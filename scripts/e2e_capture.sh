@@ -309,6 +309,18 @@ assert_jq "$import_out" '
     and all(.data.sessions[]; (.sessionId | type == "string" and length > 0)
         and (.indexJobId | type == "string" and length > 0))
 ' "fixture cass import stores 130 sessions and 134 evidence spans, crossing both 128-row source-read bounds with exact job counts"
+# Positive proof that reconcile_cass_import_index() PUBLISHED, rather than that
+# nothing went wrong (bd-16imy). On success record_index_publish_success() clears
+# indexRequiredAction; on failure it is set to the exact rebuild command and a
+# `cass_import_index_publish_failed` degradation is emitted. So a cleared action
+# plus an empty degraded list is the publish-success state stated positively.
+# `has(...)` is load-bearing: asserting the value IS null cannot distinguish
+# "publish cleared it" from "the field is absent", and it was an absent field --
+# on the wrong payload -- that this guard caught.
+assert_jq "$import_out" '(.data | has("indexRequiredAction"))
+    and .data.indexRequiredAction == null
+    and all((.degraded // [])[]?; .code != "cass_import_index_publish_failed")' \
+    "import publishes its queued index jobs inline and clears the manual-rebuild action"
 spans_imported="$(printf '%s' "$import_out" | jq -r '.data.spansImported // 0')"
 first_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[0].sessionId // empty')"
 second_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[1].sessionId // empty')"
@@ -337,19 +349,64 @@ stale_index_out="$(ee_json --workspace "$WS" index status --json)"
 # admitted-count clause in particular is load-bearing for bullet 2: if import
 # admission drops a span, this is where that shows up, and a bare `false` would
 # have hidden which of the two counts disagreed.
-assert_json "$stale_index_out" '.data.health' 'stale' \
-    "atomic CASS import makes the previously ready index stale"
+# RE-AIMED (bd-16imy). These asserted that a durable import leaves the index
+# STALE with its jobs queued. That was true when written on 2026-08-08
+# (90be091f4) and stopped being true on 2026-08-10, when 12e68978f added
+# reconcile_cass_import_index(): the import now PUBLISHES its queued jobs inline
+# and record_index_publish_success() clears the rebuild action. The old
+# expectation had been red for 41 days and read as a product regression.
+#
+# The stale/pending state still exists -- it is the PUBLISH-FAILURE path, and it
+# is asserted in its own step below, where it is correct. Nothing is deleted.
+#
+# Asserting the positive: what the post-publish state IS.
+assert_json "$stale_index_out" '.data.health' 'ready' \
+    "a durable CASS import leaves the index published and current"
+# `has(...)` is load-bearing. Asserting the value IS null cannot distinguish
+# "publish cleared it" from "the field is gone" -- absence would pass, and this
+# clause exists precisely to prove publish RAN. Caught by planting the negative:
+# an empty payload satisfied the naive form.
+# NOTE: `indexRequiredAction` belongs to the IMPORT report, not to `index status`
+# (src/cass/import.rs CassImportReport::data_json). It is asserted against
+# "$import_out" further up, where the field actually exists. Asserting it here
+# against the index-status payload was a wrong-payload error, caught because the
+# `has(...)` guard makes a missing field FAIL -- without it, `== null` on an
+# absent field would have passed and reported a green for a check of nothing.
 assert_json "$stale_index_out" '.data.dbSessionCount' '130' \
     "stale index reports every imported session"
 assert_json "$stale_index_out" '.data.dbEvidenceCount' "$spans_imported" \
     "stale index evidence count equals the spans the import reported"
 assert_json "$stale_index_out" '.data.dbEvidenceAdmittedCount' "$spans_imported" \
     "every imported span was admitted; a drop here is an admission filter, not a count bug"
+# RE-AIMED with the same reasoning. `health` is a pure function of
+# db_generation > index_generation (src/core/index.rs:9497), so this and the
+# health clause above could never fail independently -- one fact asserted twice.
+# Pin the RELATIONSHIP and the completeness together: equal generations, and an
+# index holding exactly one document per session plus one per admitted span.
+# A count alone cannot express that; the pair constrains it.
+# The type guards are load-bearing for the same reason. On an empty payload
+# `null == null` is true AND `null == (null + null)` is true, because jq adds
+# nulls to null -- so the naive form passed a response containing nothing at all.
+# Planting that negative is what found it.
 assert_jq "$stale_index_out" ".schema == \"ee.response.v2\"
     and .success == true
-    and (.data.dbGeneration > .data.indexGeneration)" \
-    "atomic CASS import advances the db generation past the index generation"
+    and ((.data.dbGeneration | type) == \"number\")
+    and ((.data.indexGeneration | type) == \"number\")
+    and ((.data.indexDocumentCount | type) == \"number\")
+    and (.data.dbGeneration == .data.indexGeneration)
+    and (.data.indexDocumentCount == (.data.dbSessionCount + .data.dbEvidenceAdmittedCount))" \
+    "a published import leaves db and index generations equal and the index complete"
 coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 130 --json)"
+# RE-AIMED (bd-16imy). The conjunction below is premised on 130 PENDING jobs.
+# Since 12e68978f the import publishes inline, so on this path there is nothing
+# left to coalesce and every per-job clause would evaluate against an empty
+# array. The block is NOT deleted -- it is the correct proof for the
+# publish-FAILURE path, where jobs really do remain queued. It now runs when that
+# path is present and reports a visible DROP when it is not, so the uncovered
+# path is stated in the summary rather than silently absent.
+coalesce_pending="$(printf '%s' "$coalesce_out" | jq -r '.data.job.details.preflight.pending_jobs // 0' 2>/dev/null || printf '0')"
+assert_nonempty "$coalesce_pending" "coalesce preflight reports a pending-job count"
+if [ "${coalesce_pending:-0}" -gt 0 ]; then
 assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
     and .data.requestedJob == \"index_coalesce\"
     and .data.durableMutation == true
@@ -390,6 +447,22 @@ assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
         and .documents_total == (130 + $spans_imported)
         and .documents_indexed == (130 + $spans_imported))" \
     "public index_coalesce binds all import jobs to one completed, page-bounded source snapshot"
+else
+    # The no-op contract, asserted POSITIVELY. Not "coalesce did not fail" -- a
+    # negation would pass if the job never ran, if the field vanished, or if the
+    # whole path were skipped (bd-o8e1n). State what the state IS: the job runs,
+    # succeeds, and truthfully reports that it found nothing to do.
+    assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
+        and .data.requestedJob == \"index_coalesce\"
+        and .data.job.outcome == \"success\"
+        and .data.job.details.schema == \"ee.steward.index_coalesce.v1\"
+        and .data.job.details.result.status == \"no_pending_jobs\"
+        and .data.job.details.result.pending_jobs == 0
+        and .data.job.details.result.processed_jobs == 0
+        and .data.job.details.result.failed_jobs == 0" \
+        "after a published import, coalesce truthfully reports nothing left to do"
+    log_drop 1 "publish-failure coalescing uncovered: the per-job proof above (processing_mode, fallback_to_full, documents_total/indexed, exact job and document IDs) only runs when jobs remain QUEUED, which since 12e68978f happens only when reconcile_cass_import_index fails to publish. No fault-injection hook exists for that path; inducing it needs a mechanism this suite does not have."
+fi
 ready_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$ready_index_out" ".schema == \"ee.response.v2\"
     and .success == true
