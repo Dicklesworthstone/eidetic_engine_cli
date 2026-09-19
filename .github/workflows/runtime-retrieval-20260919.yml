@@ -85,6 +85,7 @@ jobs:
           base64 --decode "$delivery/diagnostic-fallback.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/runtime-second.patch"
           echo "3e7350431961278914f968c55f87c9dd8f17815e37f315d5d40941445672ed76  $RUNNER_TEMP/runtime-first.patch" | sha256sum --check
           echo "c04f03eec8d369222f79aac6eb40fd049e86c3cd91a825d764db79ea5db88a80  $RUNNER_TEMP/runtime-second.patch" | sha256sum --check
+          git apply --unsafe-paths --directory "$RUNNER_TEMP" "$delivery/compiler-repair.patch"
           if ! test -f src/core/search_runtime_fallback.rs; then
             base=$(git rev-parse HEAD)
             git apply --check --whitespace=error-all "$RUNNER_TEMP/runtime-first.patch"
