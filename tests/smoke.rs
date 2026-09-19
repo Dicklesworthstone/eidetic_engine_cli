@@ -7579,9 +7579,42 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     let links_before = connection
         .list_all_memory_links(None)
         .map_err(|error| error.to_string())?;
+    // ADR 0051 MOVED THE BASELINE, so this asserts the CONTRACT rather than the
+    // old constant. It used to require memory_links to be EMPTY after the
+    // remembers above -- true while remember only STAGED suggestions, false
+    // since docs/adr/0051-remember-cotag-auto-linking.md made it persist durable
+    // links for strong co-tag neighbours. `expired` alone shares all four of its
+    // tags with `current` (score 0.95), so a link exists here BY DESIGN.
+    //
+    // What must still hold is what the assertion was named for: STAGED
+    // SUGGESTIONS CREATE NOTHING. So every pre-existing link must be one ADR
+    // 0051 itself made -- a co_tag auto-link -- and any other relation appearing
+    // here would mean something durably wrote a link that should only ever have
+    // been suggested.
+    //
+    // Asserted STRUCTURALLY rather than as a count: how many auto-links five
+    // remembers produce is derived from the LIMIT-3 cut and from `current` and
+    // `expired` carrying identical tag sets, so pinning that number would encode
+    // a derived constant nobody could later tell was deliberate -- the exact
+    // fixture shape this repair exists to remove.
+    let unexpected_baseline_links = links_before
+        .iter()
+        .filter(|link| link.relation != "co_tag")
+        .map(|link| {
+            format!(
+                "{} relation={} source={}",
+                link.id, link.relation, link.source
+            )
+        })
+        .collect::<Vec<_>>();
     ensure(
-        links_before.is_empty(),
-        "staged suggestions and dry-run autolink candidates must not mutate memory_links",
+        unexpected_baseline_links.is_empty(),
+        format!(
+            "staged suggestions and dry-run autolink candidates must not mutate memory_links; \
+             only ADR 0051 co_tag auto-links may exist at this point, found {} other link(s): \
+             {unexpected_baseline_links:?}",
+            unexpected_baseline_links.len()
+        ),
     )?;
 
     let insert_link = |id: &str,
@@ -7667,7 +7700,18 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     let links_after = connection
         .list_all_memory_links(None)
         .map_err(|error| error.to_string())?;
-    ensure_equal(&links_after.len(), &4, "seeded memory link count")?;
+    // The DELTA, not the absolute. links_before is ADR 0051's baseline rather
+    // than zero (see above), and this block inserts exactly four links by hand,
+    // so what this test owns is that four appeared and nothing else did.
+    // Asserting the absolute count would re-encode a baseline ADR 0051 owns, and
+    // would drift again the next time the auto-link LIMIT or threshold moves --
+    // which is precisely how this assertion and the two above it went stale
+    // together from one shipped change.
+    ensure_equal(
+        &links_after.len(),
+        &(links_before.len() + 4),
+        "seeded memory link count (ADR 0051 baseline + the four this test inserts)",
+    )?;
 
     let show = run_ee(&[
         "--workspace",
