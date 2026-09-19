@@ -19,6 +19,8 @@ use super::{recovery_error, storage_error};
 use crate::db::DbConnection;
 use crate::models::DomainError;
 
+#[path = "backup_cass_recovery.rs"]
+mod cass;
 #[path = "backup_pack_recovery.rs"]
 mod packs;
 
@@ -78,6 +80,7 @@ pub(in crate::core::backup) struct HistoryExpectation {
     workspace_id: String,
     learning: Rows,
     packs: packs::PackExpectation,
+    cass: cass::CassExpectation,
 }
 
 impl HistoryExpectation {
@@ -93,6 +96,7 @@ impl HistoryExpectation {
             workspace_id: workspace_id.to_owned(),
             learning: Rows::default(),
             packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
+            cass: cass::CassExpectation::from_assets(assets, workspace_id)?,
         };
         for asset in assets
             .iter()
@@ -201,7 +205,8 @@ impl HistoryExpectation {
             )?;
         }
         self.learning.verify(&actual, LEARNING_TABLES)?;
-        self.packs.verify_connection(db)
+        self.packs.verify_connection(db)?;
+        self.cass.verify_connection(db)
     }
 }
 

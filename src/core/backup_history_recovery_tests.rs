@@ -199,8 +199,10 @@ fn learned_content_fence_rejects_feedback_reapplication() -> TestResult {
 
 #[test]
 fn learned_content_fence_rejects_changed_agent_bias() -> TestResult {
+    // Stay inside the +/-0.05 schema bound, so this exercises the publication
+    // fence after a successful write rather than an earlier CHECK refusal.
     assert_same_count_corruption_refused(
         "agent_context_profiles",
-        "UPDATE agent_context_profiles SET weight_cached = 0.91",
+        "UPDATE agent_context_profiles SET weight_cached = -0.04",
     )
 }

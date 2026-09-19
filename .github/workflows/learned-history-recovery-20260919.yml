@@ -6,6 +6,7 @@ on:
     paths:
       - src/core/backup_history_recovery*.rs
       - src/core/backup_pack_recovery*.rs
+      - src/core/backup_cass_recovery.rs
       - src/core/backup_recovery.rs
       - .github/workflows/learned-history-recovery-20260919.yml
   workflow_dispatch:
@@ -39,7 +40,7 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/history-source-sha.log"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git diff --exit-code
-          tar -czf "$RUNNER_TEMP/history-source.tar.gz" src/core/backup.rs src/core/backup_recovery.rs src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs
+          tar -czf "$RUNNER_TEMP/history-source.tar.gz" src/core/backup.rs src/core/backup_recovery.rs src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs src/core/backup_cass_recovery.rs
           rustc --version --verbose > "$RUNNER_TEMP/history-toolchain.log"
       - uses: actions/upload-artifact@v4
         with:
@@ -78,7 +79,7 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/history-$name.log"; then failed=1; fi
           }
           run_group publication core::backup::history_recovery_tests 6
-          run_group inventory core::backup::recovery:: 25
+          run_group inventory core::backup::recovery:: 30
           run_group chunks core::backup::tests::default_backup_restores_learning_history 1
           run_group replay core::backup::tests::default_backup_restores_pack_history_and_replay 1
           run_group evidence core::backup::tests::pack_history_restores_native_evidence_and_legacy_missing_ledger 1
@@ -95,7 +96,7 @@ jobs:
           failed=0
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/history-clippy.log" 2>&1 || failed=1
           tail -n 100 "$RUNNER_TEMP/history-clippy.log"
-          rustfmt --check --edition 2024 --config skip_children=true src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs > "$RUNNER_TEMP/history-format.log" 2>&1 || failed=1
+          rustfmt --check --edition 2024 --config skip_children=true src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs src/core/backup_cass_recovery.rs > "$RUNNER_TEMP/history-format.log" 2>&1 || failed=1
           cat "$RUNNER_TEMP/history-format.log"
           exit "$failed"
       - uses: actions/upload-artifact@v4

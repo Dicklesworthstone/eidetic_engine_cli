@@ -175,13 +175,37 @@ fn pack_content_fence_preserves_modern_legacy_and_native_evidence_history() -> T
                 .map_err(|e| e.to_string())?;
             assert_eq!(history.record.ledger_json.is_some(), index == 0);
         }
+        let sessions = db.list_sessions(&workspace_id).map_err(|e| e.to_string())?;
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].source_path.is_none());
+        assert_eq!(
+            sessions[0].cass_session_id,
+            crate::core::backup::portable_cass_session_id(&sessions[0].id)
+        );
+        let spans = db
+            .list_evidence_spans_for_workspace(&workspace_id)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(spans.len(), 1);
+        if redaction == RedactionLevel::Full {
+            assert_eq!(spans[0].search_eligibility, "denied");
+            assert_eq!(spans[0].pack_eligibility, "denied");
+            assert!(spans[0].canonical_excerpt_hash.is_none());
+        }
         db.close().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 fn assert_corruption_refused(table: &str, statement: impl FnOnce(&[String]) -> String) -> TestResult {
-    let fixture = fixture(RedactionLevel::None)?;
+    assert_corruption_refused_with_redaction(table, RedactionLevel::None, statement)
+}
+
+fn assert_corruption_refused_with_redaction(
+    table: &str,
+    redaction: RedactionLevel,
+    statement: impl FnOnce(&[String]) -> String,
+) -> TestResult {
+    let fixture = fixture(redaction)?;
     let sql = statement(&fixture.ids);
     let error = restore_backup_to_side_path_with_verification_hook(&fixture.options, |path| {
         let db = DbConnection::open_file(path).map_err(work_history_error)?;
@@ -329,4 +353,50 @@ fn pack_content_expectation_rejects_duplicate_chunks_and_backup_substitution() -
     assets.push(assets[0].clone());
     assert!(PackExpectation::from_assets(&assets, &first.backup_id, &first.workspace_id).is_err());
     Ok(())
+}
+
+#[test]
+fn evidence_content_fence_rejects_resurrected_host_path() -> TestResult {
+    assert_corruption_refused("sessions", |_| {
+        "UPDATE sessions SET source_path = '/MUTATION_SENTINEL/private-session.json'".to_owned()
+    })
+}
+
+#[test]
+fn evidence_content_fence_rejects_changed_session_identity_hash() -> TestResult {
+    assert_corruption_refused("sessions", |_| {
+        format!(
+            "UPDATE sessions SET content_hash = '{}'",
+            hash_bytes(b"substituted transcript"),
+        )
+    })
+}
+
+#[test]
+fn evidence_content_fence_rejects_changed_excerpt_with_consistent_content_hash() -> TestResult {
+    assert_corruption_refused("evidence_spans", |_| {
+        format!(
+            "UPDATE evidence_spans SET excerpt = 'MUTATION_SENTINEL', content_hash = '{}'",
+            hash_bytes(b"MUTATION_SENTINEL"),
+        )
+    })
+}
+
+#[test]
+fn evidence_content_fence_rejects_promoted_redacted_evidence() -> TestResult {
+    assert_corruption_refused_with_redaction(
+        "evidence_spans",
+        RedactionLevel::Full,
+        |_| {
+            "UPDATE evidence_spans SET pack_eligibility = 'admitted', search_eligibility = 'admitted'"
+                .to_owned()
+        },
+    )
+}
+
+#[test]
+fn evidence_content_fence_rejects_changed_provenance_epoch() -> TestResult {
+    assert_corruption_refused("evidence_spans", |_| {
+        "UPDATE evidence_spans SET security_policy_epoch = security_policy_epoch + 1".to_owned()
+    })
 }
