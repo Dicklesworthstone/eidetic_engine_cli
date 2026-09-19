@@ -4212,9 +4212,16 @@ fn validate_canonical_search_result(
     if !(0.0..=1.0).contains(&relevance) {
         return Err(format!("{context}.relevanceScore must be between 0 and 1"));
     }
+    // FAIL-CLOSED, AND DELIBERATELY SINGLE-SPELLING. The lexical tag was
+    // renamed `unit_normalized` -> `query_relative_pool_minmax`
+    // (bd-reality-core-convergence-1azkt.11). The old spelling is NOT retained
+    // beside the new one: accepting both would let a half-renamed emitter keep
+    // shipping the tag the rename exists to remove, and this validator would
+    // report healthy while doing it. One spelling means a partial rename
+    // refuses loudly instead of degrading quietly.
     if !matches!(
         result.get("scoreKind").and_then(serde_json::Value::as_str),
-        Some("unit_normalized" | "cosine_similarity" | "rrf_fused" | "reranked")
+        Some("query_relative_pool_minmax" | "cosine_similarity" | "rrf_fused" | "reranked")
     ) || !matches!(
         result.get("source").and_then(serde_json::Value::as_str),
         Some(

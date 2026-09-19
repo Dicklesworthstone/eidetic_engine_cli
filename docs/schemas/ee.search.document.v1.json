@@ -39,12 +39,12 @@
     "scoreKind": {
       "type": "string",
       "enum": [
-        "unit_normalized",
+        "query_relative_pool_minmax",
         "cosine_similarity",
         "rrf_fused",
         "reranked"
       ],
-      "description": "Interpretation tag for score, naming the scale it arrives on. `unit_normalized` is reported for a lexical-only score, whose value is min-max normalized over the returned pool against a synthetic zero-evidence reference: it is query-relative, so it is neither cross-query nor cross-source comparable, and the raw BM25 value remains in lexicalScore. That tag asserts a property of the output rather than naming the projection that produced it, and is tracked for rename by bd-reality-core-convergence-1azkt.11. Cosine, RRF, and reranker scores retain their native ranking scale."
+      "description": "Interpretation tag for score, naming WHAT PRODUCED the value rather than asserting a property of it. `query_relative_pool_minmax` is reported for a lexical-only score: min-max normalized over the RETURNED POOL against a synthetic zero-evidence reference, which maps that pool's strongest hit to exactly 1.0 whatever its raw BM25 was. `query_relative` says the value is not comparable across queries; `pool` names the denominator, because min-max over the retrieved pool is a different number from min-max over the corpus. Raw BM25 remains in lexicalScore. Renamed from `unit_normalized` by bd-reality-core-convergence-1azkt.11, which was a claim about the output and could be read as a calibrated unit-interval score. Cosine, RRF, and reranker scores retain their native ranking scale."
     },
     "calibrationId": {
       "type": ["string", "null"],

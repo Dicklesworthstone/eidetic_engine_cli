@@ -2494,7 +2494,7 @@ mod tests {
         )?;
         ensure(
             positive.why.starts_with("Relevance ")
-                && positive.why.contains("unit_normalized")
+                && positive.why.contains("query_relative_pool_minmax")
                 && positive.why.contains("lexical match")
                 && positive.why != positive.provenance[0].note,
             format!(

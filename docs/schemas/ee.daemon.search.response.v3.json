@@ -412,7 +412,7 @@
         "memoryId": {"type": "string"},
         "score": {"type": "number"},
         "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
-        "scoreKind": {"type": "string", "enum": ["unit_normalized", "cosine_similarity", "rrf_fused", "reranked"]},
+        "scoreKind": {"type": "string", "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"]},
         "scoreInterval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
         "coverageGuarantee": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "calibrated": {"type": "boolean"},

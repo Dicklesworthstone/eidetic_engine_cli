@@ -28,7 +28,7 @@
         "docId": "mem_00000000000000000000010001",
         "score": 1.0,
         "relevanceScore": 1.0,
-        "scoreKind": "unit_normalized",
+        "scoreKind": "query_relative_pool_minmax",
         "scoreInterval": [
           0.0,
           1.0
@@ -36,7 +36,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 1.0000 from score 1.0000 (unit_normalized) via lexical match (1.70).",
+        "why": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70).",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -103,7 +103,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 1.0000 from score 1.0000 (unit_normalized) via lexical match (1.70).",
+          "summary": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70).",
           "factors": [
             {
               "name": "lexical",
@@ -119,7 +119,7 @@
         "docId": "mem_00000000000000000000010002",
         "score": 0.6233764,
         "relevanceScore": 0.623376,
-        "scoreKind": "unit_normalized",
+        "scoreKind": "query_relative_pool_minmax",
         "scoreInterval": [
           0.0,
           1.0
@@ -127,7 +127,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.6234 from score 0.6234 (unit_normalized) via lexical match (1.06).",
+        "why": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06).",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -194,7 +194,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.6234 from score 0.6234 (unit_normalized) via lexical match (1.06).",
+          "summary": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06).",
           "factors": [
             {
               "name": "lexical",
@@ -210,7 +210,7 @@
         "docId": "mem_00000000000000000000010003",
         "score": 0.36304024,
         "relevanceScore": 0.36304,
-        "scoreKind": "unit_normalized",
+        "scoreKind": "query_relative_pool_minmax",
         "scoreInterval": [
           0.0,
           1.0
@@ -218,7 +218,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.3630 from score 0.3630 (unit_normalized) via lexical match (0.62).",
+        "why": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62).",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -285,7 +285,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.3630 from score 0.3630 (unit_normalized) via lexical match (0.62).",
+          "summary": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62).",
           "factors": [
             {
               "name": "lexical",

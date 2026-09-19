@@ -3217,17 +3217,29 @@ impl ScoreSource {
 
     /// Interpretation tag for the `score` scale (bd-1et0v.11).
     ///
-    /// Lexical-only results expose a unit-normalized ranking score while
-    /// retaining raw BM25 in `lexicalScore`. Semantic and hash-control results
-    /// expose raw cosine similarity. `Hybrid` carries an RRF-fused magnitude
-    /// that tops out near [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`). `Reranked`
-    /// means the score is the cross-encoder score carried in `rerankScore`.
+    /// The tag NAMES WHAT PRODUCED THE VALUE; it does not assert a property of
+    /// it (bd-reality-core-convergence-1azkt.11). Lexical-only results are
+    /// `query_relative_pool_minmax`: min-max normalized over the RETURNED POOL
+    /// against a synthetic zero-evidence reference, with raw BM25 retained in
+    /// `lexicalScore`. The previous tag, `unit_normalized`, was a claim about
+    /// the output — and one a reader could take as a calibrated unit-interval
+    /// score. Both words of the replacement carry weight: `query_relative`
+    /// says the value is not comparable across queries, and `pool` names the
+    /// DENOMINATOR, because min-max over the retrieved pool is a different
+    /// number from min-max over the corpus and "query relative" alone is
+    /// silent about which. A consumer reading only the tag could otherwise
+    /// believe it holds a corpus-normalized score for one query.
+    ///
+    /// Semantic and hash-control results expose raw cosine similarity.
+    /// `Hybrid` carries an RRF-fused magnitude that tops out near
+    /// [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`). `Reranked` means the score is the
+    /// cross-encoder score carried in `rerankScore`.
     #[must_use]
     pub const fn score_kind(self) -> &'static str {
         match self {
             Self::Hybrid => "rrf_fused",
             Self::Reranked => "reranked",
-            Self::Lexical => "unit_normalized",
+            Self::Lexical => "query_relative_pool_minmax",
             Self::SemanticFast | Self::SemanticQuality | Self::HashControl => "cosine_similarity",
         }
     }
@@ -20394,7 +20406,7 @@ mod tests {
         let summary = report.human_summary();
         assert!(
             summary.contains(
-                "1. mem_teamhit · from Priya / acme-analysis · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 unit_normalized, source: lexical)"
+                "1. mem_teamhit · from Priya / acme-analysis · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 query_relative_pool_minmax, source: lexical)"
             ),
             "human search must attribute teammate hits: {summary}"
         );
@@ -20407,7 +20419,7 @@ mod tests {
         let unbound_summary = unbound.human_summary();
         assert!(
             unbound_summary.contains(
-                "1. mem_teamhit · from Priya · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 unit_normalized, source: lexical)"
+                "1. mem_teamhit · from Priya · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 query_relative_pool_minmax, source: lexical)"
             ),
             "missing project must still name the teammate: {unbound_summary}"
         );
@@ -21234,8 +21246,9 @@ mod tests {
         // bd-1et0v.11: a top hybrid hit scores at the RRF-fused magnitude
         // (~0.0328), which an agent misreads as "no match". The normalized
         // relevanceScore must rescale that to ~1.0 and tag it `rrf_fused`,
-        // while unit-normalized sources pass through unchanged and tag
-        // `unit_normalized`.
+        // while the lexical projection passes through unchanged and tags
+        // `query_relative_pool_minmax` — a tag that names what produced the
+        // value rather than asserting a property of it.
         let top_hybrid = normalized_relevance_score(ScoreSource::Hybrid, RRF_HYBRID_TYPICAL_MAX);
         assert!(
             (top_hybrid - 1.0).abs() < 1e-6,
@@ -21246,7 +21259,10 @@ mod tests {
         // Hybrid magnitudes above the reference (3+ contributing arms) clamp.
         assert!((normalized_relevance_score(ScoreSource::Hybrid, 0.06) - 1.0).abs() < f32::EPSILON);
 
-        assert_eq!(ScoreSource::Lexical.score_kind(), "unit_normalized");
+        assert_eq!(
+            ScoreSource::Lexical.score_kind(),
+            "query_relative_pool_minmax"
+        );
         assert_eq!(ScoreSource::SemanticFast.score_kind(), "cosine_similarity");
         assert_eq!(
             ScoreSource::SemanticQuality.score_kind(),
@@ -21299,7 +21315,7 @@ mod tests {
         assert_eq!(hits[0].lexical_score, Some(9.0));
         assert_eq!(hits[1].lexical_score, Some(5.0));
         assert_eq!(hits[2].lexical_score, Some(2.0));
-        assert_eq!(hits[0].score_kind(), "unit_normalized");
+        assert_eq!(hits[0].score_kind(), "query_relative_pool_minmax");
         assert_eq!(hits[0].relevance_score(), 1.0);
         assert!(hits[0].relevance_score() > hits[1].relevance_score());
         assert!(hits[1].relevance_score() > hits[2].relevance_score());
@@ -21425,7 +21441,7 @@ mod tests {
 
         assert_eq!(scale, FrankensearchFinalScoreScale::Native);
         assert_eq!(hits[0].source, ScoreSource::Lexical);
-        assert_eq!(hits[0].score_kind(), "unit_normalized");
+        assert_eq!(hits[0].score_kind(), "query_relative_pool_minmax");
         assert_eq!(hits[0].score, 1.0);
         assert_eq!(hits[0].lexical_score, Some(4.25));
     }

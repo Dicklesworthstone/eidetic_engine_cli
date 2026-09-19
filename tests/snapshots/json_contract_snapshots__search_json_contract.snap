@@ -253,12 +253,12 @@ expression: canonical_json_text(value)
           0.0,
           1.0
         ],
-        "scoreKind": "unit_normalized",
+        "scoreKind": "query_relative_pool_minmax",
         "source": "lexical",
         "validFrom": "[TIMESTAMP]",
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
-        "why": "Selected by lexical retrieval with relevance 1.0000 from score 1.0000 (unit_normalized)."
+        "why": "Selected by lexical retrieval with relevance 1.0000 from score 1.0000 (query_relative_pool_minmax)."
       }
     ],
     "scopeStats": {

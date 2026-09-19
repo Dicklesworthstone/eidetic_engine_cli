@@ -75141,7 +75141,7 @@ mod tests {
             .ok_or_else(|| "relevant item missing why".to_owned())?;
         ensure(
             relevant_why.starts_with("Relevance ")
-                && relevant_why.contains("unit_normalized")
+                && relevant_why.contains("query_relative_pool_minmax")
                 && relevant_why.contains("lexical match"),
             &format!(
                 "relevant JSON why must preserve normalized lexical explanation evidence: {relevant_why:?}"

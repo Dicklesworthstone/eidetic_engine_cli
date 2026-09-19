@@ -128,7 +128,7 @@
         "scoreKind": {
           "type": "string",
           "enum": [
-            "unit_normalized",
+            "query_relative_pool_minmax",
             "cosine_similarity",
             "rrf_fused",
             "reranked"

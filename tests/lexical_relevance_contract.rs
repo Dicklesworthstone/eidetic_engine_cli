@@ -38,11 +38,15 @@
 //! `1.0`-rendered pins the RELATIONSHIP, which is the thing any repair has to
 //! preserve.
 //!
-//! * `lexical_score_kind_names_the_projection_that_produced_it` is expected to
-//!   go GREEN when `ScoreSource::Lexical`'s score kind is renamed from
-//!   `unit_normalized` to `query_relative_minmax`. `unit_normalized` is a claim
-//!   about the output; `query_relative_minmax` names what was actually done to
-//!   produce it.
+//! * `lexical_score_kind_names_the_projection_that_produced_it` WAS the red
+//!   this file was written for, and the rename that clears it has now landed:
+//!   `ScoreSource::Lexical`'s score kind is `query_relative_pool_minmax`, not
+//!   `unit_normalized`. It is now a REGRESSION GUARD rather than a documented
+//!   defect — it holds the tag to a name that describes its cause. Both words
+//!   carry weight: `query_relative` says the value is not comparable across
+//!   queries, and `pool` names the DENOMINATOR, since min-max over the
+//!   retrieved pool is a different number from min-max over the corpus and
+//!   `query_relative` alone is silent about which.
 //! * `lexical_admission_does_not_invert_on_an_unrelated_documents_score` is
 //!   NOT expected to go green on that rename. It owns acceptance bullet 4
 //!   ("relevance-floor admission operates in the correct source domain") and
@@ -51,7 +55,7 @@
 //!   separately observable in one run.
 //!
 //! Every assertion states the value it EXPECTS rather than the value it
-//! rejects: `assert_eq!(kind, "query_relative_minmax")` fails when the field is
+//! rejects: `assert_eq!(kind, "query_relative_pool_minmax")` fails when the field is
 //! absent or renamed to a third thing, where `assert_ne!(kind, ...)` would be
 //! satisfied by absence.
 
@@ -70,7 +74,7 @@ use ee::search::{ScoreSource as FrankensearchScoreSource, ScoredResult};
 /// query-relative projection over one result set: it is not comparable across
 /// queries, and it is not comparable against the absolute cosine domain the
 /// semantic sources report on.
-const EXPECTED_LEXICAL_SCORE_KIND: &str = "query_relative_minmax";
+const EXPECTED_LEXICAL_SCORE_KIND: &str = "query_relative_pool_minmax";
 
 fn lexical_result(doc_id: &str, raw_bm25: f32) -> ScoredResult {
     ScoredResult {
@@ -122,13 +126,13 @@ fn hit_for<'a>(hits: &'a [SearchHit], doc_id: &str) -> &'a SearchHit {
 /// caused it is gone, but min-max normalization maps the pool MAXIMUM to
 /// exactly 1.0 by construction, so the same three raw values still render 1.0 —
 /// and so does a pool whose only member scored 0.001. The remaining defect is
-/// that `scoreKind` calls that value `unit_normalized`, a claim about the
-/// output. `docs/schemas/ee.search.document.v1.json` used to compound it by
+/// that `scoreKind` called that value `unit_normalized`, a claim about the
+/// output. That tag is now `query_relative_pool_minmax`; this pin holds it there. `docs/schemas/ee.search.document.v1.json` used to compound it by
 /// telling an agent to "use relevanceScore for cross-source relevance"; that
 /// sentence was corrected in the same commit as this pin, which leaves the
 /// machine-readable tag as the last place the label still overstates the thing.
 #[test]
-#[ignore = "tracked red, bd-reality-core-convergence-1azkt.11: lexical scoreKind is unit_normalized, a claim about the output, for a value produced by query-relative min-max over the returned pool"]
+#[ignore = "regression guard, bd-reality-core-convergence-1azkt.11: lexical scoreKind must stay query_relative_pool_minmax, naming the projection that produced the value rather than asserting a property of it"]
 fn lexical_score_kind_names_the_projection_that_produced_it() {
     // The bead's own field numbers, plus a raw value three orders of magnitude
     // weaker, each alone in its pool.
