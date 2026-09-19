@@ -803,8 +803,32 @@ fn dry_run_accepts_focused_cargo_test_and_builds_cargo_argv() -> TestResult {
     if report["schema"] != "ee.rch.verify.v1" {
         return Err("unexpected schema".to_owned());
     }
-    if report["success"] != true {
-        return Err("dry-run cargo test should succeed".to_owned());
+    // bd-success-shaped-signal-on-failure-l3pa4. This asserted
+    // `report["success"] == true` for a run that EXECUTES NOTHING. A dry run
+    // plans a dispatch and stops, so it has no exit code and therefore no
+    // success verdict; claiming one is the same defect that let thirteen
+    // refusal paths report success beside exit_code 1.
+    //
+    // The receipt now abstains instead, and a pass and an abstention do not
+    // share a status word.
+    if report["verdict"] != "abstained" {
+        return Err(format!(
+            "dry run executes nothing, so it must abstain rather than claim a \
+             verdict; got verdict {} success {}",
+            report["verdict"], report["success"]
+        ));
+    }
+    if !report["success"].is_null() {
+        return Err(format!(
+            "an abstaining receipt must not carry a success verdict; got {}",
+            report["success"]
+        ));
+    }
+    if report["abstention_reason"] != "no_execution_attempted" {
+        return Err(format!(
+            "abstention must name its reason; got {}",
+            report["abstention_reason"]
+        ));
     }
     if report["command_kind"] != "cargo_test" {
         return Err(format!("wrong command kind: {report}"));
@@ -1060,6 +1084,28 @@ printf '[RCH] remote worker-c (0.1s)\n'
         || report["elapsed_ms"] != 0
     {
         return Err(format!("unexpected dirty tracked refusal: {report}"));
+    }
+
+    // bd-success-shaped-signal-on-failure-l3pa4. THIS is the assertion whose
+    // absence let the defect stand: every field above was already correct on a
+    // refusal, and `success` was `true` beside all of them. A reader keying on
+    // `.success` -- which is the field literally named for the question -- read
+    // this refusal as a pass.
+    //
+    // Asserted as a PAIR with the cause, so it cannot be satisfied by a receipt
+    // that reports failure for the wrong reason.
+    if report["success"] != false {
+        return Err(format!(
+            "a refusal that never reached remote Cargo must not report success; \
+             got success {} beside status {} and exit_code {}",
+            report["success"], report["status"], report["exit_code"]
+        ));
+    }
+    if report["verdict"] != "failed" {
+        return Err(format!(
+            "a refusal must carry verdict failed, not {}",
+            report["verdict"]
+        ));
     }
     if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
         return Err(format!("tracked dirty counts were not precise: {report}"));

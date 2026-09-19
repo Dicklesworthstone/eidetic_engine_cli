@@ -5268,12 +5268,66 @@ rch_env_allowlist() {
 RUN_STARTED_AT="$(now_iso)"
 
 emit_json() {
-    local success="$1"
+    # bd-success-shaped-signal-on-failure-l3pa4, instance (2).
+    #
+    # This first argument used to be emitted as `success` VERBATIM, and thirteen
+    # call sites passed `true` beside `exit_code 1` -- every preflight refusal,
+    # the build-admission denial, the proof-broker refusals, and the client/
+    # daemon version skew. A reader keying on `.success` therefore read a run
+    # that never reached remote Cargo as a pass. `status` and `exit_code` were
+    # carrying the truth the whole time; `success` was the only field that
+    # disagreed, which is what made it dangerous -- it gave a confident wrong
+    # answer rather than a missing one.
+    #
+    # `success` is now COMPUTED here and is not emittable while the operation
+    # failed. The argument survives only to answer the one question an exit code
+    # cannot: when there is NO exit code, did the caller decline to run, or
+    # refuse the request?
+    #
+    #   exit_code 0        -> verdict passed,    success true
+    #   exit_code non-zero -> verdict failed,    success false
+    #   exit_code null + caller true  -> verdict abstained, success NULL
+    #   exit_code null + caller false -> verdict failed,    success false
+    #
+    # The null-exit split is the judgement call. A dry run never executed
+    # anything, so it has no success verdict -- emitting `true` would be the
+    # same defect in the other direction. It abstains, following the rule Lane 2
+    # set in closure-lint at c9f49b736: A PASS AND AN ABSTENTION MUST NOT SHARE
+    # AN EXIT CODE OR A STATUS WORD. An argument refusal also never executed,
+    # but it is a refusal rather than an abstention, and it keeps `false`.
+    local caller_disposition="$1"
     local exit_code_json="$2"
     local elapsed_ms="$3"
     local stdout_tail="$4"
     local stderr_tail="$5"
     shift 5
+
+    local success verdict abstention_reason_json
+    case "$exit_code_json" in
+        0)
+            verdict="passed"
+            success="true"
+            abstention_reason_json="null"
+            ;;
+        null)
+            if [ "$caller_disposition" = "true" ]; then
+                verdict="abstained"
+                success="null"
+                abstention_reason_json='"no_execution_attempted"'
+            else
+                verdict="failed"
+                success="false"
+                abstention_reason_json="null"
+            fi
+            ;;
+        *)
+            # Any non-zero exit, and any malformed or empty exit code, fails
+            # closed. An exit code this function cannot read is not a pass.
+            verdict="failed"
+            success="false"
+            abstention_reason_json="null"
+            ;;
+    esac
     FRANKEN_STACK_JSON="$(refresh_franken_stack_cargo_lock_json)"
     if [ "$(json_text_field "$FRANKEN_STACK_JSON" cargo_lock_unchanged)" = "False" ]; then
         set -- "$@" "rch_verify_franken_stack_cargo_lock_changed"
@@ -5320,7 +5374,7 @@ emit_json() {
     done
     artifacts_json="$(attempt_artifacts_json "${artifact_args[@]}")"
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"oracle_evidence":$oracle_evidence_json,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"cargo_config_provenance":$cargo_config_provenance_json,"franken_stack":$franken_stack_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"verdict":"$verdict","abstention_reason":$abstention_reason_json,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"oracle_evidence":$oracle_evidence_json,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"cargo_config_provenance":$cargo_config_provenance_json,"franken_stack":$franken_stack_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -6282,7 +6336,23 @@ if not proof_broker_bypassed:
         }
     }
 
-if proof.get("success") is not True:
+# bd-success-shaped-signal-on-failure-l3pa4. These two branches replace a
+# single `if proof.get("success") is not True: status = "refused"`.
+#
+# That test used to catch ONLY the four argument refusals, because every other
+# refusal path emitted success=true. Now that `success` is computed, thirteen
+# more paths report false, and leaving the old test first would short-circuit
+# all of them to a generic "refused" -- destroying rch_environment_failure,
+# source_state_refused, build_admission_refused and the rest. The specific
+# classifications below are the diagnostic value of this receipt.
+#
+# So the split is keyed on `verdict`, and every downstream status is preserved
+# exactly: abstentions become dry_run, no-exit-code refusals become refused,
+# and a failed run with a real exit code falls through to be classified on its
+# degraded codes as before.
+if proof.get("verdict") == "abstained":
+    status = "dry_run"
+elif proof.get("verdict") == "failed" and exit_code is None:
     status = "refused"
 elif "rch_verify_known_blocker_active" in degraded:
     status = "known_blocker_refused"
