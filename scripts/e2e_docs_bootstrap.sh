@@ -71,7 +71,11 @@ assert_jq "$run" '.success == true' "bootstrap docs --dry-run succeeds"
 assert_jq "$run" '.data.schema == "ee.bootstrap.docs.run.v1"' "run carries the v1 schema"
 assert_jq "$run" '(.data.candidates | length) >= 1' "at least one candidate compiled"
 # Dry-run never writes: durableMutation must not be true.
-assert_jq "$run" '(.data.durableMutation // false) == false' \
+# Direct comparison, not `// false` (bd-o8e1n). The jq alternative operator
+# substitutes on null OR false, so an ABSENT durableMutation passed this safety
+# claim. If the field is renamed or dropped, the assertion must fail, not stop
+# verifying that a dry run wrote nothing. Absent is null, null == false is false.
+assert_jq "$run" '.data.durableMutation == false' \
     "dry-run performs no durable mutation"
 
 step "each candidate is structural: source span + hash + anchors + specificity"
@@ -130,7 +134,11 @@ step "apply refuses bulk auto-import without --approved-only"
 run_id="$(printf '%s' "$run" | jq -r '.data.runId // empty')"
 if [ -n "$run_id" ] && ee_supports bootstrap apply; then
     refuse="$(ee_json bootstrap apply "$run_id" --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"
-    assert_jq "$refuse" '(.success // false) != true' \
+    # Assert what success should BE, not what it should not be (bd-o8e1n). This is a
+# `!=` site, where direct comparison does NOT fix the vacuity: with the field
+# absent, `.success != true` is `null != true`, which is TRUE and still passes.
+# Only asserting the positive value makes absence fail.
+assert_jq "$refuse" '.success == false' \
         "bootstrap apply refuses without --approved-only (no bulk auto-import)"
 
     step "apply requires the same reference selectors as the reviewed run"

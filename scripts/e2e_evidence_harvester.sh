@@ -88,7 +88,10 @@ if ee_lists_outcome_sub harvest; then
     applied="$(ee_json outcome harvest --workspace "$WS" --apply --json)"
     assert_jq "$applied" '.success == true' "outcome harvest --apply succeeds"
     assert_jq "$applied" \
-        '(.data.explicitOverrides // 0) == 0' \
+        # Direct comparison, not `// 0` (bd-o8e1n): an ABSENT explicitOverrides
+        # defaulted to 0 and passed. The count must be PRESENT and zero -- a
+        # missing field is not evidence that nothing was overridden.
+        '.data.explicitOverrides == 0' \
         "derived feedback never overrides explicit feedback"
 else
     log_drop 1 "harvest --apply pending (bd-1n0np.2.5): audited-write + explicit-override assertions skipped"
