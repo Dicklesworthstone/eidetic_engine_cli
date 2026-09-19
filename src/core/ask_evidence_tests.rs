@@ -6,11 +6,10 @@ use crate::core::ask::{
     render_ask_markdown,
 };
 use crate::db::{
-    CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
+    CreateEvidenceSpanInput, CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput,
+    EvidenceProducerKind,
 };
-use crate::models::{
-    CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId, SessionId, WorkspaceId,
-};
+use crate::models::{EvidenceId, MemoryId, SessionId, WorkspaceId};
 
 const BODY: &str = "Run cargo fmt before every release tag.";
 const QUESTION: &str = "Which command must run before every release tag?";
@@ -46,17 +45,11 @@ fn session(db: &DbConnection, workspace: &str, n: u128) -> String {
             ended_at: Some("2026-01-01T01:00:00Z".to_owned()),
             message_count: 8,
             token_count: None,
-            content_hash: blake3::hash(format!("session-{n}").as_bytes())
-                .to_hex()
-                .to_string(),
-            metadata_json: Some(
-                serde_json::json!({
-                    "schema": CASS_SESSION_SCHEMA_V1,
-                    "contentHashSource": "provided",
-                    "messageCountObserved": true,
-                })
-                .to_string(),
+            content_hash: format!(
+                "blake3:{}",
+                blake3::hash(format!("session-{n}").as_bytes()).to_hex()
             ),
+            metadata_json: None,
         },
     )
     .unwrap();
@@ -64,13 +57,24 @@ fn session(db: &DbConnection, workspace: &str, n: u128) -> String {
 }
 
 fn evidence(db: &DbConnection, workspace: &str, session: &str, n: u32, body: &str) -> String {
+    evidence_with_parent(db, workspace, session, n, body, None)
+}
+
+fn evidence_with_parent(
+    db: &DbConnection,
+    workspace: &str,
+    session: &str,
+    n: u32,
+    body: &str,
+    parent: Option<&str>,
+) -> String {
     let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(n))).to_string();
     db.insert_evidence_span(
         &id,
         &CreateEvidenceSpanInput {
             workspace_id: workspace.to_owned(),
             session_id: session.to_owned(),
-            memory_id: None,
+            memory_id: parent.map(str::to_owned),
             producer_kind: EvidenceProducerKind::CassImport,
             cass_span_id: format!("ask-span-{n}"),
             span_kind: crate::cass::CassSpanKind::Message.as_str().to_owned(),
@@ -78,24 +82,20 @@ fn evidence(db: &DbConnection, workspace: &str, session: &str, n: u32, body: &st
             end_line: n,
             start_byte: None,
             end_byte: None,
-            role: Some("user".to_owned()),
+            role: Some("assistant".to_owned()),
             excerpt: body.to_owned(),
-            content_hash: blake3::hash(body.as_bytes()).to_hex().to_string(),
-            metadata_json: Some(
-                serde_json::json!({
-                    "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
-                    "redactionStatus": "clean",
-                    "redactionClasses": [],
-                })
-                .to_string(),
-            ),
+            content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+            metadata_json: None,
             inherited_redaction_classes: Vec::new(),
         },
     )
     .unwrap();
     let span = db.get_evidence_span(&id).unwrap().unwrap();
     let session = db.get_session(session).unwrap().unwrap();
-    assert!(span.is_direct_pack_admitted_for_session(workspace, &session));
+    assert!(
+        span.is_direct_pack_admitted_for_session(workspace, &session),
+        "seeded assistant excerpt {id} must have live admission"
+    );
     id
 }
 
@@ -296,7 +296,7 @@ fn admission_is_rechecked_after_hash_revocation_and_repair() {
     let before = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
     assert_eq!(before.candidates.len(), 1);
 
-    let bad_hash = "0".repeat(64);
+    let bad_hash = format!("blake3:{}", "0".repeat(64));
     db.execute_raw(&format!(
         "UPDATE evidence_spans SET content_hash = '{bad_hash}' WHERE id = '{id}'"
     ))
@@ -326,7 +326,7 @@ fn clean_metadata_and_a_matching_digest_do_not_authorize_secret_text() {
     let session = session(&db, &workspace, 1);
     let id = evidence(&db, &workspace, &session, 1, BODY);
     let unsafe_body = "Run cargo fmt before every release tag. password=ask-private-canary";
-    let hash = blake3::hash(unsafe_body.as_bytes()).to_hex().to_string();
+    let hash = format!("blake3:{}", blake3::hash(unsafe_body.as_bytes()).to_hex());
     db.execute_raw(&format!(
         "UPDATE evidence_spans SET excerpt = '{unsafe_body}', content_hash = '{hash}' WHERE id = '{id}'"
     ))
@@ -346,4 +346,99 @@ fn clean_metadata_and_a_matching_digest_do_not_authorize_secret_text() {
             .contains("ask-private-canary")
     );
     assert!(!render_ask_markdown(&report).contains("ask-private-canary"));
+}
+
+fn parent_memory(db: &DbConnection, workspace: &str) -> String {
+    let id = MemoryId::from_uuid(uuid::Uuid::from_u128(77)).to_string();
+    db.insert_memory(
+        &id,
+        &CreateMemoryInput {
+            workspace_id: workspace.to_owned(),
+            content: BODY.to_owned(),
+            level: "semantic".to_owned(),
+            kind: "note".to_owned(),
+            workflow_id: None,
+            confidence: 0.95,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            provenance_uri: Some("manual://parent-admission".to_owned()),
+            tags: Vec::new(),
+            valid_from: Some("1990-01-01T00:00:00Z".to_owned()),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+    id
+}
+
+#[test]
+fn linked_evidence_follows_parent_admission_without_hiding_unlinked_evidence() {
+    let (root, db, workspace) = fixture();
+    let parent = parent_memory(&db, &workspace);
+    let first_session = session(&db, &workspace, 1);
+    let linked = evidence_with_parent(&db, &workspace, &first_session, 1, BODY, Some(&parent));
+    let second_session = session(&db, &workspace, 2);
+    let unlinked = evidence(&db, &workspace, &second_session, 2, BODY);
+    let live = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(live.candidates.len(), 3);
+    assert_eq!(live.native_sources[&linked].source_memory_ids, vec![parent.clone()]);
+    for mutation in [
+        "valid_to = '2000-01-01T00:00:00Z'",
+        "tombstoned_at = '2000-01-01T00:00:00Z'",
+        "content = 'password=private-parent-canary'",
+    ] {
+        db.execute_raw(&format!(
+            "UPDATE memories SET valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
+        ))
+        .unwrap();
+        db.execute_raw(&format!("UPDATE memories SET {mutation} WHERE id = '{parent}'"))
+            .unwrap();
+        let withheld = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+        assert_eq!(withheld.candidates.len(), 1, "{mutation}");
+        assert_eq!(withheld.candidates[0].memory_id, unlinked);
+        assert!(!withheld.native_sources.contains_key(&linked));
+        let output = ask_data_json(&answer(&withheld)).to_string();
+        assert!(!output.contains(&linked));
+        assert!(!output.contains(&parent));
+        assert!(!output.contains("private-parent-canary"));
+    }
+    db.execute_raw(&format!(
+        "UPDATE memories SET valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
+    ))
+    .unwrap();
+    let restored = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(restored.candidates.len(), 3);
+    assert!(restored.native_sources.contains_key(&linked));
+    assert!(!root.path().join(".ee/index").exists());
+}
+
+#[test]
+fn concurrent_parent_revocation_obeys_the_owned_evidence_snapshot() {
+    let (root, db, workspace) = fixture();
+    let parent = parent_memory(&db, &workspace);
+    let session = session(&db, &workspace, 1);
+    let linked = evidence_with_parent(&db, &workspace, &session, 1, BODY, Some(&parent));
+    let writer = DbConnection::open_file(&root.path().join(".ee/ee.db")).unwrap();
+    let pinned = load_corpus_with_boundary(&db, &workspace, Utc::now(), || {
+        writer
+            .with_transaction(|| {
+                writer.execute_raw(&format!(
+                    "UPDATE memories SET valid_to = '2000-01-01T00:00:00Z' WHERE id = '{parent}'"
+                ))
+            })
+            .unwrap();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(pinned.candidates.len(), 2);
+    assert!(pinned.native_sources.contains_key(&linked));
+    let excerpt = pinned.candidates.iter().find(|item| item.memory_id == linked).unwrap();
+    assert_eq!(excerpt.confidence, 0.5);
+    assert_eq!(excerpt.trust_class, "cass_evidence");
+    let current = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert!(current.candidates.is_empty());
+    assert!(current.native_sources.is_empty());
+    assert!(answer(&current).abstained);
 }
