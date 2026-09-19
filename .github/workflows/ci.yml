@@ -248,10 +248,30 @@ jobs:
       # stack checkout; splitting it cleanly is a follow-up once that checkout
       # is factored into a reusable composite action.
       #
+      # bd-reality-core-convergence-1azkt.18: this ran `check advisories`
+      # only, so deny.toml's [bans] list -- the section the file says it
+      # exists for ("this file is scoped to `bans` only") -- was configured
+      # and never checked, and [sources] did not exist. `bans` and `sources`
+      # were both measured green locally against this Cargo.lock before being
+      # enabled here, so this activates two dormant gates without changing
+      # what passes today.
+      #
+      # `licenses` is deliberately NOT enabled: it fails today on an unmatched
+      # allow-list entry, and deny.toml states license posture is owned
+      # elsewhere. Enabling it is a separate decision, not a drive-by.
       - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+
+      # Kept as a SEPARATE step from advisories on purpose. Bundling them
+      # would make one red step mean any of three things, and a bans or
+      # sources regression could sit unnoticed behind an unrelated advisory
+      # failure. Each gate reports its own verdict.
+      - name: Ban and source audit (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans sources
 
       - name: Closure linter
         run: ./scripts/closure-lint.sh --audit --json

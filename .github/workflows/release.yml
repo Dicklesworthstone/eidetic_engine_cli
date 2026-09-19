@@ -121,10 +121,24 @@ jobs:
       # version=2 gate mode. Closes the "signed but unscanned" false-assurance
       # gap: provenance != freedom from known CVEs.
       #
+      # bd-reality-core-convergence-1azkt.18: was `check advisories` only, so
+      # deny.toml's [bans] list was configured and never enforced and there
+      # was no [sources] constraint at all. Both measured green locally
+      # against this Cargo.lock before being enabled. `licenses` stays off --
+      # it fails today on an unmatched allow entry and deny.toml states
+      # license posture is owned elsewhere.
       - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+
+      # Separate step from advisories deliberately: one red step should mean
+      # one thing. A bans or sources regression must not hide behind an
+      # unrelated advisory failure.
+      - name: Ban and source audit (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans sources
 
       - name: Closure linter
         run: ./scripts/closure-lint.sh --json

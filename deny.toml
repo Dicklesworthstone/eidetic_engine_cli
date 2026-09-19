@@ -72,3 +72,23 @@ ignore = [
     # drops its paste dependency.
     "RUSTSEC-2024-0436",
 ]
+
+# bd-reality-core-convergence-1azkt.18: "Enforce allowed registries/git
+# origins". There was no [sources] section at all, so nothing constrained
+# where code could come from.
+#
+# The resolved tree today has ZERO git sources and exactly one registry
+# (crates.io), which is why `cargo deny check sources` reported "ok" before
+# this section existed -- it had nothing to object to. An "ok" from an
+# unconfigured check is not enforcement, so this section states the rule
+# explicitly and the gate below makes a new source fail rather than pass
+# silently.
+#
+# Proven to be consulted, in both directions, before landing: with
+# `allow-registry = []` the check FAILS on crates.io itself (so the section
+# is live); with crates.io allowed and unknowns denied it passes. A config
+# that cannot fail would have looked identical to one that works.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
