@@ -5,6 +5,7 @@
 //! diagnostics.
 
 pub mod import_auth;
+mod ingestion;
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;
@@ -2007,30 +2008,7 @@ fn classify_transcript_object(value: &serde_json::Value, depth: usize) -> Transc
 /// redacted content that would otherwise become durable or candidate material.
 #[must_use]
 pub fn screen_external_text_for_ingestion(content: &str) -> ExternalIngestionScreenReport {
-    let redaction = redact_secret_like_content(content);
-    let instruction_report = detect_instruction_like_content(&redaction.content);
-    ExternalIngestionScreenReport {
-        content: redaction.content,
-        redacted: redaction.redacted,
-        redacted_reasons: redaction
-            .redacted_reasons
-            .iter()
-            .map(|reason| (*reason).to_owned())
-            .collect(),
-        instruction_like: instruction_report.is_instruction_like,
-        instruction_risk: instruction_report.risk.as_str(),
-        instruction_score: format!("{:.4}", instruction_report.score),
-        rejected_reasons: instruction_report
-            .rejected_reasons
-            .iter()
-            .map(|reason| (*reason).to_owned())
-            .collect(),
-        signal_codes: instruction_report
-            .signals
-            .iter()
-            .map(|signal| signal.code.to_owned())
-            .collect(),
-    }
+    ingestion::screen(content)
 }
 
 #[must_use]
