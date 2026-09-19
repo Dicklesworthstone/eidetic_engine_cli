@@ -92,3 +92,96 @@ fn provenance_docs_and_audit_surface_are_registered() {
         assert_contains(&audit, needle);
     }
 }
+
+/// Extract a bash array literal `name=(\n  a\n  b\n)` from a workflow.
+fn bash_array(workflow: &str, name: &str) -> Vec<String> {
+    workflow
+        .lines()
+        .skip_while(|line| line.trim() != format!("{name}=("))
+        .skip(1)
+        .take_while(|line| line.trim() != ")")
+        .map(|line| line.trim().to_owned())
+        .filter(|entry| !entry.is_empty() && !entry.starts_with('#'))
+        .collect()
+}
+
+/// bd-reality-core-convergence-1azkt.18: "no stale/unbound input can enter an
+/// archive".
+///
+/// The release pipeline uses no cache, so there is no stale cache to rebuild
+/// from. The reuse surface is instead artifacts handed from `build` to
+/// `release`, and that job already defends it well: it counts the artifacts,
+/// checks each target x suffix is present, runs `sha256sum --check`, and
+/// cosign-verifies. Those guards are real.
+///
+/// What is NOT defended is the guards' OWN INPUTS. Three things must agree and
+/// nothing holds them equal:
+///
+///   the build matrix `target:` entries
+///   the `expected_targets` array in the release job
+///   `expected_artifact_count`, a hardcoded literal rather than the product
+///
+/// They agree today. If they drift, the count check does fail closed -- but it
+/// fails DURING A RELEASE, which is the most expensive place to discover a
+/// typo. This moves that discovery to commit time.
+#[test]
+fn release_expected_assets_match_the_build_matrix() {
+    let workflow = repo_file(".github/workflows/release.yml");
+
+    let matrix_targets: std::collections::BTreeSet<String> = workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- target: "))
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect();
+    let expected_targets: std::collections::BTreeSet<String> =
+        bash_array(&workflow, "expected_targets")
+            .into_iter()
+            .collect();
+    let suffixes = bash_array(&workflow, "expected_suffixes");
+
+    // A zero-length parse means the workflow's shape moved and this test can no
+    // longer read it. That is a different failure from a real drift and must
+    // not be reported as agreement -- empty sets compare equal to each other.
+    assert!(
+        !matrix_targets.is_empty(),
+        "parsed zero matrix targets from release.yml; the matrix format changed \
+         and this test can no longer read it. Fix the parser before trusting it."
+    );
+    assert!(
+        !expected_targets.is_empty() && !suffixes.is_empty(),
+        "parsed zero expected_targets or expected_suffixes from release.yml; \
+         the release job's format changed and this test can no longer read it."
+    );
+
+    let missing: Vec<&str> = matrix_targets
+        .difference(&expected_targets)
+        .map(String::as_str)
+        .collect();
+    let unexpected: Vec<&str> = expected_targets
+        .difference(&matrix_targets)
+        .map(String::as_str)
+        .collect();
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "release `expected_targets` has drifted from the build matrix.\n  \
+         built but not expected (their artifacts would be unpublished): {missing:?}\n  \
+         expected but not built (the release would fail waiting for them): {unexpected:?}"
+    );
+
+    let declared: usize = workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("expected_artifact_count="))
+        .and_then(|value| value.trim().parse().ok())
+        .expect("release.yml must declare expected_artifact_count");
+    let product = expected_targets.len() * suffixes.len();
+    assert_eq!(
+        declared,
+        product,
+        "expected_artifact_count is a hardcoded literal and no longer equals \
+         targets x suffixes: declared {declared}, but {} targets x {} suffixes \
+         = {product}. Update the literal, or derive it.",
+        expected_targets.len(),
+        suffixes.len()
+    );
+}
