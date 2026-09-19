@@ -476,3 +476,136 @@ fn large_multifile_capture_binds_the_last_change_beyond_its_visible_prefix() -> 
     assert!(!root.join(".ee").exists());
     Ok(())
 }
+
+// A promisor remote can make a read write objects or block on network/auth.
+// Use real filtered local clones so the missing-object arm cannot pass merely
+// because the fixture already contains every blob it needs.
+fn partial_fixture() -> Result<(tempfile::TempDir, tempfile::TempDir, Vec<String>), String> {
+    let source = fixture()?;
+    write(source.path(), "source.rs", "pub fn initial_release() {}\n")?;
+    commit(source.path(), "initial source")?;
+    write(source.path(), "source.rs", "pub fn verified_release() {}\n")?;
+    commit(source.path(), "verify release")?;
+    git(source.path(), &["config", "uploadpack.allowFilter", "true"])?;
+    let objects = ["HEAD~1:source.rs", "HEAD:source.rs"]
+        .into_iter()
+        .map(|reference| git_text(source.path(), &["rev-parse", reference]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let source_path = source.path().to_str().ok_or("non-UTF-8 fixture path")?;
+    git(
+        target.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--no-local",
+            "--filter=blob:none",
+            "--no-checkout",
+            source_path,
+            ".",
+        ],
+    )?;
+    assert_eq!(
+        git_text(target.path(), &["config", "remote.origin.promisor"])?,
+        "true"
+    );
+    for object in &objects {
+        assert!(
+            !object_present(target.path(), object)?,
+            "filtered clone already has its blobs"
+        );
+    }
+    Ok((source, target, objects))
+}
+
+fn object_present(root: &Path, object: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["--no-lazy-fetch", "cat-file", "-e", object])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("local object probe failed: {}", output.status)),
+    }
+}
+
+#[test]
+fn partial_clone_capture_refuses_missing_blobs_without_fetching_or_writing() -> TestResult {
+    let (_source, target, objects) = partial_fixture()?;
+    let root = target.path();
+    let counts = git(root, &["count-objects", "-v"])?;
+    assert!(!root.join(".git/index").exists());
+    for (mode, reference) in [
+        (RememberGitCaptureMode::Commit, Some("HEAD")),
+        (RememberGitCaptureMode::Diff, Some("HEAD~1..HEAD")),
+        (RememberGitCaptureMode::WorkingTree, None),
+    ] {
+        let error = capture(root, mode, reference)
+            .err()
+            .ok_or("fetched missing capture content")?;
+        assert!(error.contains("read capture comparison"), "{error}");
+        for object in &objects {
+            assert!(
+                !object_present(root, object)?,
+                "capture silently fetched a missing blob"
+            );
+        }
+        assert_eq!(git(root, &["count-objects", "-v"])?, counts);
+        assert!(!root.join(".git/index").exists());
+        assert!(!root.join(".ee").exists());
+    }
+    // Prove that the remote and lazy fetching actually work in this fixture.
+    // Only this explicit fixture read is permitted to hydrate the objects.
+    for object in &objects {
+        git(root, &["cat-file", "blob", object])?;
+        assert!(object_present(root, object)?);
+    }
+    assert_ne!(git(root, &["count-objects", "-v"])?, counts);
+    Ok(())
+}
+
+#[test]
+fn partial_clone_with_local_evidence_captures_offline_without_mutating_git() -> TestResult {
+    let (source, target, objects) = partial_fixture()?;
+    let root = target.path();
+    for object in &objects {
+        git(root, &["cat-file", "blob", object])?;
+    }
+    git(root, &["checkout", "HEAD", "--", "source.rs"])?;
+    let unavailable = root.join("unavailable-promisor");
+    git(
+        root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            unavailable.to_str().ok_or("non-UTF-8 path")?,
+        ],
+    )?;
+    let index = fs::read(root.join(".git/index")).map_err(|error| error.to_string())?;
+    let counts = git(root, &["count-objects", "-v"])?;
+    for (mode, reference) in [
+        (RememberGitCaptureMode::Commit, Some("HEAD")),
+        (RememberGitCaptureMode::Diff, Some("HEAD~1..HEAD")),
+    ] {
+        let captured = capture(root, mode, reference)?;
+        let original = capture(source.path(), mode, reference)?;
+        assert_eq!(captured, original);
+        assert!(captured.content.contains("verified_release"));
+    }
+    write(root, "source.rs", "pub fn additional_offline_check() {}\n")?;
+    let worktree = capture(root, RememberGitCaptureMode::WorkingTree, None)?;
+    assert!(worktree.content.contains("additional_offline_check"));
+    assert_eq!(
+        fs::read(root.join(".git/index")).map_err(|error| error.to_string())?,
+        index
+    );
+    assert_eq!(git(root, &["count-objects", "-v"])?, counts);
+    assert!(!root.join(".ee").exists());
+    Ok(())
+}

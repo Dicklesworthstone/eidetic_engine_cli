@@ -374,6 +374,11 @@ fn run(root: &Path, args: &[&str], phase: &'static str) -> Result<Output, Domain
         .args([
             "--no-pager",
             "--no-replace-objects",
+            // A read in a partial clone otherwise hydrates missing objects via
+            // its promisor remote. Capture must remain local and read-only.
+            // Use the option, not just an env var silently ignored by old Git:
+            // unsupported versions must refuse rather than fetch unexpectedly.
+            "--no-lazy-fetch",
             "-c",
             "core.quotePath=false",
         ])
@@ -381,6 +386,7 @@ fn run(root: &Path, args: &[&str], phase: &'static str) -> Result<Output, Domain
         .arg(root)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .output()
         .map_err(|error| DomainError::Configuration {
