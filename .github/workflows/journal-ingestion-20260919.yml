@@ -1,0 +1,122 @@
+name: Journal evidence ingestion
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/journal-ingestion-20260919/**
+      - .github/workflows/journal-ingestion-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: journal-ingestion-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: journal-ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            journal-ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            trust-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate and test canonical journal screening before publication
+        run: |
+          set -euo pipefail
+          paths=(src/policy/mod.rs src/policy/ingestion.rs src/core/journal.rs src/core/journal_ingestion_tests.rs)
+          if ! git ls-files --error-unmatch src/core/journal_ingestion_tests.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/policy/mod.rs)" = c398a739f573be0214b310e59e15e349aa8923fb
+            test "$(git rev-parse HEAD:src/policy/ingestion.rs)" = eaf9c3eb870718b817f05e921fcafe7022af0d48
+            test "$(git rev-parse HEAD:src/core/journal.rs)" = 8bbfe8fffced3eae17ffeda14624d4482223a5fa
+            base64 --decode scripts/delivery/journal-ingestion-20260919/journal.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/journal-ingestion.patch"
+            echo "d50b06c132ec930aab4306cdc5bc3c67f12df630877337f224e51a19a24327fc  $RUNNER_TEMP/journal-ingestion.patch" | sha256sum --check
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/journal-ingestion.patch"
+            git apply "$RUNNER_TEMP/journal-ingestion.patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          status=0
+          cargo test --locked --lib core::journal::ingestion_tests:: -- --test-threads=2 > "$RUNNER_TEMP/journal-focused.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/journal-focused.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 6 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/journal-focused.log"
+          status=0
+          cargo test --locked --lib policy::ingestion:: -- --test-threads=2 > "$RUNNER_TEMP/journal-policy.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/journal-policy.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/journal-policy.log"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          if ! git diff --cached --quiet; then
+            base=$(git rev-parse HEAD)
+            git commit -m 'fix(journal): screen complete capture content before truncation and persistence' -m 'Use the canonical external ingestion policy for body and every structured content field, preserving actual replacement counts without counting existing placeholders. Screen before the body cut so credentials cannot become durable fragments and omitted instruction-bearing tails cannot be silently downgraded for distillation. Cover direct, stdin, daemon preparation, same-ID fallback, actual database bytes, and distillation refusal. All six new journal and eight shared-policy regressions passed before publication.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch --deepen=100 origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/journal-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/journal-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: journal-ingestion-source-and-tests
+          path: ${{ runner.temp }}/journal-*
+          retention-days: 7
+      - name: Verify journal compatibility and production checks
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo test --locked --lib core::journal::tests:: -- --test-threads=2 > "$RUNNER_TEMP/journal-compatibility.log" 2>&1 || failed=1
+          tail -n 120 "$RUNNER_TEMP/journal-compatibility.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/journal-compatibility.log" || failed=1
+          cargo check --locked --all-targets > "$RUNNER_TEMP/journal-check.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/journal-check.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/journal-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/journal-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: journal-ingestion-verification
+          path: ${{ runner.temp }}/journal-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: journal-ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
