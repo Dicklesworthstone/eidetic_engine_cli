@@ -637,7 +637,7 @@ Current top-level groups:
 | `ee search --family <family-id> [--memory-scope <scope>] [--strict-scope] [--json]` | Queryless, workspace-scoped retrieval of every recorded attempt-family member, including rejected attempts |
 | `ee search "<query>" --all-workspaces [--json]` | Inspection-only fan-out over registered workspaces plus the user-global lane (bounded, per-row `workspaceId` and lane labels); never mutates any store |
 | `ee similar <memory-id> [--limit N] [--min-score T] [--explain] [--json]` | Find embedding-native nearest-neighbor memories for a seed memory; degrades to lexical similarity with an explicit degraded note when semantic vectors are unavailable |
-| `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
+| `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, thresholded abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee timeline "<topic>" --as-of <RFC3339> --json` | Reconstruct read-only memory state for a topic at a historical timestamp; returns `ee.timeline.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b] [--sentinel <kind>:<target>] [--revive-when <kind>:<target>]` | Capture a durable memory with optional Gate and Revive sentinel predicates; both forms are fully validated before any memory, idempotency, or dry-run write |
@@ -1638,7 +1638,7 @@ keys, just like the other authenticated history above.
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
 | `ee eval report [fixture]` | Summarize fixture IDs, data hashes, aggregate retrieval metrics, and the first failing query |
 | `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
-| `ee ask "<question>" --workspace . --json` | Answer a narrow question extractively from stored memories, with citations, conflict sides, and calibrated abstention |
+| `ee ask "<question>" --workspace . --json` | Answer a narrow question extractively from stored memories, with citations, conflict sides, and thresholded abstention |
 | `ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json` | Compare normalized performance artifact summaries without mutating state |
 | `ee perf budget check --profile <name> --report <artifact.json> --json` | Check one normalized performance artifact against a profile budget |
 | `ee perf explain-latency --surface search\|context --report <artifact.json> [--log <j1.jsonl>] --json` | Explain deterministic latency stages and cache posture from normalized search/context artifacts and optional J1 timing evidence |
@@ -1658,7 +1658,7 @@ guidance.
 
 Use ask-quality evaluation for direct answers that must stay extractive and
 citation-backed. `ee eval run ask_v1 --json` gates citation precision, answer
-exactness, calibrated abstention, and conflict recall against the committed
+exactness, thresholded abstention, and conflict recall against the committed
 Project Zephyr fixture corpus; `scripts/e2e_ask.sh` exercises the same public
 CLI path end to end.
 

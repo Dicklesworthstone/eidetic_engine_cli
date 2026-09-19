@@ -17,8 +17,8 @@ The JSON payload uses `data.schema == "ee.ask.v1"`. Important fields:
 |---|---|
 | `data.answerText` | Extractive answer text, or null when abstained/conflicted |
 | `data.citations[]` | Cited memory IDs, source byte ranges, span text, trust class, and confidence |
-| `data.confidence` | Overall confidence after corroboration and contradiction handling |
-| `data.confidenceComponents` | Top span score, corroboration multiplier, and contradiction penalty |
+| `data.confidence` | Deterministic ask heuristic after corroboration and contradiction handling; not a calibrated probability |
+| `data.confidenceCalibration` | Calibration posture. Current value is `heuristic_uncalibrated`, `calibrated: false`, `scoreKind: ask_span_heuristic_v1`, `calibrationId: null` |\n| `data.confidenceComponents` | Top span score, corroboration multiplier, and contradiction penalty |
 | `data.sides[]` | Opposing cited answers when conflicting evidence is detected |
 | `data.nearestEvidence[]` | Best sub-threshold spans when the command abstains |
 | `data.counterfactualHint` | What evidence was missing or too weak for an answer |

@@ -1546,7 +1546,7 @@ run_stage "Dueling Wizards Typed Kinds E2E" "./scripts/e2e_typed_kinds.sh"
 
 # Gate 6.125: Ask direct-answer real-binary E2E (bd-169v0.5). No-Cargo:
 # proves extractive answer citations, corroboration confidence lift, conflict
-# sides, calibrated abstention, fail-closed --require-confidence, and retained
+# sides, thresholded abstention, fail-closed --require-confidence, and retained
 # ee.test_event.v1 evidence artifacts.
 run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 

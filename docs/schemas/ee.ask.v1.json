@@ -6,7 +6,7 @@
   "x-ee-status": "shipped:true",
   "x-ee-bead": "bd-169v0.1",
   "type": "object",
-  "required": ["schema", "question", "abstained", "confidence", "confidenceComponents", "citations"],
+  "required": ["schema", "question", "abstained", "confidence", "confidenceCalibration", "confidenceComponents", "citations"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -30,6 +30,31 @@
       "minimum": 0,
       "maximum": 1,
       "description": "Overall confidence: top_span_score × corroboration × (1 − contradiction_penalty), clamped to [0,1]."
+    },
+    "confidenceCalibration": {
+      "type": "object",
+      "required": ["status", "calibrated", "scoreKind", "calibrationId"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "heuristic_uncalibrated",
+          "description": "The ask score is a deterministic ranking/admission heuristic, not an empirically calibrated probability."
+        },
+        "calibrated": {
+          "type": "boolean",
+          "const": false
+        },
+        "scoreKind": {
+          "type": "string",
+          "const": "ask_span_heuristic_v1",
+          "description": "Stable identity for the scoring rule that produced confidence."
+        },
+        "calibrationId": {
+          "type": "null",
+          "description": "No fitted calibration artifact is active for ask confidence."
+        }
+      }
     },
     "confidenceComponents": {
       "type": "object",
@@ -118,6 +143,7 @@
       "abstained",
       "answerText",
       "confidence",
+      "confidenceCalibration",
       "citations"
     ],
     "summary": [
@@ -126,6 +152,7 @@
       "abstained",
       "answerText",
       "confidence",
+      "confidenceCalibration",
       "confidenceComponents",
       "citations",
       "candidatesScanned",
@@ -139,6 +166,7 @@
       "abstained",
       "answerText",
       "confidence",
+      "confidenceCalibration",
       "confidenceComponents",
       "citations",
       "sides",

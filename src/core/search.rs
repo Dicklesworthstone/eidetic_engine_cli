@@ -768,12 +768,22 @@ pub fn normalized_relevance_score(source: ScoreSource, score: f32) -> f32 {
     normalized.clamp(0.0, 1.0)
 }
 
+fn calibrated_relevance_lower_bound(hit: &SearchHit) -> Option<f32> {
+    let metadata = hit.metadata.as_ref()?;
+    if metadata.get("calibrated").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let interval = metadata.get("scoreInterval")?.as_array()?;
+    let lower = interval.first()?.as_f64()? as f32;
+    lower.is_finite().then_some(lower.clamp(0.0, 1.0))
+}
+
 pub(crate) fn search_hit_meets_relevance_floor(
     hit: &SearchHit,
     user_floor_override: Option<f32>,
 ) -> bool {
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
-    let relevance_score = hit.relevance_score();
+    let relevance_score = calibrated_relevance_lower_bound(hit).unwrap_or_else(|| hit.relevance_score());
     relevance_score.is_finite() && relevance_score >= floor
 }
 
@@ -1788,7 +1798,9 @@ impl SearchAuditFacts {
                     serde_json::json!({
                         "queryHash": &q_hash, "rank": (rank + 1) as u32,
                         "score": hit.score, "relevanceScore": hit.relevance_score(),
-                        "scoreKind": hit.score_kind(), "source": hit.source.as_str(),
+                        "scoreKind": hit.score_kind(),
+                        "calibrationId": search_hit_calibration_id_json(hit),
+                        "source": hit.source.as_str(),
                     })
                     .to_string(),
                 ),
@@ -3475,6 +3487,7 @@ impl SearchReport {
                     "score": hit.score,
                     "relevanceScore": round_metric_f32(hit.relevance_score()),
                     "scoreKind": hit.score_kind(),
+                    "calibrationId": search_hit_calibration_id_json(hit),
                     "scoreInterval": search_hit_score_interval_json(hit),
                     "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
                     "calibrated": search_hit_calibrated_json(hit),
@@ -4589,6 +4602,21 @@ impl SearchScoreCalibration {
         }
     }
 
+    fn calibration_id(&self) -> String {
+        let feedback_ids = self.feedback_event_ids.join("\n");
+        let material = format!(
+            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_ids={}\nfeedback_ids_truncated={}\n",
+            SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
+            self.status.as_str(),
+            SEARCH_SCORE_COVERAGE_GUARANTEE,
+            self.sample_count,
+            self.jsonl_hash.as_deref().unwrap_or("none"),
+            feedback_ids,
+            self.feedback_event_ids_truncated,
+        );
+        format!("blake3:{}", blake3::hash(material.as_bytes()).to_hex())
+    }
+
     fn interval_for_score(&self, score: f32) -> [f32; 2] {
         let score = if score.is_finite() {
             score.clamp(0.0, 1.0)
@@ -4615,6 +4643,7 @@ impl SearchScoreCalibration {
             "schema": SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
             "method": "scaled_split_conformal",
             "status": self.status.as_str(),
+            "calibrationId": self.calibration_id(),
             "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),
             "sampleCount": self.sample_count,
             "minimumSamples": MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
@@ -5217,6 +5246,14 @@ fn search_hit_coverage_guarantee_json(hit: &SearchHit) -> serde_json::Value {
     hit.metadata
         .as_ref()
         .and_then(|metadata| metadata.get("coverageGuarantee"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn search_hit_calibration_id_json(hit: &SearchHit) -> serde_json::Value {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/scoreCalibration/calibrationId"))
         .cloned()
         .unwrap_or(serde_json::Value::Null)
 }
@@ -9222,9 +9259,24 @@ async fn run_search_inner_with_performance(
                 };
             trace.record_elapsed("search::dedupeMutualInformation", dedupe_mi_start);
 
+            // Calibrate before admission so an available calibrated interval is
+            // load-bearing: floor admission uses its lower bound. Uncalibrated
+            // hits retain the historical point-score behavior.
+            let mut raw_hits = raw_hits;
+            let calibration_start = Instant::now();
+            annotate_hits_with_score_calibration(
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                read_connection,
+                &mut raw_hits,
+                &mut degraded,
+            );
+            trace.record_elapsed("search::scoreCalibration", calibration_start);
+
             // Bead bd-17c65.2.1 (B1): apply the floor to the comparable
             // `relevanceScore` projection, never to source-dependent raw
-            // BM25, cosine, or RRF magnitudes.
+            // BM25, cosine, or RRF magnitudes. When calibration is available,
+            // use the interval's conservative lower bound.
             let user_floor_override = options.relevance_floor;
             let pre_floor_count = raw_hits.len();
             let pre_floor_top_score = raw_hits.first().map(SearchHit::relevance_score);
@@ -9262,15 +9314,6 @@ async fn run_search_inner_with_performance(
             let mesh_start = Instant::now();
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             trace.record_elapsed("search::meshVisibility", mesh_start);
-            let calibration_start = Instant::now();
-            annotate_hits_with_score_calibration(
-                &options.workspace_path,
-                options.database_path.as_deref(),
-                read_connection,
-                &mut above_floor,
-                &mut degraded,
-            );
-            trace.record_elapsed("search::scoreCalibration", calibration_start);
             let truncate_start = Instant::now();
             truncate_hits_to_limit(&mut above_floor, effective_limit);
             trace.record_elapsed("search::truncate", truncate_start);
@@ -9641,8 +9684,16 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         } else {
             (raw_hits, 0, 0)
         };
-    // Mirror `run_search`'s relevance projection and shared floor so
+    // Mirror `run_search`'s calibration-aware relevance floor so
     // `ee diag search` cannot silently disagree with the live path.
+    let mut raw_hits = raw_hits;
+    annotate_hits_with_score_calibration(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        None,
+        &mut raw_hits,
+        &mut degraded,
+    );
     let user_floor_override = options.relevance_floor;
     let pre_floor_count = raw_hits.len();
     let pre_floor_top_score = raw_hits.first().map(SearchHit::relevance_score);
@@ -9654,13 +9705,6 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         apply_tombstone_visibility_collecting(options, above_floor, &mut degraded, None, None);
     let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
-    annotate_hits_with_score_calibration(
-        &options.workspace_path,
-        options.database_path.as_deref(),
-        None,
-        &mut above_floor,
-        &mut degraded,
-    );
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let query_assist_candidates =
@@ -23836,6 +23880,27 @@ mod tests {
     // ========================================================================
     // Bead bd-17c65.2.3 (B3) — dedupe_hits_on_doc_id
     // ========================================================================
+
+    #[test]
+    fn calibrated_floor_uses_conservative_lower_bound() {
+        let mut hit = synthetic_hit("calibrated", 0.80);
+        hit.metadata = Some(serde_json::json!({
+            "calibrated": true,
+            "scoreInterval": [0.20, 0.95],
+        }));
+        assert!(!search_hit_meets_relevance_floor(&hit, Some(0.50)));
+        assert!(search_hit_meets_relevance_floor(&hit, Some(0.20)));
+    }
+
+    #[test]
+    fn uncalibrated_floor_preserves_point_score_behavior() {
+        let mut hit = synthetic_hit("uncalibrated", 0.80);
+        hit.metadata = Some(serde_json::json!({
+            "calibrated": false,
+            "scoreInterval": [0.10, 0.95],
+        }));
+        assert!(search_hit_meets_relevance_floor(&hit, Some(0.50)));
+    }
 
     #[test]
     fn dedupe_keeps_unique_doc_ids_unchanged() {

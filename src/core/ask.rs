@@ -61,6 +61,14 @@ pub const ASK_QUERY_MISS_ORIGIN: &str = "ask";
 /// Default minimum confidence below which the engine abstains (ADR §3).
 pub const ASK_MIN_CONFIDENCE_DEFAULT: f32 = 0.55;
 
+/// The current ask score is a deterministic heuristic over lexical/semantic
+/// span evidence, source confidence, trust, corroboration, and contradiction.
+/// It is NOT an empirically calibrated probability.
+pub const ASK_CONFIDENCE_CALIBRATION_STATUS: &str = "heuristic_uncalibrated";
+/// Stable identity for the heuristic so callers can distinguish it from a
+/// future fitted calibration artifact without parsing prose.
+pub const ASK_CONFIDENCE_SCORE_KIND: &str = "ask_span_heuristic_v1";
+
 /// Default maximum number of evidence spans to emit in the answer (ADR §3).
 pub const ASK_MAX_EVIDENCE_DEFAULT: usize = 3;
 
@@ -1149,6 +1157,12 @@ fn ask_query_miss_audit_details(query_hash: &str, report: &AskReport, reason: &s
         "candidateCount": report.candidates_scanned,
         "nearestEvidenceCount": nearest_count,
         "confidence": round_ask_metric(report.confidence),
+        "confidenceCalibration": {
+            "status": ASK_CONFIDENCE_CALIBRATION_STATUS,
+            "calibrated": false,
+            "scoreKind": ASK_CONFIDENCE_SCORE_KIND,
+            "calibrationId": serde_json::Value::Null,
+        },
         "ttlSeconds": ASK_QUERY_MISS_AUDIT_TTL_SECONDS,
         "sampling": {
             "strategy": "all_ask_abstentions_v1",
@@ -1180,6 +1194,12 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
         "abstained": report.abstained,
         "answerText": report.answer_text,
         "confidence": report.confidence,
+        "confidenceCalibration": {
+            "status": ASK_CONFIDENCE_CALIBRATION_STATUS,
+            "calibrated": false,
+            "scoreKind": ASK_CONFIDENCE_SCORE_KIND,
+            "calibrationId": serde_json::Value::Null,
+        },
         "confidenceComponents": {
             "topSpanScore": report.confidence_components.top_span_score,
             "corroboration": report.confidence_components.corroboration,
@@ -2067,6 +2087,16 @@ mod tests {
         assert_eq!(json["schema"], ASK_SCHEMA_V1);
         assert_eq!(json["question"], "test question");
         assert_eq!(json["abstained"], false);
+        assert_eq!(
+            json["confidenceCalibration"]["status"],
+            ASK_CONFIDENCE_CALIBRATION_STATUS
+        );
+        assert_eq!(json["confidenceCalibration"]["calibrated"], false);
+        assert_eq!(
+            json["confidenceCalibration"]["scoreKind"],
+            ASK_CONFIDENCE_SCORE_KIND
+        );
+        assert!(json["confidenceCalibration"]["calibrationId"].is_null());
         assert!(json["citations"].as_array().is_some());
         let cits = json["citations"].as_array().unwrap();
         assert_eq!(cits.len(), 1);
@@ -2218,6 +2248,16 @@ mod tests {
         assert_eq!(value["reason"], DEGRADED_NO_ANSWER);
         assert_eq!(value["candidateCount"], 7);
         assert_eq!(value["nearestEvidenceCount"], 1);
+        assert_eq!(
+            value["confidenceCalibration"]["status"],
+            ASK_CONFIDENCE_CALIBRATION_STATUS
+        );
+        assert_eq!(value["confidenceCalibration"]["calibrated"], false);
+        assert_eq!(
+            value["confidenceCalibration"]["scoreKind"],
+            ASK_CONFIDENCE_SCORE_KIND
+        );
+        assert!(value["confidenceCalibration"]["calibrationId"].is_null());
         assert_eq!(value["redaction"]["rawQueryStored"], false);
         assert_eq!(value["redaction"]["queryTextStored"], false);
         assert_eq!(value["redaction"]["queryVectorStored"], false);
