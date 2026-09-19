@@ -67,23 +67,23 @@ const RETRIEVAL_WORKLOADS: &[(&str, &[&str])] = &[
     (
         "fx.data_size_tiers.v1",
         &[
-            "all task relevant memories",
             "budget truncation",
+            "deterministic priority bucket",
             "large workspace history",
             "medium workspace history",
             "redundant memories suppressed",
             "release memory",
-            "section quotas",
+            "release note verification",
+            "repeated checks",
             "small workspace history",
-            "top ranked memories",
         ],
     ),
     (
         "fx.memory_poisoning.v1",
         &[
             "authority claim",
+            "ignore previous instructions",
             "imported memories are evidence",
-            "instruction-like content",
             "legacy memories",
             "new system prompt",
             "policy denial",
