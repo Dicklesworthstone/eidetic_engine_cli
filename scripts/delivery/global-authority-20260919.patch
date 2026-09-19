@@ -1,0 +1,286 @@
+diff --git a/src/core/global_store.rs b/src/core/global_store.rs
+--- a/src/core/global_store.rs
++++ b/src/core/global_store.rs
+@@ -722,7 +722,9 @@ fn ensure_global_workspace_row(
+     Ok(requested)
+ }
+ 
+-/// Read memories persisted in the user-global store (read-only).
++/// Read current, revealed memories in the user-global store (read-only).
++/// Supersession and seals are source authority, not author validity windows.
++/// This current-head read is wall-clock-free for deterministic primer caching.
+ ///
+ /// Returns an empty vector when the store does not exist yet (no `remember
+ /// --global` has run), so callers can include the global tier unconditionally
+@@ -736,14 +738,45 @@ pub fn read_global_store_memories(
+     paths: &GlobalStorePaths,
+     include_tombstoned: bool,
+ ) -> Result<Vec<StoredMemory>, String> {
+-    if !paths.database_path.exists() {
++    read_global_store_memories_at(paths, include_tombstoned, None)
++}
++
++/// Read global memory bodies, revision markers and seals in one source snapshot.
++/// `Some(as_of)` preserves history until the exclusive supersession boundary;
++/// `None` selects current heads without consulting the clock. Author expiry is
++/// deliberately left to each caller's existing validity-window policy.
++pub fn read_global_store_memories_at(
++    paths: &GlobalStorePaths,
++    include_tombstoned: bool,
++    as_of: Option<chrono::DateTime<chrono::Utc>>,
++) -> Result<Vec<StoredMemory>, String> {
++    if !paths.database_path.try_exists().map_err(global_read_error)? {
+         return Ok(Vec::new());
+     }
+     let connection = DbConnection::open_file_read_only(&paths.database_path)
+-        .map_err(|error| format!("failed to open global store database read-only: {error}"))?;
++        .map_err(global_read_error)?;
++    connection.begin_read_snapshot().map_err(global_read_error)?;
++    // The synchronous helper cannot yield between authority reads. On error
++    // the snapshot is still released; unwinding drops the owned connection.
++    let result = read_global_rows_in_snapshot(&connection, paths, include_tombstoned, as_of);
++    let released = connection.rollback_read_snapshot().map_err(global_read_error);
++    result.and_then(|rows| released.map(|()| rows))
++}
++
++fn global_read_error(_: impl std::fmt::Display) -> String {
++    "Could not verify the user-global memory snapshot; the optional global lane was withheld"
++        .to_owned()
++}
++
++fn read_global_rows_in_snapshot(
++    connection: &DbConnection,
++    paths: &GlobalStorePaths,
++    include_tombstoned: bool,
++    as_of: Option<chrono::DateTime<chrono::Utc>>,
++) -> Result<Vec<StoredMemory>, String> {
+     let needs_migration = connection
+         .needs_migration()
+-        .map_err(|error| format!("failed to inspect global store migration state: {error}"))?;
++        .map_err(global_read_error)?;
+     if needs_migration {
+         // Must keep containing `GLOBAL_STORE_NEEDS_MIGRATION_MARKER`; the
+         // search read path classifies this case by that substring.
+@@ -753,24 +786,46 @@ pub fn read_global_store_memories(
+     }
+     let requested = global_workspace_id(paths);
+     let Some(workspace) = crate::core::workspace::select_existing_workspace_row(
+-        &connection,
++        connection,
+         &requested,
+         &[paths.root.as_path()],
+     )
+-    .map_err(|error| {
+-        format!(
+-            "failed to resolve global workspace row: {}",
+-            error.message()
+-        )
+-    })?
++    .map_err(global_read_error)?
+     else {
+         return Ok(Vec::new());
+     };
+-    connection
++    let memories = connection
+         .list_memories(&workspace.id, None, include_tombstoned)
+-        .map_err(|error| format!("failed to list global store memories: {error}"))
++        .map_err(global_read_error)?;
++    let revisions = connection
++        .list_memory_supersession_markers(&workspace.id)
++        .map_err(global_read_error)?;
++    let closed_seals = connection
++        .list_memory_seals_for_recovery(&workspace.id)
++        .map_err(global_read_error)?
++        .into_iter()
++        .filter(|seal| seal.is_sealed())
++        .map(|seal| seal.memory_id)
++        .collect::<std::collections::BTreeSet<_>>();
++    let mut admitted = Vec::with_capacity(memories.len());
++    for memory in memories {
++        if let Some(raw) = revisions.get(&memory.id) {
++            let cutoff = chrono::DateTime::parse_from_rfc3339(raw).map_err(global_read_error)?;
++            if as_of.is_none_or(|reference| reference >= cutoff.with_timezone(&chrono::Utc)) {
++                continue;
++            }
++        }
++        if !closed_seals.contains(&memory.id) {
++            admitted.push(memory);
++        }
++    }
++    Ok(admitted)
+ }
+ 
++#[cfg(test)]
++#[path = "global_store_revision_tests.rs"]
++mod revision_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/src/core/search.rs b/src/core/search.rs
+--- a/src/core/search.rs
++++ b/src/core/search.rs
+@@ -11532,7 +11532,11 @@ async fn global_store_frankensearch_hits(
+         }
+         return Vec::new();
+     }
+-    let memories = match super::global_store::read_global_store_memories(&paths, true) {
++    let memories = match super::global_store::read_global_store_memories_at(
++        &paths,
++        options.include_tombstoned,
++        Some(options.as_of.unwrap_or_else(Utc::now)),
++    ) {
+         Ok(memories) => memories,
+         Err(error) => {
+             // A global store that merely needs migration is an optional lane
+diff --git a/src/core/global_store_revision_tests.rs b/src/core/global_store_revision_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/src/core/global_store_revision_tests.rs
+@@ -0,0 +1,146 @@
++//! Real global-store authority reads, including historical and primer semantics.
++
++use super::*;
++use chrono::{DateTime, Utc};
++use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
++
++const PRIOR: &str = "mem_00000000000000000000000041";
++const HEAD: &str = "mem_00000000000000000000000042";
++const SEALED: &str = "mem_00000000000000000000000043";
++const CUTOFF: &str = "2026-06-01T00:00:00Z";
++type TestResult = Result<(), String>;
++
++fn at(raw: &str) -> DateTime<Utc> {
++    DateTime::parse_from_rfc3339(raw).expect("fixture timestamp").with_timezone(&Utc)
++}
++
++fn input(workspace: &str, content: &str) -> CreateMemoryInput {
++    CreateMemoryInput {
++        workspace_id: workspace.to_owned(), level: "procedural".to_owned(),
++        kind: "rule".to_owned(), content: content.to_owned(), workflow_id: None,
++        confidence: 0.9, utility: 0.8, importance: 0.7,
++        provenance_uri: Some("manual://global-revision".to_owned()),
++        trust_class: "human_explicit".to_owned(), trust_subclass: None,
++        tags: vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()],
++        valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
++        valid_to: Some("2099-01-01T00:00:00Z".to_owned()),
++    }
++}
++
++fn fixture() -> Result<(tempfile::TempDir, GlobalStorePaths, DbConnection, String), String> {
++    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
++    let path = root.path().canonicalize().map_err(|e| e.to_string())?;
++    let paths = GlobalStorePaths::from_root(&path.join("global"));
++    let (db, workspace) = open_or_create_global_store(&paths)?;
++    for (id, body) in [(PRIOR, "Legacy deployment advice."), (HEAD, "Reviewed deployment advice.")] {
++        db.insert_memory_with_timestamps(id, &input(&workspace, body),
++            "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", PRIOR)
++            .map_err(|e| e.to_string())?;
++    }
++    db.restore_imported_memory_supersession(PRIOR, CUTOFF).map_err(|e| e.to_string())?;
++    Ok((root, paths, db, workspace))
++}
++
++fn ids(rows: &[StoredMemory]) -> Vec<&str> {
++    let mut ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
++    ids.sort_unstable();
++    ids
++}
++
++#[test]
++fn global_current_reads_exclude_history_without_changing_author_expiry() -> TestResult {
++    let (_root, paths, db, workspace) = fixture()?;
++    let current = read_global_store_memories(&paths, true)?;
++    assert_eq!(ids(&current), [HEAD]);
++    assert_eq!(current[0].valid_to.as_deref(), Some("2099-01-01T00:00:00Z"));
++    assert_eq!(db.list_memories(&workspace, None, true).map_err(|e| e.to_string())?.len(), 2);
++    assert_eq!(db.get_memory(PRIOR).map_err(|e| e.to_string())?.ok_or("prior")?.content,
++        "Legacy deployment advice.");
++    Ok(())
++}
++
++#[test]
++fn global_historical_reads_use_the_exact_exclusive_supersession_boundary() -> TestResult {
++    let (_root, paths, _db, _workspace) = fixture()?;
++    let before = read_global_store_memories_at(&paths, true,
++        Some(at("2026-05-31T23:59:59.999999999Z")))?;
++    // This API gates revision authority only. The search caller additionally
++    // applies each row's author validity interval, including future starts.
++    assert_eq!(ids(&before), [PRIOR, HEAD]);
++    for reference in [CUTOFF, "2026-08-01T00:00:00Z", "2026-06-01T01:00:00+01:00"] {
++        assert_eq!(ids(&read_global_store_memories_at(&paths, true, Some(at(reference)))?), [HEAD]);
++    }
++    Ok(())
++}
++
++#[test]
++fn global_seals_cannot_be_bypassed_by_current_or_historical_reads() -> TestResult {
++    let (_root, paths, db, workspace) = fixture()?;
++    db.insert_memory(SEALED, &input(&workspace, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT))
++        .map_err(|e| e.to_string())?;
++    db.insert_memory_seal(SEALED, &format!("blake3:{}", "a".repeat(64)), "2026-01-01T00:00:00Z")
++        .map_err(|e| e.to_string())?;
++    for reference in [None, Some(at("2026-05-01T00:00:00Z"))] {
++        assert!(!ids(&read_global_store_memories_at(&paths, true, reference)?).contains(&SEALED));
++    }
++    assert!(db.mark_memory_seal_revealed(SEALED, CUTOFF).map_err(|e| e.to_string())?);
++    assert_eq!(ids(&read_global_store_memories(&paths, true)?), [HEAD, SEALED]);
++    Ok(())
++}
++
++#[test]
++fn global_reader_preserves_tombstone_flags_and_workspace_ownership() -> TestResult {
++    let (_root, paths, db, _workspace) = fixture()?;
++    let foreign = "wsp_00000000000000000000000044";
++    db.insert_workspace(foreign, &CreateWorkspaceInput {
++        path: paths.root.join("other").to_string_lossy().into_owned(), name: None,
++    }).map_err(|e| e.to_string())?;
++    db.insert_memory(SEALED, &input(foreign, "Foreign workspace advice."))
++        .map_err(|e| e.to_string())?;
++    assert_eq!(ids(&read_global_store_memories(&paths, false)?), [HEAD]);
++    db.tombstone_memory(HEAD).map_err(|e| e.to_string())?;
++    assert!(read_global_store_memories(&paths, false)?.is_empty());
++    assert_eq!(ids(&read_global_store_memories(&paths, true)?), [HEAD]);
++    Ok(())
++}
++
++#[test]
++fn global_authority_uses_one_real_snapshot_without_owning_the_callers_transaction() -> TestResult {
++    let (_root, paths, writer, _workspace) = fixture()?;
++    let reader = DbConnection::open_file_read_only(&paths.database_path).map_err(|e| e.to_string())?;
++    reader.begin_read_snapshot().map_err(|e| e.to_string())?;
++    let old = read_global_rows_in_snapshot(&reader, &paths, true, None)?;
++    assert_eq!(ids(&old), [HEAD]);
++    writer.restore_imported_memory_supersession(HEAD, "2026-07-01T00:00:00Z")
++        .map_err(|e| e.to_string())?;
++    assert_eq!(read_global_rows_in_snapshot(&reader, &paths, true, None)?, old);
++    reader.commit_read_snapshot().map_err(|e| e.to_string())?;
++    assert!(read_global_store_memories(&paths, true)?.is_empty());
++    Ok(())
++}
++
++#[test]
++fn malformed_global_revision_withholds_the_lane_without_echoing_private_values() -> TestResult {
++    let (_root, paths, db, _workspace) = fixture()?;
++    db.execute_raw("UPDATE memories SET superseded_at = 'PRIVATE-GLOBAL-REVISION-CANARY' WHERE superseded_at IS NOT NULL")
++        .map_err(|e| e.to_string())?;
++    let before = std::fs::read(&paths.database_path).map_err(|e| e.to_string())?;
++    for reference in [None, Some(at(CUTOFF))] {
++        let error = read_global_store_memories_at(&paths, true, reference).expect_err("malformed revision");
++        assert!(!error.contains("PRIVATE-GLOBAL-REVISION-CANARY"));
++        assert!(!error.contains(&paths.database_path.to_string_lossy().into_owned()));
++        assert!(error.contains("optional global lane was withheld"));
++    }
++    assert_eq!(std::fs::read(&paths.database_path).map_err(|e| e.to_string())?, before);
++    Ok(())
++}
++
++#[test]
++fn absent_global_read_is_non_mutating_for_current_and_historical_queries() -> TestResult {
++    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
++    let paths = GlobalStorePaths::from_root(&root.path().join("absent"));
++    assert!(read_global_store_memories(&paths, true)?.is_empty());
++    assert!(read_global_store_memories_at(&paths, true, Some(at(CUTOFF)))?.is_empty());
++    assert!(!paths.root.exists());
++    Ok(())
++}

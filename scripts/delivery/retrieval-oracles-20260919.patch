@@ -1,0 +1,47 @@
+diff --git a/src/core/search_diagnostic_snapshot.rs b/src/core/search_diagnostic_snapshot.rs
+--- a/src/core/search_diagnostic_snapshot.rs
++++ b/src/core/search_diagnostic_snapshot.rs
+@@ -217,7 +217,9 @@
+             trust_class: "human_explicit".to_owned(),
+             trust_subclass: None,
+             tags: Vec::new(),
+-            valid_from: None,
++            // The fixture queries at a fixed August instant. An ambient
++            // creation-time default turns its visible control into a future row.
++            valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
+             valid_to: None,
+         }
+     }
+diff --git a/tests/support/revision_search_cli.rs b/tests/support/revision_search_cli.rs
+--- a/tests/support/revision_search_cli.rs
++++ b/tests/support/revision_search_cli.rs
+@@ -207,7 +207,10 @@
+         "--include-expired",
+         "--include-stale",
+     ])?;
+-    assert_eq!(ids(&search, "/data/results", "id")?, vec![head.as_str()]);
++    assert_eq!(
++        ids(&search, "/data/results", "docId")?,
++        vec![head.as_str()]
++    );
+     let diag = fixture.run(&[
+         "diag",
+         "search",
+@@ -217,7 +220,7 @@
+         "0",
+     ])?;
+     assert_eq!(
+-        ids(&diag, "/data/final/results", "id")?,
++        ids(&diag, "/data/final/results", "docId")?,
+         vec![head.as_str()]
+     );
+     assert_eq!(
+@@ -304,7 +307,7 @@
+             reference,
+         ])?;
+         assert_eq!(
+-            ids(&search, "/data/results", "id")?,
++            ids(&search, "/data/results", "docId")?,
+             vec![expected],
+             "{reference}"
+         );
