@@ -5,6 +5,7 @@ on:
     paths:
       - scripts/delivery/lifecycle-recovery-20260919.patch.xz.b64
       - scripts/delivery/maintenance-recovery-20260919.patch.xz.b64
+      - scripts/delivery/recovery-policy-fixture-20260919.patch
       - .github/workflows/lifecycle-recovery-20260919.yml
   workflow_dispatch:
 permissions:
@@ -67,7 +68,14 @@ jobs:
           else
             grep -Fq 'self.maintenance.verify_connection(db)' src/core/backup_history_recovery.rs
           fi
-          files=(src/core/backup_history_recovery.rs src/core/backup_lifecycle_recovery.rs src/core/backup_lifecycle_recovery_tests.rs src/core/backup_maintenance_recovery.rs src/core/backup_maintenance_recovery_tests.rs)
+          fixture_patch=scripts/delivery/recovery-policy-fixture-20260919.patch
+          echo "94e140f4d18a529821df690e36ece7f713905a48a7ec6793e1e258da331dbe60  $fixture_patch" | sha256sum --check
+          if ! grep -Fq 'fn migration_defaults_cannot_substitute_for_missing_captured_policy_history()' src/core/backup_recovery.rs; then
+            test "$(git rev-parse HEAD:src/core/backup_recovery.rs)" = a5e69be8cab3a630fc1af818cc09eff8a4960326
+            git apply --check --whitespace=error-all "$fixture_patch"
+            git apply "$fixture_patch"
+          fi
+          files=(src/core/backup_recovery.rs src/core/backup_history_recovery.rs src/core/backup_lifecycle_recovery.rs src/core/backup_lifecycle_recovery_tests.rs src/core/backup_maintenance_recovery.rs src/core/backup_maintenance_recovery_tests.rs)
           rustfmt --edition 2024 --config skip_children=true "${files[@]}"
           tar -czf "$RUNNER_TEMP/lifecycle-tested-source.tar.gz" "${files[@]}"
           verify() {
@@ -78,6 +86,9 @@ jobs:
             cargo test --locked --lib core::backup::recovery::history::maintenance::tests -- --test-threads=2 > "$RUNNER_TEMP/lifecycle-maintenance.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/lifecycle-maintenance.log"; return 1; }
             tail -n 100 "$RUNNER_TEMP/lifecycle-maintenance.log"
             grep -Fq 'test result: ok. 10 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/lifecycle-maintenance.log"
+            cargo test --locked --lib core::backup::recovery::tests -- --test-threads=2 > "$RUNNER_TEMP/lifecycle-inventory.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/lifecycle-inventory.log"; return 1; }
+            tail -n 100 "$RUNNER_TEMP/lifecycle-inventory.log"
+            grep -Fq 'test result: ok. 15 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/lifecycle-inventory.log"
             for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
               cargo test --locked --lib "core::backup::tests::$filter" -- --exact > "$RUNNER_TEMP/lifecycle-$filter.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/lifecycle-$filter.log"; return 1; }
               tail -n 50 "$RUNNER_TEMP/lifecycle-$filter.log"
@@ -90,7 +101,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(backup): preserve maintenance constraints and reflection replay state' -m 'Bind all seven maintenance history families to exact typed rows before and after derived rebuilding. Preserve sentinel predicates, consumed reflection challenges, tripwire halt state and check history, situation routing, debt assessments and promoted recipes. All-target compilation, twenty-two adversarial recovery tests and three public recovery continuations passed before this commit.'
+            git commit -m 'fix(backup): preserve maintenance constraints and reflection replay state' -m 'Bind all seven maintenance history families to exact typed rows before and after derived rebuilding. Preserve sentinel predicates, consumed reflection challenges, tripwire halt state and check history, situation routing, debt assessments and promoted recipes. Require captured curation policies rather than accepting destination defaults. All-target compilation, twenty-two lifecycle/maintenance tests, fifteen recovery inventory tests and three public recovery continuations passed before this commit.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
