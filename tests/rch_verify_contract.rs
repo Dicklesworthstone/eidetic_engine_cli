@@ -8516,3 +8516,165 @@ fn ledger_no_write_renders_summary_without_appending() -> TestResult {
     }
     Ok(())
 }
+
+/// Every remediation bead the verifier can cite, and whether the tracker says
+/// it is still open. bd-5d8rx.
+///
+/// `remediation_bead_for` maps a blocker kind to a bead id, and that id is
+/// emitted in the receipt as `known_blocker` alongside a retry window. That is
+/// not a hint -- it is an instruction to wait. When the cited bead is closed,
+/// the receipt tells an operator to wait on resolved work, and an agent
+/// treating `known_blocker` as "expected, not mine" excuses a live failure.
+///
+/// Measured 2026-09-19: 13 citations, 8 distinct beads, ALL CLOSED, freshest
+/// closure three months old. The case that exposed it was
+/// `client_daemon_version_skew` -> `bd-17c65.10.17.1.4`, closed 2026-05-19 with
+/// the reason "verifier now fails closed on downstream worker preflight/
+/// critical pressure, NOT client/daemon version skew" -- while a live run
+/// refused on exactly that skew. The citation did not merely rot; it
+/// contradicts the observation it is attached to.
+///
+/// READS THE COMMITTED EXPORT, NOT THE LIVE TRACKER. `.beads/issues.jsonl` is
+/// tracked, so this test is hermetic: same commit, same input, same verdict.
+/// Querying `br` would make the outcome depend on daemon liveness and on edits
+/// made mid-run -- failures that say nothing about the code under test. The
+/// staleness this misses is one sync's lag, which is a delay rather than a
+/// wrong citation, and it is worth missing to keep the test deterministic.
+///
+/// RATCHETS RATHER THAN DEMANDING A BIG BANG. The 13 stale citations are
+/// recorded below as known debt. A NEW stale citation fails, and so does a
+/// baseline entry that is no longer stale -- because a baseline listing debt
+/// that no longer exists is itself a lie about the state of the tree.
+/// Deliberately NOT repointing any mapping at a plausible open bead: guessing a
+/// replacement is how a wrong reference becomes permanent. Whoever owns each
+/// blocker picks its successor.
+#[test]
+fn rch_verify_remediation_beads_are_open_or_recorded_as_stale() -> TestResult {
+    const KNOWN_STALE: &[&str] = &[
+        "bd-17c65.10.17",
+        "bd-17c65.10.17.1",
+        "bd-17c65.10.17.1.2",
+        "bd-17c65.10.17.1.3",
+        "bd-17c65.10.17.1.4",
+        "bd-17c65.10.19",
+        "bd-1n3x1.13",
+        "bd-37ugy",
+    ];
+
+    let script = fs::read_to_string(script_path())
+        .map_err(|error| format!("read rch_verify.sh: {error}"))?;
+
+    // Scope the parse to the mapping function so an unrelated bead id in a
+    // comment elsewhere in a 7000-line script cannot enter the population.
+    // The slice deliberately includes the trailing `mapping.get(kind, default)`
+    // fallback, which is a thirteenth citation and was closed too.
+    let body = script
+        .split_once("def remediation_bead_for(")
+        .and_then(|(_, rest)| rest.split_once("\ndef "))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "remediation_bead_for not found in rch_verify.sh".to_owned())?;
+
+    let mut cited: BTreeSet<String> = BTreeSet::new();
+    let mut rest = body;
+    while let Some(index) = rest.find("\"bd-") {
+        rest = &rest[index + 1..];
+        if let Some(end) = rest.find('"') {
+            cited.insert(rest[..end].to_owned());
+        }
+    }
+
+    // An empty population compares equal to everything. If the mapping's shape
+    // moves, that is a parser failure and must not read as agreement.
+    if cited.len() < 4 {
+        return Err(format!(
+            "parsed only {} remediation beads from rch_verify.sh; the mapping \
+             shape changed and this test can no longer read it",
+            cited.len()
+        ));
+    }
+
+    let export_path = repo_root().join(".beads").join("issues.jsonl");
+    let export = fs::read_to_string(&export_path)
+        .map_err(|error| format!("read {}: {error}", export_path.display()))?;
+    let mut status_of: BTreeMap<String, String> = BTreeMap::new();
+    for line in export.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let (Some(id), Some(status)) = (
+            record.get("id").and_then(Value::as_str),
+            record.get("status").and_then(Value::as_str),
+        ) {
+            status_of.insert(id.to_owned(), status.to_owned());
+        }
+    }
+    if status_of.len() < 100 {
+        return Err(format!(
+            "parsed only {} issues from the committed export; the JSONL shape \
+             changed and every citation would read as unknown",
+            status_of.len()
+        ));
+    }
+
+    let baseline: BTreeSet<&str> = KNOWN_STALE.iter().copied().collect();
+    let mut newly_stale = Vec::new();
+    let mut healed = Vec::new();
+
+    for bead in &cited {
+        let stale = match status_of.get(bead) {
+            Some(status) => status == "closed",
+            // A citation naming a bead the export does not contain is worse
+            // than a closed one: it cannot be chased at all.
+            None => true,
+        };
+        let recorded = baseline.contains(bead.as_str());
+        if stale && !recorded {
+            newly_stale.push(format!(
+                "  {bead}: cited by rch_verify.sh, and the committed export says {}",
+                status_of
+                    .get(bead)
+                    .map_or("it does not exist", String::as_str)
+            ));
+        }
+        if !stale && recorded {
+            healed.push(format!(
+                "  {bead}: recorded as stale debt but the export says {}",
+                status_of.get(bead).map_or("?", String::as_str)
+            ));
+        }
+    }
+
+    // A baseline entry that no longer appears in the mapping at all is also
+    // stale bookkeeping -- the citation was removed and nobody pruned the list.
+    for bead in &baseline {
+        if !cited.contains(*bead) {
+            healed.push(format!(
+                "  {bead}: recorded as stale debt but rch_verify.sh no longer cites it"
+            ));
+        }
+    }
+
+    if !newly_stale.is_empty() || !healed.is_empty() {
+        return Err(format!(
+            "the verifier's remediation-bead citations disagree with the \
+             committed tracker export.\nNEW STALE CITATIONS (a refusal would \
+             send an operator to resolved or missing work):\n{}\nBASELINE NO \
+             LONGER TRUE (prune or repoint, deliberately):\n{}",
+            if newly_stale.is_empty() {
+                "  (none)".to_owned()
+            } else {
+                newly_stale.join("\n")
+            },
+            if healed.is_empty() {
+                "  (none)".to_owned()
+            } else {
+                healed.join("\n")
+            },
+        ));
+    }
+
+    Ok(())
+}
