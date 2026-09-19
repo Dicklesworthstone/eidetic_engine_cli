@@ -65,6 +65,11 @@ jobs:
           fi
           rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs
           bash -n scripts/e2e_capture.sh
+          # Cargo autodiscovery is disabled; make the real-binary scenarios
+          # an explicit target in the same transaction as their source file.
+          if ! grep -Fq 'path = "tests/session_arc_learning_cli.rs"' Cargo.toml; then
+            printf '\n[[test]]\nname = "session_arc_learning_cli"\npath = "tests/session_arc_learning_cli.rs"\n' >> Cargo.toml
+          fi
           cargo check --locked --all-targets > "$RUNNER_TEMP/arc-check.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-check.log"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
@@ -127,7 +132,7 @@ jobs:
               steps:
                 - run: echo 'Source delivery is complete; consult this workflow history for execution results.'
           RECEIPT
-          files=(src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs scripts/e2e_capture.sh "$workflow" .github/workflows/contradiction-graph-20260919.yml)
+          files=(Cargo.toml src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs scripts/e2e_capture.sh "$workflow" .github/workflows/contradiction-graph-20260919.yml)
           git diff --check
           git add -- "${files[@]}"
           if ! git diff --cached --quiet; then
