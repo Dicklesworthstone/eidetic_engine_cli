@@ -28,7 +28,8 @@ pub(super) fn preserve_independent_support<'a>(
     if ranked.len() < 2 || unique.len() <= ranked.len() {
         return;
     }
-    let groups = native::candidate_support_groups(unique.values().copied(), &request.native_sources);
+    let groups =
+        native::candidate_support_groups(unique.values().copied(), &request.native_sources);
     if groups.is_empty() {
         return;
     }
@@ -139,9 +140,7 @@ mod tests {
         ] {
             let request = AskRequest::default();
             let mut rows: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
-                .map(|index| {
-                    candidate(&format!("a-{index:05}"), 0.54, &format!("{prefix}{index}"))
-                })
+                .map(|index| candidate(&format!("a-{index:05}"), 0.54, &format!("{prefix}{index}")))
                 .collect();
             rows.push(candidate("z-independent", 0.54, "file://independent.md#L1"));
             let selected = select(&request, &rows, ASK_CANDIDATE_SCAN_CAP);
@@ -281,14 +280,9 @@ mod tests {
                 0.2
             }
         };
-        let selected = select_candidates_with_scorer(
-            &AskRequest::default(),
-            &[],
-            &rows,
-            2,
-            &scorer,
-        )
-        .expect("valid candidates");
+        let selected =
+            select_candidates_with_scorer(&AskRequest::default(), &[], &rows, 2, &scorer)
+                .expect("valid candidates");
         assert_eq!(ids(&selected), ["a", "y"]);
     }
 
