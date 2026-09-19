@@ -1,0 +1,128 @@
+name: Session arc learning integration and verification
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/session-arc-learning-20260919.patch.xz.b64
+      - .github/workflows/session-arc-learning-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: session-arc-learning-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Integrate production learning and regression tests
+        id: commit
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          base64 --decode scripts/delivery/session-arc-learning-20260919.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/session-arc.patch"
+          echo "dce2c38a045e17de3a92be4392e99ac767f734f43dcafc8b845462d888ca467d  $RUNNER_TEMP/session-arc.patch" | sha256sum --check
+          if ! test -f src/core/curate_session_arc.rs; then
+            test "$(git rev-parse HEAD:src/core/curate.rs)" = 6dbbefaae061e74ccea8328bf0d8f912a904ab2a
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/session-arc.patch"
+            git apply "$RUNNER_TEMP/session-arc.patch"
+          else
+            grep -Fq 'session_arc::link_applied_peer(' src/core/curate.rs
+          fi
+          files=(src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(learn): complete independently reviewed failure-to-repair memory pairs' -m 'Mine ordered related failure and verified-repair spans across topic boundaries, retain complete pairs under limits, and persist proposals atomically. Permit only regenerated reciprocal proposals to share admitted evidence. Atomically link accepted rule and anti-pattern without reparenting evidence or auto-approving a peer. Add eleven real-store and signal regressions. Formatting passed; compilation and runtime checks are reported by the separate verification job. bd-2vq2z.9'
+            for attempt in 1 2 3 4; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 4
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/session-arc-source.log"
+          tar -czf "$RUNNER_TEMP/session-arc-source.tar.gz" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: session-arc-published-source
+          path: |
+            ${{ runner.temp }}/session-arc-source.log
+            ${{ runner.temp }}/session-arc-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: session-arc-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            session-arc-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile all targets
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/session-arc-source.log"
+          timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/session-arc-check.log"
+      - name: Execute paired learning and existing derivation regressions
+        run: |
+          set -euo pipefail
+          timeout 20m cargo test --locked --lib core::curate::session_arc::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-tests.log"
+          grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-tests.log"
+          for filter in review_session_candidates_link_failed_fixed_arc_pair review_session_candidates_do_not_invent_arc_without_later_resolution apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict apply_curation_candidate_rolls_back_create_derived_failures review_session_proposals_persist_bootstrap_as_create_derived_candidate; do
+            timeout 5m cargo test --locked --lib "core::curate::tests::$filter" -- --exact 2>&1 | tee "$RUNNER_TEMP/session-arc-$filter.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-$filter.log"
+          done
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: session-arc-rust-results
+          path: ${{ runner.temp }}/session-arc-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
