@@ -337,3 +337,6 @@ impl ContextDeltaEnvelope {
 #[cfg(test)]
 #[path = "context_delta_wire_tests.rs"]
 mod tests;
+
+#[path = "context_delta_scoped.rs"]
+mod scoped;

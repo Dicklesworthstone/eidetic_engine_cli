@@ -193,7 +193,6 @@ fn open_directory(parent: &Path) -> Result<File, IndexRebuildError> {
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
         .open(parent)
-        .map_err(|error| error.to_string())
         .map_err(|error| lease_error("open", error))
 }
 
@@ -381,9 +380,14 @@ mod tests {
                 if kind.is_dir() {
                     pending.push(path);
                 } else {
-                    assert!(kind.is_file(), "snapshot fixture must contain only regular files");
+                    assert!(
+                        kind.is_file(),
+                        "snapshot fixture must contain only regular files"
+                    );
                     files.insert(
-                        path.strip_prefix(root).map_err(|error| error.to_string())?.to_path_buf(),
+                        path.strip_prefix(root)
+                            .map_err(|error| error.to_string())?
+                            .to_path_buf(),
                         std::fs::read(path).map_err(|error| error.to_string())?,
                     );
                 }
@@ -393,7 +397,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_read_recovers_missing_malformed_and_obsolete_metadata_without_writes() -> TestResult {
+    fn snapshot_read_recovers_missing_malformed_and_obsolete_metadata_without_writes() -> TestResult
+    {
         for manifest in [None, Some("{broken"), Some(r#"{"generation":5}"#)] {
             let (_root, index) = fixture()?;
             crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
@@ -410,10 +415,16 @@ mod tests {
                     .await
                     .map_err(|error| error.to_string())?;
                 assert_eq!(
-                    lease.index_for_snapshot(&cx, &index, 7).map_err(|error| error.to_string())?,
+                    lease
+                        .index_for_snapshot(&cx, &index, 7)
+                        .map_err(|error| error.to_string())?,
                     retained
                 );
-                assert_eq!(file_snapshot(parent)?, before, "recovery must not repair or promote files");
+                assert_eq!(
+                    file_snapshot(parent)?,
+                    before,
+                    "recovery must not repair or promote files"
+                );
                 // A retained generation is not authority to read beyond the DB snapshot.
                 assert!(lease.index_for_snapshot(&cx, &index, 6).is_err());
                 assert_eq!(file_snapshot(parent)?, before);
@@ -436,12 +447,19 @@ mod tests {
             build_generation(&cx, &newest, 7).await?;
             let broken = parent.join("index.previous.003");
             build_generation(&cx, &broken, 8).await?;
-            std::fs::write(broken.join(super::super::VECTOR_INDEX_FAST_FILE), b"corrupt")
-                .map_err(|error| error.to_string())?;
+            std::fs::write(
+                broken.join(super::super::VECTOR_INDEX_FAST_FILE),
+                b"corrupt",
+            )
+            .map_err(|error| error.to_string())?;
             let future = parent.join("index.previous.001");
             build_generation(&cx, &future, 20).await?;
             // Fully valid bytes still cannot grant an uncommitted path authority.
-            for name in [".index.publish-uncommitted", ".index.rejected-rejected", "index.previous.backup"] {
+            for name in [
+                ".index.publish-uncommitted",
+                ".index.rejected-rejected",
+                "index.previous.backup",
+            ] {
                 build_generation(&cx, &parent.join(name), 9).await?;
             }
             let before = file_snapshot(parent)?;
@@ -450,7 +468,9 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             for (ceiling, expected) in [(9, &newest), (4, &old), (20, &future), (30, &index)] {
                 assert_eq!(
-                    lease.index_for_snapshot(&cx, &index, ceiling).map_err(|error| error.to_string())?,
+                    lease
+                        .index_for_snapshot(&cx, &index, ceiling)
+                        .map_err(|error| error.to_string())?,
                     *expected
                 );
             }
@@ -480,8 +500,11 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
             assert!(lease.index_for_snapshot(&cx, &index, 7).is_err());
-            assert!(std::fs::symlink_metadata(index.join("meta.json"))
-                .map_err(|error| error.to_string())?.is_symlink());
+            assert!(
+                std::fs::symlink_metadata(index.join("meta.json"))
+                    .map_err(|error| error.to_string())?
+                    .is_symlink()
+            );
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())?
