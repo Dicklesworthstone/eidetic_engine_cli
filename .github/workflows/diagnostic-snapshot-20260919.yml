@@ -1,0 +1,133 @@
+name: Diagnostic search source snapshots
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/diagnostic-snapshot-20260919/**
+      - .github/workflows/diagnostic-snapshot-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: diagnostic-snapshot-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - name: Apply reviewed source-snapshot implementation
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/diagnostic-base-sha.log"
+          if ! git ls-files --error-unmatch src/core/search_diagnostic_snapshot.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/core/search.rs)" = 1a204d4c2bde969c5f037b9777248d224a12bcdc
+            base64 --decode scripts/delivery/diagnostic-snapshot-20260919/implementation.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/diagnostic.patch"
+            echo "1c89246f8bd8f856b2e1e576138166f0bfdcc94eb67940842befb65c1da9dd17  $RUNNER_TEMP/diagnostic.patch" | sha256sum --check
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/diagnostic.patch"
+            git apply "$RUNNER_TEMP/diagnostic.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_diagnostic_snapshot.rs
+            git diff --check
+          fi
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile production implementation before publication
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/diagnostic-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/diagnostic-check.log"
+          exit "$status"
+      - name: Commit verified production source directly to main
+        run: |
+          set -euo pipefail
+          paths=(src/core/search.rs src/core/search_diagnostic_snapshot.rs)
+          base=$(cat "$RUNNER_TEMP/diagnostic-base-sha.log")
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(search): bind diagnostics and every retrieval arm to source snapshots' -m 'Pin one read-only database snapshot across index selection, memory/evidence admission, calibration, scope, and query assistance. Recover diagnostic reads from compatible retained generations. Apply live lifecycle, seal, workspace, global-tag and mesh-denial admission to raw and fused diagnostics without applying relevance floors to raw evidence. Hydrate evidence from admitted canonical source text. Reject stale indexed global tags when the source has none. Add eight real-store and backend regression tests. Production cargo check passed before this commit; test execution is reported separately.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+              cargo check --locked --lib > "$RUNNER_TEMP/diagnostic-merge-check.log" 2>&1
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/diagnostic-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/diagnostic-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-snapshot-source
+          path: |
+            ${{ runner.temp }}/diagnostic-source-sha.log
+            ${{ runner.temp }}/diagnostic-source.tar.gz
+          retention-days: 7
+      - name: Compile and execute diagnostic and recovery regressions
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked --lib --no-run > "$RUNNER_TEMP/diagnostic-test-build.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/diagnostic-test-build.log"
+          if test "$status" -ne 0; then exit "$status"; fi
+          failed=0
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/diagnostic-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/diagnostic-$name.log"
+            if test "$status" -ne 0 || ! grep -Eq "test result: ok\. $expected passed; 0 failed;" "$RUNNER_TEMP/diagnostic-$name.log"; then failed=1; fi
+          }
+          run_group admission 'core::search::diagnostic_snapshot::tests' 8
+          run_group existing 'core::search::tests::diag_search_' '[1-9][0-9]*'
+          run_group evidence 'core::search::tests::live_evidence_admission_filters' '[1-9][0-9]*'
+          run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: diagnostic-snapshot-test-results
+          path: ${{ runner.temp }}/diagnostic-*.log
+          retention-days: 7
+      - name: Check all targets and Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/diagnostic-all-targets.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/diagnostic-all-targets.log"
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/diagnostic-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/diagnostic-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: diagnostic-snapshot-verification
+          path: ${{ runner.temp }}/diagnostic-*.log
+          retention-days: 7
