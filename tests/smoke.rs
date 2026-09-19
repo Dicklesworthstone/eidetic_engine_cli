@@ -7802,7 +7802,34 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     let why_links = why_current_json["data"]["links"]
         .as_array()
         .ok_or_else(|| "why links must be an array".to_string())?;
-    ensure_equal(&why_links.len(), &4, "why current link count")?;
+    // WHAT THE SEEDING ESTABLISHED, not how many rows exist. This asserted 4 --
+    // the number of links the block above inserts by hand -- and measured 8 on
+    // hz4: the four seeded, plus ADR 0051's remember-time auto-links into
+    // `current` from `expired`, `future`, `boundary` and `unknown`.
+    //
+    // A relation filter CANNOT separate the two here, unlike the pre-seeding
+    // baseline above: the seeded set deliberately includes both
+    // MemoryLinkRelation::Related (:7687) and ::CoTag (:7698), so "related" is
+    // ambiguous once seeding has run. Counting is therefore the wrong instrument
+    // at this point in the fixture, not just the wrong number.
+    //
+    // What this test actually needs is that `why` RENDERS each seeded edge so
+    // the supports lookup below has something to find. Asserting the four seeded
+    // relations are present is stronger than the old count in the way that
+    // matters -- a count of 4 would pass with the wrong four relations -- and it
+    // does not drift when the auto-link LIMIT or threshold moves.
+    for relation in ["supports", "contradicts", "related", "co_tag"] {
+        ensure(
+            why_links.iter().any(|link| link["relation"] == relation),
+            format!(
+                "why current must render the seeded `{relation}` edge; rendered relations: {:?}",
+                why_links
+                    .iter()
+                    .map(|link| link["relation"].as_str().unwrap_or("<none>"))
+                    .collect::<Vec<_>>()
+            ),
+        )?;
+    }
     let supports = why_links
         .iter()
         .find(|link| link["relation"] == "supports")
