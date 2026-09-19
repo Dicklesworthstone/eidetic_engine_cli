@@ -1,0 +1,111 @@
+name: Evidence recovery fixed points
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/evidence-export-20260919/**
+      - .github/workflows/evidence-export-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: evidence-export-recovery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate and prove the failed recovery scenario before publication
+        run: |
+          set -euo pipefail
+          python3 scripts/delivery/evidence-export-20260919/apply.py
+          paths=(src/core/backup.rs src/core/backup_evidence_export.rs src/core/backup_cass_recovery.rs src/core/backup_pack_recovery_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          run_exact_group() {
+            local name="$1" filter="$2" count="$3"
+            local status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/evidence-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/evidence-$name.log"
+            test "$status" -eq 0
+            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/evidence-$name.log"
+          }
+          run_exact_group projection core::backup::evidence_export::tests 6
+          run_exact_group recurrence context_history_survives_rebackup_without_regaining_evidence_authority 1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'fix(backup): make redacted evidence and recovery identities stable across restores' -m 'Preserve schema-defined evidence kinds and recognized producer roles, redact unchecked references only once, and retain canonical agent/task pseudonyms across independent backups. Never restore content authority after redaction. Six projection tests and the previously failing real two-generation context-history regression passed before this source commit. Include the two prior formatting corrections without weakening any assertion.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/evidence-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/evidence-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: evidence-export-source-and-first-tests
+          path: ${{ runner.temp }}/evidence-*
+          retention-days: 7
+      - name: Check all targets and production Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/evidence-check.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/evidence-check.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/evidence-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/evidence-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: evidence-export-verification
+          path: ${{ runner.temp }}/evidence-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
