@@ -1,0 +1,112 @@
+name: Durable recovery publication fence
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/durable-recovery-20260919.b64
+      - .github/workflows/durable-recovery-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: durable-recovery-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Apply the exact reviewed recovery implementation
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:src/core/backup.rs)" = a61fad489f1a97538942b6f0bec85101419fa0bd
+          test ! -e src/core/backup_recovery.rs
+          base64 --decode scripts/delivery/durable-recovery-20260919.b64 | gzip -d > "$RUNNER_TEMP/recovery.patch"
+          echo "3c3643e800539a87db9b78a98aa59edc520ec38fb88685d49bb42c71bdb8c17f  $RUNNER_TEMP/recovery.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/recovery.patch"
+          git apply "$RUNNER_TEMP/recovery.patch"
+          rustfmt --edition 2024 --config skip_children=true src/core/backup.rs src/core/backup_recovery.rs
+          git diff --check
+          git diff --stat
+      - name: Commit source directly to main without overwriting concurrent work
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/backup.rs src/core/backup_recovery.rs
+          git commit -m 'fix(backup): reconcile durable recovery before publishing the restored store' -m 'Use one registry for all 52 required durable tables. Reject missing or partial manifest inventories before staging, then verify actual persisted rows in one read-only snapshot after all recovery writers and before index rebuild/publication. Keep recovery-generated audit additions and explicitly exclude rebuildable/rekeyed state. Add 14 regression tests. Patch application and rustfmt passed; compilation and runtime tests are reported separately by the delivery run.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            test "$attempt" -lt 3
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- src/core/backup.rs src/core/backup_recovery.rs
+            git merge --no-edit origin/main
+            base=$(git rev-parse origin/main)
+          done
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/recovery-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: durable-recovery-source
+          path: |
+            ${{ runner.temp }}/recovery-source-sha.log
+            ${{ runner.temp }}/recovery-source.tar.gz
+          retention-days: 7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Resolve pinned Franken stack build paths
+        run: |
+          set -euo pipefail
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/recovery-build-paths.patch"
+          rustc --version --verbose > "$RUNNER_TEMP/recovery-toolchain.log"
+      - name: Check the production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/recovery-check.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/recovery-check.log"
+          exit "$status"
+      - name: Execute every durable recovery regression
+        run: |
+          status=0
+          cargo test --locked --lib core::backup::recovery::tests:: -- --test-threads=2 > "$RUNNER_TEMP/recovery-tests.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/recovery-tests.log"
+          test "$status" -eq 0
+          grep -Eq 'test result: ok\. 14 passed; 0 failed;' "$RUNNER_TEMP/recovery-tests.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: durable-recovery-verification
+          path: |
+            ${{ runner.temp }}/recovery-*.log
+            ${{ runner.temp }}/recovery-*.patch
+          retention-days: 7
