@@ -23,6 +23,10 @@ use crate::models::DomainError;
 mod cass;
 #[path = "backup_pack_recovery.rs"]
 mod packs;
+#[path = "backup_signal_recovery.rs"]
+mod signals;
+#[path = "backup_trust_recovery.rs"]
+mod trust;
 
 const LEARNING_TABLES: &[&str] = &[
     "procedural_rules",
@@ -81,6 +85,8 @@ pub(in crate::core::backup) struct HistoryExpectation {
     learning: Rows,
     packs: packs::PackExpectation,
     cass: cass::CassExpectation,
+    trust: trust::TrustExpectation,
+    signals: signals::SignalExpectation,
 }
 
 impl HistoryExpectation {
@@ -97,6 +103,8 @@ impl HistoryExpectation {
             learning: Rows::default(),
             packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
             cass: cass::CassExpectation::from_assets(assets, workspace_id)?,
+            trust: trust::TrustExpectation::from_assets(assets, backup_id, workspace_id)?,
+            signals: signals::SignalExpectation::from_assets(assets, backup_id, workspace_id)?,
         };
         for asset in assets
             .iter()
@@ -206,7 +214,9 @@ impl HistoryExpectation {
         }
         self.learning.verify(&actual, LEARNING_TABLES)?;
         self.packs.verify_connection(db)?;
-        self.cass.verify_connection(db)
+        self.cass.verify_connection(db)?;
+        self.trust.verify_connection(db)?;
+        self.signals.verify_connection(db)
     }
 }
 
