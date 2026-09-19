@@ -41949,14 +41949,37 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .get("embed_backend")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(crate::core::index::EMBED_BACKEND_HASH_FALLBACK);
+    // bd-ldtzi row 1: a subsystem that produced no data has no count, and
+    // rendering its absence as `0` states a measurement the data does not
+    // support. For hygiene that reading is not merely ambiguous but FALSE --
+    // `Dirty paths: 0` reads as a clean tree at the exact moment collection
+    // failed and said so in `degraded` (orient_workspace_hygiene_unavailable),
+    // and an agent that skips a safety check on the strength of it has been
+    // actively misinformed. `Doctor posture: skipped`, four lines below in the
+    // same template, already uses the right vocabulary for this; these two
+    // fields now match it.
+    //
+    // The label is `unavailable` rather than something more specific like
+    // "not run" because absence has several causes here -- fast mode nulls the
+    // pack deliberately, and error paths in the full-mode branch null it too --
+    // and `unavailable` is the one word that is true under all of them. A
+    // sharper label would be more useful on the path I measured and wrong on
+    // the others, which is the defect this row is about.
+    const HEADER_COUNT_UNAVAILABLE: &str = "unavailable";
     let dirty_paths = data
         .pointer("/workspaceHygiene/dirtyPathCount")
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .map_or_else(
+            || HEADER_COUNT_UNAVAILABLE.to_owned(),
+            |count| count.to_string(),
+        );
     let pack_items = data
         .pointer("/pack/pack/items")
         .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
+        .map_or_else(
+            || HEADER_COUNT_UNAVAILABLE.to_owned(),
+            |items| items.len().to_string(),
+        );
     let fast_recent_items = data
         .pointer("/fastContent/recent")
         .and_then(serde_json::Value::as_array)
@@ -75184,6 +75207,17 @@ mod tests {
         let human_output = String::from_utf8(human_stdout).map_err(|error| error.to_string())?;
         for expected in [
             "Fast pack: up to 5 recent + 5 relevant, lexical",
+            // bd-ldtzi row 1: fast mode nulls the pack, so there is no count
+            // to report. The header must say so rather than print a zero a
+            // reader cannot distinguish from a measured empty pack.
+            "Pack items: unavailable",
+            // The same row, and the half that actually misinforms. This
+            // fixture is a bare `tempfile::tempdir()` with no git, so hygiene
+            // collection fails and `degraded` carries
+            // orient_workspace_hygiene_unavailable. Before this change the
+            // header answered that failure with `Dirty paths: 0` -- a clean
+            // tree asserted at the moment the tree state became unknown.
+            "Dirty paths: unavailable",
             "Fast recent items: 1",
             "Fast relevant items: 1",
             "Recent memories:",
@@ -75212,6 +75246,20 @@ mod tests {
             !human_output.contains("orient_pack_skipped"),
             "human fast output must not claim content retrieval was skipped",
         )?;
+        // bd-ldtzi row 1, the negative arm. The positive assertions above are
+        // satisfied by output that says `unavailable` somewhere and still
+        // prints a zero count elsewhere, which is the reading this row is
+        // about. `Pack items: 0` is the exact string the original field report
+        // led with; `Dirty paths: 0` is the one that is outright false when
+        // hygiene collection has failed.
+        for forbidden_zero in ["Pack items: 0", "Dirty paths: 0"] {
+            ensure(
+                !human_output.contains(forbidden_zero),
+                &format!(
+                    "human fast output reported {forbidden_zero:?} for a subsystem that produced no data: {human_output}"
+                ),
+            )?;
+        }
         for forbidden_id in &forbidden_ids {
             ensure(
                 !human_output.contains(forbidden_id),
