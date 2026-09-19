@@ -4,13 +4,14 @@ on:
     branches: [main]
     paths:
       - scripts/delivery/operational-recovery-20260919.patch.xz.b64
+      - scripts/delivery/checkpoint-recovery-20260919.patch.xz.b64
       - .github/workflows/operational-recovery-20260919.yml
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: operational-recovery-delivery
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -29,41 +30,58 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Integrate journal, task, artifact and audit recovery
+      - name: Publish operational history and checkpoint increments
         id: publish
         run: |
           set -euo pipefail
           export RUSTUP_TOOLCHAIN=nightly-2026-08-31
           base=$(git rev-parse HEAD)
-          base64 --decode scripts/delivery/operational-recovery-20260919.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/operational.patch"
-          echo "076c363d9c44b87430a0532a36ed792a819beaa6d2743d53b53b8cfb6f91f104  $RUNNER_TEMP/operational.patch" | sha256sum --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          publish() {
+            local title=$1
+            shift
+            rustfmt --edition 2024 --config skip_children=true "$@"
+            git diff --check
+            git add -- "$@"
+            if ! git diff --cached --quiet; then
+              git commit -m "$title" -m 'Integrated production recovery implementation and real-store regressions. Patch integrity, application and Rust formatting passed. Compilation and runtime verification are reported separately against the resulting source SHA.'
+              for attempt in 1 2 3 4; do
+                if git push origin HEAD:main; then break; fi
+                test "$attempt" -lt 4
+                git fetch origin main
+                git diff --exit-code "$base" origin/main -- "$@"
+                git merge --no-edit origin/main
+                base=$(git rev-parse origin/main)
+              done
+            fi
+            base=$(git rev-parse HEAD)
+          }
+          decode() {
+            base64 --decode "scripts/delivery/$1.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/$1.patch"
+            echo "$2  $RUNNER_TEMP/$1.patch" | sha256sum --check
+          }
+          decode operational-recovery-20260919 076c363d9c44b87430a0532a36ed792a819beaa6d2743d53b53b8cfb6f91f104
           if ! test -f src/core/backup_operational_recovery.rs; then
             test "$(git rev-parse HEAD:src/core/backup_history_recovery.rs)" = f3659b19d2c959c94850847beee9597975ecfbc1
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/operational.patch"
-            git apply "$RUNNER_TEMP/operational.patch"
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/operational-recovery-20260919.patch"
+            git apply "$RUNNER_TEMP/operational-recovery-20260919.patch"
           else
             grep -Fq 'self.operational.verify_connection(db)' src/core/backup_history_recovery.rs
           fi
-          files=(src/core/backup_history_recovery.rs src/core/backup_operational_recovery.rs src/core/backup_operational_recovery_tests.rs)
-          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
-          git diff --check
-          git add -- "${files[@]}"
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(backup): preserve journals, task outcomes, artifact evidence and source audits' -m 'Retain admitted typed work and artifact rows through both recovery fences. Preserve consumed journals, risk classifications, failed jobs and task context; normalize only interrupted jobs. Check every original audit row while permitting new restore audits. Include nine real-store tests spanning both fences and repeated recovery. Patch integrity and formatting passed; compilation and runtime validation are reported separately.'
-            for attempt in 1 2 3 4; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 4
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${files[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
+          publish 'fix(backup): preserve journals, task outcomes, artifact evidence and source audits' src/core/backup_history_recovery.rs src/core/backup_operational_recovery.rs src/core/backup_operational_recovery_tests.rs
+          decode checkpoint-recovery-20260919 869c06b27abc12758dfc07f762f3a43c15e351511de20d7eee390716311e9ecb
+          if ! test -f src/core/backup_import_recovery.rs; then
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/checkpoint-recovery-20260919.patch"
+            git apply "$RUNNER_TEMP/checkpoint-recovery-20260919.patch"
+          else
+            grep -Fq 'self.imports.verify_connection(db)' src/core/backup_history_recovery.rs
+            grep -Fq 'inventory.verify_rows(&db)' src/core/backup_publication_recovery.rs
           fi
+          publish 'fix(backup): preserve resumable checkpoints and pin final workspace identity' src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_recovery.rs src/core/backup_publication_recovery.rs src/core/backup_import_recovery.rs src/core/backup_import_recovery_tests.rs
           echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/operational-source-sha.log"
-          tar -czf "$RUNNER_TEMP/operational-source.tar.gz" "${files[@]}"
+          tar -czf "$RUNNER_TEMP/operational-source.tar.gz" src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_recovery.rs src/core/backup_publication_recovery.rs src/core/backup_operational_recovery.rs src/core/backup_operational_recovery_tests.rs src/core/backup_import_recovery.rs src/core/backup_import_recovery_tests.rs
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
@@ -109,11 +127,21 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/operational-identity.log"
           timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/operational-check.log"
-      - name: Execute both-boundary corruption and repeated restore tests
+      - name: Exercise operational content and both publication boundaries
         run: |
           set -euo pipefail
-          timeout 30m cargo test --locked --lib core::backup::recovery::history::operational::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-tests.log"
+          timeout 25m cargo test --locked --lib core::backup::recovery::history::operational::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-tests.log"
           grep -Fq 'test result: ok. 9 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-tests.log"
+      - name: Exercise resumed imports, repeated relocation and workspace tampering
+        run: |
+          set -euo pipefail
+          timeout 20m cargo test --locked --lib core::backup::recovery::history::imports::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-checkpoints.log"
+          grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-checkpoints.log"
+          timeout 10m cargo test --locked --lib core::backup::tests::default_backup_restores_import_checkpoints_and_reopens_same_source -- --exact 2>&1 | tee "$RUNNER_TEMP/operational-resumption.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-resumption.log"
+      - name: Preserve existing inventory regressions
+        run: |
+          set -euo pipefail
           timeout 15m cargo test --locked --lib core::backup::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-inventory.log"
           grep -Fq 'test result: ok. 15 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-inventory.log"
       - uses: actions/upload-artifact@v4
