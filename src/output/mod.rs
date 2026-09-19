@@ -11,8 +11,9 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::context::ContextPackOutputOptions;
 use crate::core::curate::{
-    CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
-    CurateShowReport, CurateValidateReport, ReflectionIngestReport, ReflectionProposeReport,
+    CurateApplyReport, CurateApplyResult, CurateCandidatesReport, CurateDispositionReport,
+    CurateReviewReport, CurateShowReport, CurateValidateReport, ReflectionIngestReport,
+    ReflectionProposeReport,
 };
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
@@ -9411,12 +9412,43 @@ pub fn render_reflect_ingest_toon(report: &ReflectionIngestReport) -> String {
     render_toon_from_json(&render_reflect_ingest_json(report))
 }
 
+/// Did the apply this report describes actually happen? (bd-94y04)
+///
+/// `success` in `ee.response.v2` carries the OUTCOME, not whether the command
+/// ran — that is the exit code's job. Seventeen renderers in this file already
+/// derive it (`report.is_valid()`, `report.failed_count == 0`,
+/// `report.error.is_none()`, ...). `curate apply` used the constant form, which
+/// a report with a refusal state cannot afford: a blocked application left
+/// `success: true` and `degraded: []`, so both envelope-level channels reported
+/// an apply that never happened. The human renderer said `status: blocked` the
+/// whole time; only the machine reader was misled.
+///
+/// `certificate verify` is the precedent for the pairing: it derives `success`
+/// and leaves the exit code at 0, because the command did run. `claim verify`
+/// upgrades its exit code instead. The house has not settled the exit-code
+/// half, so this changes only the field the bead names.
+///
+/// The allowlist FAILS CLOSED. An unrecognized status reports `false`, so a
+/// status added later cannot silently produce a green envelope. `ready` is
+/// excluded deliberately: it reaches a response only when the decision was
+/// ready and the transition was not permitted, which means nothing was written.
+fn curate_apply_succeeded(application: &CurateApplyResult) -> bool {
+    application.errors.is_empty()
+        && matches!(
+            application.status.as_str(),
+            "applied" | "would_apply" | "already_applied"
+        )
+}
+
 /// Render a curation apply report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_apply_json(report: &CurateApplyReport) -> String {
-    ResponseEnvelope::success()
-        .data_raw(&report.data_json())
-        .finish()
+    let envelope = if curate_apply_succeeded(&report.application) {
+        ResponseEnvelope::success()
+    } else {
+        ResponseEnvelope::failure()
+    };
+    envelope.data_raw(&report.data_json()).finish()
 }
 
 /// Render a curation apply report as human-readable text.
@@ -22556,6 +22588,77 @@ mod tests {
         ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
         ensure_contains(&json, "\"code\":\"code1\"", "degradation code")?;
         ensure_contains(&json, "\"severity\":\"warning\"", "degradation severity")
+    }
+
+    /// bd-94y04: a refused application must not report a successful envelope.
+    ///
+    /// The defect was that `success` was a constant for this command, so the
+    /// only two envelope-level channels a machine reader has — `success` and
+    /// `degraded` — both reported an apply that never happened. The `blocked`
+    /// case below is the reported one; the rest are here so the predicate
+    /// cannot pass by being constant in the other direction.
+    #[test]
+    fn curate_apply_success_tracks_the_application_outcome() -> TestResult {
+        use super::curate_apply_succeeded;
+        use crate::core::curate::{CurateApplyResult, CurateValidationIssue};
+
+        let application = |status: &str, errors: Vec<CurateValidationIssue>| CurateApplyResult {
+            status: status.to_owned(),
+            decision: "unchanged".to_owned(),
+            candidate_type: "create_derived_memory".to_owned(),
+            target_memory_id: None,
+            created_memory_id: None,
+            created_memory: None,
+            changes: Vec::new(),
+            errors,
+            warnings: Vec::new(),
+        };
+        let blocking_error = || {
+            vec![CurateValidationIssue {
+                code: "candidate_requires_validation".to_owned(),
+                message: "Candidate must be approved before it can be applied.".to_owned(),
+                repair: "Run `ee curate validate <id>` first.".to_owned(),
+            }]
+        };
+
+        // The reported case: measured from a real refusal.
+        ensure_equal(
+            &curate_apply_succeeded(&application("blocked", blocking_error())),
+            &false,
+            "a blocked application is not a success",
+        )?;
+
+        // Without these the predicate could be a constant `false` and still
+        // satisfy the assertion above.
+        for status in ["applied", "would_apply", "already_applied"] {
+            ensure_equal(
+                &curate_apply_succeeded(&application(status, Vec::new())),
+                &true,
+                status,
+            )?;
+        }
+
+        // Fail closed: a status nobody taught this predicate about must not
+        // produce a green envelope. `ready` reaches a response only when the
+        // transition was refused, so nothing was written.
+        ensure_equal(
+            &curate_apply_succeeded(&application("ready", Vec::new())),
+            &false,
+            "ready is not an applied outcome",
+        )?;
+        ensure_equal(
+            &curate_apply_succeeded(&application("a_status_added_later", Vec::new())),
+            &false,
+            "an unrecognized status fails closed",
+        )?;
+
+        // Errors alone are disqualifying, so a future path that reports an
+        // applied-looking status alongside errors cannot slip through.
+        ensure_equal(
+            &curate_apply_succeeded(&application("applied", blocking_error())),
+            &false,
+            "errors disqualify an otherwise applied status",
+        )
     }
 
     #[test]
