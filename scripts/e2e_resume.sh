@@ -68,10 +68,10 @@ finish() {
 }
 
 case "${EE_RESUME_E2E_SCOPE}" in
-    all|functional) ;;
+    all|functional|scale) ;;
     *)
         event invalid_e2e_scope fail \
-            "scope=${EE_RESUME_E2E_SCOPE}; expected all or functional"
+            "scope=${EE_RESUME_E2E_SCOPE}; expected all, functional or scale"
         finish
         exit 3
         ;;
@@ -141,6 +141,26 @@ fast_orient_10k_json_accepts() {
         and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
     ' "${response}" >/dev/null 2>&1
 }
+
+# --- functional phase (bd-f4pmz) -----------------------------------------
+# EE_RESUME_E2E_SCOPE=scale skips everything between here and the matching
+# `fi`, so the 10k orient guard can be run WITHOUT the whole resume suite in
+# front of it. That guard is bd-orient-fast-content-iubub's acceptance 4, and
+# it went 41 days unexecuted because the only way to reach it cost over two
+# hours and returned nothing if it overran.
+#
+# The phase is WRAPPED, not moved. Bash indentation is cosmetic, so guarding
+# 700 lines costs one `if` and one `fi` and leaves every line between them
+# byte-identical -- which is the whole point: a mechanical re-indent of a
+# suite this size is exactly the brittle transformation AGENTS.md forbids, and
+# it would have buried the two lines that actually change. The body being
+# unindented inside this block is deliberate, not an oversight.
+#
+# Safe because the scale section below builds its own workspace
+# (${ROOT}/scale-10k) and needs only ROOT, LOG_DIR and STEP from above, all of
+# which are preamble, not products of these tests. And the script runs under
+# `set -uo pipefail` with no `-e`, so wrapping changes no error semantics.
+if [[ "${EE_RESUME_E2E_SCOPE}" != "scale" ]]; then
 
 run_ee init --workspace "${WS}" --json
 if [[ "${LAST_EXIT}" -eq 0 ]]; then
@@ -869,6 +889,9 @@ else
     event stale_count_deduplicates_open_loop_and_session_projections fail \
         "init/old/new/resume exits=${DEDUP_INIT_EXIT}/${DEDUP_OLD_EXIT}/${DEDUP_NEW_EXIT}/${DEDUP_RESUME_EXIT}; ids=${DEDUP_OLD_ID}/${DEDUP_NEW_ID}; $(head -c 400 "${DEDUP_JSON}")"
 fi
+
+fi
+# --- end of the functional phase (bd-f4pmz). scope=scale resumes here. ----
 
 if [[ "${EE_RESUME_E2E_SCOPE}" == "functional" ]]; then
     finish
