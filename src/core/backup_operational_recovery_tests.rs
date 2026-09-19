@@ -172,7 +172,7 @@ fn assert_rejected(table: &str, sql: &str) -> TestResult {
             let db = DbConnection::open_file(path).map_err(work_history_error)?;
             let before = snapshot(&db, &workspace_id).map_err(work_history_error)?;
             let count = db.count_table_rows(table).map_err(work_history_error)?;
-            db.execute_raw(sql).map_err(work_history_error)?;
+            crate::core::backup::recovery_faults::inject_history_corruption(&db, table, sql)?;
             assert_ne!(
                 before,
                 snapshot(&db, &workspace_id).map_err(work_history_error)?

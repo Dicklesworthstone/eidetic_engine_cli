@@ -12,6 +12,9 @@ mod history_recovery_tests;
 #[path = "backup_recovery.rs"]
 mod recovery;
 #[cfg(test)]
+#[path = "backup_fault_injection_tests.rs"]
+mod recovery_faults;
+#[cfg(test)]
 #[path = "backup_revision_recovery_tests.rs"]
 mod revision_recovery_tests;
 
@@ -21570,7 +21573,7 @@ mod tests {
             let db = DbConnection::open_file(path).map_err(work_history_error)?;
             let before = snapshot(&db, &workspace_id)?;
             let count = db.count_table_rows(table).map_err(work_history_error)?;
-            db.execute_raw(sql).map_err(work_history_error)?;
+            recovery_faults::inject_history_corruption(&db, table, sql)?;
             assert_ne!(
                 before,
                 snapshot(&db, &workspace_id)?,
@@ -21591,7 +21594,13 @@ mod tests {
         )
         .err()
         .ok_or("published changed durable history")?;
-        ensure(mutated.get(), "the intended mutation ran")?;
+        ensure(
+            mutated.get(),
+            &format!(
+                "the intended {table} mutation did not run (late={late}): {}",
+                error.message()
+            ),
+        )?;
         ensure(
             error.message().contains(table),
             "correct durable family rejected",
@@ -24044,8 +24053,11 @@ mod tests {
         repair.link_kind = "repair".to_owned();
         repair.target_id = memory_id.clone();
         repair.outcome = "harmful".to_owned();
+        // The public trace insertion owns its transaction and creates its
+        // normalized target links. Do not nest it inside a fixture transaction.
+        db.insert_rationale_trace(workspace_id, &trace.trace)
+            .map_err(|e| e.to_string())?;
         db.with_transaction(|| {
-            db.insert_rationale_trace(workspace_id, &trace.trace)?;
             db.insert_causal_evidence_for_recovery(&recovery_causal(
                 workspace_id,
                 &memory_id,
