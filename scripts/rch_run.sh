@@ -86,6 +86,57 @@ emit_verdict_block() {
         return 1
     fi
 
+    # A COMPILE-ONLY RUN HAS NO TEST ANNOUNCEMENTS BY CONSTRUCTION.
+    #
+    # `cargo test --no-run` builds and stops; libtest never starts, so it never
+    # prints `running N tests`. Grading that log on announcements demands
+    # evidence the log cannot contain, and the wrapper then reds a run that did
+    # exactly what was asked.
+    #
+    # MEASURED 2026-09-19, against a known positive first so that "not green"
+    # was not vacuous: the grader returns 0 for a log with a real
+    # announcement/summary pair, and 1 for every --no-run shape -- a clean
+    # compile, a compile that failed with E0425, and a target-not-found. So the
+    # defect is a FALSE RED and never a false green, in either direction, and
+    # nothing already graded needs revisiting.
+    #
+    # It is still worth fixing. A gate that reds on correct input is training
+    # data for ignoring the gate, which costs precisely what a gate that cannot
+    # fail costs, arriving from the other side.
+    #
+    # Graded on BUILD evidence instead, and STILL FAILING CLOSED: exit 0 with no
+    # `Finished` line is not a pass.
+    if printf '%s' "$cmd" | grep -q -- '--no-run'; then
+        if [ "$run_exit" -ne 0 ]; then
+            printf 'verdict      : RED (compile-only run exited %s)\n' "$run_exit"
+            printf '===== END VERDICT BLOCK =====\n'
+            warn "compile-only run exited ${run_exit}; that is the fact of record."
+            return "$run_exit"
+        fi
+        # STRIP ANSI BEFORE ANCHORING. Cargo colourises, so `Finished` arrives
+        # as ESC[0m ESC[1;32mFinished and `^ *Finished` never matches. This
+        # exact blindness cost this lane a false "0 errors, exit 101" reading
+        # earlier today against `^error`, and the first draft of THIS fix
+        # reproduced it -- the self-test fixture had no escape codes, so it
+        # passed while the real log reddened. A fixture that omits the medium's
+        # noise validates nothing.
+        local esc plain
+        esc=$'\033'
+        plain="$(sed -e "s/${esc}\[[0-9;]*m//g" "$log" 2>/dev/null)"
+        if printf '%s\n' "$plain" | grep -qa '^[[:space:]]*Finished '; then
+            local built
+            built="$(printf '%s\n' "$plain" | grep -ca '^[[:space:]]*Executable ' 2>/dev/null || true)"
+            printf '  [compile-only] Finished present; %s executable(s) built; no tests expected.\n' "${built:-0}"
+            printf 'verdict      : GREEN (compile-only; graded on build evidence)\n'
+            printf '===== END VERDICT BLOCK =====\n'
+            return 0
+        fi
+        printf 'verdict      : RED (compile-only exited 0 with no Finished line)\n'
+        printf '===== END VERDICT BLOCK =====\n'
+        warn "compile-only run exited 0 but never reported Finished -- refusing to call this a pass."
+        return 1
+    fi
+
     if [ -n "$expect" ]; then
         grade_out="$(python3 "$GRADER" --expect-target "$expect" "$log" 2>&1)"
     else
@@ -94,6 +145,17 @@ emit_verdict_block() {
     grade_exit=$?
 
     printf '%s\n' "$grade_out" | sed 's/^/  /'
+    # THE LEAD CAN BE MISREAD, and that is not the grader's fault. `run exit :
+    # 0` sits several lines above the refusal text, so a reader skimming for an
+    # exit code finds a 0 and never reaches the word RED. The grader is honest;
+    # its output simply buries the conclusion. State the wrapper's own verdict.
+    if [ "$run_exit" -ne 0 ]; then
+        printf 'verdict      : RED (run exited %s)\n' "$run_exit"
+    elif [ "$grade_exit" -ne 0 ]; then
+        printf 'verdict      : RED (run exited 0; the log does not grade green)\n'
+    else
+        printf 'verdict      : GREEN\n'
+    fi
     printf '===== END VERDICT BLOCK =====\n'
 
     # EXECUTION DOMINATES. A failed run is a failed run whatever the log says,
@@ -152,22 +214,38 @@ self_test() {
     printf '     Running unittests src/lib.rs (target/debug/deps/ee-a)\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n     Running tests/contracts.rs (target/debug/deps/contracts-b)\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$tmp/multi.log"
     printf 'rsync: connection unexpectedly closed\n[RCH] remote hz4 failed [RCH-E104] SSH command timed out\n' > "$tmp/ungradeable.log"
 
-    # name | log | run_exit | expect-target | want wrapper exit
+    # Compile-only fixtures. A `--no-run` log has no announcement by
+    # construction, so these are graded on build evidence instead.
+    printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n  Executable tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ok.log"
+    printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\nerror[E0425]: cannot find function `ensure_command_success` in this scope\nerror: could not compile `eidetic-engine` (test "integration_s_z") due to 1 previous error\n' > "$tmp/norun_fail.log"
+    printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\n' > "$tmp/norun_nofinish.log"
+    # COLOURISED, as cargo actually emits it. Without this arm the anchored
+    # match passes on clean fixtures and fails on every real log.
+    printf '\033[1m\033[32m   Compiling\033[0m eidetic-engine v0.14.4\n\033[1m\033[32m    Finished\033[0m `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n\033[1m\033[32m  Executable\033[0m tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ansi.log"
+
+    # name | log | run_exit | expect-target | want wrapper exit | command
+    # The command matters: --no-run in it selects the build-evidence path, so
+    # these arms exercise the DETECTION as well as the grading.
     local -a cases=(
-        "green run, graded green|$tmp/green.log|0||0"
-        "green run, log shows failures|$tmp/red.log|0||1"
-        "green run, ZERO tests executed|$tmp/zero.log|0||1"
-        "green run, nested child summary|$tmp/nested.log|0||1"
-        "green run, two targets, ambiguous|$tmp/multi.log|0||1"
-        "green run, two targets, disambiguated|$tmp/multi.log|0|contracts-b|0"
-        "UNGRADEABLE log, run exited 0|$tmp/ungradeable.log|0||1"
-        "run FAILED: its exit code dominates|$tmp/green.log|101||101"
-        "log missing entirely|$tmp/does-not-exist.log|0||1"
+        "green run, graded green|$tmp/green.log|0||0|"
+        "green run, log shows failures|$tmp/red.log|0||1|"
+        "green run, ZERO tests executed|$tmp/zero.log|0||1|"
+        "green run, nested child summary|$tmp/nested.log|0||1|"
+        "green run, two targets, ambiguous|$tmp/multi.log|0||1|"
+        "green run, two targets, disambiguated|$tmp/multi.log|0|contracts-b|0|"
+        "UNGRADEABLE log, run exited 0|$tmp/ungradeable.log|0||1|"
+        "run FAILED: its exit code dominates|$tmp/green.log|101||101|"
+        "log missing entirely|$tmp/does-not-exist.log|0||1|"
+        "--no-run that BUILT is green|$tmp/norun_ok.log|0||0|cargo test --test x --no-run"
+        "--no-run that FAILED keeps its code|$tmp/norun_fail.log|101||101|cargo test --test x --no-run"
+        "--no-run, exit 0, no Finished: fails closed|$tmp/norun_nofinish.log|0||1|cargo test --test x --no-run"
+        "a --no-run log graded as a TEST run still reds|$tmp/norun_ok.log|0||1|cargo test --test x"
+        "--no-run, COLOURISED as cargo really emits|$tmp/norun_ansi.log|0||0|cargo test --test x --no-run"
     )
-    local entry name log rexit expect want
+    local entry name log rexit expect want cmd
     for entry in "${cases[@]}"; do
-        IFS='|' read -r name log rexit expect want <<< "$entry"
-        emit_verdict_block "$log" "$rexit" "self-test" "$expect" "self-test" >/dev/null 2>&1
+        IFS='|' read -r name log rexit expect want cmd <<< "$entry"
+        emit_verdict_block "$log" "$rexit" "self-test" "$expect" "${cmd:-self-test}" >/dev/null 2>&1
         got=$?
         if [ "$got" -eq "$want" ]; then
             say "self-test OK   ${name}: want ${want}, got ${got}"
