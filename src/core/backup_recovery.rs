@@ -631,17 +631,55 @@ mod tests {
 
     #[test]
     fn file_verification_reopens_read_only_and_does_not_change_memories() {
-        let (_root, db, path, workspace) = fixture();
+        let (root, db, path, workspace) = fixture();
         seed_memory(&db, &workspace, 1);
         let before = db.list_memories(&workspace, None, true).unwrap();
         let plan = RestoreInventory::from_manifest(&manifest_for_database(&db)).unwrap();
+        // This unit test starts after archive authentication. Even an otherwise
+        // empty database has durable migration-seeded TTL policies, so capture
+        // them explicitly rather than letting destination defaults stand in for
+        // archived state. Real authenticated restores are exercised separately.
+        let chunk = crate::core::backup::BackupCurationHistory {
+            schema: crate::core::backup::CURATION_HISTORY_SCHEMA.to_owned(),
+            backup_id: "backup-empty".to_owned(),
+            workspace_id: workspace.clone(),
+            chunk_index: 0,
+            chunk_count: 1,
+            candidates: Vec::new(),
+            policies: db.list_curation_ttl_policies().unwrap(),
+            authentication: None,
+        };
+        assert!(!chunk.policies.is_empty());
+        let captured = root.path().join("curation-history.json");
+        std::fs::write(&captured, serde_json::to_vec(&chunk).unwrap()).unwrap();
+        let asset = crate::core::backup::BackupRestoredDerivedAssetReport {
+            path: "curation-history.json".to_owned(),
+            kind: "curation_history".to_owned(),
+            restore_path: captured.to_string_lossy().into_owned(),
+            lab_episode_path: None,
+        };
+        let history =
+            HistoryExpectation::from_assets(&[asset], "backup-empty", &workspace).unwrap();
         db.close().unwrap();
-        let history = HistoryExpectation::from_assets(&[], "backup-empty", &workspace).unwrap();
         plan.verify_database(&path, &history).unwrap();
         let reopened = DbConnection::open_file(&path).unwrap();
         assert_eq!(
             before,
             reopened.list_memories(&workspace, None, true).unwrap()
         );
+    }
+
+    #[test]
+    fn migration_defaults_cannot_substitute_for_missing_captured_policy_history() {
+        let (_root, db, path, workspace) = fixture();
+        let before = db.list_curation_ttl_policies().unwrap();
+        assert!(!before.is_empty());
+        let plan = RestoreInventory::from_manifest(&manifest_for_database(&db)).unwrap();
+        let history = HistoryExpectation::from_assets(&[], "backup-empty", &workspace).unwrap();
+        db.close().unwrap();
+        let error = plan.verify_database(&path, &history).unwrap_err();
+        assert!(error.message().contains("curation_ttl_policies"));
+        let reopened = DbConnection::open_file(&path).unwrap();
+        assert_eq!(before, reopened.list_curation_ttl_policies().unwrap());
     }
 }
