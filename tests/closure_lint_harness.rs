@@ -832,12 +832,31 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
     )?;
 
     let (output, report) = linter_result?;
+    // A SKIP IS NOT A PASS, AND THE EXIT CODE IS THE CHANNEL CI READS.
+    //
+    // This assertion used to require `status.success()` -- exit 0 -- and read
+    // "linter should skip successfully while write lock is held". That encoded
+    // the defect rather than a contract: the report already said
+    // status:"skipped", so the machine-readable channel distinguished a skip
+    // from a pass, while the exit code said success and CI Static reads
+    // nothing else. A gate that did not run must not hand back success.
+    //
+    // 75 is verify.sh's BEADS_LOCK_SKIP_CODE, reused rather than given a
+    // number of its own; verify.sh already routes it as a skipped stage toward
+    // the INCOMPLETE banner (see contended_closure_lint_is_reported_as_
+    // contention_not_as_a_pass in tests/verification_drift_guard.rs).
+    ensure_eq(
+        output.status.code().unwrap_or(-1),
+        75,
+        "a lock-contended skip must exit 75, not 0",
+    )?;
+    // And it must SAY so. The notice was previously suppressed under --json,
+    // which is the invocation CI uses, so the one path where this gate does
+    // not run was the one path that printed nothing.
+    let stderr = String::from_utf8_lossy(&output.stderr);
     ensure(
-        output.status.success(),
-        format!(
-            "linter should skip successfully while write lock is held\n{}",
-            output_excerpt(&output)
-        ),
+        stderr.contains("SKIPPED") && stderr.contains("NOT a pass"),
+        format!("the skip must announce itself on stderr; got: {stderr:?}"),
     )?;
     ensure_eq(report_status(&report)?, "skipped", "report status")?;
     ensure_eq(report_count(&report)?, 0, "report count")?;

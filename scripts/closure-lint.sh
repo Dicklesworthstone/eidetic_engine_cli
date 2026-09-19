@@ -73,8 +73,13 @@ fi
 
 write_skip_report() {
     local reason="$1"
+    # auditedBeads is NULL, not 0. The skip happens before the ledger is read,
+    # so nothing was counted -- and 0 would claim it looked and found none,
+    # which is the very conflation the empty-population branch exists to
+    # prevent. Absent would be worse still: a consumer reads a missing number
+    # as zero.
     jq -cn --arg reason "$reason" \
-        '{violations:[],count:0,status:"skipped",skipped:true,reason:$reason}' > "$REPORT_FILE"
+        '{violations:[],count:0,auditedBeads:null,status:"skipped",skipped:true,reason:$reason}' > "$REPORT_FILE"
 }
 
 beads_lock_wait_seconds() {
@@ -89,13 +94,29 @@ beads_lock_wait_seconds() {
     esac
 }
 
+# Mirrors verify.sh's BEADS_LOCK_SKIP_CODE. Reused rather than given a number
+# of its own: contention already HAS a code, and a second number for the same
+# state is how two names for one condition start drifting apart.
+BEADS_LOCK_SKIP_CODE=75
+
 skip_for_beads_lock() {
     local reason="$1"
     write_skip_report "$reason"
-    if [ "$JSON_OUTPUT" != true ]; then
-        echo "Skipping closure-lint: $reason" >&2
-    fi
-    exit 0
+    # THE NOTICE PRINTS UNCONDITIONALLY, INCLUDING UNDER --json.
+    #
+    # It used to be suppressed under --json, which is the invocation CI uses --
+    # so the one path where this gate DOES NOT RUN was the one path that said
+    # nothing at all. That is the same suppression as the empty-population
+    # branch, one branch above, and the argument for leaving it ("contention
+    # cannot happen in a CI runner") is the argument that let the empty-
+    # population hole survive: nobody expected a zero-row audit either.
+    echo "closure-lint: SKIPPED -- $reason" >&2
+    echo "  This is NOT a pass. The linter did not run, so nothing was checked." >&2
+    # AND IT EXITS NON-ZERO. The report already said status:"skipped", so the
+    # machine-readable channel distinguished a skip from a pass; the EXIT CODE
+    # did not, and that is the channel CI reads. A gate that did not run must
+    # not hand back success.
+    exit "$BEADS_LOCK_SKIP_CODE"
 }
 
 acquire_beads_read_locks() {
