@@ -30,6 +30,115 @@ pub(super) struct ConsolidationCandidateSelection {
     pub(super) objective_value: f64,
 }
 
+/// Selection needs identity, coverage and scalar scores, not owned proposals.
+/// Keeping this interface borrowed prevents speculative curation bodies and
+/// reason strings from being allocated for every duplicate in a large store.
+trait ConsolidationProposal {
+    fn level(&self) -> &str;
+    fn kind(&self) -> &str;
+    fn normalized_content(&self) -> &str;
+    fn source_id(&self) -> &str;
+    fn target_id(&self) -> &str;
+    fn objective_score(&self) -> f64;
+}
+
+impl ConsolidationProposal for ConsolidationCandidatePlan {
+    fn level(&self) -> &str {
+        &self.level
+    }
+    fn kind(&self) -> &str {
+        &self.kind
+    }
+    fn normalized_content(&self) -> &str {
+        &self.normalized_content
+    }
+    fn source_id(&self) -> &str {
+        &self.source_memory_id
+    }
+    fn target_id(&self) -> &str {
+        &self.target_memory_id
+    }
+    fn objective_score(&self) -> f64 {
+        self.objective_score
+    }
+}
+
+impl<T: ConsolidationProposal> ConsolidationProposal for &T {
+    fn level(&self) -> &str {
+        T::level(self)
+    }
+    fn kind(&self) -> &str {
+        T::kind(self)
+    }
+    fn normalized_content(&self) -> &str {
+        T::normalized_content(self)
+    }
+    fn source_id(&self) -> &str {
+        T::source_id(self)
+    }
+    fn target_id(&self) -> &str {
+        T::target_id(self)
+    }
+    fn objective_score(&self) -> f64 {
+        T::objective_score(self)
+    }
+}
+
+struct BorrowedConsolidationProposal<'a> {
+    source: &'a StoredMemory,
+    target: &'a StoredMemory,
+    normalized_content: &'a str,
+    objective_score: f64,
+}
+
+impl ConsolidationProposal for BorrowedConsolidationProposal<'_> {
+    fn level(&self) -> &str {
+        &self.source.level
+    }
+    fn kind(&self) -> &str {
+        &self.source.kind
+    }
+    fn normalized_content(&self) -> &str {
+        self.normalized_content
+    }
+    fn source_id(&self) -> &str {
+        &self.source.id
+    }
+    fn target_id(&self) -> &str {
+        &self.target.id
+    }
+    fn objective_score(&self) -> f64 {
+        self.objective_score
+    }
+}
+
+impl BorrowedConsolidationProposal<'_> {
+    fn into_plan(self, workspace_id: &str) -> ConsolidationCandidatePlan {
+        let level = self.level();
+        let kind = self.kind();
+        let normalized = self.normalized_content;
+        ConsolidationCandidatePlan {
+            candidate_id: stable_consolidation_candidate_id(
+                workspace_id,
+                &self.source.id,
+                &self.target.id,
+            ),
+            source_memory_id: self.source.id.clone(),
+            target_memory_id: self.target.id.clone(),
+            level: level.to_owned(),
+            kind: kind.to_owned(),
+            normalized_content: normalized.to_owned(),
+            objective_score: self.objective_score,
+            proposed_content: self.source.content.clone(),
+            proposed_confidence: self.source.confidence.max(self.target.confidence),
+            reason: format!(
+                "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
+                normalized, self.target.id, self.source.id
+            ),
+        }
+    }
+}
+
 fn normalize_memory_content_for_consolidation(content: &str) -> String {
     crate::curate::normalize_memory_content_for_consolidation(content)
 }
@@ -50,42 +159,42 @@ pub(super) fn plan_consolidation_candidates(
             .or_default()
             .push(memory);
     }
-
-    let mut candidates = Vec::new();
-    for ((level, kind, normalized), mut group) in grouped {
-        if group.len() < 2 {
-            continue;
-        }
+    for group in grouped.values_mut() {
         group.sort_by(|left, right| compare_consolidation_memory_preference(left, right));
-        let Some(source) = group.first().copied() else {
+    }
+
+    // Source grouping and lightweight ranking metadata remain corpus-sized.
+    // Full payloads do not: normalized text is shared per group, source/target
+    // rows are borrowed, and only the final bounded selection becomes plans.
+    let mut candidates = Vec::new();
+    for ((_, _, normalized), group) in &grouped {
+        let Some((&source, targets)) = group.split_first() else {
             continue;
         };
-        for target in group.iter().skip(1) {
-            let candidate_id =
-                stable_consolidation_candidate_id(workspace_id, &source.id, &target.id);
-            let objective_score = consolidation_candidate_objective(source, target, group.len());
-            candidates.push(ConsolidationCandidatePlan {
-                candidate_id,
-                source_memory_id: source.id.clone(),
-                target_memory_id: target.id.clone(),
-                level: level.clone(),
-                kind: kind.clone(),
-                normalized_content: normalized.clone(),
-                objective_score,
-                proposed_content: source.content.clone(),
-                proposed_confidence: source.confidence.max(target.confidence),
-                reason: format!(
-                    "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
-                    normalized, target.id, source.id
-                ),
+        for &target in targets {
+            candidates.push(BorrowedConsolidationProposal {
+                source,
+                target,
+                normalized_content: normalized,
+                objective_score: consolidation_candidate_objective(source, target, group.len()),
             });
         }
     }
     candidates.sort_by(compare_consolidation_candidate_plan);
-    sieve_stream_consolidation_candidates(
+    let selection = sieve_stream_consolidation_candidates(
         candidates,
         consolidation_sieve_candidate_limit(item_limit),
-    )
+    );
+    ConsolidationCandidateSelection {
+        candidates: selection
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.into_plan(workspace_id))
+            .collect(),
+        considered_candidates: selection.considered_candidates,
+        max_candidates: selection.max_candidates,
+        objective_value: selection.objective_value,
+    }
 }
 
 fn consolidation_sieve_candidate_limit(item_limit: Option<u64>) -> usize {
@@ -117,18 +226,15 @@ fn consolidation_candidate_objective(
     1.0 + group_pressure + confidence_gain + (utility_gain * 0.25) + (importance_gain * 0.25)
 }
 
-fn compare_consolidation_candidate_plan(
-    left: &ConsolidationCandidatePlan,
-    right: &ConsolidationCandidatePlan,
-) -> Ordering {
+fn compare_consolidation_candidate_plan<T: ConsolidationProposal>(left: &T, right: &T) -> Ordering {
     right
-        .objective_score
-        .total_cmp(&left.objective_score)
-        .then_with(|| left.level.cmp(&right.level))
-        .then_with(|| left.kind.cmp(&right.kind))
-        .then_with(|| left.normalized_content.cmp(&right.normalized_content))
-        .then_with(|| left.source_memory_id.cmp(&right.source_memory_id))
-        .then_with(|| left.target_memory_id.cmp(&right.target_memory_id))
+        .objective_score()
+        .total_cmp(&left.objective_score())
+        .then_with(|| left.level().cmp(right.level()))
+        .then_with(|| left.kind().cmp(right.kind()))
+        .then_with(|| left.normalized_content().cmp(right.normalized_content()))
+        .then_with(|| left.source_id().cmp(right.source_id()))
+        .then_with(|| left.target_id().cmp(right.target_id()))
 }
 
 /// Coverage of the retained set only. Nested maps allow borrowed string
@@ -141,69 +247,69 @@ struct ConsolidationCoverage {
 }
 
 impl ConsolidationCoverage {
-    fn group_count(&self, candidate: &ConsolidationCandidatePlan) -> usize {
+    fn group_count(&self, candidate: &impl ConsolidationProposal) -> usize {
         self.levels
-            .get(&candidate.level)
-            .and_then(|kinds| kinds.get(&candidate.kind))
-            .and_then(|groups| groups.get(&candidate.normalized_content))
+            .get(candidate.level())
+            .and_then(|kinds| kinds.get(candidate.kind()))
+            .and_then(|groups| groups.get(candidate.normalized_content()))
             .copied()
             .unwrap_or(0)
     }
 
-    fn kind_count(&self, candidate: &ConsolidationCandidatePlan) -> usize {
+    fn kind_count(&self, candidate: &impl ConsolidationProposal) -> usize {
         self.levels
-            .get(&candidate.level)
-            .and_then(|kinds| kinds.get(&candidate.kind))
+            .get(candidate.level())
+            .and_then(|kinds| kinds.get(candidate.kind()))
             .map(|groups| groups.values().sum())
             .unwrap_or(0)
     }
 
-    fn insert(&mut self, candidate: &ConsolidationCandidatePlan) {
-        let kinds = self.levels.entry(candidate.level.clone()).or_default();
-        let groups = kinds.entry(candidate.kind.clone()).or_default();
+    fn insert(&mut self, candidate: &impl ConsolidationProposal) {
+        let kinds = self.levels.entry(candidate.level().to_owned()).or_default();
+        let groups = kinds.entry(candidate.kind().to_owned()).or_default();
         if groups.is_empty() {
             self.level_kinds += 1;
         }
-        let count = groups.entry(candidate.normalized_content.clone()).or_default();
+        let count = groups.entry(candidate.normalized_content().to_owned()).or_default();
         if *count == 0 {
             self.groups += 1;
         }
         *count += 1;
     }
 
-    fn remove(&mut self, candidate: &ConsolidationCandidatePlan) {
-        let Some(kinds) = self.levels.get_mut(&candidate.level) else {
+    fn remove(&mut self, candidate: &impl ConsolidationProposal) {
+        let Some(kinds) = self.levels.get_mut(candidate.level()) else {
             return;
         };
-        let Some(groups) = kinds.get_mut(&candidate.kind) else {
+        let Some(groups) = kinds.get_mut(candidate.kind()) else {
             return;
         };
-        let Some(count) = groups.get_mut(&candidate.normalized_content) else {
+        let Some(count) = groups.get_mut(candidate.normalized_content()) else {
             return;
         };
         *count -= 1;
         if *count == 0 {
-            groups.remove(&candidate.normalized_content);
+            groups.remove(candidate.normalized_content());
             self.groups -= 1;
         }
         if groups.is_empty() {
-            kinds.remove(&candidate.kind);
+            kinds.remove(candidate.kind());
             self.level_kinds -= 1;
         }
         if kinds.is_empty() {
-            self.levels.remove(&candidate.level);
+            self.levels.remove(candidate.level());
         }
     }
 
-    fn replacement_objective(
+    fn replacement_objective<T: ConsolidationProposal>(
         &self,
-        selected: &[ConsolidationCandidatePlan],
+        selected: &[T],
         index: usize,
-        candidate: &ConsolidationCandidatePlan,
+        candidate: &T,
     ) -> f64 {
         let previous = &selected[index];
-        let same_kind = previous.level == candidate.level && previous.kind == candidate.kind;
-        let same_group = same_kind && previous.normalized_content == candidate.normalized_content;
+        let same_kind = previous.level() == candidate.level() && previous.kind() == candidate.kind();
+        let same_group = same_kind && previous.normalized_content() == candidate.normalized_content();
         let groups = if same_group {
             self.groups
         } else {
@@ -224,9 +330,9 @@ impl ConsolidationCoverage {
             .enumerate()
             .map(|(position, item)| {
                 if position == index {
-                    candidate.objective_score
+                    candidate.objective_score()
                 } else {
-                    item.objective_score
+                    item.objective_score()
                 }
             })
             .sum::<f64>();
@@ -236,12 +342,19 @@ impl ConsolidationCoverage {
     }
 }
 
-fn sieve_stream_consolidation_candidates(
-    candidates: impl IntoIterator<Item = ConsolidationCandidatePlan>,
+struct SieveSelection<T> {
+    candidates: Vec<T>,
+    considered_candidates: usize,
     max_candidates: usize,
-) -> ConsolidationCandidateSelection {
+    objective_value: f64,
+}
+
+fn sieve_stream_consolidation_candidates<T: ConsolidationProposal>(
+    candidates: impl IntoIterator<Item = T>,
+    max_candidates: usize,
+) -> SieveSelection<T> {
     let mut considered_candidates = 0;
-    let mut selected = Vec::<ConsolidationCandidatePlan>::new();
+    let mut selected = Vec::new();
     let mut coverage = ConsolidationCoverage::default();
     for candidate in candidates {
         considered_candidates += 1;
@@ -274,7 +387,7 @@ fn sieve_stream_consolidation_candidates(
 
     selected.sort_by(compare_consolidation_candidate_plan);
     let objective_value = consolidation_selection_objective(&selected);
-    ConsolidationCandidateSelection {
+    SieveSelection {
         candidates: selected,
         considered_candidates,
         max_candidates,
@@ -282,25 +395,25 @@ fn sieve_stream_consolidation_candidates(
     }
 }
 
-fn consolidation_selection_objective(candidates: &[ConsolidationCandidatePlan]) -> f64 {
+fn consolidation_selection_objective<T: ConsolidationProposal>(candidates: &[T]) -> f64 {
     let base_score = candidates
         .iter()
-        .map(|candidate| candidate.objective_score)
+        .map(|candidate| candidate.objective_score())
         .sum::<f64>();
     let distinct_groups = candidates
         .iter()
         .map(|candidate| {
             (
-                candidate.level.as_str(),
-                candidate.kind.as_str(),
-                candidate.normalized_content.as_str(),
+                candidate.level(),
+                candidate.kind(),
+                candidate.normalized_content(),
             )
         })
         .collect::<BTreeSet<_>>()
         .len() as f64;
     let distinct_level_kinds = candidates
         .iter()
-        .map(|candidate| (candidate.level.as_str(), candidate.kind.as_str()))
+        .map(|candidate| (candidate.level(), candidate.kind()))
         .collect::<BTreeSet<_>>()
         .len() as f64;
 
@@ -544,5 +657,101 @@ mod tests {
         coverage.remove(&third);
         assert_eq!((coverage.groups, coverage.level_kinds), (0, 0));
         assert!(coverage.levels.is_empty());
+    }
+
+    #[test]
+    fn borrowed_sieve_selects_original_objects_without_copying_payloads() {
+        let candidates: Vec<_> = (0..96)
+            .map(|index| {
+                candidate(
+                    &format!("{index:04}"),
+                    &format!("group-{}", index % 17),
+                    "procedural",
+                    "rule",
+                    (index % 19) as f64 * 0.1,
+                )
+            })
+            .collect();
+        let expected = reference_selection(&candidates, 7);
+        let actual = sieve_stream_consolidation_candidates(candidates.iter(), 7);
+        assert_eq!(actual.considered_candidates, 96);
+        assert_eq!(actual.candidates.len(), 7);
+        assert_eq!(format!("{:?}", actual.candidates), format!("{expected:?}"));
+        for selected in actual.candidates {
+            assert!(candidates.iter().any(|original| std::ptr::eq(original, selected)));
+        }
+    }
+
+    #[test]
+    fn borrowed_planner_preserves_real_store_proposals_and_source_rows() -> TestResult {
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use crate::models::WorkspaceId;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let db = DbConnection::open_file(&root.path().join("store.db"))
+            .map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(51)).to_string();
+        db.insert_workspace(
+            &workspace,
+            &CreateWorkspaceInput {
+                path: root.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for number in 1..=9 {
+            db.insert_memory(
+                &format!("mem_{number:026}"),
+                &CreateMemoryInput {
+                    workspace_id: workspace.clone(),
+                    content: if number == 1 {
+                        "Run cargo fmt before release.".to_owned()
+                    } else {
+                        "  Run  cargo fmt before release.  ".to_owned()
+                    },
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    workflow_id: None,
+                    confidence: if number == 1 { 0.9 } else { 0.5 },
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://consolidation-fixture".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let before = db.list_memories(&workspace, None, true).map_err(|error| error.to_string())?;
+        let selection = plan_consolidation_candidates(&workspace, &before, Some(3));
+        assert_eq!(selection.considered_candidates, 8);
+        assert_eq!(selection.max_candidates, 3);
+        assert_eq!(selection.candidates.len(), 3);
+        let source = format!("mem_{:026}", 1);
+        for (offset, plan) in selection.candidates.iter().enumerate() {
+            let target = format!("mem_{:026}", offset + 2);
+            assert_eq!(plan.source_memory_id, source);
+            assert_eq!(plan.target_memory_id, target);
+            assert_eq!(
+                plan.candidate_id,
+                stable_consolidation_candidate_id(&workspace, &source, &target)
+            );
+            assert_eq!(plan.proposed_content, "Run cargo fmt before release.");
+            assert_eq!(plan.normalized_content, "run cargo fmt before release.");
+            assert_eq!(plan.proposed_confidence, 0.9);
+        }
+        let mut reversed = before.clone();
+        reversed.reverse();
+        let reordered = plan_consolidation_candidates(&workspace, &reversed, Some(3));
+        assert_eq!(format!("{selection:?}"), format!("{reordered:?}"));
+        assert_eq!(
+            before,
+            db.list_memories(&workspace, None, true).map_err(|error| error.to_string())?
+        );
+        Ok(())
     }
 }
