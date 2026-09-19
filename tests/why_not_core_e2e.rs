@@ -188,7 +188,22 @@ fn why_not_unretrieved_memory_is_reconstructed() -> TestResult {
         ));
     }
     if json["selected"] != Value::Bool(false) {
-        return Err("an unretrieved memory cannot be selected".to_owned());
+        // Print what was actually there, and say so when the field is ABSENT.
+        // `json["selected"]` yields Null for a missing key, which also fails
+        // this comparison -- so the old bare message, "an unretrieved memory
+        // cannot be selected", asserted that the memory WAS selected even when
+        // the real defect was a renamed or dropped field. A failure message
+        // that narrates a cause it did not observe is worse than a silent one,
+        // because it sends the next reader somewhere specific and wrong.
+        let observed = &json["selected"];
+        return Err(format!(
+            "an unretrieved memory must report selected=false; got {observed} ({})",
+            if observed.is_null() {
+                "field ABSENT from the report, not merely false"
+            } else {
+                "field present with an unexpected value"
+            }
+        ));
     }
     if json["primaryReason"] != "not_retrieved" {
         return Err(format!(
@@ -221,8 +236,15 @@ fn why_not_missing_memory_id_errors() -> TestResult {
         &why_not_options(&workspace_path, &database_path, "any task"),
         absent,
     );
-    if result.is_ok() {
-        return Err("explain_why_not_default must error for an absent memory id".to_owned());
+    if let Ok(report) = &result {
+        // Surface the report it wrongly produced. "must error" tells the next
+        // reader the contract and nothing about what happened instead, and the
+        // interesting case -- a report fabricated for an id that is not in the
+        // store -- is exactly the one the bare message hid.
+        return Err(format!(
+            "explain_why_not_default must error for an absent memory id, but it \
+             returned a report: {report:?}"
+        ));
     }
     Ok(())
 }
