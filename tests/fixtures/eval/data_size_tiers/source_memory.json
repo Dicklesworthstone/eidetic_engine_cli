@@ -36,7 +36,7 @@
       "expected_query_match": [
         "small workspace history",
         "release memory",
-        "all task relevant memories"
+        "release note verification"
       ]
     },
     {
@@ -54,7 +54,7 @@
       },
       "expected_query_match": [
         "medium workspace history",
-        "section quotas",
+        "repeated checks",
         "redundant memories suppressed"
       ]
     },
@@ -74,7 +74,7 @@
       "expected_query_match": [
         "large workspace history",
         "budget truncation",
-        "top ranked memories"
+        "deterministic priority bucket"
       ]
     }
   ],

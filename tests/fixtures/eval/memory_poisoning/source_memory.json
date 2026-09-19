@@ -47,7 +47,7 @@
       "provenance_uri": "file://tests/fixtures/eval/memory_poisoning/source_memory.json#L46",
       "expected_query_match": [
         "prompt injection",
-        "instruction-like content",
+        "ignore previous instructions",
         "policy denial"
       ],
       "expected_policy": {
