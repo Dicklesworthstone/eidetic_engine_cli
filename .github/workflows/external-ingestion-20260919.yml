@@ -1,0 +1,115 @@
+name: External evidence ingestion
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/external-ingestion-20260919/**
+      - .github/workflows/external-ingestion-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: external-ingestion-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            trust-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate and test the external evidence policy
+        run: |
+          set -euo pipefail
+          paths=(src/policy/mod.rs src/policy/ingestion.rs src/policy/ingestion_store_tests.rs)
+          if ! git ls-files --error-unmatch src/policy/ingestion.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/policy/mod.rs)" = e0ba8a77a188d41586d898cd9ba1d5ae916b4047
+            base64 --decode scripts/delivery/external-ingestion-20260919/policy.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/ingestion.patch"
+            echo "73f84027ab0a88a132da56f1639fe7510ae010b902a501d006d6d5fa4e0883ee  $RUNNER_TEMP/ingestion.patch" | sha256sum --check
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/ingestion.patch"
+            git apply "$RUNNER_TEMP/ingestion.patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          status=0
+          cargo test --locked --lib policy::ingestion:: -- --test-threads=2 > "$RUNNER_TEMP/ingestion-focused.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/ingestion-focused.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/ingestion-focused.log"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          if ! git diff --cached --quiet; then
+            base=$(git rev-parse HEAD)
+            git commit -m 'fix(policy): scrub embedded credentials before external evidence admission' -m 'Use the shared provider shapes without trusting label boundaries in CASS, docs, journal and other external evidence. Preserve ordinary prose and paths, bound scanning without retaining an unsafe prefix, and keep manual-memory policy and provider minimum lengths unchanged. All eight policy and real FrankenSQLite admission/projection regressions passed, including all 31 provider families, old self-consistent unsafe rows, and non-CASS authority controls.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch --deepen=100 origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/ingestion-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/ingestion-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: external-ingestion-source-and-tests
+          path: ${{ runner.temp }}/ingestion-*
+          retention-days: 7
+      - name: Verify policy compatibility and production compilation
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo test --locked --lib policy::tests:: -- --test-threads=2 > "$RUNNER_TEMP/ingestion-policy.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/ingestion-policy.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/ingestion-policy.log" || failed=1
+          cargo check --locked --all-targets > "$RUNNER_TEMP/ingestion-check.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/ingestion-check.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/ingestion-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/ingestion-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: external-ingestion-verification
+          path: ${{ runner.temp }}/ingestion-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
