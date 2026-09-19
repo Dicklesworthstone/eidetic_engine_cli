@@ -1,0 +1,130 @@
+name: Git capture security
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/git-capture-20260919/**
+      - .github/workflows/git-capture-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: git-capture-security
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Retain exact starting source
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/capture-base-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/capture-base.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: capture-base-source
+          path: ${{ runner.temp }}/capture-base*
+          retention-days: 7
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            trust-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply preserved capture implementation and execute real regressions
+        run: |
+          set -euo pipefail
+          paths=(src/core/memory.rs src/core/memory_git_capture_security_tests.rs src/policy/mod.rs src/policy/git_capture_redaction_tests.rs)
+          if ! git ls-files --error-unmatch src/core/memory_git_capture_security_tests.rs >/dev/null 2>&1; then
+            for n in 01 02; do
+              xz -dc "scripts/delivery/git-capture-20260919/$n.patch.xz" > "$RUNNER_TEMP/$n.patch"
+            done
+            echo "2b8dfd069ddeb907be34e270da1380a1f893c4592618454adfb1fd202411e187  $RUNNER_TEMP/01.patch" | sha256sum -c
+            echo "3bc519804414a9ee24e35b67342d5005824e0accdaf541cea1cec14efe3b1fd9  $RUNNER_TEMP/02.patch" | sha256sum -c
+            for n in 01 02; do
+              git apply --check --whitespace=error-all "$RUNNER_TEMP/$n.patch"
+              git apply "$RUNNER_TEMP/$n.patch"
+            done
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/capture-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/capture-$name.log"
+            test "$status" -eq 0
+            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/capture-$name.log"
+          }
+          run_group memory core::memory::git_capture_security_tests 11
+          run_group policy policy::git_capture_redaction_tests 7
+          run_group existing core::memory::tests::remember_git_capture 4
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}" || test -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'fix(capture): protect git content and provenance before truncation and storage' -m 'Screen the complete diff before budgeting, keep sanitized diff and commit capture admissible, and redact fused bearer tokens against original input spans. Withhold sensitive refs, paths and commit identifiers; do not invent symbol anchors or leak Git arguments through errors. Preserve manual policy thresholds and concurrent external-ingestion changes. All 18 new and 4 existing capture regressions passed before this source commit.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch --deepen=100 origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/capture-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/capture-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: capture-source-and-tests
+          path: ${{ runner.temp }}/capture-*
+          retention-days: 7
+      - name: Check all targets and production Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/capture-check.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/capture-check.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/capture-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/capture-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: capture-verification
+          path: ${{ runner.temp }}/capture-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
