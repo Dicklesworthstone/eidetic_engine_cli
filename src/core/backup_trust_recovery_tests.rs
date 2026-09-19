@@ -302,3 +302,6 @@ fn trust_history_survives_recovery_generations_without_gaining_authority() -> Te
 
 #[path = "backup_reference_recovery_tests.rs"]
 mod references;
+
+#[path = "backup_publication_recovery_tests.rs"]
+mod publication;

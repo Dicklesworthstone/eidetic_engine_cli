@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use super::{HistoryExpectation, storage_error};
 use super::super::RecoveryReadSnapshot;
+use super::{HistoryExpectation, storage_error};
 use crate::db::{DatabaseConfig, DbConnection};
 use crate::models::DomainError;
 

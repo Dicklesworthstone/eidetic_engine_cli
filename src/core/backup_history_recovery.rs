@@ -23,6 +23,8 @@ use crate::models::DomainError;
 mod cass;
 #[path = "backup_pack_recovery.rs"]
 mod packs;
+#[path = "backup_publication_recovery.rs"]
+mod publication;
 #[path = "backup_signal_recovery.rs"]
 mod signals;
 #[path = "backup_trust_recovery.rs"]
