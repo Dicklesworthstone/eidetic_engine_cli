@@ -1640,9 +1640,21 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         None,
     )?;
     let status_registry_json = parse_logged_response(&status_registry, "model status registry")?;
+    // THREE, not two: the bundled declaration is still there. This fixture
+    // inserts exactly two entries above -- `fnv1a-256` (Available, :1594) and
+    // `minilm` (Disabled, :1613) -- on top of the declared-but-not-downloaded
+    // bundled row that ADR 0080 puts in every fresh workspace, which the
+    // registeredCount 1 assertion at the top of this test already proves is
+    // present. The literal 2 predates that row and was never updated when the
+    // first count was.
+    //
+    // availableCount below stays 1 and is NOT adjusted with it: the bundled row
+    // is Unavailable (src/core/model.rs:3632) and `minilm` is Disabled, so
+    // `fnv1a-256` is still the only entry with status == "available". The two
+    // counts move independently, which is the whole point of the distinction.
     ensure_equal(
         &status_registry_json["data"]["registeredCount"],
-        &serde_json::json!(2),
+        &serde_json::json!(3),
         "model status registered count",
     )?;
     ensure_equal(
@@ -1677,20 +1689,42 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &serde_json::json!("ee.model.list.v1"),
         "model list schema",
     )?;
+    // THREE here too, for the same reason as registeredCount: the bundled
+    // declaration row sits alongside the two this fixture inserts. My enumerator
+    // for count assertions in this test MISSED this one -- it matched `.len()`
+    // and `json!(N)` while this spells them `Vec::len` and `Some(N)` -- so it is
+    // called out rather than quietly fixed.
+    //
+    // The providers are printed on every one of these three assertions so a
+    // count change and an ORDERING change are distinguishable in ONE run instead
+    // of one run per hypothesis. `fnv1a-256` is Hash (:1589) while `minilm` and
+    // the bundled row are both Model2Vec, so the third entry can only appear as
+    // a second "model2vec" -- whether it lands at index 1 and displaces the
+    // ordering below is exactly what the printed list answers.
+    let list_entries = list_json["data"]["entries"].as_array();
+    let list_providers = list_entries
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["provider"].to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|| "<entries is not an array>".to_owned());
     ensure_equal(
-        &list_json["data"]["entries"].as_array().map(Vec::len),
-        &Some(2),
-        "model list entry count",
+        &list_entries.map(Vec::len),
+        &Some(3),
+        &format!("model list entry count; providers in order: [{list_providers}]"),
     )?;
     ensure_equal(
         &list_json["data"]["entries"][0]["provider"],
         &serde_json::json!("hash"),
-        "model list first provider ordering",
+        &format!("model list first provider ordering; providers in order: [{list_providers}]"),
     )?;
     ensure_equal(
         &list_json["data"]["entries"][1]["provider"],
         &serde_json::json!("model2vec"),
-        "model list second provider ordering",
+        &format!("model list second provider ordering; providers in order: [{list_providers}]"),
     )?;
     ensure_equal(
         &list_json["data"]["degradations"],
