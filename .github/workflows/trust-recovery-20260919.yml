@@ -1,9 +1,10 @@
 name: Trust recovery publication
 on:
-  workflow_run:
-    workflows: [Evidence recovery fixed points]
-    types: [completed]
+  push:
     branches: [main]
+    paths:
+      - scripts/delivery/trust-recovery-20260919/**
+      - .github/workflows/trust-recovery-20260919.yml
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   integrate-and-verify:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
     permissions:
@@ -50,20 +51,20 @@ jobs:
           set -euo pipefail
           grep -Fq 'evidence_export::redact_evidence(self, level, provenance_admitted)' src/core/backup.rs
           python3 scripts/delivery/trust-recovery-20260919/apply.py
-          paths=(src/core/backup_history_recovery.rs src/core/backup_trust_recovery.rs src/core/backup_trust_recovery_tests.rs)
+          paths=(src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_trust_recovery.rs src/core/backup_trust_recovery_tests.rs src/core/backup_reference_recovery_tests.rs)
           rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
           git diff --check
           status=0
           cargo test --locked --lib core::backup::recovery::history::trust::tests -- --test-threads=2 > "$RUNNER_TEMP/trust-focused.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/trust-focused.log"
           test "$status" -eq 0
-          grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/trust-focused.log"
+          grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/trust-focused.log"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git diff --quiet -- "${paths[@]}"; then
             base=$(git rev-parse HEAD)
             git add -- "${paths[@]}"
-            git commit -m 'fix(backup): preserve quarantine, seal and certificate authority on restore' -m 'Bind the admitted trust history to actual typed rows in the existing unpublished read snapshot. Reject same-count quarantine release or expiry changes, fabricated reveals and certificate verification, substituted commitments, and agent reattribution. Include every inactive historical decision, preserve redacted identities across two recovery generations, and keep the source store unchanged. All seven real backup/restore trust regressions passed before publication.'
+            git commit -m 'fix(backup): preserve quarantine, seal and certificate authority on restore' -m 'Bind the admitted trust history to actual typed rows in the existing unpublished read snapshot. Reject same-count quarantine release or expiry changes, fabricated reveals and certificate verification, substituted commitments, and agent reattribution. Include every inactive historical decision, preserve redacted identities across two recovery generations, and keep the source store unchanged. All eight real trust and reference regressions passed before publication. Preserve opaque external reference identity across backup generations.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -92,7 +93,7 @@ jobs:
             tail -n 100 "$RUNNER_TEMP/trust-$name.log"
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/trust-$name.log"; then failed=1; fi
           }
-          run_group inventory core::backup::recovery:: 38
+          run_group inventory core::backup::recovery:: 39
           run_group learning core::backup::history_recovery_tests 6
           run_group projection core::backup::evidence_export::tests 6
           run_group live default_backup_restores_trust_history_and_live_consumers 1

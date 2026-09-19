@@ -19,3 +19,40 @@ if "trust: trust::TrustExpectation," not in source:
         assert source.count(old) == 1, old
         source = source.replace(old, new, 1)
     path.write_text(source)
+
+# Opaque targets may outlive their original pack/artifact. Rehashing the
+# archive's own canonical reference changes their cross-generation identity.
+path = Path("src/core/backup.rs")
+source = path.read_text()
+start = source.index("fn redact_learning_reference(")
+end = source.index("\nfn quarantine_payload_hash(", start)
+block = source[start:end]
+old = """    if redacted == value {
+        redacted
+    } else {
+        format!(\"backup-ref:{}\", blake3::hash(value.as_bytes()).to_hex())
+    }
+"""
+new = """    // Recovery's own opaque references are already scrubbed identifiers.
+    // Preserve only the exact emitted grammar, never an arbitrary prefix.
+    let opaque = value.strip_prefix(\"backup-ref:\").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if redacted == value || opaque {
+        value.to_owned()
+    } else {
+        format!(\"backup-ref:{}\", blake3::hash(value.as_bytes()).to_hex())
+    }
+"""
+if old in block:
+    assert block.count(old) == 1
+    source = source[:start] + block.replace(old, new, 1) + source[end:]
+    path.write_text(source)
+else:
+    assert 'let opaque = value.strip_prefix("backup-ref:")' in block, "Reference redaction changed"
+
+path = Path("src/core/backup_trust_recovery_tests.rs")
+source = path.read_text()
+if "mod references;" not in source:
+    path.write_text(source + '\n#[path = "backup_reference_recovery_tests.rs"]\nmod references;\n')
