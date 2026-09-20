@@ -942,6 +942,10 @@ STAGE_ADVISORY=0
 STAGE_ADVISORY_NAMES=""
 STAGE_TRACKED_RED=0
 STAGE_TRACKED_RED_NAMES=""
+# Same rule as the counters above: verification_exit_status reads this, so
+# omitting it kills the extracted function under `set -u` instead of returning a
+# wrong number. 70 = EX_SOFTWARE, the code a run that attempted NOTHING returns.
+VERIFY_EXIT_NOTHING_ATTEMPTED=70
 eval "$(awk '/^verification_exit_status\(\) /,/^}/' "$VERIFY_SCRIPT")"
 eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
 verification_summary_banner
@@ -957,6 +961,44 @@ exit "$(verification_exit_status)"
         .expect("run verification verdict");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     (stdout, output.status.code().unwrap_or(-1))
+}
+
+/// A run that attempted NOTHING is not a pass (1azkt.5 acceptance bullet 4).
+///
+/// `verification_exit_status` used to ask one question -- were stages skipped
+/// for contention -- and answer 0 otherwise. Measured against the real function
+/// before the fix:
+///
+/// ```text
+/// passed=0 contended=0 gated_off=0 -> exit=0
+/// passed=0 contended=0 gated_off=9 -> exit=0
+/// ```
+///
+/// A green there was the absence of a FAIL, not the presence of a completed
+/// check: the same vacuous-pass shape this file exists to catch, one layer up in
+/// the runner that reports on everything else.
+///
+/// 70 rather than 75 is deliberate and is the half worth pinning. 75 is
+/// EX_TEMPFAIL and wrappers RETRY it, so a zero-stage run sharing that code
+/// would be retried forever, attempting nothing each time. Asserting the exact
+/// code, not merely "non-zero", is what keeps the two states distinguishable.
+#[test]
+fn a_run_that_attempted_nothing_is_not_a_pass() {
+    let (stdout, code) = verification_verdict(0, 0, 0);
+    assert_eq!(
+        code, 70,
+        "a run with zero attempted stages must exit 70 (EX_SOFTWARE), not 0 and \
+         not 75; banner was:\n{stdout}"
+    );
+
+    // Every stage gated off is the same absence wearing a different label: the
+    // run declared work and performed none of it.
+    let (stdout, code) = verification_verdict(0, 0, 9);
+    assert_eq!(
+        code, 70,
+        "a run whose every declared stage was gated off must exit 70; banner \
+         was:\n{stdout}"
+    );
 }
 
 /// A run where every attempted stage passed exits 0.

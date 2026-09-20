@@ -225,6 +225,11 @@ STAGE_RESULTS=""
 # incompleteness, never a verification failure, so it must not collide with a
 # real stage failure's exit code.
 VERIFY_EXIT_INCOMPLETE="$BEADS_LOCK_SKIP_CODE"
+# 70 = EX_SOFTWARE. A run that attempted ZERO stages is a broken invocation, not
+# a transient condition, so it must not share 75 (EX_TEMPFAIL) with contention:
+# a wrapper retries 75, and retrying a run that attempts nothing attempts
+# nothing again. See verification_exit_status.
+VERIFY_EXIT_NOTHING_ATTEMPTED=70
 
 # --- stage status vocabulary (bd-reality-core-convergence-1azkt.5) -----------
 #
@@ -816,11 +821,36 @@ record_gated_off() {
 # Exit status for a completed verification run. Echoes rather than returns so
 # callers can use it under `set -e` without the status tripping the shell.
 verification_exit_status() {
+    # SUCCESS REQUIRES COMPLETENESS, NOT MERELY THE ABSENCE OF A FAILURE
+    # (bd-reality-core-convergence-1azkt.5, acceptance bullet 4).
+    #
+    # This function used to ask exactly one question -- were any stages skipped
+    # for lock contention -- and answered 0 otherwise. So a run in which NOTHING
+    # EXECUTED exited 0:
+    #
+    #     passed=0 contended=0 gated_off=0 -> exit=0
+    #     passed=0 contended=0 gated_off=9 -> exit=0
+    #
+    # Both measured against this function before the change. A green there is
+    # the absence of a FAIL, not the presence of a completed check, which is the
+    # same vacuous-pass shape this repo has been removing from its gates all
+    # week: an assertion whose failing case is unreachable, one layer up.
+    #
+    # A DISTINCT CODE, deliberately. VERIFY_EXIT_INCOMPLETE is 75 = EX_TEMPFAIL,
+    # and wrappers RETRY 75 because contention is transient. A run that attempted
+    # nothing is not transient -- retrying it attempts nothing again -- so
+    # reusing 75 would spin. 70 = EX_SOFTWARE says the invocation itself was
+    # wrong. One value cannot express two states.
+    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ADVISORY + STAGE_TRACKED_RED))
+    if [ "$attempted" -eq 0 ]; then
+        printf '%s\n' "$VERIFY_EXIT_NOTHING_ATTEMPTED"
+        return
+    fi
     if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
         printf '%s\n' "$VERIFY_EXIT_INCOMPLETE"
-    else
-        printf '%s\n' "0"
+        return
     fi
+    printf '%s\n' "0"
 }
 
 verification_summary_banner() {
