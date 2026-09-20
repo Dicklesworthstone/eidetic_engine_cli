@@ -20,6 +20,23 @@ Zero of twenty-eight for bots, by either count. `ci-static.yml` has **no paths
 filter** — its trigger is `push: branches: [main]` — so every push to `main`
 should run it. Pushes made by workflows in this directory never have.
 
+**Re-measured 2026-09-20 per commit, and it is worse than the line above says.**
+Over the last 24h of `origin/main`: 41 delivery-lane commits, and **0 of 41
+received a push-triggered workflow run of ANY kind** — not CI Static, and not
+any of the path-filtered workflows either. 0 unclassifiable; the run-fetch
+window (2026-09-17 → 2026-09-20) covers every commit classified, and the same
+join over 12 human commits returned 11 with one run and 1 with five, so the
+zeros are the repo's answer and not the query's.
+
+One commit carries a single run at `event=workflow_run` — a chained trigger that
+inherits another run's head sha, not a gate on the push.
+
+**It is not a paths problem.** 30 of those 41 commits touch `src/` and the lane
+wrote 103 `src` files in that window. Path-filtered `src` workflows would have
+fired. Nothing fired, uniformly, whatever the commit touched — which is what a
+credential that does not trigger workflows predicts, and what a paths mismatch
+does not.
+
 **Do not quote the 90%.** It counts a run that *existed*, and 42% of runs in
 this repo are cancelled. A cancelled run checked nothing, so it is coverage in
 a status line and not in fact. The honest human number is **33%**.
