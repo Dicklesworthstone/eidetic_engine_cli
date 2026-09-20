@@ -5,16 +5,31 @@
 Read this before adding another delivery workflow. It is the hole bd-fy92m was
 filed for, and the next one added here will fall into it by default.
 
-**Measured 2026-09-20T00:31Z over a 6h window of `origin/main`:**
+**Measured 2026-09-20T00:5xZ over a 6h window of `origin/main`, counted two
+ways — because the two ways disagree by a factor of three:**
 
 ```
-bot commits (github-actions[bot])   29 total,  0 with a CI Static run   (0%)
-human commits                       74 total, 66 with a CI Static run  (89%)
+                      commits   has ANY run      run that SUCCEEDED
+bot (github-actions)     28       0   (0%)          0   (0%)
+human                    70      63  (90%)         23  (33%)
+
+cancelled CI Static runs in the sample: 84 of 200 (42%)
 ```
 
-Zero of twenty-nine. `ci-static.yml` has **no paths filter** — its trigger is
-`push: branches: [main]` — so every push to `main` should run it. Human pushes
-do. Pushes made by workflows in this directory never have.
+Zero of twenty-eight for bots, by either count. `ci-static.yml` has **no paths
+filter** — its trigger is `push: branches: [main]` — so every push to `main`
+should run it. Pushes made by workflows in this directory never have.
+
+**Do not quote the 90%.** It counts a run that *existed*, and 42% of runs in
+this repo are cancelled. A cancelled run checked nothing, so it is coverage in
+a status line and not in fact. The honest human number is **33%**.
+
+The likely mechanism for the cancellations is this workflow's own concurrency:
+push/PR runs share a `github.ref`-keyed group with `cancel-in-progress: true`,
+so under a multi-agent swarm each push cancels the run before it. That is
+deliberate — the latest commit should win — but it means **most human pushes are
+also ungated**, just less visibly than the bot's. This was measured, not
+isolated: I did not confirm each cancellation was a supersession.
 
 ### The mechanism, stated as the hypothesis it is
 
@@ -52,6 +67,11 @@ ungated commits are caught within the interval instead of accumulating
 invisibly. Its concurrency group keys scheduled runs on `run_id` rather than
 `github.ref`, because otherwise the next push would cancel the sweep — losing
 the only coverage those commits get.
+
+That choice turns out to matter more than it looked. With 42% of push runs
+cancelled, the sweep is not just cover for bot commits — it is the only CI
+Static run in this repo that **cannot** be cancelled by the next push. It is
+therefore the coverage floor for human commits too.
 
 **The sweep does not gate a commit before it lands**, and when several land
 between sweeps only the newest HEAD is evaluated. The tree is still checked, so
