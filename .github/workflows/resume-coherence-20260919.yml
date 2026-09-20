@@ -17,7 +17,16 @@ jobs:
     permissions:
       contents: write
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      # bd-niay4. PIN BOTH HALVES OR NEITHER. This env var overrides the
+      # action's install AT INVOCATION TIME, so the bare `rustfmt` later in this
+      # job resolves through it and not through `toolchain:` below. Pinning only
+      # the action installs rustfmt onto nightly-2026-08-31 and then runs
+      # rustfmt from floating `nightly`, which does not have it:
+      #   error: 'rustfmt' is not installed for the toolchain
+      #          'nightly-x86_64-unknown-linux-gnu'
+      # That is exactly what d315cdc7f did here. Before it both names read
+      # `nightly` and the job worked by the two COINCIDING, not by design.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
