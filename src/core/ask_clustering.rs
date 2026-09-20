@@ -22,7 +22,7 @@ use super::{
 /// identifiers, units, IP addresses and versions. Sentence punctuation and
 /// quote delimiters do not change a literal; internal punctuation still does.
 /// Formatting differences may withhold a corroboration bonus, never invent one.
-fn numeric_literals(text: &str) -> Vec<String> {
+pub(super) fn numeric_literals(text: &str) -> Vec<String> {
     text.split(|ch: char| {
         ch.is_whitespace()
             || matches!(

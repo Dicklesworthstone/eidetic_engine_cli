@@ -12,17 +12,30 @@ fn public_compatible_numeric_restriction_is_not_a_conflict() -> Result<(), Strin
     assert_eq!(data["abstained"], false);
     assert!(data["sides"].is_null());
     assert_eq!(data["confidenceComponents"]["contradictionPenalty"], 0.0);
-    let citations = data["citations"].as_array().ok_or("missing compatible citations")?;
+    let citations = data["citations"]
+        .as_array()
+        .ok_or("missing compatible citations")?;
     assert_eq!(citations.len(), 2);
     for (id, text) in ids.iter().zip([FIRST, compatible]) {
-        let citation = citations.iter().find(|row| row["memoryId"].as_str() == Some(id.as_str()))
+        let citation = citations
+            .iter()
+            .find(|row| row["memoryId"].as_str() == Some(id.as_str()))
             .ok_or("compatible source was discarded")?;
         assert_eq!(citation["text"], text);
-        let start = citation["span"]["byteStart"].as_u64().ok_or("missing byte start")? as usize;
-        let end = citation["span"]["byteEnd"].as_u64().ok_or("missing byte end")? as usize;
+        let start = citation["span"]["byteStart"]
+            .as_u64()
+            .ok_or("missing byte start")? as usize;
+        let end = citation["span"]["byteEnd"]
+            .as_u64()
+            .ok_or("missing byte end")? as usize;
         assert_eq!(text.get(start..end), citation["text"].as_str());
     }
-    assert!(!response["degraded"].as_array().ok_or("missing degradations")?
-        .iter().any(|row| row["code"] == "ask_conflicting_evidence"));
+    assert!(
+        !response["degraded"]
+            .as_array()
+            .ok_or("missing degradations")?
+            .iter()
+            .any(|row| row["code"] == "ask_conflicting_evidence")
+    );
     Ok(())
 }

@@ -321,7 +321,10 @@ fn preserve_inferred_opposition<'a>(
         for (start, end) in segment_spans(&candidate.content) {
             let text = &candidate.content[start..end];
             let numeric_opposition = super::numeric_conflict(anchor_text, text);
-            if has_negation(text) == anchor_negated && !numeric_opposition {
+            if (has_negation(text) == anchor_negated
+                || !super::same_numeric_context(anchor_text, text))
+                && !numeric_opposition
+            {
                 continue;
             }
             let score = scorer(

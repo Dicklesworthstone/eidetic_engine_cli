@@ -2,6 +2,9 @@
 use ee::db::DbConnection;
 use serde_json::Value;
 
+#[path = "ask_numeric_polarity.rs"]
+mod polarity;
+
 const FIRST: &str = "The production database service port is 5432.";
 const SECOND: &str = "The production database service port is 6432.";
 const QUESTION: &str = "What is the production database service port?";

@@ -605,6 +605,17 @@ fn numeric_conflict(left: &str, right: &str) -> bool {
     numeric::conflicts(left, has_negation(left), right, has_negation(right))
 }
 
+/// Opposite polarity about different numeric subjects is not proof of a
+/// contradiction: using port 5432 and forbidding port 6432 are compatible.
+/// Keep the existing generic-prohibition behavior when either passage has no
+/// numeric literal. Otherwise require the same ordered, case-sensitive literal
+/// context before inferring opposition; more complex relations need an edge.
+fn same_numeric_context(left: &str, right: &str) -> bool {
+    let left = clustering::numeric_literals(left);
+    let right = clustering::numeric_literals(right);
+    left.is_empty() || right.is_empty() || left == right
+}
+
 /// Look for supported opposition to the best answer throughout the admitted
 /// clusters, not just at rank two. The caller has already applied the evidence
 /// floor; a weak span must not manufacture a conflict with a strong answer.
@@ -616,6 +627,7 @@ fn detect_contradiction(clusters: &[AskSpan]) -> bool {
     let anchor_negated = has_negation(&anchor.text);
     clusters.iter().skip(1).any(|span| {
         (has_negation(&span.text) != anchor_negated
+            && same_numeric_context(&anchor.text, &span.text)
             && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
             || numeric_conflict(&anchor.text, &span.text)
     })
@@ -989,7 +1001,10 @@ fn evaluate_ask_inner(
             let anchor_terms = tokenize_for_ask(&clusters[0].text);
             let related: Vec<_> = clusters
                 .iter()
-                .filter(|span| same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
+                .filter(|span| {
+                    same_numeric_context(&clusters[0].text, &span.text)
+                        && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text))
+                })
                 .collect();
             (
                 related

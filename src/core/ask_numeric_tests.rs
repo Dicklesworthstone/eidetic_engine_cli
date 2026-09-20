@@ -1,6 +1,9 @@
 //! Behavior of numeric alternatives through the real ask selection/composition engine.
 use super::*;
 
+#[path = "ask_numeric_polarity_tests.rs"]
+mod polarity_tests;
+
 const FIRST: &str = "The production database service port is 5432.";
 const SECOND: &str = "The production database service port is 6432.";
 const QUESTION: &str = "What is the production database service port?";
