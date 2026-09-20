@@ -1,0 +1,75 @@
+diff --git a/src/output/jsonl_export.rs b/src/output/jsonl_export.rs
+--- a/src/output/jsonl_export.rs
++++ b/src/output/jsonl_export.rs
+@@ -598,18 +598,23 @@
+     }
+ }
+ 
++/// Exact structural alias grammar shared by export and import. A digest is an
++/// identity, not secret prose; arbitrary `key_` prefixes are not exempted.
++pub(crate) fn is_recovery_identity_alias(key: &str) -> bool {
++    key.strip_prefix("key_").is_some_and(|suffix| {
++        suffix.len() == 64
++            && suffix
++                .bytes()
++                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++    })
++}
++
+ /// Project a durable identity without collapsing distinct owners into a prose
+ /// placeholder. Reuse exact canonical aliases across independent backups, and
+ /// share this projection with task/baseline history so restored joins survive.
+ /// A lookalike prefix alone is not an alias and confers no trust.
+ pub(crate) fn redact_recovery_identity(key: &str, level: RedactionLevel) -> String {
+-    let canonical = key.strip_prefix("key_").is_some_and(|suffix| {
+-        suffix.len() == 64
+-            && suffix
+-                .bytes()
+-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+-    });
+-    if canonical || redact_content(key, level) == key {
++    if is_recovery_identity_alias(key) || redact_content(key, level) == key {
+         key.to_owned()
+     } else {
+         format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
+diff --git a/src/core/jsonl_import.rs b/src/core/jsonl_import.rs
+--- a/src/core/jsonl_import.rs
++++ b/src/core/jsonl_import.rs
+@@ -2292,7 +2292,8 @@
+             )
+         })?;
+     if workflow_id.as_deref().is_some_and(|workflow| {
+-        crate::policy::redact_secret_like_content(workflow).redacted
++        !crate::output::jsonl_export::is_recovery_identity_alias(workflow)
++            && crate::policy::redact_secret_like_content(workflow).redacted
+     }) {
+         return Err(JsonlImportIssue::error(
+             None,
+diff --git a/src/core/jsonl_workflow_tests.rs b/src/core/jsonl_workflow_tests.rs
+--- a/src/core/jsonl_workflow_tests.rs
++++ b/src/core/jsonl_workflow_tests.rs
+@@ -65,6 +65,7 @@
+ 
+ #[test]
+ fn legacy_absence_and_native_workflow_boundaries_are_compatible() {
++    use crate::output::jsonl_export::is_recovery_identity_alias;
+     let old = record(1, None);
+     let value = serde_json::to_value(&old).unwrap();
+     assert!(value.get("workflow_id").is_none());
+@@ -75,6 +76,16 @@
+         let validated = validate_memory(&record, RedactionLevel::None).unwrap();
+         assert_eq!(validated.workflow_id.as_deref(), Some(workflow.trim()));
+     }
++    let digest = blake3::hash(b"workflow alias boundary").to_hex().to_string();
++    let canonical = format!("key_{digest}");
++    assert!(is_recovery_identity_alias(&canonical));
++    let wire = record(1, Some(&canonical));
++    assert_eq!(validate_memory(&wire, RedactionLevel::None).unwrap().workflow_id.as_deref(), Some(canonical.as_str()));
++    for malformed in [format!("key_{}", &digest[..63]), format!("{canonical}0"),
++        format!("key_{}", digest.to_uppercase()), format!("key_{digest}=private"),
++        "key_secret".to_owned()] {
++        assert!(!is_recovery_identity_alias(&malformed));
++    }
+ }
+ 
+ #[test]

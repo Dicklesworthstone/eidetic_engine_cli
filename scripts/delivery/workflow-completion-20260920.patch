@@ -1,0 +1,38 @@
+diff --git a/src/core/backup.rs b/src/core/backup.rs
+--- a/src/core/backup.rs
++++ b/src/core/backup.rs
+@@ -17,6 +17,9 @@
+ #[cfg(test)]
+ #[path = "backup_revision_recovery_tests.rs"]
+ mod revision_recovery_tests;
++#[cfg(test)]
++#[path = "backup_workflow_recovery_tests.rs"]
++mod workflow_recovery_tests;
+ 
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::fs::{self, File, OpenOptions};
+diff --git a/src/db/mod.rs b/src/db/mod.rs
+--- a/src/db/mod.rs
++++ b/src/db/mod.rs
+@@ -27867,6 +27867,21 @@
+                     previous_trust_class: None,
+                     new_trust_class: None,
+                 })?;
++            // The lifecycle change, audit and reindex request form one durable
++            // operation. A workflow close must not leave the derived document
++            // at its old working level, or commit without a repairable job.
++            let job_identity = crate::models::MemoryId::now().to_string();
++            let job_id = format!("sidx_{}", job_identity.trim_start_matches("mem_"));
++            self.insert_search_index_job(
++                &job_id,
++                &CreateSearchIndexJobInput {
++                    workspace_id: workspace_id.to_owned(),
++                    job_type: SearchIndexJobType::SingleDocument,
++                    document_source: Some("memory".to_owned()),
++                    document_id: Some(memory.id.clone()),
++                    documents_total: 1,
++                },
++            )?;
+             promotions.push(WorkflowMemoryPromotion {
+                 memory_id: memory.id,
+                 audit_id,
