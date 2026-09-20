@@ -51,11 +51,36 @@ fn claim(text: &str) -> Option<Claim> {
         // simultaneously true. Decline rather than guess their semantics.
         if matches!(
             lower.as_str(),
-            "and" | "or" | "either" | "between" | "least" | "most"
-                | "minimum" | "maximum" | "min" | "max" | "over" | "under"
-                | "above" | "below" | "than" | "about" | "around" | "roughly"
-                | "approximately" | "approx" | "may" | "might" | "can" | "could"
-                | "if" | "unless" | "except" | "example" | "e.g" | "range"
+            "and"
+                | "or"
+                | "either"
+                | "between"
+                | "least"
+                | "most"
+                | "minimum"
+                | "maximum"
+                | "min"
+                | "max"
+                | "over"
+                | "under"
+                | "above"
+                | "below"
+                | "than"
+                | "about"
+                | "around"
+                | "roughly"
+                | "approximately"
+                | "approx"
+                | "may"
+                | "might"
+                | "can"
+                | "could"
+                | "if"
+                | "unless"
+                | "except"
+                | "example"
+                | "e.g"
+                | "range"
         ) || token.contains(['<', '>', '≤', '≥', '±', '~', '/'])
             || token.contains("..")
         {
@@ -70,8 +95,10 @@ fn claim(text: &str) -> Option<Claim> {
             value = Some(number);
             template.push(Token::Scalar { unit });
         } else {
-            let assignment = matches!(lower.as_str(), "is" | "are" | "use" | "uses" | "equals" | "set" | "=")
-                || token.ends_with(':');
+            let assignment = matches!(
+                lower.as_str(),
+                "is" | "are" | "use" | "uses" | "equals" | "set" | "="
+            ) || token.ends_with(':');
             has_assignment |= assignment;
             has_subject |= !assignment && !matches!(lower.as_str(), "a" | "an" | "the");
             // Numeric identifiers are exact context too, not value slots.
@@ -82,7 +109,10 @@ fn claim(text: &str) -> Option<Claim> {
             }));
         }
     }
-    Some(Claim { template, value: value? })
+    Some(Claim {
+        template,
+        value: value?,
+    })
 }
 
 /// A signed integer or ordinary decimal, optionally followed by an ASCII unit
@@ -135,8 +165,11 @@ mod tests {
     #[test]
     fn different_values_of_the_same_setting_are_alternatives() {
         for (left, right) in [
-            ("5432", "6432"), ("-30", "30"), ("1.25", "1.75"),
-            ("9007199254740992", "9007199254740993"), ("10ms", "20ms"),
+            ("5432", "6432"),
+            ("-30", "30"),
+            ("1.25", "1.75"),
+            ("9007199254740992", "9007199254740993"),
+            ("10ms", "20ms"),
             ("0.00000000000000000000001", "0.00000000000000000000002"),
             ("12.5%", "15%"),
         ] {
@@ -149,7 +182,12 @@ mod tests {
 
     #[test]
     fn equivalent_decimal_spellings_are_not_a_dispute() {
-        for (left, right) in [("1", "1.000"), ("+001.25", "1.2500"), ("-0.0", "+0"), ("10ms", "010.0ms")] {
+        for (left, right) in [
+            ("1", "1.000"),
+            ("+001.25", "1.2500"),
+            ("-0.0", "+0"),
+            ("10ms", "010.0ms"),
+        ] {
             assert!(!disagreement(
                 &format!("The database timeout is {left}."),
                 &format!("The database timeout is {right}."),
@@ -160,9 +198,18 @@ mod tests {
     #[test]
     fn contexts_units_and_numeric_identifiers_are_not_wildcards() {
         for (left, right) in [
-            ("The production database port is 5432.", "The staging database port is 6432."),
-            ("The database timeout is 30ms.", "The database timeout is 40s."),
-            ("The node1 database port is 5432.", "The node2 database port is 6432."),
+            (
+                "The production database port is 5432.",
+                "The staging database port is 6432.",
+            ),
+            (
+                "The database timeout is 30ms.",
+                "The database timeout is 40s.",
+            ),
+            (
+                "The node1 database port is 5432.",
+                "The node2 database port is 6432.",
+            ),
             ("The database port is 5432.", "The cache port is 6432."),
             ("Port 5432 is open.", "Port 6432 is open."),
         ] {
@@ -180,7 +227,13 @@ mod tests {
             "The database port is VALUE or 7432.",
             "The database port is VALUE and retry limit is 3.",
         ] {
-            assert!(!disagreement(&template.replace("VALUE", "30"), &template.replace("VALUE", "40")), "{template}");
+            assert!(
+                !disagreement(
+                    &template.replace("VALUE", "30"),
+                    &template.replace("VALUE", "40")
+                ),
+                "{template}"
+            );
         }
     }
 
@@ -189,35 +242,64 @@ mod tests {
         let left = "Do not use port 5432 for the database.";
         let right = "Do not use port 6432 for the database.";
         assert!(!conflicts(left, true, right, true));
-        assert!(!conflicts(left, true, "Use port 6432 for the database.", false));
+        assert!(!conflicts(
+            left,
+            true,
+            "Use port 6432 for the database.",
+            false
+        ));
     }
 
     #[test]
     fn punctuation_and_case_do_not_rewrite_source_text() {
-        assert!(disagreement("The database port is `5432`.", "THE database PORT is (6432)!"));
-        assert!(!disagreement("The database port is `5432`.", "THE database PORT is (5432)!"));
-        assert!(disagreement("The café timeout is 30ms.", "The café timeout is 40ms."));
+        assert!(disagreement(
+            "The database port is `5432`.",
+            "THE database PORT is (6432)!"
+        ));
+        assert!(!disagreement(
+            "The database port is `5432`.",
+            "THE database PORT is (5432)!"
+        ));
+        assert!(disagreement(
+            "The café timeout is 30ms.",
+            "The café timeout is 40ms."
+        ));
     }
 
     #[test]
     fn unsupported_literals_and_missing_values_do_not_guess() {
         for (left, right) in [
-            ("1e3", "2e3"), ("1.2.3", "1.2.4"),
-            ("2026-09-19", "2026-09-20"), ("1,234", "1,235"),
-            (".5", ".6"), ("３０", "４０"),
+            ("1e3", "2e3"),
+            ("1.2.3", "1.2.4"),
+            ("2026-09-19", "2026-09-20"),
+            ("1,234", "1,235"),
+            (".5", ".6"),
+            ("３０", "４０"),
         ] {
             assert!(!disagreement(
                 &format!("The database setting is {left}."),
                 &format!("The database setting is {right}."),
             ));
         }
-        assert!(!disagreement("No numeric value here.", "Nothing here either."));
-        assert!(!disagreement("The database port is 5432.", "The database port is unknown."));
+        assert!(!disagreement(
+            "No numeric value here.",
+            "Nothing here either."
+        ));
+        assert!(!disagreement(
+            "The database port is 5432.",
+            "The database port is unknown."
+        ));
     }
 
     #[test]
     fn meaningful_unit_case_is_preserved() {
-        assert!(!disagreement("The storage limit is 10MB.", "The storage limit is 20mb."));
-        assert!(!disagreement("The power setting is 10MW.", "The power setting is 20mW."));
+        assert!(!disagreement(
+            "The storage limit is 10MB.",
+            "The storage limit is 20mb."
+        ));
+        assert!(!disagreement(
+            "The power setting is 10MW.",
+            "The power setting is 20mW."
+        ));
     }
 }

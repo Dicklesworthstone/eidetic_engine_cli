@@ -320,7 +320,8 @@ fn preserve_inferred_opposition<'a>(
     for candidate in unique.values().copied() {
         for (start, end) in segment_spans(&candidate.content) {
             let text = &candidate.content[start..end];
-            if has_negation(text) == anchor_negated {
+            let numeric_opposition = super::numeric_conflict(anchor_text, text);
+            if has_negation(text) == anchor_negated && !numeric_opposition {
                 continue;
             }
             let score = scorer(
@@ -330,7 +331,8 @@ fn preserve_inferred_opposition<'a>(
                 &candidate.trust_class,
             );
             if score < request.min_confidence
-                || !same_conflict_topic(&anchor_terms, &tokenize_for_ask(text))
+                || (!numeric_opposition
+                    && !same_conflict_topic(&anchor_terms, &tokenize_for_ask(text)))
             {
                 continue;
             }

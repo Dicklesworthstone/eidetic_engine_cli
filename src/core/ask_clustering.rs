@@ -31,7 +31,9 @@ fn numeric_literals(text: &str) -> Vec<String> {
             )
     })
     .filter(|token| token.chars().any(char::is_numeric))
-    .map(|token| token.trim_end_matches(['.', '!', '?']).to_lowercase())
+    // Units and numeric identifiers can be case-sensitive (MW versus mW).
+    // Case folding here would manufacture agreement before conflict detection.
+    .map(|token| token.trim_end_matches(['.', '!', '?']).to_owned())
     .collect()
 }
 
@@ -173,6 +175,8 @@ mod numeric_tests {
             ("9007199254740992", "9007199254740993"),
             ("worker1", "worker2"),
             ("10ms", "10s"),
+            ("10MW", "10mW"),
+            ("10MB", "10mb"),
         ] {
             let input = [
                 span(

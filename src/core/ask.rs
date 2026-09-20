@@ -37,6 +37,13 @@ mod selection;
 #[path = "ask_clustering.rs"]
 mod clustering;
 
+#[path = "ask_numeric.rs"]
+mod numeric;
+
+#[cfg(test)]
+#[path = "ask_numeric_tests.rs"]
+mod numeric_answer_tests;
+
 #[path = "ask_native.rs"]
 mod native;
 
@@ -592,6 +599,12 @@ fn same_conflict_topic(left: &[String], right: &[String]) -> bool {
     shared >= 2 && jaccard_similarity(left, right) >= 0.5
 }
 
+/// Use the same narrow scalar-setting rule in admission and composition.
+/// Neither different subjects nor two compatible negative restrictions qualify.
+fn numeric_conflict(left: &str, right: &str) -> bool {
+    numeric::conflicts(left, has_negation(left), right, has_negation(right))
+}
+
 /// Look for supported opposition to the best answer throughout the admitted
 /// clusters, not just at rank two. The caller has already applied the evidence
 /// floor; a weak span must not manufacture a conflict with a strong answer.
@@ -602,8 +615,9 @@ fn detect_contradiction(clusters: &[AskSpan]) -> bool {
     let anchor_terms = tokenize_for_ask(&anchor.text);
     let anchor_negated = has_negation(&anchor.text);
     clusters.iter().skip(1).any(|span| {
-        has_negation(&span.text) != anchor_negated
-            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text))
+        (has_negation(&span.text) != anchor_negated
+            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
+            || numeric_conflict(&anchor.text, &span.text)
     })
 }
 
@@ -953,6 +967,20 @@ fn evaluate_ask_inner(
                 vec![clusters[1].clone()],
                 "query_match",
                 "linked_opposition",
+            )
+        } else if let Some(alternative) = clusters
+            .iter()
+            .skip(1)
+            .find(|span| numeric_conflict(&clusters[0].text, &span.text))
+        {
+            // Two affirmative settings are alternatives, not an affirming and
+            // negating pair. Disclose the strongest supported alternative with
+            // its real source; never invent a stored relation or choose a winner.
+            (
+                vec![clusters[0].clone()],
+                vec![alternative.clone()],
+                "query_match",
+                "numeric_alternative",
             )
         } else {
             // Only disclose the topic that actually conflicts with the best

@@ -5,6 +5,9 @@ use ee::db::{
 };
 use serde_json::Value;
 
+#[path = "ask_numeric.rs"]
+mod numeric;
+
 fn seed(
     connection: &DbConnection,
     workspace_id: &str,
