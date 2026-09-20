@@ -1,0 +1,61 @@
+# Shrink-only baseline: UNPINNED Rust toolchain invocations per workflow file.
+# Format: <unpinned count><TAB><workflow basename>
+#
+# WHY A BASELINE AND NOT A HARD FAIL. Measured 2026-09-20 at 84236ce90: 41
+# workflow files, 44 toolchain invocations, 13 pinned, 31 unpinned across 25
+# files. A gate that failed on all of them could not be landed at all -- it
+# would red main on its first run, and 24 of the 25 files belong to the active
+# delivery lane, which this lane is instructed not to edit. A gate nobody can
+# turn on protects nothing; this bead already has one of those in
+# scripts/check-format.sh, wired to a detector and invoked by nothing.
+#
+# WHAT THIS BUYS, WHICH IS THE ACTUAL REQUEST. The stated goal was to stop a
+# nineteenth file drifting tomorrow. This does exactly that: a NEW unpinned
+# invocation -- in a new workflow or an existing one -- has no row to hide
+# behind and fails immediately, by name. What it deliberately does not do is
+# demand that 31 pre-existing invocations be fixed before the guard can exist.
+#
+# A COUNT MAY ONLY DECREASE, AND IT FAILS IN BOTH DIRECTIONS.
+#   count rose        new unpinned debt          -> FAIL
+#   count fell        good, but finish the job   -> FAIL, lower the row
+# The second arm is not pedantry. Without it a stale row decays into a permanent
+# allowlist, which is how the no_silent_fallback inventory reached 289 allowed
+# entries before anyone noticed, and why its baseline carries the same rule.
+#
+# REMOVE A ROW ENTIRELY when its file reaches zero. A row at 0 is
+# indistinguishable from a file nobody has looked at.
+#
+# THE TWO CORE GATES ARE ABSENT FROM THIS LIST ON PURPOSE. ci-static.yml
+# (f0eb1c578) and ci.yml (84236ce90) are fully pinned, so they have no row. They
+# are the gates that block main, which is why they were fixed rather than
+# baselined. The remainder are delivery-lane workflows plus release.yml and
+# macos-ee-artifact.yml.
+#
+# DO NOT ADD A ROW HERE TO MAKE A NEW FINDING PASS. That is the one move this
+# file exists to refuse.
+
+1	contradiction-graph-20260919.yml
+2	diagnostic-generation-20260919.yml
+1	diagnostic-snapshot-20260919.yml
+1	evidence-export-20260919.yml
+1	external-ingestion-20260919.yml
+1	git-capture-20260919.yml
+1	git-capture-mcp-20260919.yml
+1	git-capture-offline-20260919.yml
+2	global-authority-20260919.yml
+1	index-publication-20260918.yml
+1	journal-ingestion-20260919.yml
+1	learned-history-recovery-20260919.yml
+1	macos-ee-artifact.yml
+1	primary-recovery-20260919.yml
+2	primer-admission-20260919.yml
+1	recovery-headship-admission-20260919.yml
+2	release.yml
+1	revision-record-recovery-20260919.yml
+1	runtime-retrieval-20260919.yml
+2	seed-authority-20260919.yml
+1	session-arc-20260919.yml
+2	session-arc-learning-20260919.yml
+1	snapshot-recovery-20260919.yml
+1	trust-recovery-20260919.yml
+1	verify-ask-admission-20260917.yml

@@ -166,5 +166,15 @@ jobs:
       - name: Pinned definitions
         run: ./scripts/check-pinned-definitions.sh
 
+      # bd-niay4. Self-test first, same reason as bd-yytkz above. This guard sits
+      # immediately before Format on purpose: Format is the step whose verdict
+      # depends on WHICH rustfmt ran, and this is the check that the toolchain
+      # was chosen rather than resolved on the day.
+      - name: Toolchain pin guard --self-test
+        run: ./scripts/check-toolchain-pins.sh --self-test
+
+      - name: Toolchain pins
+        run: ./scripts/check-toolchain-pins.sh
+
       - name: Format
         run: cargo fmt --check
