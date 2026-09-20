@@ -18,7 +18,9 @@
 //!    the bd-orient-store-discovery-ft1z5 scan) when the addressed store
 //!    has nothing episodic to resume from.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -38,6 +40,8 @@ use crate::models::{
 };
 use crate::pack::PackProvenance;
 
+#[path = "resume_projection.rs"]
+mod projection;
 #[path = "resume_snapshot.rs"]
 mod snapshot;
 
@@ -391,6 +395,15 @@ fn group_sessions(
     tags: &BTreeMap<String, Vec<String>>,
     limit: usize,
 ) -> Vec<ResumeSession> {
+    group_sessions_with_projection(memories, tags, limit, item)
+}
+
+fn group_sessions_with_projection(
+    memories: &[&StoredMemory],
+    tags: &BTreeMap<String, Vec<String>>,
+    limit: usize,
+    mut project: impl FnMut(&StoredMemory, &BTreeMap<String, Vec<String>>, &'static str) -> ResumeItem,
+) -> Vec<ResumeSession> {
     let session_tag = |memory: &StoredMemory| -> Option<String> {
         tags.get(&memory.id).and_then(|memory_tags| {
             memory_tags
@@ -438,20 +451,18 @@ fn group_sessions(
         }
     }
 
-    let mut grouped: Vec<ResumeSession> = sessions
+    // Rank lightweight groups before rendering their members. With 10,000
+    // tagged sessions and a request for three, redaction/provenance projection
+    // must visit only those three bounded pages, not all 10,000 sessions.
+    let mut ranked: Vec<(String, Vec<&StoredMemory>)> = sessions
         .into_iter()
         .map(|(tag, members)| {
-            let newest_at = members
-                .first()
-                .map(|memory| memory.created_at.clone())
-                .unwrap_or_default();
-            let oldest_at = members
-                .last()
-                .map(|memory| memory.created_at.clone())
-                .unwrap_or_default();
             let label = tag.map_or_else(
                 || {
-                    let date = newest_at.get(..10).unwrap_or("unknown");
+                    let date = members
+                        .first()
+                        .and_then(|memory| memory.created_at.get(..10))
+                        .unwrap_or("unknown");
                     format!("inferred-{date}")
                 },
                 |tag| {
@@ -459,28 +470,40 @@ fn group_sessions(
                     public_resume_text(&tag, "session.label", &mut reasons)
                 },
             );
-            let items: Vec<ResumeItem> = members
-                .iter()
-                .take(SESSION_ITEM_CAP)
-                .map(|memory| item(memory, tags, "recent_session_member"))
-                .collect();
-            ResumeSession {
-                label,
-                member_count: members.len(),
-                newest_at,
-                oldest_at,
-                items,
-            }
+            (label, members)
         })
         .collect();
-    grouped.sort_by(|left, right| {
-        right
-            .newest_at
-            .cmp(&left.newest_at)
-            .then_with(|| left.label.cmp(&right.label))
+    ranked.sort_by_cached_key(|(label, members)| {
+        (
+            std::cmp::Reverse(
+                members
+                    .first()
+                    .and_then(|memory| parse_ts(&memory.created_at)),
+            ),
+            label.clone(),
+        )
     });
-    grouped.truncate(limit.min(RESUME_SESSION_CAP));
-    grouped
+    ranked
+        .into_iter()
+        .take(limit.min(RESUME_SESSION_CAP))
+        .map(|(label, members)| ResumeSession {
+            label,
+            member_count: members.len(),
+            newest_at: members
+                .first()
+                .map(|memory| memory.created_at.clone())
+                .unwrap_or_default(),
+            oldest_at: members
+                .last()
+                .map(|memory| memory.created_at.clone())
+                .unwrap_or_default(),
+            items: members
+                .iter()
+                .take(SESSION_ITEM_CAP)
+                .map(|memory| project(memory, tags, "recent_session_member"))
+                .collect(),
+        })
+        .collect()
 }
 
 fn is_control_tag(tag: &str) -> bool {
@@ -490,83 +513,13 @@ fn is_control_tag(tag: &str) -> bool {
 /// Flag surfaced items superseded by a newer live memory on the same
 /// subject (same kind, at least one shared non-control subject tag, strictly
 /// newer `created_at`). Returns the unique IDs flagged in this projection.
+#[cfg(test)]
 fn apply_staleness(
     items: &mut [ResumeItem],
     all_live: &[StoredMemory],
     tags: &BTreeMap<String, Vec<String>>,
 ) -> BTreeSet<String> {
-    let mut flagged_ids = BTreeSet::new();
-    for surfaced in items.iter_mut() {
-        let surfaced_tags = tags
-            .get(&surfaced.memory_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        if surfaced_tags.is_empty() {
-            continue;
-        }
-        let Some(surfaced_created_at) = parse_ts(&surfaced.created_at) else {
-            continue;
-        };
-        let mut best: Option<(DateTime<Utc>, StaleFlag)> = None;
-        for candidate in all_live {
-            if candidate.id == surfaced.memory_id || candidate.kind != surfaced.kind {
-                continue;
-            }
-            let Some(candidate_created_at) = parse_ts(&candidate.created_at) else {
-                continue;
-            };
-            if candidate_created_at <= surfaced_created_at {
-                continue;
-            }
-            let candidate_tags = tags.get(&candidate.id);
-            let Some(candidate_tags) = candidate_tags else {
-                continue;
-            };
-            let shared: Vec<String> = surfaced_tags
-                .iter()
-                .filter(|tag| !is_control_tag(tag) && candidate_tags.contains(tag))
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if shared.is_empty() {
-                continue;
-            }
-            let replace = match &best {
-                None => true,
-                Some((existing_created_at, existing)) => {
-                    candidate_created_at > *existing_created_at
-                        || (candidate_created_at == *existing_created_at
-                            && candidate.id < existing.superseded_by)
-                }
-            };
-            if replace {
-                best = Some((
-                    candidate_created_at,
-                    StaleFlag {
-                        superseded_by: candidate.id.clone(),
-                        superseded_by_created_at: candidate.created_at.clone(),
-                        shared_tags: shared,
-                    },
-                ));
-            }
-        }
-        if let Some((_, mut flag)) = best {
-            flag.shared_tags = flag
-                .shared_tags
-                .iter()
-                .map(|tag| {
-                    public_resume_text(tag, "stale.sharedTag", &mut surfaced.redaction.reasons)
-                })
-                .collect();
-            surfaced.redaction.reasons.sort();
-            surfaced.redaction.reasons.dedup();
-            surfaced.redaction.applied = !surfaced.redaction.reasons.is_empty();
-            surfaced.stale = Some(flag);
-            flagged_ids.insert(surfaced.memory_id.clone());
-        }
-    }
-    flagged_ids
+    projection::StalenessIndex::new(all_live, tags).apply(items)
 }
 
 /// Apply staleness to every report projection while counting each memory ID
@@ -577,9 +530,10 @@ fn apply_report_staleness(
     all_live: &[StoredMemory],
     tags: &BTreeMap<String, Vec<String>>,
 ) -> usize {
-    let mut stale_memory_ids = apply_staleness(tagged_items, all_live, tags);
+    let index = projection::StalenessIndex::new(all_live, tags);
+    let mut stale_memory_ids = index.apply(tagged_items);
     for session in sessions {
-        stale_memory_ids.extend(apply_staleness(&mut session.items, all_live, tags));
+        stale_memory_ids.extend(index.apply(&mut session.items));
     }
     stale_memory_ids.len()
 }
@@ -834,11 +788,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         .iter()
         .filter(|memory| memory.level == "episodic")
         .collect();
-    episodic.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| b.id.cmp(&a.id))
-    });
+    projection::sort_newest_first(&mut episodic);
     let episodic_total = episodic.len();
 
     let mut sessions = group_sessions(&episodic, &tags, options.sessions);
@@ -858,11 +808,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
             })
         })
         .collect();
-    tagged_memories.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| b.id.cmp(&a.id))
-    });
+    projection::sort_newest_first(&mut tagged_memories);
     let tagged_items_total = tagged_memories.len();
     let tagged_items_truncated = tagged_items_total > OPEN_LOOP_CAP;
     let mut tagged_items: Vec<ResumeItem> = tagged_memories
