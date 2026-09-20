@@ -90,7 +90,15 @@ assert_jq "$capsule_json" '.data.closeoutCapsule.executionSubstrate // empty' "r
     "verification_reuse_capsule_substrate"
 assert_jq_nonempty "$capsule_json" '.data.closeoutCapsule.workerHost // empty' \
     "verification_reuse_capsule_worker"
-assert_jq "$capsule_json" '.data.closeoutCapsule.supportBundleMetadata.rawOutputIncluded // true' "false" \
+# Direct read, NOT `// true` (bd-o8e1n). assert_jq compares the filter's output
+# against want="false", and jq's alternative operator fires on `false` AS WELL AS
+# null -- so `X // true` yielded "true" for a genuinely false field, for a true
+# one, for null and for an absent one alike. No input could ever produce "false",
+# making this assertion UNSATISFIABLE: a permanent red that reads as a product
+# defect. Reading the field directly is sound at every input: false -> "false"
+# passes, true -> "true" fails, and absent -> "null" fails, so a renamed or
+# dropped field still breaks the claim instead of silently excusing it.
+assert_jq "$capsule_json" '.data.closeoutCapsule.supportBundleMetadata.rawOutputIncluded' "false" \
     "verification_reuse_capsule_no_raw_output"
 assert_jq "$capsule_json" '.data.closeoutCapsule.supportBundleMetadata.localPathsRedacted // false' "true" \
     "verification_reuse_capsule_redacts_paths"
@@ -162,6 +170,9 @@ jq -n \
 SUMMARY_TEXT="$(cat "$SUMMARY_JSON")"
 assert_jq "$SUMMARY_TEXT" '.schema // empty' "ee.e2e.verification_reuse.v1" \
     "verification_reuse_summary_schema"
-assert_jq "$SUMMARY_TEXT" '.cargoExecuted // true' "false" \
+# Direct read, NOT `// true` (bd-o8e1n) -- same unsatisfiable shape as the
+# capsule assertion above. This one claims cargo did not execute, which is the
+# whole point of a reuse path, and it could not have reported that at any input.
+assert_jq "$SUMMARY_TEXT" '.cargoExecuted' "false" \
     "verification_reuse_summary_no_cargo"
 e2e_log_note "verification_reuse_summary path=$SUMMARY_JSON"
