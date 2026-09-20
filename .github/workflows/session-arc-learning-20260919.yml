@@ -10,7 +10,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: session-arc-learning-delivery
+  # The legacy session-arc workflow uses session-arc-learning-delivery.
+  # Serialize this implementation independently; source guards protect both.
+  group: session-arc-imported-messages
   cancel-in-progress: false
 jobs:
   integrate-and-verify:
@@ -89,6 +91,7 @@ jobs:
           timeout 15m cargo test --locked --test session_arc_learning_cli -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-cli.log"
           grep -Fq 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-cli.log"
       - name: Commit tested source directly to main without replacing concurrent work
+        id: publish
         run: |
           set -euo pipefail
           files=(src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs tests/session_arc_learning_cli.rs)
@@ -116,7 +119,34 @@ jobs:
           name: session-arc-source-and-tests
           path: ${{ runner.temp }}/session-arc-*
           retention-days: 7
+      - name: Exercise unchanged capture E2E from importer through accepted learning
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          timeout 15m cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/session-arc-build.log"
+          mkdir -p "$RUNNER_TEMP/session-arc-capture" "$RUNNER_TEMP/session-arc-workspaces"
+          export EE_BIN="$PWD/target/debug/ee"
+          export EE_BINARY="$EE_BIN"
+          export EE_E2E_KEEP=1
+          export EE_E2E_TMPDIR="$RUNNER_TEMP/session-arc-workspaces"
+          export LOG_DIR="$RUNNER_TEMP/session-arc-capture"
+          timeout 15m bash scripts/e2e_capture.sh 2>&1 | tee "$RUNNER_TEMP/session-arc-capture.log"
+          test -s "$LOG_DIR/summary.json"
+          python3 - "$LOG_DIR/summary.json" <<'PY'
+          import json, sys
+          print(json.dumps(json.load(open(sys.argv[1])), indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: session-arc-capture-evidence
+          path: |
+            ${{ runner.temp }}/session-arc-capture*
+            ${{ runner.temp }}/session-arc-workspaces
+          include-hidden-files: true
+          retention-days: 7
       - name: Verify all-target compilation, library Clippy and public schema
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         run: |
           set -euo pipefail
           timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/session-arc-check.log"
