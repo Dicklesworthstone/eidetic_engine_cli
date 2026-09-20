@@ -3507,6 +3507,21 @@ fn build_session_arc_candidates(
     }
 
     let mut candidates = session_arc::inline_candidates(workspace_id, session, evidence_spans);
+    // bd-6br0o: an explicit `Failure arc:` / `Fix:` marker pair is the product's
+    // OWN declaration that two excerpts form an arc. session_arc::inline_pair
+    // already honours it and bypasses topic grouping for it -- but only WITHIN a
+    // single excerpt. Split across two transcript lines, the identical
+    // declaration was ignored, because the halves key to different topic groups
+    // and are therefore never compared to each other.
+    //
+    // This pass is strictly additive. It fires only when the markers are present
+    // AND the grouped pass below cannot already pair the two halves, so it
+    // cannot change any arc that pairs correctly by topic today.
+    candidates.extend(explicit_marker_arc_candidates(
+        workspace_id,
+        session,
+        evidence_spans,
+    ));
     for (topic_key, mut spans) in grouped {
         spans.sort_by(|left, right| {
             left.start_line
@@ -3526,6 +3541,60 @@ fn build_session_arc_candidates(
         ));
     }
     candidates
+}
+
+/// Pair an explicitly marked `Failure arc:` span with a later `Fix:` span
+/// across topic groups.
+///
+/// This mirrors the `explicit_pair` escape hatch in `session_arc::inline_pair`,
+/// which applies the identical rule inside a single excerpt. The ordering and
+/// foreign-window constraints are the same ones the grouped pass and
+/// `inline_candidates` already enforce, so the only thing relaxed here is the
+/// requirement that both halves key to the same topic -- which an explicit
+/// marker pair, by definition, does not need.
+///
+/// Returns nothing when the two halves DO share a topic key: the grouped pass
+/// emits that pair already, and firing here as well would duplicate the arc.
+fn explicit_marker_arc_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    evidence_spans: &[StoredEvidenceSpan],
+) -> Vec<ReviewSessionCandidate> {
+    let mut spans: Vec<&StoredEvidenceSpan> = evidence_spans
+        .iter()
+        .filter(|span| span.workspace_id == workspace_id && span.session_id == session.id)
+        .collect();
+    spans.sort_by(|left, right| session_arc_span_order(left, right));
+
+    let mut failure: Option<&StoredEvidenceSpan> = None;
+    for span in spans {
+        if failure.is_none() && span.excerpt.to_ascii_lowercase().contains("failure arc:") {
+            failure = Some(span);
+            continue;
+        }
+        let Some(failure_span) = failure else {
+            continue;
+        };
+        if !span.excerpt.to_ascii_lowercase().contains("fix:")
+            || session_arc_span_order(failure_span, span).is_ge()
+            || failure_span.end_line >= span.start_line
+        {
+            continue;
+        }
+        let failure_topic = review_topic_key(&failure_span.excerpt);
+        if failure_topic != "noise" && failure_topic == review_topic_key(&span.excerpt) {
+            return Vec::new();
+        }
+        let topic = review_topic_key(&format!("{} {}", failure_span.excerpt, span.excerpt));
+        return build_session_arc_candidate_pair(
+            workspace_id,
+            session,
+            &topic,
+            failure_span,
+            span,
+        );
+    }
+    Vec::new()
 }
 
 fn first_failed_to_fixed_arc<'a>(

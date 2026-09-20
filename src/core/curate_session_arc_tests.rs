@@ -100,6 +100,78 @@ fn session_arc_does_not_join_unrelated_topics_or_foreign_windows() {
     assert!(session_arc::inline_candidates(&session.workspace_id, &session, &[foreign]).is_empty());
 }
 
+// bd-6br0o: the capture fixture's two halves arrive as SEPARATE transcript
+// lines, so inline_pair never sees them together. They key to different topics
+// ("failure" vs "accept"), so the grouped pass never compares them either, and
+// the capture e2e was red as a result. The explicit marker pair is the
+// product's own declaration that these two excerpts form an arc.
+#[test]
+fn session_arc_explicit_marker_pairs_across_two_spans() {
+    let session = synthetic_stored_session();
+    let mut failure = super::super::tests::synthetic_span(
+        "ev_marked_failure",
+        None,
+        "Failure arc: storing silently would violate the no-loop-takeover policy.",
+    );
+    let mut repair = super::super::tests::synthetic_span(
+        "ev_marked_fix",
+        None,
+        "Fix: require accept/reject commands and audit every accepted capture.",
+    );
+    failure.start_line = 3;
+    failure.end_line = 3;
+    repair.start_line = 4;
+    repair.end_line = 4;
+    let candidates = super::super::build_session_arc_candidates(
+        &session.workspace_id,
+        &session,
+        &[failure, repair],
+        0.0,
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "an explicit `Failure arc:`/`Fix:` pair split across two spans must still \
+         produce a reciprocal arc; got {} candidate(s)",
+        candidates.len()
+    );
+}
+
+// A repair that pairs everything is worse than one that pairs nothing. Same two
+// spans, same line ordering, same unrelated topics -- with the explicit markers
+// REMOVED. This must still refuse to pair. Green both before and after the
+// bd-6br0o repair, by design: it guards against over-pairing rather than
+// discriminating the fix.
+#[test]
+fn session_arc_without_markers_still_refuses_unrelated_topics() {
+    let session = synthetic_stored_session();
+    let mut failure = super::super::tests::synthetic_span(
+        "ev_plain_failure",
+        None,
+        "Storing silently would violate the no-loop-takeover policy and failed.",
+    );
+    let mut repair = super::super::tests::synthetic_span(
+        "ev_plain_fix",
+        None,
+        "Fixed by requiring accept/reject commands and auditing every capture.",
+    );
+    failure.start_line = 3;
+    failure.end_line = 3;
+    repair.start_line = 4;
+    repair.end_line = 4;
+    let candidates = super::super::build_session_arc_candidates(
+        &session.workspace_id,
+        &session,
+        &[failure, repair],
+        0.0,
+    );
+    assert!(
+        candidates.is_empty(),
+        "unmarked spans on different topics must NOT pair; got {} candidate(s)",
+        candidates.len()
+    );
+}
+
 #[test]
 fn session_arc_distinct_overlapping_windows_do_not_invent_temporal_order() {
     let session = synthetic_stored_session();
