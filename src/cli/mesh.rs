@@ -5103,9 +5103,7 @@ fn load_discovery_policy_state(
     .filter(|item| tags_were_probed || item.code != DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE)
     .map(|item| MeshCliDegradation {
         code: item.code,
-        // MeshCliDegradation.severity is still &'static str. Sourcing it from
-        // the typed field means only a real variant can arrive here.
-        severity: item.severity.as_str(),
+        severity: item.severity,
         message: item.message,
         repair: item.repair.to_owned(),
     })
