@@ -62,11 +62,61 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 ALLOWLIST = pathlib.Path(
     os.environ.get("MOD_REACHABILITY_ALLOWLIST", REPO / "scripts" / "mod-reachability-allowlist.txt")
 )
-IN_SCOPE = ("src/", "tests/")
+# THE POPULATION, DECLARED BEFORE IT IS MEASURED (bd-hvlm2 follow-up).
+#
+# This gate answers ONE predicate: is a tracked .rs file reachable from a cargo
+# target root, as reported by `cargo fmt --verbose`. Everything below is scoped
+# to that predicate. A gate that reports on some surfaces and is silent about
+# the rest does not read as partial, it reads as clean -- which is why the
+# denominator is written down here rather than left implicit in the tuple.
+#
+# TRACKED RUST SURFACES IN THE ROOT WORKSPACE -- 4, this gate's whole reach:
+#     src/       444 files   IN SCOPE
+#     tests/     771 files   IN SCOPE
+#     benches/    40 files   IN SCOPE as of this change
+#     build.rs     1 file    IN SCOPE as of this change
+#
+# TRACKED RUST SURFACES THIS GATE STRUCTURALLY CANNOT SEE -- 2:
+#     fuzz/                27 files, its own Cargo.toml, `exclude`d from the
+#                          root workspace, so this gate's single cargo
+#                          invocation never walks it.
+#     crates/determinism/   1 file, likewise a separate manifest.
+#   Covering these needs a cargo invocation PER MANIFEST, not a wider tuple.
+#   Neither has a bead as of 2026-09-20; this comment is the only record.
+#
+# NOT A SURFACE FOR THIS PREDICATE AT ALL:
+#     scripts/**.sh -- shell scripts have no module graph. Their reachability
+#     is "named by a gate root", a different predicate measured separately by
+#     bd-unreachable-e2e-scripts-u14sr. Adding them here would be a category
+#     error, not a widening.
+#
+# WHAT WIDENING TO benches/ DOES AND DOES NOT FIX. It does NOT discharge
+# bd-unreachable-bench-tests-k0le8. That bead is about 74 `#[test]` fns under
+# benches/ that never EXECUTE because every [[bench]] declares
+# `harness = false`, so libtest never runs them. Those files are perfectly
+# reachable as modules; compilation and execution are different predicates and
+# this gate only answers the first. Expecting this change to clear k0le8 would
+# be the same mistake as reading a green here as "everything is covered".
+IN_SCOPE = ("src/", "tests/", "benches/", "build.rs")
 
 # Controls, from observed cargo behaviour. See the module docstring.
+#
+# PER-SURFACE CONTROLS. A surface added without its own control is
+# unfalsifiable: an EMPTY scan over it passes exactly like a clean one, and
+# this gate cannot tell the difference from the outside.
 CONTROL_REACHABLE = "tests/contracts/ask_native.rs"
 CONTROL_UNREACHABLE = "src/core/preflight_token.rs"
+# benches/: the positive arm is a real declared target.
+CONTROL_REACHABLE_BENCH = "benches/remember.rs"
+# benches/: THE NEGATIVE ARM IS UNREPRESENTABLE TODAY, and is recorded as
+# absent rather than quietly skipped. All 40 benches/*.rs are themselves
+# declared [[bench]] targets (by `name`, via autodiscovery) and benches/ holds
+# ZERO nested .rs, so no tracked-but-unreachable bench file exists to name. The
+# invariant that stands in for it is asserted at runtime below: tracked
+# benches/ files must equal benches/ roots cargo walks. The day someone adds
+# benches/helpers/foo.rs declared by nothing, that equality breaks and the main
+# check fires -- which is the negative arm arriving the moment it is possible.
+CONTROL_UNREACHABLE_BENCH = None
 
 PATH_MOD = re.compile(
     r'#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;', re.S
@@ -311,6 +361,35 @@ def main() -> int:
             file=sys.stderr,
         )
         return 3
+    # benches/ positive arm. Without it, widening IN_SCOPE to benches/ would be
+    # indistinguishable from a tuple entry that matches nothing at all.
+    if not is_reachable(CONTROL_REACHABLE_BENCH):
+        print(
+            f"[mod-reachability] CONTROL FAILED: {CONTROL_REACHABLE_BENCH} should be reachable "
+            "(it is a declared [[bench]] target) but the resolver says otherwise — refusing to emit",
+            file=sys.stderr,
+        )
+        return 3
+    # benches/ negative arm, as an invariant because no fixture can express it
+    # (see CONTROL_UNREACHABLE_BENCH). Every tracked benches/*.rs must be a root
+    # cargo walks. This is not decoration: it is the assertion that would have
+    # caught a nested, undeclared bench file, and it fails loudly if one appears
+    # while the allowlist says nothing about it.
+    bench_tracked = {t for t in tracked if t.startswith("benches/")}
+    bench_roots = {
+        str(r.relative_to(REPO))
+        for r in roots
+        if str(r.relative_to(REPO)).startswith("benches/")
+    }
+    bench_orphans = sorted(bench_tracked - bench_roots)
+    if bench_orphans and CONTROL_UNREACHABLE_BENCH is None:
+        print(
+            "[mod-reachability] benches/ now contains tracked .rs that are not target "
+            f"roots: {', '.join(bench_orphans)}. The negative control for this surface "
+            "was recorded as unrepresentable because no such file existed; one exists "
+            "now, so name it as CONTROL_UNREACHABLE_BENCH and let the main check judge it.",
+            file=sys.stderr,
+        )
 
     allow, budget = read_allowlist()
     allow_paths = {p for p, _, _ in allow}
@@ -424,6 +503,29 @@ def main() -> int:
         f"{len(tracked) - len(unreachable)} reachable, {len(unreachable)} allowlisted, "
         f"0 unaccounted UNDER cfg({host_cfg_label()}) -- this is a per-target "
         f"answer, not a universal one."
+    )
+    # PER SURFACE, because a total hides a zero. A surface that matched nothing
+    # -- a renamed directory, a tuple entry that never applies on this host --
+    # contributes 0 to every column and is indistinguishable from a clean one
+    # inside an aggregate. Printing each surface on its own line makes an empty
+    # scan visible as an empty scan. This is the same reason the count above
+    # carries its cfg scope (bd-waksx): a number whose population is invisible
+    # cannot be audited.
+    for surface in IN_SCOPE:
+        s_tracked = [t for t in tracked if t.startswith(surface)]
+        s_unreachable = [u for u in unreachable if str(u).startswith(surface)]
+        note = "  <-- EMPTY SCAN: this surface matched no tracked file" if not s_tracked else ""
+        print(
+            f"[mod-reachability]   {surface:<10} {len(s_tracked):>4} tracked, "
+            f"{len(s_tracked) - len(s_unreachable):>4} reachable, "
+            f"{len(s_unreachable):>3} allowlisted{note}"
+        )
+    print(
+        "[mod-reachability]   NOT COVERED by this gate: fuzz/ (27) and "
+        "crates/determinism/ (1) are separate manifests excluded from the root "
+        "workspace, so one cargo invocation cannot reach them; scripts/**.sh "
+        "have no module graph and are a different predicate (bd-unreachable-"
+        "e2e-scripts-u14sr). 4 of 6 tracked Rust surfaces are in scope here."
     )
     in_scope_cfg_only = sorted(
         (path, gates)
