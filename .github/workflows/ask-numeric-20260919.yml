@@ -1,0 +1,101 @@
+name: Numeric setting answers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/delivery/ask-numeric-20260919.patch'
+      - '.github/workflows/ask-numeric-20260919.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-numeric-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-numeric-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ask-evidence-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate numeric admission and composition
+        run: |
+          git rev-parse HEAD
+          patch=scripts/delivery/ask-numeric-20260919.patch
+          if git apply --check --recount "$patch"; then
+            git apply --recount "$patch"
+          elif git apply --reverse --check --recount "$patch"; then
+            echo 'Numeric integration is already present.'
+          else
+            echo 'Source context changed; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs
+          git diff --check
+      - name: Execute the exact dependency-free scalar classifier
+        run: |
+          rustc --edition 2024 --test src/core/ask_numeric.rs -o "$RUNNER_TEMP/ask-numeric-classifier"
+          "$RUNNER_TEMP/ask-numeric-classifier" --nocapture | tee "$RUNNER_TEMP/numeric-classifier.log"
+          grep -Eq 'test result: ok\. 8 passed; 0 failed' "$RUNNER_TEMP/numeric-classifier.log"
+      - name: Compile integrated production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/numeric-check.log" 2>&1 || status=$?
+          tail -n 140 "$RUNNER_TEMP/numeric-check.log"
+          exit "$status"
+      - name: Commit compiled feature directly to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(ask): preserve and disclose supported numeric-setting alternatives' -m 'Reserve supported numeric opposition under the candidate cap and disclose its byte-exact citation with the existing conflict penalty. Preserve explicit-link precedence and reject numeric inference for distinct contexts, units, ranges, approximations or negative restrictions. Preserve case-sensitive numeric literals during corroboration. Eight scalar-classifier tests and cargo check --locked --lib passed before publication; full ask and public CLI regressions run separately in this job.'
+            # Fast-forward only. A concurrent main update must not be overwritten
+            # or silently merged into the tree whose compile result is reported.
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
+      - name: Execute complete ask engine regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/numeric-engine.log" 2>&1 || status=$?
+          tail -n 220 "$RUNNER_TEMP/numeric-engine.log"
+          grep -q 'numeric_answer_tests::numeric_assignments_are_disclosed_not_confidently_combined ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
+          grep -q 'numeric_answer_tests::numeric_opposition_survives_the_candidate_cap_and_input_order ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
+          exit "$status"
+      - name: Execute real CLI numeric contracts
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/numeric-cli.log"
+          grep -Eq 'test result: ok\. 4 passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: numeric-setting-verification
+          path: ${{ runner.temp }}/numeric-*.log
+          retention-days: 7

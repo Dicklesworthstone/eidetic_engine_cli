@@ -1,0 +1,106 @@
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -37,5 +37,12 @@
+ #[path = "ask_clustering.rs"]
+ mod clustering;
+ 
++#[path = "ask_numeric.rs"]
++mod numeric;
++
++#[cfg(test)]
++#[path = "ask_numeric_tests.rs"]
++mod numeric_answer_tests;
++
+ #[path = "ask_native.rs"]
+ mod native;
+@@ -596,3 +603,9 @@
++/// Use the same narrow scalar-setting rule in admission and composition.
++/// Neither different subjects nor two compatible negative restrictions qualify.
++fn numeric_conflict(left: &str, right: &str) -> bool {
++    numeric::conflicts(left, has_negation(left), right, has_negation(right))
++}
++
+ /// Look for supported opposition to the best answer throughout the admitted
+ /// clusters, not just at rank two. The caller has already applied the evidence
+ /// floor; a weak span must not manufacture a conflict with a strong answer.
+@@ -603,7 +616,8 @@
+     let anchor_terms = tokenize_for_ask(&anchor.text);
+     let anchor_negated = has_negation(&anchor.text);
+     clusters.iter().skip(1).any(|span| {
+-        has_negation(&span.text) != anchor_negated
+-            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text))
++        (has_negation(&span.text) != anchor_negated
++            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
++            || numeric_conflict(&anchor.text, &span.text)
+     })
+ }
+@@ -1048,5 +1062,19 @@
+                 "query_match",
+                 "linked_opposition",
++            )
++        } else if let Some(alternative) = clusters
++            .iter()
++            .skip(1)
++            .find(|span| numeric_conflict(&clusters[0].text, &span.text))
++        {
++            // Two affirmative settings are alternatives, not an affirming and
++            // negating pair. Disclose the strongest supported alternative with
++            // its real source; never invent a stored relation or choose a winner.
++            (
++                vec![clusters[0].clone()],
++                vec![alternative.clone()],
++                "query_match",
++                "numeric_alternative",
+             )
+         } else {
+             // Only disclose the topic that actually conflicts with the best
+diff --git a/src/core/ask_candidates.rs b/src/core/ask_candidates.rs
+--- a/src/core/ask_candidates.rs
++++ b/src/core/ask_candidates.rs
+@@ -320,5 +320,6 @@
+         for (start, end) in segment_spans(&candidate.content) {
+             let text = &candidate.content[start..end];
+-            if has_negation(text) == anchor_negated {
++            let numeric_opposition = super::numeric_conflict(anchor_text, text);
++            if has_negation(text) == anchor_negated && !numeric_opposition {
+                 continue;
+             }
+@@ -331,7 +332,8 @@
+                 &candidate.trust_class,
+             );
+             if score < request.min_confidence
+-                || !same_conflict_topic(&anchor_terms, &tokenize_for_ask(text))
++                || (!numeric_opposition
++                    && !same_conflict_topic(&anchor_terms, &tokenize_for_ask(text)))
+             {
+                 continue;
+             }
+diff --git a/src/core/ask_clustering.rs b/src/core/ask_clustering.rs
+--- a/src/core/ask_clustering.rs
++++ b/src/core/ask_clustering.rs
+@@ -28,5 +28,7 @@
+     })
+     .filter(|token| token.chars().any(char::is_numeric))
+-    .map(|token| token.trim_end_matches(['.', '!', '?']).to_lowercase())
++    // Units and numeric identifiers can be case-sensitive (MW versus mW).
++    // Case folding here would manufacture agreement before conflict detection.
++    .map(|token| token.trim_end_matches(['.', '!', '?']).to_owned())
+     .collect()
+ }
+@@ -184,3 +186,5 @@
+             ("worker1", "worker2"),
+             ("10ms", "10s"),
++            ("10MW", "10mW"),
++            ("10MB", "10mb"),
+         ] {
+diff --git a/tests/contracts/ask_lifecycle.rs b/tests/contracts/ask_lifecycle.rs
+--- a/tests/contracts/ask_lifecycle.rs
++++ b/tests/contracts/ask_lifecycle.rs
+@@ -5,3 +5,6 @@
+ use serde_json::Value;
+ 
++#[path = "ask_numeric.rs"]
++mod numeric;
++
+ fn seed(
