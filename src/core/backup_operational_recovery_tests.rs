@@ -304,6 +304,25 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
                 .map_err(|e| e.to_string())?;
             let mapping =
                 backup_memory_id_mapping(&memories, redaction).map_err(|e| e.message())?;
+            let mut expected_audit = source
+                .get_audit(AUDIT_ID)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing source audit")?;
+            // The first audit has no predecessor. The redacted backup rebinds
+            // its memory target and computes a new commitment to those bytes.
+            assert!(expected_audit.prev_row_hash.is_none());
+            if let Some(old) = expected_audit.target_id.as_deref() {
+                expected_audit.target_id = Some(
+                    mapping
+                        .get(old)
+                        .ok_or("missing audit target mapping")?
+                        .clone(),
+                );
+            }
+            if expected_audit.this_row_hash.is_some() {
+                expected_audit.this_row_hash =
+                    Some(crate::db::compute_audit_row_hash(&expected_audit));
+            }
             source.close().map_err(|e| e.to_string())?;
             let backup = create(&workspace, &database, redaction)?;
             let side = root
@@ -352,6 +371,8 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
             );
             assert_eq!(state["links"].as_array().ok_or("missing links")?.len(), 1);
             assert_eq!(state["originalAudit"]["action"], "memory.create");
+            let expected_audit = serde_json::to_value(expected_audit).map_err(|e| e.to_string())?;
+            assert_eq!(state["originalAudit"], expected_audit);
             for new in mapping.values() {
                 assert!(db.get_memory(new).map_err(|e| e.to_string())?.is_some());
             }
@@ -382,8 +403,9 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
                         row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
                     }
                 }
-                // Every other value, including the original audit and its
-                // historical target ID, must remain byte-for-byte identical.
+                // The complete audit was checked above against the source
+                // row with only its declared target mapping and hash changed.
+                previous["originalAudit"] = expected_audit;
                 assert_eq!(&*previous, &state);
             } else {
                 first = Some(state);
