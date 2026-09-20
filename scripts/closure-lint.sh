@@ -2147,5 +2147,21 @@ else
         write_report "pass"
     fi
 
+    # THE DENOMINATOR GOES TO THE LOG, NOT ONLY TO THE REPORT.
+    #
+    # `auditedBeads` was added to the JSON report first, which satisfied the
+    # letter of "a denominator beside the count" and none of its purpose: CI
+    # invokes this with --json and prints only the log, so the step's output
+    # stayed EMPTY. Measured in workflow_dispatch run 35480047237 -- the
+    # "Closure linter" step emitted nothing but its group header while
+    # "Vision coverage" emitted its verdict, and the difference was that one
+    # wrote to stdout and the other to a file nobody opens.
+    #
+    # Unconditional, including under --json, for the same reason the
+    # abstention and skip notices are: the run that matters is the one whose
+    # output nobody configured.
+    printf 'closure-lint: audited %s beads, %s violations\n' \
+        "${AUDITED_BEAD_COUNT:-0}" "$VIOLATION_COUNT"
+
     exit 0
 fi
