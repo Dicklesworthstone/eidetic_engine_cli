@@ -967,6 +967,10 @@ pub struct ExportMemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
     pub workspace_id: String,
+    /// Workflow membership is durable state, not a derived search hint. Older
+    /// exports omit it; its presence never grants workflow or producer trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
     pub level: String,
     pub kind: String,
     pub content: String,
@@ -1034,6 +1038,7 @@ pub struct ExportMemoryRecordBuilder {
     memory_id: Option<String>,
     logical_id: Option<String>,
     workspace_id: Option<String>,
+    workflow_id: Option<String>,
     level: Option<String>,
     kind: Option<String>,
     content: Option<String>,
@@ -1071,6 +1076,12 @@ pub struct ExportMemoryRecordBuilder {
 }
 
 impl ExportMemoryRecordBuilder {
+    #[must_use]
+    pub fn workflow_id(mut self, workflow_id: impl Into<String>) -> Self {
+        self.workflow_id = Some(workflow_id.into());
+        self
+    }
+
     #[must_use]
     pub fn typed_fields(mut self, typed_fields: serde_json::Value) -> Self {
         self.typed_fields = Some(typed_fields);
@@ -1303,6 +1314,7 @@ impl ExportMemoryRecordBuilder {
             schema: EXPORT_MEMORY_SCHEMA_V1.to_owned(),
             memory_id: required_string(ExportRecordType::Memory, "memory_id", self.memory_id)?,
             logical_id: self.logical_id,
+            workflow_id: self.workflow_id,
             workspace_id: required_string(
                 ExportRecordType::Memory,
                 "workspace_id",

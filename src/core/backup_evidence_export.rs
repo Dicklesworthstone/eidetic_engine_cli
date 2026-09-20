@@ -27,11 +27,7 @@ fn opaque_reference(value: &str) -> String {
 /// Identity keys are not prose. Preserve the precise opaque format emitted by
 /// this projection, never an arbitrary string merely beginning with `key_`.
 pub(super) fn redact_identity(key: &str, level: RedactionLevel) -> String {
-    if canonical_digest(key, "key_") || redact_content(key, level) == key {
-        key.to_owned()
-    } else {
-        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
-    }
+    crate::output::jsonl_export::redact_recovery_identity(key, level)
 }
 
 pub(super) fn redact_evidence(

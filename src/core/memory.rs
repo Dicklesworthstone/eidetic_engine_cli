@@ -3926,7 +3926,7 @@ fn tag_rejection_reason(ch: char) -> Option<&'static str> {
     }
 }
 
-fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
+pub(crate) fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
     let Some(raw) = workflow_id else {
         return Ok(None);
     };

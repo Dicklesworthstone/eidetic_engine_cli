@@ -598,12 +598,38 @@ pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
     }
 }
 
+/// Exact structural alias grammar shared by export and import. A digest is an
+/// identity, not secret prose; arbitrary `key_` prefixes are not exempted.
+pub(crate) fn is_recovery_identity_alias(key: &str) -> bool {
+    key.strip_prefix("key_").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// Project a durable identity without collapsing distinct owners into a prose
+/// placeholder. Reuse exact canonical aliases across independent backups, and
+/// share this projection with task/baseline history so restored joins survive.
+/// A lookalike prefix alone is not an alias and confers no trust.
+pub(crate) fn redact_recovery_identity(key: &str, level: RedactionLevel) -> String {
+    if is_recovery_identity_alias(key) || redact_content(key, level) == key {
+        key.to_owned()
+    } else {
+        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
+    }
+}
+
 /// Apply redaction to an export memory record.
 #[must_use]
 pub fn redact_memory_record(
     mut record: ExportMemoryRecord,
     level: RedactionLevel,
 ) -> ExportMemoryRecord {
+    if let Some(workflow_id) = record.workflow_id.as_mut() {
+        *workflow_id = redact_recovery_identity(workflow_id, level);
+    }
     if let Some(fields) = record.typed_fields.as_mut() {
         typed_fields::redact(fields, &record.kind, level);
     }

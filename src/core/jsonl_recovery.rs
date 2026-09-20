@@ -461,6 +461,7 @@ mod tests {
         let fixture = Fixture::new(&rows)?;
         for (field, value) in [
             ("content", json!("Different recovered body.")),
+            ("workflow_id", json!("release-workflow")),
             ("confidence", json!(0.1)),
             ("utility", json!(0.2)),
             ("importance", json!(0.3)),

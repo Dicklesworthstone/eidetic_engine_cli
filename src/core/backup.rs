@@ -5818,6 +5818,9 @@ fn memory_record(
         .created_at(memory.created_at.clone())
         .redacted(false);
     builder = builder.updated_at(memory.updated_at.clone());
+    if let Some(workflow_id) = &memory.workflow_id {
+        builder = builder.workflow_id(workflow_id.clone());
+    }
     if let Some(trust_subclass) = &memory.trust_subclass {
         builder = builder.trust_subclass(trust_subclass.clone());
     }

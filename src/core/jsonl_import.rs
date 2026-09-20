@@ -14,6 +14,9 @@ mod revisions;
 #[cfg(test)]
 #[path = "jsonl_typed_fields_tests.rs"]
 mod typed_fields_tests;
+#[cfg(test)]
+#[path = "jsonl_workflow_tests.rs"]
+mod workflow_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -631,6 +634,7 @@ struct PreparedMemory {
 struct ValidatedMemory<'a> {
     record: &'a ExportMemoryRecord,
     typed_fields_json: Option<String>,
+    workflow_id: Option<String>,
     id: String,
     logical_id: String,
     level: MemoryLevel,
@@ -1461,6 +1465,9 @@ fn reimport_conflict_issue(
     if existing.workspace_id != incoming.input.workspace_id {
         divergences.push("workspace_id");
     }
+    if existing.workflow_id != incoming.input.workflow_id {
+        divergences.push("workflow_id");
+    }
     if existing.content != incoming.input.content {
         divergences.push("content");
     }
@@ -2274,6 +2281,26 @@ fn validate_memory(
             )
         })
         .transpose()?;
+    // Use the native remember boundary, including its whitespace and UTF-8
+    // byte-length semantics. Validate before opening/creating the destination.
+    let workflow_id = crate::core::memory::parse_workflow_id(memory.workflow_id.as_deref())
+        .map_err(|_| {
+            JsonlImportIssue::error(
+                None,
+                "invalid_memory_workflow_id",
+                "workflow id must be nonblank and at most 128 bytes after trimming",
+            )
+        })?;
+    if workflow_id.as_deref().is_some_and(|workflow| {
+        !crate::output::jsonl_export::is_recovery_identity_alias(workflow)
+            && crate::policy::redact_secret_like_content(workflow).redacted
+    }) {
+        return Err(JsonlImportIssue::error(
+            None,
+            "memory_workflow_id_contains_secret",
+            "workflow id contains secrets; redact before import",
+        ));
+    }
     let bayes_posterior = exported_bayes_posterior(memory)?;
     for (field, value) in [
         ("created_at", Some(memory.created_at.as_str())),
@@ -2301,6 +2328,7 @@ fn validate_memory(
     Ok(ValidatedMemory {
         record: memory,
         typed_fields_json,
+        workflow_id,
         logical_id: id.clone(),
         id,
         level,
@@ -2396,7 +2424,7 @@ fn prepare_memory(
             level: validated.level.as_str().to_owned(),
             kind: validated.kind.as_str().to_owned(),
             content: validated.content.as_str().to_owned(),
-            workflow_id: None,
+            workflow_id: validated.workflow_id,
             confidence: validated
                 .confidence
                 .unwrap_or_else(|| trust_class.initial_confidence()),
