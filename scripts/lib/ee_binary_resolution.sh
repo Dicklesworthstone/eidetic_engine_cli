@@ -18,11 +18,65 @@ ee_cargo_target_directory() {
     fi
 }
 
+# Profile implied by a binary path's Cargo layout segment. Prints `debug`,
+# `release`, or NOTHING when the path carries neither -- an unknown profile is
+# not a mismatch, and guessing one would manufacture warnings for every custom
+# path someone passes.
+ee_binary_path_profile() {
+    case "${1:-}" in
+    */debug/ee | */debug/ee.exe) printf 'debug\n' ;;
+    */release/ee | */release/ee.exe) printf 'release\n' ;;
+    *) : ;;
+    esac
+}
+
 ee_resolve_binary() {
+    # Whether the caller NAMED a profile. `${1:-debug}` cannot distinguish "asked
+    # for debug" from "asked for nothing", and only the first is a promise worth
+    # checking against.
+    local requested_explicitly=0
+    if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
+        requested_explicitly=1
+    fi
     local profile="${1:-debug}"
-    local target_dir
+    local target_dir actual_profile
 
     if [ -n "${EE_BINARY:-}" ]; then
+        # bd-3vuhv. A PRESET EE_BINARY WINS OVER THE REQUESTED PROFILE, AND USED
+        # TO DO SO SILENTLY. That silence is the defect this announces.
+        #
+        # scripts/e2e_overhaul/lib/shared.sh:33 asks for `release` and had no way
+        # to learn it got a debug build instead. Measured on an RCH worker,
+        # `ee init` into a fresh workspace: RELEASE 6.18s mean (n=5), DEBUG 62.3s
+        # mean (n=2, plus n=10 more debug runs at 61.6-62.7s from a separate
+        # arm). Ten times slower. The library's 60s init budget has ~54s of
+        # headroom for release and misses by ~2s for debug, so every suite
+        # sourcing it died at status=124 -- reported as "ee init failed", which
+        # reads as a broken init rather than a wrong build.
+        #
+        # DELIBERATELY NOT FATAL AND DELIBERATELY NOT A RESOLUTION CHANGE.
+        # Pinning EE_BINARY to a debug build is legitimate; several suites ask
+        # for `debug` on purpose. Changing which binary is returned would
+        # re-point every caller at once, unmeasured, in an area with no hosted
+        # gate. The harness only needs to be ABLE TO TELL. Downstream can then
+        # decide to refuse, the way ee_require_current_binary refuses staleness.
+        #
+        # stderr, never stdout: callers use `$(ee_resolve_binary ...)` and a
+        # warning on stdout would be captured as part of the path.
+        if [ "$requested_explicitly" -eq 1 ]; then
+            actual_profile="$(ee_binary_path_profile "$EE_BINARY")"
+            if [ -n "$actual_profile" ] && [ "$actual_profile" != "$profile" ]; then
+                printf 'ee_resolve_binary: PROFILE MISMATCH: caller requested %s, EE_BINARY is a %s build\n' \
+                    "$profile" "$actual_profile" >&2
+                printf 'ee_resolve_binary:   EE_BINARY=%s\n' "$EE_BINARY" >&2
+                printf 'ee_resolve_binary: using it unchanged. A %s build ran `ee init` ~10x slower than\n' \
+                    "$actual_profile" >&2
+                printf 'ee_resolve_binary: %s on an RCH worker (62.3s vs 6.18s), so timeouts calibrated for\n' \
+                    "$profile" >&2
+                printf 'ee_resolve_binary: %s will fire against it and report a timeout, not a profile (bd-3vuhv).\n' \
+                    "$profile" >&2
+            fi
+        fi
         printf '%s\n' "$EE_BINARY"
         return 0
     fi

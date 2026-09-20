@@ -22,6 +22,22 @@ assert_eq() {
     printf 'ok %s\n' "$label"
 }
 
+# assert_eq cannot express "produced nothing": its `${1:?actual required}` aborts
+# on an empty first argument, so an emptiness check written with it fails for the
+# wrong reason. The silent cases matter here -- a warning that also fires when
+# nothing is wrong is noise, and noise is how a warning gets ignored -- so they
+# get an assertion that can actually represent empty.
+assert_silent() {
+    local actual="${1-}"
+    local label="${2:?label required}"
+
+    if [ -n "$actual" ]; then
+        printf 'FAIL %s\nexpected: (no output)\nactual:   %s\n' "$label" "$actual" >&2
+        exit 1
+    fi
+    printf 'ok %s\n' "$label"
+}
+
 SCRATCH_ROOT="${TMPDIR:-/tmp}/ee-binary-resolution-test.$$"
 FAKE_BIN="$SCRATCH_ROOT/bin"
 mkdir -p "$FAKE_BIN"
@@ -220,3 +236,84 @@ case "$stale_log" in
         exit 1
         ;;
 esac
+
+# ---------------------------------------------------------------------------
+# bd-3vuhv: a preset EE_BINARY whose profile contradicts the requested one must
+# ANNOUNCE itself. The silence was the defect -- shared.sh:33 asked for release,
+# received a debug build, and could not tell. Measured on an RCH worker,
+# `ee init`: release 6.18s mean (n=5) vs debug 62.3s mean (n=2), so a 60s budget
+# calibrated for release fires against debug and reports a timeout, not a
+# profile.
+# ---------------------------------------------------------------------------
+
+# 1. THE PATH MUST STILL BE CLEAN. The warning goes to stderr; if it ever
+#    reached stdout every caller's `$(...)` would capture it as part of the path,
+#    turning an advisory into a broken harness.
+mismatch_path="$(
+    EE_BINARY="/repo/.rch-target/debug/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary release 2>/dev/null
+)"
+assert_eq "$mismatch_path" "/repo/.rch-target/debug/ee" \
+    "mismatch still returns EE_BINARY verbatim on clean stdout"
+
+# 2. AND IT MUST ACTUALLY WARN. A silent pass here is the original defect.
+mismatch_log="$(
+    EE_BINARY="/repo/.rch-target/debug/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary release 2>&1 >/dev/null
+)"
+case "$mismatch_log" in
+    *"PROFILE MISMATCH"*"requested release"*"debug build"*)
+        printf 'ok profile mismatch is announced with both profiles named\n'
+        ;;
+    *)
+        printf 'FAIL profile mismatch was not announced\nactual: %s\n' "$mismatch_log" >&2
+        exit 1
+        ;;
+esac
+
+# 3. THE OPPOSITE DIRECTION TOO, so the check is not keyed to one profile.
+reverse_log="$(
+    EE_BINARY="/repo/target/release/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary debug 2>&1 >/dev/null
+)"
+case "$reverse_log" in
+    *"PROFILE MISMATCH"*"requested debug"*"release build"*)
+        printf 'ok reverse mismatch (release binary, debug requested) is announced\n'
+        ;;
+    *)
+        printf 'FAIL reverse mismatch was not announced\nactual: %s\n' "$reverse_log" >&2
+        exit 1
+        ;;
+esac
+
+# 4. NEGATIVE CONTROL -- AGREEMENT MUST BE SILENT. A warning that fires on the
+#    correct case is noise, and noise is how a warning gets ignored.
+agree_log="$(
+    EE_BINARY="/repo/target/release/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary release 2>&1 >/dev/null
+)"
+assert_silent "$agree_log" "matching profile produces no warning"
+
+# 5. NEGATIVE CONTROL -- AN UNKNOWN PROFILE IS NOT A MISMATCH. A custom path
+#    carries no Cargo profile segment; guessing one would warn on every such
+#    caller and train readers to ignore the message.
+custom_log="$(
+    EE_BINARY="/custom/bin/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary release 2>&1 >/dev/null
+)"
+assert_silent "$custom_log" "path with no profile segment produces no warning"
+
+# 6. NEGATIVE CONTROL -- NO PROFILE REQUESTED, NO PROMISE TO BREAK. `${1:-debug}`
+#    cannot tell "asked for debug" from "asked for nothing"; only the first is a
+#    claim worth checking, so a bare call must stay quiet.
+implicit_log="$(
+    EE_BINARY="/repo/target/release/ee" \
+        PATH="$FAKE_BIN:$PATH" \
+        ee_resolve_binary 2>&1 >/dev/null
+)"
+assert_silent "$implicit_log" "no explicit profile requested produces no warning"
