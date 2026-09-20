@@ -70,7 +70,13 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
+        # bd-niay4. `@nightly` is the ACTION REF, not the toolchain. Without an
+        # explicit `toolchain:` the action installs a floating nightly and
+        # exports RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml. Keep
+        # this equal to that file's `channel`; the action does not read it.
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
 
       - name: Record performance host
         shell: bash
@@ -206,7 +212,10 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
+        # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -351,7 +360,10 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
+        # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
 
       - name: Tests
         shell: bash
@@ -533,8 +545,10 @@ jobs:
           Set-Content Cargo.toml -Value $cargoText -NoNewline
 
       - name: Install nightly Rust
+        # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           targets: ${{ matrix.target }}
 
       - name: Install Python for target evidence checks
@@ -1544,8 +1558,10 @@ jobs:
           Set-Content Cargo.toml -Value $cargoText -NoNewline
 
       - name: Install nightly Rust
+        # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           targets: x86_64-pc-windows-msvc
 
       - name: Windows path resolver and binary smoke test
