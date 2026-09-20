@@ -1,83 +1,17 @@
-# Rollback durability implementation: 401665e3d572f9b2a93eb2939ac6dc012dc26e63.
-# This final delivery step moves the unchanged tests after production items;
-# it does not suppress Clippy or weaken any assertion.
-name: Index rollback durability delivery
+# Production fix delivered directly to main:
+# 401665e3d572f9b2a93eb2939ac6dc012dc26e63.
+# Delivery execution record: Actions run 35483358677 (integrate job succeeded).
+# Follow-up/test execution record: Actions run 35483544988; consult its actual result.
+# This retained workflow cannot modify the repository. Already-dispatched runs
+# retain their original definitions and report their results independently.
+name: Index rollback durability regressions
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/index-rollback-durability-20260919.yml
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: index-rollback-durability-20260919
-  cancel-in-progress: true
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      source_sha: ${{ steps.source.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 1
-      - name: Keep the regression module after production items
-        id: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=$(git rev-parse HEAD)
-          python3 - <<'PY'
-          import pathlib, subprocess
-          path = pathlib.Path('src/core/index.rs')
-          source = path.read_text()
-          marker = '#[cfg(test)]\nmod rollback_durability_tests {'
-          assert source.count(marker) == 1, 'Expected exactly one rollback regression module'
-          start = source.index(marker)
-          fingerprint = source.index('/// GH#19: the embedder fingerprint')
-          if start < fingerprint:
-              blob = subprocess.check_output(['git', 'rev-parse', 'HEAD:src/core/index.rs'], text=True).strip()
-              assert blob == 'e725c1e1137d6e4a8d501d7d07a3917f13757bba', 'Index source changed; refusing an unreviewed edit'
-              tests = source[start:fingerprint].rstrip() + '\n'
-              assert tests.count('    #[test]') == 7
-              assert tests.endswith('}\n')
-              remaining = source[:start] + source[fingerprint:]
-              path.write_text(remaining.rstrip() + '\n\n' + tests)
-          else:
-              assert source[start:].count('    #[test]') == 7
-              print('Rollback regressions are already after production items')
-          PY
-          if ! git diff --quiet -- src/core/index.rs; then
-            git diff --check
-            test "$(git diff --name-only)" = src/core/index.rs
-            git diff --stat
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add -- src/core/index.rs
-            git commit -m 'test(index): place rollback durability regressions after production items' -m 'Move the seven unchanged rollback regression tests to the end of the index module so items_after_test_module remains clean. No production behavior, assertions, or lint configuration changes.'
-            pushed=0
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then pushed=1; break; fi
-              if test "$(git rev-parse --is-shallow-repository)" = true; then
-                git fetch --unshallow origin main
-              else
-                git fetch origin main
-              fi
-              git diff --exit-code "$base" origin/main -- src/core/index.rs
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-            test "$pushed" -eq 1
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify:
-    needs: integrate
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -90,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.integrate.outputs.source_sha }}
+          ref: main
           persist-credentials: false
       - name: Install the repository-pinned nightly toolchain
         shell: bash
@@ -98,20 +32,18 @@ jobs:
           set -euo pipefail
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           case "$channel" in nightly|nightly-*) ;; *) echo 'Expected a nightly toolchain' >&2; exit 1 ;; esac
-          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup toolchain install "$channel" --profile minimal
           echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             target
-          key: rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.integrate.outputs.source_sha }}
+          key: rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
             rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             diag-fidelity-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            global-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Execute all seven rollback durability regressions
         shell: bash
         run: |
@@ -120,20 +52,6 @@ jobs:
           rustc --version | tee "$RUNNER_TEMP/rollback-toolchain.log"
           cargo test --locked --lib rollback_durability_tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/rollback-tests.log"
           grep -Fq 'test result: ok. 7 passed; 0 failed;' "$RUNNER_TEMP/rollback-tests.log"
-      - name: Check the changed Rust sections without reformatting unrelated code
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, subprocess
-          source = pathlib.Path('src/core/index.rs').read_text()
-          start = source.index('fn rollback_published_index(')
-          end = source.index('/// GH#19: the embedder fingerprint', start)
-          tests = source.index('#[cfg(test)]\nmod rollback_durability_tests {')
-          for section in (source[start:end], source[tests:]):
-              subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', '--check'], input=section, text=True, check=True)
-          PY
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
