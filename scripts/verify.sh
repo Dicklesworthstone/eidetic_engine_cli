@@ -865,7 +865,21 @@ verification_summary_banner() {
     # would trade one honest number for another instead of reporting both.
     local census="${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_GATED_OFF} not-applicable"
 
-    if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
+    if [ "$attempted" -eq 0 ]; then
+        # THE TEXT HALF OF bullet 4. Without this branch the banner printed
+        # "=== 0/0 attempted verification stages passed; 0 advisory, 0
+        # tracked-red, 0 did-not-run, 0 not-applicable ===", which reads as a
+        # clean run to every human and every log scraper. Fixing only the exit
+        # code would leave the two halves of one contract disagreeing, and the
+        # half people actually read would still say success.
+        echo "=== NOTHING ATTEMPTED: 0 of ${declared} declared stages ran. This run establishes NOTHING. ==="
+        echo ""
+        echo "    Not a pass and not a contended skip: no stage was attempted at all."
+        if [ "$STAGE_GATED_OFF" -gt 0 ]; then
+            echo "    Every declared stage was gated off:"
+            printf "%b" "$STAGE_GATED_OFF_NAMES"
+        fi
+    elif [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
         echo "=== INCOMPLETE: ${STAGE_PASSED}/${attempted} attempted stages passed; ${STAGE_SKIPPED_CONTENTION} did NOT run (lock contention); ${census} ==="
         echo ""
         echo "    This run does not establish what these stages check:"

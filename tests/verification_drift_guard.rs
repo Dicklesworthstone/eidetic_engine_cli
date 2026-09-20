@@ -990,6 +990,20 @@ fn a_run_that_attempted_nothing_is_not_a_pass() {
         "a run with zero attempted stages must exit 70 (EX_SOFTWARE), not 0 and \
          not 75; banner was:\n{stdout}"
     );
+    // BOTH HALVES, because the exit code and the banner are one contract and
+    // the banner is the half people read. Before this fix the text said
+    // "0/0 attempted verification stages passed", which reads as a clean run
+    // however the code exits. Asserting only the code would have left that
+    // intact -- and the open-coded-assertion guard in this very file failed
+    // this test for exactly that incompleteness, which is the gate working.
+    assert!(
+        stdout.contains("NOTHING ATTEMPTED"),
+        "the banner must lead with NOTHING ATTEMPTED, not a 0/0 pass line:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("0/0 attempted verification stages passed"),
+        "the banner must not report a 0/0 run as stages passed:\n{stdout}"
+    );
 
     // Every stage gated off is the same absence wearing a different label: the
     // run declared work and performed none of it.
@@ -998,6 +1012,10 @@ fn a_run_that_attempted_nothing_is_not_a_pass() {
         code, 70,
         "a run whose every declared stage was gated off must exit 70; banner \
          was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0 of 9 declared stages ran"),
+        "the banner must name the declared denominator it did not attempt:\n{stdout}"
     );
 }
 
