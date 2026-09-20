@@ -82,7 +82,12 @@ ALLOWLIST = pathlib.Path(
 #                          invocation never walks it.
 #     crates/determinism/   1 file, likewise a separate manifest.
 #   Covering these needs a cargo invocation PER MANIFEST, not a wider tuple.
-#   Neither has a bead as of 2026-09-20; this comment is the only record.
+#   Tracked as bd-ik4wg. That bead records what is MEASURED (28 tracked .rs that
+#   no root-workspace target root reaches) and what is NOT (whether any of them
+#   is unreachable inside its own manifest -- nobody has run that pass). Do not
+#   file a second bead off this comment; the first draft of it said "no bead
+#   exists", which stopped being true minutes later and nearly caused exactly
+#   that duplicate.
 #
 # NOT A SURFACE FOR THIS PREDICATE AT ALL:
 #     scripts/**.sh -- shell scripts have no module graph. Their reachability
