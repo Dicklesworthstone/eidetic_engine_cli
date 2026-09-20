@@ -179,6 +179,34 @@ emit_verdict_block() {
         local esc plain
         esc=$'\033'
         plain="$(sed -e "s/${esc}\[[0-9;]*m//g" "$log" 2>/dev/null)"
+        # A RECORDED NON-ZERO EXIT OUTRANKS THE WRAPPER'S OWN EXIT 0.
+        #
+        # bd-k67bp: a shell payload's exit status is its LAST command's, so
+        #     ...; ./scripts/e2e_capture.sh; echo "E2E_CAPTURE_EXIT=$?"
+        # hands back the echo's 0 however the script ended. On 2026-09-20 that
+        # produced `verdict: GREEN (compile-only)` for a log whose payload read
+        # "refusing to run against a binary that does not exist" and
+        # E2E_CAPTURE_EXIT=2. The operator wrote that echo precisely to preserve
+        # the status the shell was about to discard -- the careful move -- and
+        # was graded green anyway.
+        #
+        # So when the log records a non-zero exit for a named step, believe the
+        # log over the wrapper's status. This only ever makes GREEN harder to
+        # obtain: the arm is reachable solely when run_exit is already 0.
+        #
+        # It also catches the misclassification underneath: a run that built AND
+        # THEN RAN something is not compile-only, and grading it on build
+        # evidence answers a question nobody asked.
+        local recorded_failure
+        recorded_failure="$(printf '%s\n' "$plain" \
+            | grep -aoE '^[A-Z][A-Z0-9_]*_EXIT=[1-9][0-9]*' | head -1)"
+        if [ -n "$recorded_failure" ]; then
+            printf 'verdict      : RED (%s recorded in the log; wrapper exit 0 was masked by a trailing command)\n' \
+                "$recorded_failure"
+            printf '===== END VERDICT BLOCK =====\n'
+            warn "log records ${recorded_failure}; refusing to call this a pass despite exit 0."
+            return 1
+        fi
         if printf '%s\n' "$plain" | grep -qa '^[[:space:]]*Finished '; then
             local built
             built="$(printf '%s\n' "$plain" | grep -ca '^[[:space:]]*Executable ' 2>/dev/null || true)"
@@ -303,6 +331,15 @@ self_test() {
     # COLOURISED, as cargo actually emits it. Without this arm the anchored
     # match passes on clean fixtures and fails on every real log.
     printf '\033[1m\033[32m   Compiling\033[0m eidetic-engine v0.14.4\n\033[1m\033[32m    Finished\033[0m `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n\033[1m\033[32m  Executable\033[0m tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ansi.log"
+    # bd-k67bp, transcribed from the real hz3 log that this wrapper graded
+    # GREEN: a build that Finished, then a payload that refused to run, whose
+    # status survives only as a sentinel because a trailing echo ate the exit.
+    # Colourised, because the real one was.
+    printf '\033[1m\033[32m    Finished\033[0m `dev` profile [unoptimized + debuginfo] target(s) in 12m 30s\ne2e_capture: ee_binary=/x/target/debug/ee (missing or not executable)\ne2e_capture: refusing to run against a binary that does not exist.\nE2E_CAPTURE_EXIT=2\n' > "$tmp/masked_exit.log"
+    # THE KNOWN POSITIVE. Same shape, same sentinel, exit 0. If this reds, the
+    # guard is not detecting failure, it is just refusing logs that mention an
+    # exit -- and a guard that blocks everything proves nothing.
+    printf '\033[1m\033[32m    Finished\033[0m `dev` profile [unoptimized + debuginfo] target(s) in 12m 30s\ne2e_capture: 41 assertions passed\nE2E_CAPTURE_EXIT=0\n' > "$tmp/masked_exit_zero.log"
 
     # name | log | run_exit | expect-target | want wrapper exit | command
     # The command matters: --no-run in it selects the build-evidence path, so
@@ -333,6 +370,9 @@ self_test() {
         "a CARGO run with no Finished still fails closed|$tmp/norun_nofinish.log|0||1|cargo check --locked"
         "a --job whose body runs cargo test IS graded on announcements|$tmp/green.log|0||0|--job -- bash -c 'cargo test --lib'"
         "...and that same --job reds when its announcements do not reconcile|$tmp/zero.log|0||1|--job -- bash -c 'cargo test --lib'"
+        # bd-k67bp: a recorded non-zero exit outranks a masked wrapper 0.
+        "a masked non-zero exit reds despite Finished and exit 0|$tmp/masked_exit.log|0||1|--job -- bash -c './scripts/e2e_capture.sh; echo EXIT=\$?'"
+        "...and the same shape with EXIT=0 is still green|$tmp/masked_exit_zero.log|0||0|--job -- bash -c './scripts/e2e_capture.sh; echo EXIT=\$?'"
     )
     local entry name log rexit expect want cmd
     for entry in "${cases[@]}"; do
