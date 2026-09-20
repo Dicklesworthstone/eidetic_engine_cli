@@ -61,10 +61,18 @@ const FRESHNESS_STATES: [&str; 8] = [
     "version_unknown",
     "unsupported_platform",
 ];
-const TOOLCHAIN_FAILURE_CODES: [(&str, &str); 3] = [
-    ("toolchain_hash_unavailable", "info"),
-    ("toolchain_probe_timeout", "low"),
-    ("toolchain_tool_unresolved", "low"),
+/// Cataloged degraded codes as (code, severity, introducing bead).
+///
+/// bd-0ldej: the bead used to be hardcoded as `bd-aunn3.2` in both the fixture
+/// assertion and the README row format, which meant a code introduced by any
+/// later bead could only satisfy this test by misattributing itself to the
+/// original collector bead. The introducer is per-code data, so it lives in
+/// the row.
+const TOOLCHAIN_FAILURE_CODES: [(&str, &str, &str); 4] = [
+    ("toolchain_git_repository_absent", "info", "bd-0ldej"),
+    ("toolchain_hash_unavailable", "info", "bd-aunn3.2"),
+    ("toolchain_probe_timeout", "low", "bd-aunn3.2"),
+    ("toolchain_tool_unresolved", "low", "bd-aunn3.2"),
 ];
 const TOOLCHAIN_TOOL_NAMES: [&str; 8] = [
     "agent_mail",
@@ -396,10 +404,41 @@ fn validate_capsule(schema: &Value, capsule: &Value, label: &str) -> TestResult 
             hash.starts_with("blake3:") && hash.len() == 71,
             format!("{label}: scriptHashes[{index}].blake3 malformed"),
         )?;
+        let tracked = row.pointer("/tracked").and_then(Value::as_bool);
         ensure(
-            row.pointer("/tracked").and_then(Value::as_bool).is_some(),
+            tracked.is_some(),
             format!("{label}: scriptHashes[{index}].tracked must be a boolean"),
         )?;
+        // bd-0ldej: `tracking` carries the state `tracked` cannot express.
+        let tracking = row
+            .pointer("/tracking")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        ensure(
+            matches!(tracking, "tracked" | "untracked" | "unknown"),
+            format!(
+                "{label}: scriptHashes[{index}].tracking must be a declared state; got {tracking:?}"
+            ),
+        )?;
+        // The compatibility bool must stay derivable from the richer field, or
+        // the capsule carries two answers to one question.
+        ensure(
+            tracked == Some(tracking == "tracked"),
+            format!(
+                "{label}: scriptHashes[{index}] tracked={tracked:?} contradicts tracking={tracking:?}"
+            ),
+        )?;
+        // Absent probe evidence is meaningful -- it is how "no repository to
+        // ask" is distinguished from "asked, and git failed" -- so it is only
+        // legitimate alongside `unknown`.
+        if row.pointer("/probe").is_none() {
+            ensure(
+                tracking == "unknown",
+                format!(
+                    "{label}: scriptHashes[{index}] claims {tracking:?} with no probe evidence"
+                ),
+            )?;
+        }
     }
 
     validate_degraded(&capsule["degraded"], "capsule")
@@ -473,7 +512,7 @@ fn failure_catalog_entries_match_toolchain_schema_codes() -> TestResult {
     let readme = std::fs::read_to_string(&readme_path)
         .map_err(|error| format!("read {}: {error}", readme_path.display()))?;
 
-    for (code, severity) in TOOLCHAIN_FAILURE_CODES {
+    for (code, severity, introducer) in TOOLCHAIN_FAILURE_CODES {
         ensure(
             degraded_code_enum.contains(code),
             format!("{code}: schema degraded-code enum is missing the cataloged code"),
@@ -496,8 +535,8 @@ fn failure_catalog_entries_match_toolchain_schema_codes() -> TestResult {
             fixture
                 .pointer("/introduced_by/bead")
                 .and_then(Value::as_str)
-                == Some("bd-aunn3.2"),
-            format!("{code}: failure fixture must keep the collector bead as introducer"),
+                == Some(introducer),
+            format!("{code}: failure fixture introducer must be {introducer}"),
         )?;
         ensure(
             fixture
@@ -525,7 +564,7 @@ fn failure_catalog_entries_match_toolchain_schema_codes() -> TestResult {
             format!("{code}: expected emission severity drifted"),
         )?;
         let readme_row =
-            format!("| `{code}` | diag toolchain-provenance | {severity} | bd-aunn3.2 |");
+            format!("| `{code}` | diag toolchain-provenance | {severity} | {introducer} |");
         ensure(
             readme.contains(&readme_row),
             format!("{code}: failure-mode README row missing or drifted"),
@@ -620,14 +659,15 @@ fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
     // can fail in BOTH directions: a genuinely untracked script in a repo, and a
     // spuriously tracked row outside one.
     //
-    // FILED SEPARATELY, because it is a product gap and not a test one: the
-    // report CANNOT distinguish "untracked" from "git unavailable".
-    // ToolchainScriptHashRow is {script, blake3, tracked} with no probe
-    // evidence -- unlike ToolchainToolRow, which carries `probe` -- and
-    // collect_toolchain_script_hashes emits a degradation only for HASH
-    // failures. Both conditions collapse to one `false` with an empty
-    // degraded[], so this test asserts the value it can see rather than the
-    // distinction it cannot.
+    // FIXED in bd-0ldej, and this test now asserts the distinction it used to
+    // note it could not make. The row carries `tracking`
+    // (tracked|untracked|unknown) plus the probe evidence, and the collector
+    // decides repository presence with a filesystem walk BEFORE asking git --
+    // necessary because `git ls-files --error-unmatch` exits 1 for an
+    // untracked file and 128 outside a repository, and ToolchainProbeExitClass
+    // maps both to `Failed`. Keying the distinction on the probe's exit class
+    // would therefore have reported every genuinely untracked script as an
+    // environment failure.
     let in_git_repo = workspace_is_git_repo(&workspace);
     let hash_violations = report
         .script_hashes
@@ -652,6 +692,63 @@ fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
              (in_git_repo={in_git_repo}); violations: {tracked_violations:?}"
         ),
     )?;
+
+    // bd-0ldej: the state each row reports must match WHY it reports it, and
+    // the two worlds are asserted separately because they are different
+    // claims. Inside a repository the answer is about the script; outside one
+    // there is no answer at all, and saying so is the whole point.
+    let expected_tracking = if in_git_repo { "tracked" } else { "unknown" };
+    let tracking_violations = report
+        .script_hashes
+        .iter()
+        .filter(|row| row.tracking.as_str() != expected_tracking)
+        .map(|row| format!("{} tracking={}", row.script, row.tracking.as_str()))
+        .collect::<Vec<_>>();
+    ensure(
+        tracking_violations.is_empty(),
+        format!(
+            "live_smoke: tracking must be {expected_tracking:?} when in_git_repo={in_git_repo}; \
+             violations: {tracking_violations:?}"
+        ),
+    )?;
+
+    let repository_absent_degradations = report
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == "toolchain_git_repository_absent")
+        .count();
+    if in_git_repo {
+        // The negative arm. Without it the assertion below passes on a capsule
+        // that always degrades, which would be the opposite defect.
+        ensure(
+            repository_absent_degradations == 0,
+            "live_smoke: a workspace inside a repository must not report the repository absent"
+                .to_owned(),
+        )?;
+        let missing_probe = report
+            .script_hashes
+            .iter()
+            .filter(|row| row.probe.is_none())
+            .map(|row| row.script.clone())
+            .collect::<Vec<_>>();
+        ensure(
+            missing_probe.is_empty(),
+            format!(
+                "live_smoke: rows inside a repository must carry probe evidence: {missing_probe:?}"
+            ),
+        )?;
+    } else {
+        // This is the RCH --clean-overlay world, where the old capsule went
+        // silent: every row false, degraded[] empty, indistinguishable from a
+        // genuine tracking violation.
+        ensure(
+            repository_absent_degradations == 1,
+            format!(
+                "live_smoke: a workspace outside a repository must say so exactly once; got \
+                 {repository_absent_degradations}"
+            ),
+        )?;
+    }
 
     let rendered = capsule.to_string();
     let workspace_text = workspace.display().to_string();

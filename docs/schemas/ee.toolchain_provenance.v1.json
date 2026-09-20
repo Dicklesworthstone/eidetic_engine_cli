@@ -163,7 +163,7 @@
     },
     "scriptHashRow": {
       "type": "object",
-      "required": ["script", "blake3", "tracked"],
+      "required": ["script", "blake3", "tracked", "tracking"],
       "additionalProperties": false,
       "properties": {
         "script": {
@@ -177,7 +177,16 @@
         },
         "tracked": {
           "type": "boolean",
-          "description": "True when the script is tracked at the collected git revision."
+          "description": "True only for a confirmed tracking, equal to `tracking == \"tracked\"`. Retained for v1 compatibility; prefer `tracking`, which separates untracked from unknown. bd-0ldej."
+        },
+        "tracking": {
+          "type": "string",
+          "enum": ["tracked", "untracked", "unknown"],
+          "description": "Tracking state at the collected git revision. `unknown` means git could not answer -- no repository at or above the workspace, a timed-out probe, or no git binary -- and is NOT a claim that the script is untracked. bd-0ldej."
+        },
+        "probe": {
+          "$ref": "#/$defs/probeEvidence",
+          "description": "Evidence for the tracking probe. Absent when no probe ran because there was no repository to ask."
         }
       }
     },
@@ -192,6 +201,7 @@
             "toolchain_probe_timeout",
             "toolchain_tool_unresolved",
             "toolchain_hash_unavailable",
+            "toolchain_git_repository_absent",
             "stale_binary",
             "source_mismatch",
             "wrapper_missing",

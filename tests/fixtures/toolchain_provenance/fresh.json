@@ -73,12 +73,24 @@
     {
       "script": "scripts/br_retry.sh",
       "blake3": "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "tracked": true
+      "tracked": true,
+      "tracking": "tracked",
+      "probe": {
+        "commandId": "toolchain_git_script_tracked",
+        "exitClass": "ok",
+        "durationMs": 0
+      }
     },
     {
       "script": "scripts/rch_verify.sh",
       "blake3": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "tracked": true
+      "tracked": true,
+      "tracking": "tracked",
+      "probe": {
+        "commandId": "toolchain_git_script_tracked",
+        "exitClass": "ok",
+        "durationMs": 0
+      }
     }
   ],
   "degraded": []

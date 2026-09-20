@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "toolchain_git_repository_absent",
+  "introduced_by": {
+    "bead": "bd-0ldej",
+    "epic_letter": "AUNN3"
+  },
+  "surfaces": [
+    "diag toolchain-provenance"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "The collector found no git repository at or above the workspace, so it cannot ask whether the declared scripts are tracked. Every scriptHashes row reports tracking \"unknown\" rather than the false \"untracked\" the bare boolean used to imply. An `rch exec --clean-overlay` export is the ordinary way to reach this state: it is a source tree with no .git.",
+    "setup_commands": [
+      "# run diag toolchain-provenance in a source tree that is not inside a git work tree"
+    ],
+    "invocation": "ee diag toolchain-provenance --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "toolchain_git_repository_absent",
+    "severity": "info",
+    "message_contains": [
+      "no git repository",
+      "unknown, not untracked"
+    ]
+  }
+}

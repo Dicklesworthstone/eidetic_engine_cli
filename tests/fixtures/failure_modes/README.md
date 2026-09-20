@@ -233,6 +233,7 @@ in the same commit, keeping the catalog complete by construction.
 | `orient_fast_recent_unavailable` | orient | warning | bd-orient-fast-content-iubub (O) |
 | `orient_fast_relevant_unavailable` | orient | warning | bd-orient-fast-content-iubub (O) |
 | `orient_revivals_unavailable` | orient | info | bd-wake-on-condition-inverse-sentinel-65uci |
+| `toolchain_git_repository_absent` | diag toolchain-provenance | info | bd-0ldej |
 | `toolchain_hash_unavailable` | diag toolchain-provenance | info | bd-aunn3.2 |
 | `toolchain_probe_timeout` | diag toolchain-provenance | low | bd-aunn3.2 |
 | `toolchain_tool_unresolved` | diag toolchain-provenance | low | bd-aunn3.2 |

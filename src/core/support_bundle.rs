@@ -497,6 +497,44 @@ pub struct ToolchainProbeEvidence {
     pub duration_ms: u64,
 }
 
+/// Whether a declared script is tracked in git, or whether we could not tell.
+/// bd-0ldej.
+///
+/// The third state is the point. `git ls-files --error-unmatch` exits 0 when
+/// tracked, 1 when untracked, and 128 when there is no repository at all --
+/// and `ToolchainProbeExitClass` maps both non-zero cases to `Failed`, so the
+/// probe alone cannot separate "this script is untracked", which is a real
+/// finding, from "git could not answer", which says nothing about the script.
+/// A bool has to pick one of those to be wrong about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainScriptTracking {
+    Tracked,
+    Untracked,
+    Unknown,
+}
+
+impl ToolchainScriptTracking {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tracked => "tracked",
+            Self::Untracked => "untracked",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The legacy `tracked` bool, which is true only for a confirmed tracking.
+    ///
+    /// `Unknown` reports false so the weaker field never over-claims, but a
+    /// consumer reading only the bool still cannot see the difference. That is
+    /// what `tracking` is for.
+    #[must_use]
+    pub const fn is_tracked(self) -> bool {
+        matches!(self, Self::Tracked)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolchainProvenanceDegradation {
@@ -544,7 +582,15 @@ pub struct ToolchainToolRow {
 pub struct ToolchainScriptHashRow {
     pub script: String,
     pub blake3: String,
+    /// Retained for `ee.toolchain_provenance.v1` compatibility. Always equal
+    /// to `tracking.is_tracked()`; prefer `tracking`, which can say "unknown".
     pub tracked: bool,
+    /// bd-0ldej: the state `tracked` cannot express.
+    pub tracking: ToolchainScriptTracking,
+    /// Evidence for the tracking probe, absent when no probe was run because
+    /// there was no repository to ask.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ToolchainProbeEvidence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -912,22 +958,66 @@ where
 {
     let mut rows = Vec::new();
     let mut degraded = Vec::new();
+    // bd-0ldej: decide ONCE, before the loop, whether git can answer at all.
+    // Without this the per-script probe reports `Failed` both for a genuinely
+    // untracked script and for every script in a tree that has no repository
+    // -- which is exactly what an `rch --clean-overlay` export is.
+    let repository_present = workspace_git_repository_present(workspace);
+    if !repository_present && !scripts.is_empty() {
+        degraded.push(ToolchainProvenanceDegradation::new(
+            "toolchain_git_repository_absent",
+            "info",
+            "no git repository at or above the workspace: script tracking is unknown, \
+             not untracked"
+                .to_owned(),
+            None,
+        ));
+    }
     for script in scripts {
         let relative = normalize_toolchain_script_path(script);
         let path = workspace.join(&relative);
         match hash_toolchain_file(&path) {
             Ok(hash) => {
-                let tracked = toolchain_script_tracked(
-                    workspace,
-                    &relative,
-                    timeout_ms,
-                    probe_duration_override_ms,
-                    runner,
-                );
+                // Skip the probe entirely with no repository: it cannot answer,
+                // and this also saves one git spawn per declared script.
+                let (tracking, probe) = if repository_present {
+                    let (tracking, evidence) = toolchain_script_tracked(
+                        workspace,
+                        &relative,
+                        timeout_ms,
+                        probe_duration_override_ms,
+                        runner,
+                    );
+                    (tracking, Some(evidence))
+                } else {
+                    (ToolchainScriptTracking::Unknown, None)
+                };
+                // Name the cause, not just the outcome: a timed-out probe and
+                // a missing git binary are different operator problems.
+                if let Some(evidence) = probe.as_ref() {
+                    let unresolved_code = match evidence.exit_class {
+                        ToolchainProbeExitClass::TimedOut => Some("toolchain_probe_timeout"),
+                        ToolchainProbeExitClass::Unresolved => Some("toolchain_tool_unresolved"),
+                        ToolchainProbeExitClass::Ok | ToolchainProbeExitClass::Failed => None,
+                    };
+                    if let Some(code) = unresolved_code {
+                        degraded.push(ToolchainProvenanceDegradation::new(
+                            code,
+                            "low",
+                            format!(
+                                "{relative}: git tracking probe did not answer ({}); tracking is unknown",
+                                evidence.exit_class.as_str()
+                            ),
+                            None,
+                        ));
+                    }
+                }
                 rows.push(ToolchainScriptHashRow {
                     script: relative,
                     blake3: hash,
-                    tracked,
+                    tracked: tracking.is_tracked(),
+                    tracking,
+                    probe,
                 });
             }
             Err(message) => degraded.push(ToolchainProvenanceDegradation::new(
@@ -1148,13 +1238,38 @@ fn normalize_toolchain_script_path(script: &Path) -> String {
         .to_owned()
 }
 
+/// Whether `workspace` (or an ancestor) is inside a git work tree, decided
+/// without spawning git. bd-0ldej.
+///
+/// Deliberately a filesystem walk rather than a `git rev-parse` probe: the
+/// question being asked is "can the git probe answer at all", so a probe that
+/// shares its subject's failure mode cannot measure it. `.exists()` accepts
+/// both a `.git` directory and the `.git` FILE that a worktree uses.
+fn workspace_git_repository_present(workspace: &Path) -> bool {
+    let mut dir = Some(workspace);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return true;
+        }
+        dir = current.parent();
+    }
+    false
+}
+
+/// Classify one declared script's git tracking, keeping the probe evidence.
+///
+/// bd-0ldej: this used to return `exit_class == Ok` as a bare bool, which
+/// collapsed "untracked" (exit 1) and "no repository" (exit 128) into the same
+/// `false`, because both arrive as `ToolchainProbeExitClass::Failed`. Callers
+/// must decide repository presence separately and only call this when there is
+/// a repository to ask, so `Failed` here means untracked and nothing else.
 fn toolchain_script_tracked<R>(
     workspace: &Path,
     relative: &str,
     timeout_ms: u64,
     probe_duration_override_ms: Option<u64>,
     runner: &R,
-) -> bool
+) -> (ToolchainScriptTracking, ToolchainProbeEvidence)
 where
     R: super::swarm_brief::SwarmBriefCommandRunner,
 {
@@ -1167,7 +1282,17 @@ where
         probe_duration_override_ms,
         runner,
     );
-    output.evidence.exit_class == ToolchainProbeExitClass::Ok
+    let tracking = match output.evidence.exit_class {
+        ToolchainProbeExitClass::Ok => ToolchainScriptTracking::Tracked,
+        // A repository is present and git answered "no". That is a finding
+        // about the script, not about the environment.
+        ToolchainProbeExitClass::Failed => ToolchainScriptTracking::Untracked,
+        // git never produced an answer, so there is nothing to report.
+        ToolchainProbeExitClass::TimedOut | ToolchainProbeExitClass::Unresolved => {
+            ToolchainScriptTracking::Unknown
+        }
+    };
+    (tracking, output.evidence)
 }
 
 fn read_toolchain_agent_mail_snapshot(path: &Path) -> Result<Value, String> {
@@ -9299,6 +9424,108 @@ mod tests {
         )
     }
 
+    /// bd-0ldej: with no repository, tracking is `unknown` and the capsule
+    /// SAYS SO, instead of reporting every script as untracked in silence.
+    ///
+    /// This is the `rch exec --clean-overlay` world -- a source export with no
+    /// `.git` -- which is where the old bare bool produced an undiagnosable
+    /// red on two hosts at two bases. The mocked git below answers "tracked"
+    /// for both scripts; the collector must NOT consult it, because a repo is
+    /// what makes the question answerable, not a cooperative git.
+    #[test]
+    fn toolchain_provenance_reports_unknown_tracking_without_a_repository() -> TestResult {
+        let workspace = unique_test_path("toolchain-provenance-no-repo");
+        let scripts_dir = workspace.join("scripts");
+        fs::create_dir_all(&scripts_dir)
+            .map_err(|error| format!("failed to create fake scripts dir: {error}"))?;
+        for script in ["br_retry.sh", "rch_verify.sh"] {
+            fs::write(scripts_dir.join(script), format!("#!/bin/sh\n# {script}\n"))
+                .map_err(|error| format!("failed to write fake {script}: {error}"))?;
+        }
+        // Deliberately NO .git anywhere: unique_test_path lives under
+        // std::env::temp_dir(), which has no repository above it.
+        let runner = FakeToolchainRunner::default()
+            .with_ok(
+                "git",
+                &["ls-files", "--error-unmatch", "scripts/br_retry.sh"],
+                "scripts/br_retry.sh\n",
+            )
+            .with_ok(
+                "git",
+                &["ls-files", "--error-unmatch", "scripts/rch_verify.sh"],
+                "scripts/rch_verify.sh\n",
+            );
+
+        let mut options = ToolchainProvenanceOptions::for_workspace(&workspace);
+        options.command_timeout_ms = 42;
+        options.collected_at = Some("2026-06-10T21:20:00Z".to_owned());
+        options.probe_duration_override_ms = Some(42);
+        options.script_paths = vec![
+            PathBuf::from("scripts/br_retry.sh"),
+            PathBuf::from("scripts/rch_verify.sh"),
+        ];
+
+        let report = collect_toolchain_provenance_with_runner(&options, &runner);
+        ensure(
+            report.script_hashes.len() == 2,
+            format!(
+                "expected both declared scripts, got {}",
+                report.script_hashes.len()
+            ),
+        )?;
+        for row in &report.script_hashes {
+            ensure(
+                row.tracking == ToolchainScriptTracking::Unknown,
+                format!(
+                    "{}: tracking must be unknown, got {:?}",
+                    row.script, row.tracking
+                ),
+            )?;
+            ensure(
+                !row.tracked,
+                format!(
+                    "{}: the compatibility bool must not claim tracked",
+                    row.script
+                ),
+            )?;
+            // Absence here is load-bearing: it is what separates "no repo to
+            // ask" from "asked, and git failed".
+            ensure(
+                row.probe.is_none(),
+                format!(
+                    "{}: no probe should have run without a repository",
+                    row.script
+                ),
+            )?;
+        }
+        let absent = report
+            .degraded
+            .iter()
+            .filter(|entry| entry.code == "toolchain_git_repository_absent")
+            .collect::<Vec<_>>();
+        ensure(
+            absent.len() == 1,
+            format!(
+                "the missing repository must be reported exactly once, got {}",
+                absent.len()
+            ),
+        )?;
+        ensure(
+            absent[0].severity == "info",
+            format!("unexpected severity {:?}", absent[0].severity),
+        )?;
+        // The negative arm: this must be a real environment signal, not one
+        // the collector emits unconditionally. The sibling fake-tools test
+        // builds the same workspace WITH a .git and asserts tracked/probe
+        // present, so the two together show the branch actually switches.
+        ensure(
+            workspace_git_repository_present(&workspace) == false,
+            "control: this workspace must genuinely have no repository".to_owned(),
+        )?;
+        let _ = fs::remove_dir_all(&workspace);
+        Ok(())
+    }
+
     #[test]
     fn toolchain_provenance_fake_tools_are_deterministic_and_redacted() -> TestResult {
         let workspace = unique_test_path("toolchain-provenance-fake-tools");
@@ -9308,6 +9535,14 @@ mod tests {
             .map_err(|error| format!("failed to create fake bin dir: {error}"))?;
         fs::create_dir_all(&scripts_dir)
             .map_err(|error| format!("failed to create fake scripts dir: {error}"))?;
+        // bd-0ldej: the collector now decides whether git CAN answer before it
+        // asks, by looking for a repository. This fake workspace lives under
+        // std::env::temp_dir() with no repository above it, so without this
+        // marker every row would be `unknown` and the mocked `git ls-files`
+        // answers below would never be consulted. The scenario under test is
+        // "a workspace that is a repo, with git answering" -- make it one.
+        fs::create_dir_all(workspace.join(".git"))
+            .map_err(|error| format!("failed to create fake git dir: {error}"))?;
 
         let tool_names = ["ee", "rch", "br", "bv", "cass", "git", "cargo"];
         for tool in tool_names {
@@ -9386,11 +9621,13 @@ mod tests {
         )?;
         ensure(
             first.script_hashes.len() == 2
-                && first
-                    .script_hashes
-                    .iter()
-                    .all(|row| row.script.starts_with("scripts/") && row.tracked),
-            "script hashes must be workspace-relative and tracked",
+                && first.script_hashes.iter().all(|row| {
+                    row.script.starts_with("scripts/")
+                        && row.tracked
+                        && row.tracking == ToolchainScriptTracking::Tracked
+                        && row.probe.is_some()
+                }),
+            "script hashes must be workspace-relative, tracked, and carry probe evidence",
         )?;
         let bv = first
             .tools

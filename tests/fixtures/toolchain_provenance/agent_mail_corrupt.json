@@ -48,7 +48,13 @@
     {
       "script": "scripts/agent_mail_snapshot.sh",
       "blake3": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
-      "tracked": true
+      "tracked": true,
+      "tracking": "tracked",
+      "probe": {
+        "commandId": "toolchain_git_script_tracked",
+        "exitClass": "ok",
+        "durationMs": 0
+      }
     }
   ],
   "degraded": []
