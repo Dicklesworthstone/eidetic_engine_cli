@@ -1924,16 +1924,18 @@ mod tests {
 
     #[test]
     fn explicit_links_surface_paraphrased_and_same_polarity_conflicts() {
-        for (question, first, second) in [
+        for (question, first, second, numeric_dispute) in [
             (
                 "Remote cache delta enabled Project Zephyr worker-g worker pool",
                 "Remote cache delta enabled Project Zephyr worker-g worker pool.",
                 "Zephyr worker-g workers cannot use cache delta.",
+                false,
             ),
             (
                 "What port does the database use?",
                 "The database uses port 5432.",
                 "The database uses port 6432.",
+                true,
             ),
         ] {
             let candidates: Vec<_> = [("first", first), ("second", second)]
@@ -2039,7 +2041,16 @@ mod tests {
                 }
                 let report = evaluate_ask(&rejected, &candidates);
                 assert!(report.conflict_link.is_none(), "{variant}: {report:?}");
-                assert!(!report.conflict_detected, "{variant}: {report:?}");
+                // Reject the invalid relation, not independently supported
+                // facts. Same-statement numeric opposition is now discoverable
+                // without an edge; the paraphrased fixture still needs one.
+                assert_eq!(report.conflict_detected, numeric_dispute, "{variant}");
+                if numeric_dispute {
+                    assert_eq!(
+                        report.sides.as_ref().expect("supported numeric sides")[1].label,
+                        "numeric_alternative"
+                    );
+                }
             }
             let mut untrusted = candidates.clone();
             untrusted[1].confidence = 0.1;
