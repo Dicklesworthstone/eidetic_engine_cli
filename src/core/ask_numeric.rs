@@ -1,10 +1,12 @@
-//! Conservative numeric-setting alternatives, not general natural-language inference.
+//! Conservative single-valued setting alternatives, not general language inference.
 //!
 //! Only an affirmative assignment with one scalar slot is eligible. The entire
 //! ordered nonnumeric statement (including the unit and subject) must agree.
 //! Different environments, identifiers, ranges, lists and negative restrictions
 //! are not contradictory just because they contain different numbers. More
 //! general or paraphrased disputes still need an explicitly stored relation.
+//! Categorical settings reuse the clustering parser so an alternative that
+//! cannot corroborate the anchor can also be disclosed as opposing evidence.
 
 #[derive(Debug, Eq, PartialEq)]
 enum Token {
@@ -18,7 +20,7 @@ struct Claim {
     value: String,
 }
 
-/// Detect a different scalar setting in the same affirmative claim.
+/// Detect a different numeric or categorical setting in the same affirmative claim.
 /// Prose uses the caller's shared polarity detector, not another vocabulary
 /// of negation words. Exact setting syntax instead binds identifiers as keys:
 /// `NO_RETRY=1` is an assignment, not an English prohibition.
@@ -36,6 +38,16 @@ pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negat
     }
     if left_negated || right_negated {
         return false;
+    }
+    // Admission and final composition both call this predicate. Reuse the
+    // same categorical subject/value contract as clustering: keeping two
+    // backends in separate clusters is not enough if one is then silently
+    // chosen, or its opposing source is dropped by the candidate budget.
+    if super::clustering::categorical_settings_conflict(
+        super::clustering::categorical_setting(left).as_ref(),
+        super::clustering::categorical_setting(right).as_ref(),
+    ) {
+        return true;
     }
     let (Some(left), Some(right)) = (claim(left), claim(right)) else {
         return false;
@@ -461,6 +473,17 @@ mod tests {
             ("PORT=5432", "PORT = 6432", "PORT"),
             ("timeout: 30ms", "timeout: 40ms", "timeout"),
             ("NO_RETRY=1", "NO_RETRY=2", "NO_RETRY"),
+            ("BACKEND=sqlite", "BACKEND=postgres", "BACKEND"),
+            (
+                "RUST_TOOLCHAIN=\"nightly\"",
+                "RUST_TOOLCHAIN=\"stable\"",
+                "RUST_TOOLCHAIN",
+            ),
+            (
+                "The production storage backend is SQLite.",
+                "The production storage backend is Postgres.",
+                "production storage backend",
+            ),
         ] {
             let mut candidates: Vec<_> = [left, right]
                 .into_iter()
@@ -506,40 +529,138 @@ mod tests {
     fn public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap() {
         use crate::core::ask::{ASK_CANDIDATE_SCAN_CAP, AskCandidate, AskRequest, evaluate_ask};
 
-        let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
-            .map(|index| AskCandidate {
-                memory_id: format!("a-setting-{index:05}"),
-                content: "PORT=5432".to_owned(),
-                confidence: 1.0,
-                trust_class: "human_explicit".to_owned(),
-                provenance_uri: Some(format!("manual://settings/{index}")),
-                level: "semantic".to_owned(),
-                kind: "fact".to_owned(),
-                team_provenance: None,
-            })
-            .collect();
-        let mut opposing = candidates[0].clone();
-        opposing.memory_id = "z-conflicting-setting".to_owned();
-        opposing.content = "PORT = 6432".to_owned();
-        candidates.push(opposing);
+        for (left, right, question) in [
+            ("PORT=5432", "PORT = 6432", "PORT"),
+            ("BACKEND=sqlite", "BACKEND=postgres", "BACKEND"),
+        ] {
+            let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
+                .map(|index| AskCandidate {
+                    memory_id: format!("a-setting-{index:05}"),
+                    content: left.to_owned(),
+                    confidence: 1.0,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some(format!("manual://settings/{index}")),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    team_provenance: None,
+                })
+                .collect();
+            let mut opposing = candidates[0].clone();
+            opposing.memory_id = "z-conflicting-setting".to_owned();
+            opposing.content = right.to_owned();
+            candidates.push(opposing);
+            let report = evaluate_ask(
+                &AskRequest {
+                    question: question.to_owned(),
+                    ..AskRequest::default()
+                },
+                &candidates,
+            );
+            assert!(!report.abstained && report.conflict_detected);
+            assert!(report.answer_text.is_none());
+            assert!(
+                report
+                    .sides
+                    .as_ref()
+                    .expect("both settings")
+                    .iter()
+                    .flat_map(|side| &side.citations)
+                    .any(|citation| citation.memory_id == "z-conflicting-setting"
+                        && citation.text == right)
+            );
+        }
+    }
+
+    #[test]
+    fn categorical_disagreement_uses_the_same_subject_contract_as_clustering() {
+        for (left, right) in [
+            ("BACKEND=sqlite", "BACKEND=postgres"),
+            ("BACKEND=\"SQLite\"", "BACKEND=\"sqlite\""),
+            (
+                "The production storage backend is SQLite.",
+                "The production storage backend is Postgres.",
+            ),
+            ("The serialization format is JSON.", "The serialization format is YAML."),
+        ] {
+            assert!(disagreement(left, right), "{left} / {right}");
+            assert!(
+                disagreement(right, left),
+                "categorical disagreement is symmetric"
+            );
+        }
+    }
+
+    #[test]
+    fn categorical_conflicts_do_not_cross_subjects_or_invent_exclusivity() {
+        for (left, right) in [
+            ("BACKEND=sqlite", "backend=postgres"),
+            ("production.backend=sqlite", "staging.backend=postgres"),
+            (
+                "The production storage backend is SQLite.",
+                "The staging storage backend is Postgres.",
+            ),
+            ("The storage backend is SQLite.", "The storage backend is sqlite."),
+            ("The storage backend is SQLite.", "The storage backend is unknown."),
+            (
+                "The storage backend is SQLite.",
+                "The preferred storage backend is Postgres.",
+            ),
+            (
+                "The storage backend is SQLite.",
+                "The storage backend is Postgres if available.",
+            ),
+            (
+                "The storage backend is SQLite.",
+                "The supported storage backend is Postgres.",
+            ),
+            (
+                "The supported backends are SQLite.",
+                "The supported backends are Postgres.",
+            ),
+            ("BACKEND=sqlite or postgres", "BACKEND=mysql or redis"),
+            ("Do not use SQLite.", "Do not use Postgres."),
+        ] {
+            assert!(!disagreement(left, right), "{left} / {right}");
+            assert!(!disagreement(right, left), "{right} / {left}");
+        }
+    }
+
+    #[test]
+    fn public_ask_does_not_report_other_environments_as_categorical_opposition() {
+        use crate::core::ask::{AskCandidate, AskRequest, evaluate_ask};
+
+        let candidates: Vec<_> = [
+            "The production storage backend is SQLite.",
+            "The staging storage backend is Postgres.",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| AskCandidate {
+            memory_id: format!("backend-{index}"),
+            content: content.to_owned(),
+            confidence: 1.0,
+            trust_class: "human_explicit".to_owned(),
+            provenance_uri: Some(format!("manual://backends/{index}")),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            team_provenance: None,
+        })
+        .collect();
         let report = evaluate_ask(
             &AskRequest {
-                question: "PORT".to_owned(),
+                question: "production storage backend".to_owned(),
                 ..AskRequest::default()
             },
             &candidates,
         );
-        assert!(!report.abstained && report.conflict_detected);
-        assert!(report.answer_text.is_none());
+        assert!(!report.abstained && !report.extractiveness_violated);
+        assert!(!report.conflict_detected);
+        assert!(report.sides.is_none());
         assert!(
             report
-                .sides
-                .as_ref()
-                .expect("both settings")
+                .citations
                 .iter()
-                .flat_map(|side| &side.citations)
-                .any(|citation| citation.memory_id == "z-conflicting-setting"
-                    && citation.text == "PORT = 6432")
+                .any(|citation| citation.memory_id == "backend-0")
         );
     }
 }
