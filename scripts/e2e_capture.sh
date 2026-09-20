@@ -216,7 +216,7 @@ case "\$cmd" in
   {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.\"}","highlighted":true},
   {"line":3,"content":"{\"role\":\"assistant\",\"content\":\"Failure arc: storing silently would violate the no-loop-takeover policy.\"}","highlighted":false},
   {"line":4,"content":"{\"role\":\"user\",\"content\":\"Fix: require accept/reject commands and audit every accepted capture.\"}","highlighted":false},
-  {"line":5,"content":"{\"role\":\"user\",\"content\":\"Deploy key for the staging box is sk-proj-cassimport-e2e-leakcanary-000000000000000000 so keep it out of any summary.\"}","highlighted":false}
+  {"line":5,"content":"{\"role\":\"user\",\"content\":\"Deploy key for the staging box is sk-proj-cassimport-e2e-leakcanary-000000000000000000 and the rotated one is sk-proj-cassimport-e2e-subthreshold-00000000000 so keep it out of any summary.\"}","highlighted":false}
 ],"total_lines":5}
 JSON
     else
@@ -636,6 +636,10 @@ assert_jq "$repeat_evidence_pack_out" \
 # this fixture gap already produced once. So first prove the canary ENTERED the
 # pipeline, then prove it did not reach the surfaces it must not reach.
 LEAK_CANARY="sk-proj-cassimport-e2e-leakcanary-000000000000000000"
+# Suffix 39 against RAW_TOKEN_PATTERNS' minimum of 40 for "sk-proj-" -- one
+# character under the boundary, on purpose. See the characterisation assertion
+# below. Measured, not assumed: 38 and 39 survive, 40 is detected.
+SUBTHRESHOLD_CANARY="sk-proj-cassimport-e2e-subthreshold-00000000000"
 
 leak_source_view="$("$CASS_BIN" view "$SESSION_PATH" 2>/dev/null || true)"
 assert_json "$leak_source_view" "tostring | contains(\"$LEAK_CANARY\")" 'true' \
@@ -668,6 +672,36 @@ assert_json "$leak_search_out" '[.data.results[]?] | tostring | contains("stagin
     "precondition: the imported line-5 span is itself among the results, not merely some result"
 assert_json "$leak_search_out" "[.data.results[]?] | tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
     "indexed evidence content must not carry the transcript secret"
+
+# BOUNDARY CHARACTERISATION (bd-25cx8). THIS ASSERTION EXPECTS A SECRET-SHAPED
+# STRING TO BE PRESENT. That is deliberate and it is not an endorsement.
+#
+# The canary above has a 44-character suffix, comfortably over the 40 that
+# src/policy/mod.rs's RAW_TOKEN_PATTERNS declares for "sk-proj-", so its
+# redaction proves the detector fires on a token it is configured to see. It
+# says nothing about tokens it is configured to IGNORE. CASS ingestion screens
+# with redact_secret_like_content (via screen_external_text_for_ingestion), the
+# SHAPE-BOUNDED detector -- not redact_public_replay_text, which matches raw
+# credentials at any byte position. Every one of the 31 prefixes in that table
+# therefore has its own sub-threshold window, from 16 to 48 characters.
+#
+# So this sentinel is ONE character under the boundary: suffix 39 against a
+# minimum of 40. bd-5tluk was exactly this measurement in the other direction --
+# a leak test that could never trip because its sentinel sat below the threshold
+# -- so the length here is measured, not assumed, and the assertion is written to
+# FAIL if the boundary ever moves in either direction.
+#
+# If this assertion starts failing, the detector became stricter than the table
+# says and the table is now wrong. If it keeps passing, a sub-threshold
+# credential in an imported transcript is stored verbatim and returned by search.
+# Whether that boundary is right for untrusted transcript material is a policy
+# call with a real false-positive cost; this only pins where the boundary IS.
+# The constant is shared with the write-blocking detector -- see bd-ls4a7.
+assert_json "$leak_source_view" "tostring | contains(\"$SUBTHRESHOLD_CANARY\")" 'true' \
+    "precondition: the imported transcript also carries the sub-threshold canary"
+assert_json "$leak_search_out" \
+    "[.data.results[]?] | tostring | contains(\"$SUBTHRESHOLD_CANARY\")" 'true' \
+    "boundary: a sub-threshold sk-proj- token is NOT redacted by CASS ingestion and reaches search results (bd-25cx8, characterisation not endorsement)"
 
 # The pack half must be TWO-SIDED or it is weaker than it looks. The pack above
 # was assembled for line 2's phrase, so "does not contain the canary" could mean
