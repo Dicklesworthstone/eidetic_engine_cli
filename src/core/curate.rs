@@ -3586,13 +3586,7 @@ fn explicit_marker_arc_candidates(
             return Vec::new();
         }
         let topic = review_topic_key(&format!("{} {}", failure_span.excerpt, span.excerpt));
-        return build_session_arc_candidate_pair(
-            workspace_id,
-            session,
-            &topic,
-            failure_span,
-            span,
-        );
+        return build_session_arc_candidate_pair(workspace_id, session, &topic, failure_span, span);
     }
     Vec::new()
 }
