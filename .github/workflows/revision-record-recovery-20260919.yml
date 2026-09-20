@@ -19,7 +19,13 @@ jobs:
     permissions:
       contents: write
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      # bd-niay4. PIN BOTH HALVES OR NEITHER. This overrides the action's install
+      # AT INVOCATION TIME, so a bare rustfmt/cargo later in this job resolves
+      # through it, not through the `toolchain:` input below. Pinning one half
+      # only installs components onto the dated toolchain and then invokes
+      # floating nightly, which does not have them. That was d315cdc7f, repaired
+      # at 021a033b8. Keep equal to rust-toolchain.toml's `channel`.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -32,6 +38,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - name: Apply reviewed revision and record recovery implementation
         run: |
