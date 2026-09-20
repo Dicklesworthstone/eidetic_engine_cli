@@ -103,8 +103,22 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
+        # bd-niay4. `@nightly` here is the ACTION REF, not the toolchain. Without
+        # an explicit `toolchain:` input the action installs a FLOATING nightly
+        # and exports RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml --
+        # so the repo's dated pin is silently defeated on the one gate that
+        # blocks main. This run resolved rustc 1.100.0-nightly (2026-09-18)
+        # against a pin of nightly-2026-08-31.
+        #
+        # The date is duplicated from rust-toolchain.toml rather than read from
+        # it: this action takes the toolchain from its ref or this input and
+        # does not consult the file. Six workflows in this repo already use this
+        # exact form, so the duplication is the established convention here, not
+        # a new one -- but it IS a second source of truth and it will drift.
+        # Keep it equal to rust-toolchain.toml's `channel`.
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           components: rustfmt
 
       - name: Install jq
