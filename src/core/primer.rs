@@ -723,6 +723,8 @@ pub fn run_primer_with_global_lane(
     )
     .unwrap_or(i64::MAX);
 
+    let (closed_seals, seal_authority_hash) = primer_seal_admission(connection, workspace_id)?;
+
     // The global store changes without bumping the workspace generation, so
     // the lane's content fingerprint must be part of the cache key or a
     // cached primer would silently omit fresh global rows. When the lane is
@@ -737,6 +739,10 @@ pub fn run_primer_with_global_lane(
             global_store_lane_hash(&global_rows)
         )
     };
+    // Seal-only writes do not advance workspace generations. Bind admission
+    // before any cache lookup, and version the key so pre-admission cached
+    // responses cannot reappear when all seals have subsequently been revealed.
+    let cache_config_hash = format!("{cache_config_hash}+seals:{seal_authority_hash}");
 
     if !refresh
         && let Some(cached) = connection.get_primer_cache(
@@ -761,6 +767,9 @@ pub fn run_primer_with_global_lane(
     let memories = connection.list_memories(workspace_id, None, false)?;
     let mut candidates = Vec::with_capacity(memories.len());
     for memory in &memories {
+        if closed_seals.contains(&memory.id) {
+            continue;
+        }
         let superseded = if memory.kind == "decision" {
             connection
                 .list_memory_links_for_memory(&memory.id, Some(MemoryLinkRelation::Supersedes))?
@@ -823,6 +832,39 @@ pub fn run_primer_with_global_lane(
     }
     Ok(report)
 }
+
+/// A sealed row is not ordinary recall evidence, including on a warm cache.
+/// The caller's connection (and any caller-owned snapshot) is reused, never
+/// nested or released. Only an irreversible digest of sorted public identities
+/// is added to the cache key; neither commitments nor content enter that key.
+fn primer_seal_admission(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> crate::db::Result<(BTreeSet<String>, String)> {
+    let closed = connection
+        .list_memory_seals_for_recovery(workspace_id)
+        .map_err(|_| crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message:
+                "Could not verify primer seal authority; cached and fresh content were withheld"
+                    .to_owned(),
+        })?
+        .into_iter()
+        .filter(|seal| seal.is_sealed())
+        .map(|seal| seal.memory_id)
+        .collect::<BTreeSet<_>>();
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.primer.seal_admission.v1\0");
+    for id in &closed {
+        hash.update(id.as_bytes());
+        hash.update(b"\0");
+    }
+    Ok((closed, hash.finalize().to_hex().to_string()))
+}
+
+#[cfg(test)]
+#[path = "primer_seal_admission_tests.rs"]
+mod seal_tests;
 
 /// Read persisted centrality rows from the latest VALID memory-links graph
 /// snapshot. Returns `None` (and the caller degrades) when the snapshot is
