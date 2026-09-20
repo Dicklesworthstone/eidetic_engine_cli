@@ -38,6 +38,9 @@ use crate::models::{
 };
 use crate::pack::PackProvenance;
 
+#[path = "resume_snapshot.rs"]
+mod snapshot;
+
 /// Wire schema id for the resume report.
 pub const RESUME_SCHEMA_V1: &str = "ee.resume.v1";
 /// Write-time gap that starts a new inferred session.
@@ -810,81 +813,20 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
             )),
         }
     })?;
-    if connection
-        .needs_migration()
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to inspect addressed workspace schema: {error}"),
-            repair: Some("ee doctor --workspace . --json".to_owned()),
-        })?
-    {
-        return Err(DomainError::MigrationRequired {
-            message: "The addressed workspace database requires migration before resume."
-                .to_owned(),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        });
-    }
     let canonical_workspace = options
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = crate::core::workspace::addressed_workspace_row(
-        &connection,
-        options.workspace_path,
-        options.database_path,
-    )?
-    .map_or_else(
-        || crate::core::workspace::stable_workspace_id(&canonical_workspace),
-        |row| row.id,
-    );
     let now = Utc::now();
-    let current_memories = connection
-        .list_recent_current_memories_for_retrieval(
-            &workspace_id,
-            // bd-60tq7 / bd-o22r0: this bound is compared LEXICALLY against
-            // valid_from/valid_to, which are stored in the SecondsFormat::Secs
-            // `Z` spelling. Passing bare to_rfc3339() here compared `+00:00`
-            // against `Z` and misordered at the boundary instant.
-            &crate::core::memory::normalize_validity_timestamp(now),
-            u32::MAX,
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list current resume memories: {error}"),
-            repair: Some("ee doctor --workspace . --json".to_owned()),
-        })?;
-    let ids: Vec<&str> = current_memories
-        .iter()
-        .map(|memory| memory.id.as_str())
-        .collect();
-    let mut tags = BTreeMap::new();
-    for page in ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
-        let page_tags = connection
-            .get_memory_tags_batch(page)
-            .map_err(|error| DomainError::Storage {
-                message: format!(
-                    "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
-                ),
-                repair: Some(
-                    "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
-                        .to_owned(),
-                ),
-            })?;
-        tags.extend(page_tags);
-    }
-
-    // Apply the ordinary workspace-scope and public-content admission rules
-    // only after the one batched tag read. The exact sealed placeholder and
-    // secret-bearing bodies fail closed; tags and provenance remain eligible
-    // for field-level public redaction during projection. This deliberately
-    // performs no per-memory storage lookup.
-    let admission =
-        ResumeAdmissionBoundary::for_bound_workspace(&canonical_workspace, workspace_id.clone());
-    let all_live: Vec<StoredMemory> = current_memories
-        .into_iter()
-        .filter_map(|memory| {
-            let memory_tags = tags.get(&memory.id).map(Vec::as_slice).unwrap_or_default();
-            admission.admit(memory, memory_tags)
-        })
-        .collect();
+    let snapshot::ResumeState {
+        workspace_id,
+        all_live,
+        tags,
+        typed_decision_fields,
+    } = snapshot::load(&connection, options, &canonical_workspace, now)?;
+    // Projection and optional nearby-store discovery do not hold a database
+    // reader open. All dependent source rows are owned by the same snapshot.
+    drop(connection);
 
     // Recent end-state: episodic memories, newest first (created_at desc, id
     // desc as the deterministic tie-break).
@@ -903,7 +845,6 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
 
     // Open loops: all current revisit-conditioned decisions, then a bounded
     // public page with exact total/truncation posture.
-    let typed_decision_fields = load_decision_typed_fields(&connection, &all_live)?;
     let (revisit_decisions, revisit_decisions_total, revisit_decisions_truncated) =
         collect_revisit_decisions(&all_live, &typed_decision_fields, now)?;
 

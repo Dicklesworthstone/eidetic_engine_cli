@@ -24312,21 +24312,33 @@ impl DbConnection {
     ///
     /// `created_at` / `updated_at` bounds and order use `julianday` (bd-8zzbg):
     /// `to_rfc3339()` emits variable fractional precision, so `.000+00:00`
-    /// sorts above a fraction-less value at the same instant. Validity columns
-    /// stay lexical: they are stored in the SecondsFormat::Secs `Z` spelling.
+    /// sorts above a fraction-less value at the same instant. Preserve the
+    /// caller's fractional clock for those row bounds. Author validity and
+    /// supersession keep their separate canonical whole-second UTC bound;
+    /// sharing that truncated bound would hide freshly committed rows until
+    /// the following second.
     pub fn list_recent_current_memories_for_retrieval(
         &self,
         workspace_id: &str,
         as_of: &str,
         limit: u32,
     ) -> Result<Vec<StoredMemory>> {
+        let instant = DateTime::parse_from_rfc3339(as_of)
+            .map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "Recency reference time must be RFC3339".to_owned(),
+            })?
+            .with_timezone(&Utc);
+        let row_bound = instant.to_rfc3339();
+        let validity_bound = instant.to_rfc3339_opts(SecondsFormat::Secs, true);
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) <= julianday(?2) AND julianday(updated_at) <= julianday(?2) AND (valid_from IS NULL OR valid_from <= ?2) AND (superseded_at IS NULL OR superseded_at > ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY julianday(created_at) DESC, id ASC LIMIT ?3",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) <= julianday(?2) AND julianday(updated_at) <= julianday(?2) AND (valid_from IS NULL OR valid_from <= ?4) AND (superseded_at IS NULL OR superseded_at > ?4) AND (valid_to IS NULL OR valid_to >= ?4) ORDER BY julianday(created_at) DESC, id ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_owned()),
-                Value::Text(as_of.to_owned()),
+                Value::Text(row_bound),
                 Value::from_u64_clamped(u64::from(limit)),
+                Value::Text(validity_bound),
             ],
         )?;
         rows.iter().map(stored_memory_from_row).collect()
