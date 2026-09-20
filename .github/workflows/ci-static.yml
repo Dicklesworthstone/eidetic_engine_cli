@@ -27,6 +27,35 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # SCHEDULED SWEEP OF main HEAD — bd-fy92m.
+  #
+  # MEASURED 2026-09-20T00:31Z over a 6h window of origin/main:
+  #     bot commits (github-actions[bot])   29 total,  0 with a CI Static run
+  #     human commits                       74 total, 66 with a CI Static run
+  # ZERO OF TWENTY-NINE. This workflow has no paths filter -- its push trigger
+  # is `branches: [main]` -- so every push to main SHOULD run it. Bot pushes
+  # never do.
+  #
+  # LIKELY CAUSE, STATED AS A HYPOTHESIS: GitHub does not trigger workflow runs
+  # for pushes made with the default GITHUB_TOKEN, to prevent recursive loops.
+  # Every one of the 24 workflows that pushes to main does so with that token
+  # (`grep -rnE 'secrets\.[A-Z_]+'` over .github/workflows returns nothing but
+  # GITHUB_TOKEN), so THERE IS NO CONTROL IN THIS REPO to test it against. The
+  # 0-of-29 is measured; the token is inferred.
+  #
+  # WHY A SCHEDULE RATHER THAN A CREDENTIAL CHANGE: pushing with a PAT would
+  # fix the trigger at its source, but needs a secret this lane cannot create,
+  # and adding gates to all 24 delivery workflows multiplies the surface that
+  # has to stay correct. A sweep of HEAD is one place, cannot be forgotten by
+  # the next workflow author, and converts "ungated commits accumulate
+  # invisibly" into "ungated commits are caught within the interval".
+  #
+  # WHAT IT DOES NOT DO: it does not gate a bot commit BEFORE it lands, and if
+  # several land between sweeps only the newest HEAD is evaluated. The tree is
+  # still checked -- a defect from an earlier unswept commit is present in HEAD
+  # and fails here -- but attribution to the introducing commit is not restored.
+  schedule:
+    - cron: '17,47 * * * *'
 
 permissions:
   contents: read
@@ -36,8 +65,20 @@ concurrency:
   # franken-stack clones. workflow_dispatch: unique per run so a scratch proof
   # (bd-o7wh0) is not cancelled by the next push to main. The first push run
   # of this workflow (35221242320 on 548ef61d6) was cancelled that way.
-  group: ci-static-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  # SCHEDULE IS GROUPED LIKE workflow_dispatch, NOT LIKE push (bd-fy92m).
+  #
+  # The push/PR group keys on github.ref with cancel-in-progress, so the latest
+  # commit wins. A scheduled sweep shares that ref, so under the old expression
+  # the next push would CANCEL it -- and the sweep exists precisely to cover
+  # commits whose own push never triggered a run. Losing it to a push is losing
+  # the only coverage those commits get.
+  #
+  # This repo has already been bitten by exactly that: the header above records
+  # run 35221242320 cancelled on 548ef61d6, which is why workflow_dispatch was
+  # given a run_id-keyed group. Schedule needs the same treatment for the same
+  # reason.
+  group: ci-static-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' }}
 
 jobs:
   static:
