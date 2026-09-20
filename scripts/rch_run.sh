@@ -106,11 +106,67 @@ emit_verdict_block() {
     #
     # Graded on BUILD evidence instead, and STILL FAILING CLOSED: exit 0 with no
     # `Finished` line is not a pass.
-    if printf '%s' "$cmd" | grep -q -- '--no-run'; then
-        if [ "$run_exit" -ne 0 ]; then
-            printf 'verdict      : RED (compile-only run exited %s)\n' "$run_exit"
+    # THE PREDICATE IS "DOES THIS COMMAND PRODUCE TEST ANNOUNCEMENTS", NOT
+    # "IS IT --no-run". The first version of this fix matched `--no-run`, which
+    # named a SITUATION; the property is that libtest never starts, and that is
+    # equally true of `cargo clippy`, `cargo check`, `cargo build`, `cargo fmt`
+    # and any `--job` shell command. Three probes on hz4 were graded RED that
+    # way in one sitting -- each exited 0 and did exactly what was asked -- and
+    # a grader that reds three valid runs will red the next ten.
+    #
+    # A fix that names the situation does not transfer. This one names the
+    # property: announcements are expected ONLY from a command that actually
+    # runs tests, which means `cargo test` WITHOUT `--no-run`. A `--job` whose
+    # shell body itself invokes `cargo test` still matches, and should, because
+    # that run really does produce announcements.
+    # THE LOG DECIDES FIRST, THE COMMAND ONLY BREAKS THE TIE.
+    #
+    # Keying purely on the command string was my first attempt and it is
+    # unsafe: any test invocation the match does not recognise -- `cargo
+    # nextest`, a wrapper script, a filter spelled unusually -- would be graded
+    # on EXIT STATUS ALONE, which is a false GREEN. My own self-test arms
+    # caught it, because they pass a placeholder command with real
+    # announcement-bearing logs and were suddenly graded the wrong way.
+    #
+    # So: if the log CONTAINS announcements, grade them, whatever the command
+    # claims. Only when there are none does the command decide whether that
+    # absence is expected (clippy, check, --no-run, a shell job) or damning (a
+    # test run that announced nothing, which is the "nothing ran" case this
+    # wrapper was built for).
+    local has_announcements=false
+    if grep -qaE '^[[:space:]]*running [0-9]+ tests?' "$log" 2>/dev/null; then
+        has_announcements=true
+    fi
+    local expects_announcements=false
+    case "$cmd" in
+        *--no-run*) expects_announcements=false ;;
+        *"cargo test"*) expects_announcements=true ;;
+        *) expects_announcements=false ;;
+    esac
+
+    if [ "$has_announcements" = false ] && [ "$expects_announcements" = false ]; then
+        # INFRASTRUCTURE FAILURE OUTRANKS EXIT 0, ON EVERY PATH.
+        #
+        # The non-test path never calls the grader, so without this it would
+        # claim GREEN for a log full of `rsync: connection unexpectedly closed`
+        # and `RCH-E104 SSH command timed out` merely because the wrapper
+        # reported 0. That is a false green, and it is the exact regression the
+        # pre-existing "UNGRADEABLE log, run exited 0" arm was written to catch
+        # -- it caught mine.
+        #
+        # Widening a gate is where false greens get introduced: the new path
+        # skips the checks the old path did, and nothing says so out loud.
+        if grep -qaE 'RCH-E[0-9]{3}|^rsync: |connection unexpectedly closed' "$log" 2>/dev/null; then
+            printf 'verdict      : UNGRADEABLE (infrastructure failure in the log)\n'
             printf '===== END VERDICT BLOCK =====\n'
-            warn "compile-only run exited ${run_exit}; that is the fact of record."
+            warn "log carries RCH/rsync failure markers; refusing to call this a pass despite exit ${run_exit}."
+            [ "$run_exit" -ne 0 ] && return "$run_exit"
+            return 1
+        fi
+        if [ "$run_exit" -ne 0 ]; then
+            printf 'verdict      : RED (non-test run exited %s)\n' "$run_exit"
+            printf '===== END VERDICT BLOCK =====\n'
+            warn "non-test run exited ${run_exit}; that is the fact of record."
             return "$run_exit"
         fi
         # STRIP ANSI BEFORE ANCHORING. Cargo colourises, so `Finished` arrives
@@ -131,10 +187,32 @@ emit_verdict_block() {
             printf '===== END VERDICT BLOCK =====\n'
             return 0
         fi
-        printf 'verdict      : RED (compile-only exited 0 with no Finished line)\n'
-        printf '===== END VERDICT BLOCK =====\n'
-        warn "compile-only run exited 0 but never reported Finished -- refusing to call this a pass."
-        return 1
+        # NO `Finished`. What that means depends on whether cargo was even
+        # involved, and collapsing the two is what made the first version of
+        # this branch red three valid shell probes.
+        #
+        # A CARGO command that exits 0 without reporting Finished did not
+        # complete a build, so it still fails closed -- that arm is unchanged.
+        # A NON-CARGO command (a `--job` shell body, a script) has no reason to
+        # emit Finished, and demanding it would be asking the log for evidence
+        # it cannot contain: the same error one level down from asking a
+        # compile-only run for test announcements.
+        case "$cmd" in
+            *cargo*)
+                printf 'verdict      : RED (cargo run exited 0 with no Finished line)\n'
+                printf '===== END VERDICT BLOCK =====\n'
+                warn "cargo run exited 0 but never reported Finished -- refusing to call this a pass."
+                return 1
+                ;;
+            *)
+                # Exit status is the ONLY evidence here, and the block says so
+                # rather than implying the log was examined and approved.
+                printf '  [non-test] no cargo build or test output in this log; exit status is the only evidence.\n'
+                printf 'verdict      : GREEN (graded on exit status alone)\n'
+                printf '===== END VERDICT BLOCK =====\n'
+                return 0
+                ;;
+        esac
     fi
 
     if [ -n "$expect" ]; then
@@ -219,6 +297,9 @@ self_test() {
     printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n  Executable tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ok.log"
     printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\nerror[E0425]: cannot find function `ensure_command_success` in this scope\nerror: could not compile `eidetic-engine` (test "integration_s_z") due to 1 previous error\n' > "$tmp/norun_fail.log"
     printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\n' > "$tmp/norun_nofinish.log"
+    # A --job shell body: no cargo lines, no announcements, nothing to grade
+    # but the exit status. This is what the hz4 probes looked like.
+    printf 'PROBE host=hz4\n  holder ready=yes\n  REAL SCRIPT -> exit=75\nPROBE done\n' > "$tmp/shelljob.log"
     # COLOURISED, as cargo actually emits it. Without this arm the anchored
     # match passes on clean fixtures and fails on every real log.
     printf '\033[1m\033[32m   Compiling\033[0m eidetic-engine v0.14.4\n\033[1m\033[32m    Finished\033[0m `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n\033[1m\033[32m  Executable\033[0m tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ansi.log"
@@ -241,6 +322,17 @@ self_test() {
         "--no-run, exit 0, no Finished: fails closed|$tmp/norun_nofinish.log|0||1|cargo test --test x --no-run"
         "a --no-run log graded as a TEST run still reds|$tmp/norun_ok.log|0||1|cargo test --test x"
         "--no-run, COLOURISED as cargo really emits|$tmp/norun_ansi.log|0||0|cargo test --test x --no-run"
+        # THE CLASS, not the situation. Every command below produces no test
+        # announcements for the same reason --no-run does: libtest never runs.
+        # Each was graded RED before this widened (three hz4 probes in one
+        # sitting), which is why they are arms and not assumptions.
+        "clippy that BUILT is green|$tmp/norun_ok.log|0||0|cargo clippy --all-targets -- -D warnings"
+        "cargo check that BUILT is green|$tmp/norun_ok.log|0||0|cargo check --locked --all-targets"
+        "a --job shell run with no cargo output is green on exit 0|$tmp/shelljob.log|0||0|--job -- bash -c 'echo probe'"
+        "a --job shell run that FAILED keeps its code|$tmp/shelljob.log|1||1|--job -- bash -c 'exit 1'"
+        "a CARGO run with no Finished still fails closed|$tmp/norun_nofinish.log|0||1|cargo check --locked"
+        "a --job whose body runs cargo test IS graded on announcements|$tmp/green.log|0||0|--job -- bash -c 'cargo test --lib'"
+        "...and that same --job reds when its announcements do not reconcile|$tmp/zero.log|0||1|--job -- bash -c 'cargo test --lib'"
     )
     local entry name log rexit expect want cmd
     for entry in "${cases[@]}"; do
