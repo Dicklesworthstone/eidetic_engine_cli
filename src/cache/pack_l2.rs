@@ -1725,7 +1725,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// The phase fields are actually EMITTED, captured off the real trace
     /// stream rather than inferred from the source. bd-ndzfg.4.
     ///
