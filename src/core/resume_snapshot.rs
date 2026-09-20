@@ -342,7 +342,10 @@ mod seal_authority_tests {
         fixture.seed(PUBLIC, "Completed release validation.", false);
         fixture.seal();
         let before = fixture.writer.get_memory(SEALED).unwrap().unwrap();
-        assert_eq!(before.content, PRIVATE_BODY, "exercise a non-placeholder body");
+        assert_eq!(
+            before.content, PRIVATE_BODY,
+            "exercise a non-placeholder body"
+        );
         let audits = fixture.writer.count_table_rows("audit_log").unwrap();
         let state = fixture.load();
         assert_hidden(&state);
@@ -355,11 +358,22 @@ mod seal_authority_tests {
         assert_eq!(report.open_loops.revisit_decisions_total, 0);
         assert_eq!(report.open_loops.tagged_items_total, 0);
         let output = serde_json::to_string(&report).unwrap();
-        for hidden in [SEALED, "reserved choice", "session-reserved", "Private launch"] {
-            assert!(!output.contains(hidden), "hidden source must not reach any projection");
+        for hidden in [
+            SEALED,
+            "reserved choice",
+            "session-reserved",
+            "Private launch",
+        ] {
+            assert!(
+                !output.contains(hidden),
+                "hidden source must not reach any projection"
+            );
         }
         assert_eq!(fixture.writer.get_memory(SEALED).unwrap().unwrap(), before);
-        assert_eq!(fixture.writer.count_table_rows("audit_log").unwrap(), audits);
+        assert_eq!(
+            fixture.writer.count_table_rows("audit_log").unwrap(),
+            audits
+        );
         assert!(!fixture.workspace.join(".ee/index").exists());
     }
 
@@ -426,7 +440,10 @@ mod seal_authority_tests {
         assert_eq!(revealed.all_live.len(), 1);
         assert!(revealed.tags.contains_key(SEALED));
         assert!(revealed.typed_decision_fields.contains_key(SEALED));
-        fixture.reader.begin_read_snapshot().expect("snapshot released");
+        fixture
+            .reader
+            .begin_read_snapshot()
+            .expect("snapshot released");
         fixture.reader.rollback_read_snapshot().unwrap();
     }
 }

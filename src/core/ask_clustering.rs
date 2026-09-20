@@ -62,12 +62,35 @@ pub(super) fn categorical_setting(text: &str) -> Option<CategoricalSetting> {
     if words.iter().any(|word| {
         matches!(
             word.to_ascii_lowercase().as_str(),
-            "if" | "unless" | "when" | "except" | "either" | "or" | "and"
-                | "may" | "might" | "could" | "can" | "possible" | "potential"
-                | "recommended" | "preferred" | "supported" | "compatible"
-                | "perhaps" | "probably" | "apparently" | "usually" | "sometimes"
-                | "proposed" | "planned" | "hypothetical" | "alternative" | "optional"
-                | "expected" | "assumed" | "example"
+            "if" | "unless"
+                | "when"
+                | "except"
+                | "either"
+                | "or"
+                | "and"
+                | "may"
+                | "might"
+                | "could"
+                | "can"
+                | "possible"
+                | "potential"
+                | "recommended"
+                | "preferred"
+                | "supported"
+                | "compatible"
+                | "perhaps"
+                | "probably"
+                | "apparently"
+                | "usually"
+                | "sometimes"
+                | "proposed"
+                | "planned"
+                | "hypothetical"
+                | "alternative"
+                | "optional"
+                | "expected"
+                | "assumed"
+                | "example"
         )
     }) {
         return None;
@@ -75,8 +98,13 @@ pub(super) fn categorical_setting(text: &str) -> Option<CategoricalSetting> {
 
     let (subject, raw_value, machine_key) = if let Some((key, value)) = text.split_once('=') {
         let key = key.trim();
-        if !key.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-            || !key.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        if !key
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
         {
             return None;
         }
@@ -99,8 +127,17 @@ pub(super) fn categorical_setting(text: &str) -> Option<CategoricalSetting> {
         let field = words[copula_index - 1].to_ascii_lowercase();
         if !matches!(
             field.as_str(),
-            "backend" | "engine" | "mode" | "format" | "profile" | "codec"
-                | "driver" | "provider" | "algorithm" | "encoding" | "protocol"
+            "backend"
+                | "engine"
+                | "mode"
+                | "format"
+                | "profile"
+                | "codec"
+                | "driver"
+                | "provider"
+                | "algorithm"
+                | "encoding"
+                | "protocol"
                 | "runtime"
         ) {
             return None;
@@ -116,18 +153,27 @@ pub(super) fn categorical_setting(text: &str) -> Option<CategoricalSetting> {
     };
 
     let (value, quoted) = match raw_value.chars().next()? {
-        quote @ ('`' | '\'' | '"') => (
-            raw_value.strip_prefix(quote)?.strip_suffix(quote)?,
-            true,
-        ),
+        quote @ ('`' | '\'' | '"') => (raw_value.strip_prefix(quote)?.strip_suffix(quote)?, true),
         _ => (raw_value, false),
     };
-    if !value.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
-        || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    if !value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic())
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
         || matches!(
             value.to_ascii_lowercase().as_str(),
-            "unknown" | "unspecified" | "unavailable" | "undetermined" | "unset"
-                | "unconfigured" | "pending" | "tbd" | "either"
+            "unknown"
+                | "unspecified"
+                | "unavailable"
+                | "undetermined"
+                | "unset"
+                | "unconfigured"
+                | "pending"
+                | "tbd"
+                | "either"
         )
     {
         return None;
@@ -164,8 +210,7 @@ fn categorical_settings_compatible(
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
-            left.subject == right.subject
-                && !categorical_settings_conflict(Some(left), Some(right))
+            left.subject == right.subject && !categorical_settings_conflict(Some(left), Some(right))
         }
         // A qualified or unparsed statement cannot silently corroborate a
         // known singleton setting just because Jaccard drops its qualifier.
@@ -524,7 +569,11 @@ mod categorical_tests {
         let rows = [span("a", POSTGRES), span("b", &staging)];
         let result = cluster_spans(&rows);
         assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|row| row.score.to_bits() == 0.52_f32.to_bits()));
+        assert!(
+            result
+                .iter()
+                .all(|row| row.score.to_bits() == 0.52_f32.to_bits())
+        );
         assert!(!conflict(POSTGRES, &MYSQL.replace("production", "staging")));
     }
 
@@ -532,15 +581,27 @@ mod categorical_tests {
     fn explicit_machine_keys_and_code_values_preserve_case() {
         for (left, right) in [
             ("database.backend=postgres", "database.backend=mysql"),
-            ("DATABASE_BACKEND = `postgres`", "DATABASE_BACKEND = `mysql`"),
+            (
+                "DATABASE_BACKEND = `postgres`",
+                "DATABASE_BACKEND = `mysql`",
+            ),
             ("BUILD_PROFILE=Release", "BUILD_PROFILE=release"),
-            ("The build profile is `Release`.", "The build profile is `release`."),
+            (
+                "The build profile is `Release`.",
+                "The build profile is `release`.",
+            ),
         ] {
             assert!(conflict(left, right), "{left} / {right}");
         }
         assert!(!conflict("Backend=postgres", "backend=mysql"));
-        assert!(!conflict("The backend is Postgres.", "The backend is postgres."));
-        assert!(!conflict("The backend is postgres.", "The backend is `postgres`."));
+        assert!(!conflict(
+            "The backend is Postgres.",
+            "The backend is postgres."
+        ));
+        assert!(!conflict(
+            "The backend is postgres.",
+            "The backend is `postgres`."
+        ));
     }
 
     #[test]
@@ -569,15 +630,27 @@ mod categorical_tests {
             assert!(categorical_setting(body).is_none(), "{body}");
         }
         let qualified = POSTGRES.replace("backend is", "supported backend is");
-        assert_eq!(cluster_spans(&[span("a", POSTGRES), span("b", &qualified)]).len(), 2);
+        assert_eq!(
+            cluster_spans(&[span("a", POSTGRES), span("b", &qualified)]).len(),
+            2
+        );
     }
 
     #[test]
     fn subject_order_and_numeric_identifiers_are_not_wildcards() {
         for (left, right) in [
-            ("The worker1 backend is postgres.", "The worker2 backend is mysql."),
-            ("The Worker1 backend is postgres.", "The worker1 backend is mysql."),
-            ("The café backend is postgres.", "The café backend is mysql."),
+            (
+                "The worker1 backend is postgres.",
+                "The worker2 backend is mysql.",
+            ),
+            (
+                "The Worker1 backend is postgres.",
+                "The worker1 backend is mysql.",
+            ),
+            (
+                "The café backend is postgres.",
+                "The café backend is mysql.",
+            ),
         ] {
             let same_subject = left.starts_with("The café");
             assert_eq!(conflict(left, right), same_subject);
@@ -594,7 +667,14 @@ mod categorical_tests {
         let signature = |rows: &[AskSpan]| {
             cluster_spans(rows)
                 .into_iter()
-                .map(|row| (row.memory_id, row.text, row.score.to_bits(), row.provenance_uri))
+                .map(|row| {
+                    (
+                        row.memory_id,
+                        row.text,
+                        row.score.to_bits(),
+                        row.provenance_uri,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let expected = signature(&rows);

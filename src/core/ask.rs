@@ -334,12 +334,7 @@ fn ask_fence_line(bytes: &[u8], start: usize, end: usize) -> Option<(u8, usize, 
     (width >= 3).then_some((marker, width, tail))
 }
 
-fn segment_ask_prose(
-    spans: &mut Vec<(usize, usize)>,
-    content: &str,
-    start: usize,
-    end: usize,
-) {
+fn segment_ask_prose(spans: &mut Vec<(usize, usize)>, content: &str, start: usize, end: usize) {
     let bytes = content.as_bytes();
     let mut paragraph_start = start;
     let mut line_start = start;
@@ -428,12 +423,7 @@ fn ask_byte_is_escaped(bytes: &[u8], start: usize, position: usize) -> bool {
     slashes % 2 == 1
 }
 
-fn segment_ask_sentences(
-    spans: &mut Vec<(usize, usize)>,
-    content: &str,
-    start: usize,
-    end: usize,
-) {
+fn segment_ask_sentences(spans: &mut Vec<(usize, usize)>, content: &str, start: usize, end: usize) {
     let bytes = content.as_bytes();
     let code_ends = ask_inline_code_ends(bytes, start, end);
     let mut span_start = start;
@@ -586,7 +576,10 @@ mod code_evidence_segmentation_tests {
 
     #[test]
     fn escaped_openers_and_unmatched_runs_do_not_swallow_prose() {
-        assert_eq!(slices("Use \\`literal. Next."), ["Use \\`literal.", "Next."]);
+        assert_eq!(
+            slices("Use \\`literal. Next."),
+            ["Use \\`literal.", "Next."]
+        );
         assert_eq!(slices("Use `literal. Next."), ["Use `literal.", "Next."]);
         assert_eq!(slices("Use `A. B\\` safely."), ["Use `A. B\\` safely."]);
     }
@@ -623,7 +616,8 @@ mod code_evidence_segmentation_tests {
 
     #[test]
     fn whitespace_and_unicode_sentence_boundaries_preserve_offsets() {
-        let text = "  Run cargo fmt.\r\nNever skip it.\t\tÉvitez les erreurs.\u{2003}Check again.  ";
+        let text =
+            "  Run cargo fmt.\r\nNever skip it.\t\tÉvitez les erreurs.\u{2003}Check again.  ";
         assert_eq!(
             slices(text),
             [

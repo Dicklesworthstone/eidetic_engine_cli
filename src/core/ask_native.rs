@@ -545,7 +545,8 @@ mod session_support_tests {
                     .as_deref()
                     .and_then(|uri| ProvenanceUri::from_str(uri).ok()),
                 Some(ProvenanceUri::AgentMail {
-                    message: Some(_), ..
+                    message: Some(_),
+                    ..
                 })
             ));
         }

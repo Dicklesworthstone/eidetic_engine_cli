@@ -670,10 +670,8 @@ mod source_authority_tests {
     fn supersession_is_exclusive_and_compares_actual_rfc3339_instants() {
         let (_root, db) = fixture();
         seed(&db, PRIOR, WORKSPACE, OLD_BODY);
-        db.execute_raw(
-            "UPDATE memories SET superseded_at = '2026-09-17T08:00:00-04:00'",
-        )
-        .unwrap();
+        db.execute_raw("UPDATE memories SET superseded_at = '2026-09-17T08:00:00-04:00'")
+            .unwrap();
         for (reference, expected) in [
             ("2026-09-17T11:59:59.999999999Z", 1),
             (CUTOFF, 0),

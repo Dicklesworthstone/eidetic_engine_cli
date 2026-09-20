@@ -460,7 +460,10 @@ mod tests {
             ("`PORT=5432", "`PORT=6432"),
         ] {
             assert!(setting_claim(left).is_none(), "unsupported setting: {left}");
-            assert!(setting_claim(right).is_none(), "unsupported setting: {right}");
+            assert!(
+                setting_claim(right).is_none(),
+                "unsupported setting: {right}"
+            );
             assert!(!disagreement(left, right), "{left} / {right}");
         }
     }
@@ -521,7 +524,10 @@ mod tests {
             }
             let expected = ask_data_json(&report);
             candidates.reverse();
-            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
+            assert_eq!(
+                ask_data_json(&evaluate_ask(&request, &candidates)),
+                expected
+            );
         }
     }
 
@@ -580,7 +586,10 @@ mod tests {
                 "The production storage backend is SQLite.",
                 "The production storage backend is Postgres.",
             ),
-            ("The serialization format is JSON.", "The serialization format is YAML."),
+            (
+                "The serialization format is JSON.",
+                "The serialization format is YAML.",
+            ),
         ] {
             assert!(disagreement(left, right), "{left} / {right}");
             assert!(
@@ -599,8 +608,14 @@ mod tests {
                 "The production storage backend is SQLite.",
                 "The staging storage backend is Postgres.",
             ),
-            ("The storage backend is SQLite.", "The storage backend is sqlite."),
-            ("The storage backend is SQLite.", "The storage backend is unknown."),
+            (
+                "The storage backend is SQLite.",
+                "The storage backend is sqlite.",
+            ),
+            (
+                "The storage backend is SQLite.",
+                "The storage backend is unknown.",
+            ),
             (
                 "The storage backend is SQLite.",
                 "The preferred storage backend is Postgres.",
