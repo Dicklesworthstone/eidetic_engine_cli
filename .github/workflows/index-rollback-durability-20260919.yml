@@ -1,3 +1,6 @@
+# Rollback durability implementation: 401665e3d572f9b2a93eb2939ac6dc012dc26e63.
+# This final delivery step moves the unchanged tests after production items;
+# it does not suppress Clippy or weaken any assertion.
 name: Index rollback durability delivery
 on:
   push:
@@ -9,7 +12,7 @@ permissions:
   contents: read
 concurrency:
   group: index-rollback-durability-20260919
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -23,291 +26,49 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - name: Apply bounded rollback fix and commit directly to main
+          fetch-depth: 1
+      - name: Keep the regression module after production items
         id: source
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/index-rollback.patch" <<'PATCH'
-          diff --git a/src/core/index.rs b/src/core/index.rs
-          --- a/src/core/index.rs
-          +++ b/src/core/index.rs
-          @@ -18,14 +18,14 @@
-                   && let Some(retained) = retained_dir
-                   && path_exists_no_follow(retained)
-               {
-          -        let rejected = allocate_rejected_index_dir(index_dir)?;
-          -        exchange_index_directories(index_dir, retained)?;
-          -        rename_index_dir(
-          +        return rollback_index_by_exchange_with(
-          +            index_dir,
-                       retained,
-          -            &rejected,
-          -            "quarantine atomically rejected index generation",
-          -        )?;
-          -        return sync_index_directory(index_parent(index_dir));
-          +            |from, to| {
-          +                rename_index_dir(from, to, "quarantine atomically rejected index generation")
-          +            },
-          +            sync_index_directory,
-          +        );
-               }
-           
-               let mut rollback_errors = Vec::new();
-          @@ -74,10 +74,214 @@
-                   }
-               }
-           
-          +    finish_index_rollback(index_dir, rollback_errors, sync_index_directory)
-          +}
-          +
-          +/// Once an exchange has restored the accepted generation, quarantine failure
-          +/// must not bypass the persistence barrier for that restoration. Keep both
-          +/// errors when quarantine and the barrier fail; neither failure is success.
-          +#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +fn rollback_index_by_exchange_with(
-          +    index_dir: &Path,
-          +    retained_dir: &Path,
-          +    quarantine: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
-          +    sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
-          +) -> Result<(), IndexRebuildError> {
-          +    let rejected_dir = allocate_rejected_index_dir(index_dir)?;
-          +    exchange_index_directories(index_dir, retained_dir)?;
-          +    let mut rollback_errors = Vec::new();
-          +    if let Err(error) = quarantine(retained_dir, &rejected_dir) {
-          +        rollback_errors.push(error.to_string());
-          +    }
-          +    finish_index_rollback(index_dir, rollback_errors, sync_directory)
-          +}
-          +
-          +/// Failed cleanup or restoration can follow successful namespace mutations.
-          +/// Flush those mutations even when rollback is already going to report an
-          +/// error. This does not claim power-loss durability when the flush fails.
-          +fn finish_index_rollback(
-          +    index_dir: &Path,
-          +    mut rollback_errors: Vec<String>,
-          +    mut sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
-          +) -> Result<(), IndexRebuildError> {
-          +    if let Err(error) = sync_directory(index_parent(index_dir)) {
-          +        rollback_errors.push(format!("failed to persist index rollback: {error}"));
-          +    }
-               if rollback_errors.is_empty() {
-          -        sync_index_directory(index_parent(index_dir))
-          +        Ok(())
-               } else {
-                   Err(IndexRebuildError::Index(rollback_errors.join("; ")))
-          +    }
-          +}
-          +
-          +#[cfg(test)]
-          +mod rollback_durability_tests {
-          +    use super::*;
-          +    use std::cell::Cell;
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    type TestResult = Result<(), String>;
-          +
-          +    #[test]
-          +    fn rollback_flushes_parent_after_an_earlier_error() {
-          +        let calls = Cell::new(0);
-          +        let index_dir = Path::new("workspace/index");
-          +        let result = finish_index_rollback(
-          +            index_dir,
-          +            vec!["injected restore failure".to_owned()],
-          +            |parent| {
-          +                assert_eq!(parent, Path::new("workspace"));
-          +                calls.set(calls.get() + 1);
-          +                Ok(())
-          +            },
-          +        );
-          +        assert_eq!(calls.get(), 1);
-          +        let error = result.expect_err("earlier failure must survive a successful flush");
-          +        assert!(error.to_string().contains("injected restore failure"));
-          +    }
-          +
-          +    #[test]
-          +    fn rollback_preserves_the_original_and_flush_errors() {
-          +        let error = finish_index_rollback(
-          +            Path::new("workspace/index"),
-          +            vec!["injected quarantine failure".to_owned()],
-          +            |_| Err(IndexRebuildError::Index("injected flush failure".to_owned())),
-          +        )
-          +        .expect_err("both failures must be reported")
-          +        .to_string();
-          +        assert!(error.contains("injected quarantine failure"));
-          +        assert!(error.contains("injected flush failure"));
-          +        assert!(error.contains("failed to persist index rollback"));
-          +    }
-          +
-          +    #[test]
-          +    fn rollback_cannot_succeed_when_only_the_flush_fails() {
-          +        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
-          +            Err(IndexRebuildError::Index("injected flush failure".to_owned()))
-          +        });
-          +        assert!(result.is_err());
-          +    }
-          +
-          +    #[test]
-          +    fn rollback_success_requires_a_successful_flush() {
-          +        let calls = Cell::new(0);
-          +        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
-          +            calls.set(calls.get() + 1);
-          +            Ok(())
-          +        });
-          +        assert!(result.is_ok());
-          +        assert_eq!(calls.get(), 1);
-          +    }
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    fn generations(root: &Path) -> Result<(PathBuf, PathBuf), String> {
-          +        let root = root.canonicalize().map_err(|error| error.to_string())?;
-          +        let active = root.join("index");
-          +        let retained = root.join("retained");
-          +        std::fs::create_dir(&active).map_err(|error| error.to_string())?;
-          +        std::fs::create_dir(&retained).map_err(|error| error.to_string())?;
-          +        std::fs::write(active.join("identity"), "rejected")
-          +            .map_err(|error| error.to_string())?;
-          +        std::fs::write(retained.join("identity"), "accepted")
-          +            .map_err(|error| error.to_string())?;
-          +        Ok((active, retained))
-          +    }
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    #[test]
-          +    fn exchange_rollback_flushes_the_restored_generation_when_quarantine_fails() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let (active, retained) = generations(root.path())?;
-          +        let flushes = Cell::new(0);
-          +        let error = rollback_index_by_exchange_with(
-          +            &active,
-          +            &retained,
-          +            |_, _| {
-          +                Err(IndexRebuildError::Index(
-          +                    "injected quarantine failure".to_owned(),
-          +                ))
-          +            },
-          +            |parent| {
-          +                assert_eq!(parent, active.parent().expect("active parent"));
-          +                assert_eq!(
-          +                    std::fs::read_to_string(active.join("identity")).expect("restored identity"),
-          +                    "accepted"
-          +                );
-          +                flushes.set(flushes.get() + 1);
-          +                sync_index_directory(parent)
-          +            },
-          +        )
-          +        .expect_err("quarantine failure must remain visible")
-          +        .to_string();
-          +        assert!(error.contains("injected quarantine failure"));
-          +        assert_eq!(flushes.get(), 1);
-          +        // Preserve rejected bytes for diagnosis; this patch does not claim
-          +        // to make failed quarantine safe for later recovery admission.
-          +        assert_eq!(
-          +            std::fs::read_to_string(retained.join("identity"))
-          +                .map_err(|error| error.to_string())?,
-          +            "rejected"
-          +        );
-          +        Ok(())
-          +    }
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    #[test]
-          +    fn exchange_rollback_preserves_both_quarantine_and_flush_failures() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let (active, retained) = generations(root.path())?;
-          +        let error = rollback_index_by_exchange_with(
-          +            &active,
-          +            &retained,
-          +            |_, _| Err(IndexRebuildError::Index("quarantine failure".to_owned())),
-          +            |_| Err(IndexRebuildError::Index("flush failure".to_owned())),
-          +        )
-          +        .expect_err("rollback failures must not be hidden")
-          +        .to_string();
-          +        assert!(error.contains("quarantine failure"));
-          +        assert!(error.contains("flush failure"));
-          +        assert_eq!(
-          +            std::fs::read_to_string(active.join("identity"))
-          +                .map_err(|error| error.to_string())?,
-          +            "accepted"
-          +        );
-          +        Ok(())
-          +    }
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    #[test]
-          +    fn exchange_rollback_keeps_the_live_name_and_quarantines_the_rejected_bytes() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let (active, retained) = generations(root.path())?;
-          +        let mut quarantined = None;
-          +        let flushes = Cell::new(0);
-          +        rollback_index_by_exchange_with(
-          +            &active,
-          +            &retained,
-          +            |from, to| {
-          +                quarantined = Some(to.to_path_buf());
-          +                rename_index_dir(from, to, "test quarantine")
-          +            },
-          +            |parent| {
-          +                flushes.set(flushes.get() + 1);
-          +                sync_index_directory(parent)
-          +            },
-          +        )
-          +        .map_err(|error| error.to_string())?;
-          +        assert_eq!(flushes.get(), 1);
-          +        assert_eq!(
-          +            std::fs::read_to_string(active.join("identity"))
-          +                .map_err(|error| error.to_string())?,
-          +            "accepted"
-          +        );
-          +        let rejected = quarantined.ok_or_else(|| "quarantine was not attempted".to_owned())?;
-          +        assert_eq!(
-          +            std::fs::read_to_string(rejected.join("identity"))
-          +                .map_err(|error| error.to_string())?,
-          +            "rejected"
-          +        );
-          +        assert!(!path_exists_no_follow(&retained));
-          +        Ok(())
-               }
-           }
-           
-          PATCH
-          if grep -q 'mod rollback_durability_tests {' src/core/index.rs; then
-            grep -q 'fn rollback_index_by_exchange_with(' src/core/index.rs
-            grep -q 'fn finish_index_rollback(' src/core/index.rs
-            echo 'Rollback durability implementation already present; not reapplying.'
-          else
-            test "$(git rev-parse HEAD:src/core/index.rs)" = 644a5f6416c50d172b9c4b8a8221f78b94a23e7a
-            base=$(git rev-parse HEAD)
-            git apply --check "$RUNNER_TEMP/index-rollback.patch"
-            git apply "$RUNNER_TEMP/index-rollback.patch"
-            # Format only the modified rollback section, preserving all unrelated source bytes.
-            python3 - <<'PYTHON'
+          base=$(git rev-parse HEAD)
+          python3 - <<'PY'
           import pathlib, subprocess
           path = pathlib.Path('src/core/index.rs')
           source = path.read_text()
-          start = source.index('fn rollback_published_index(')
-          end = source.index('/// GH#19: the embedder fingerprint', start)
-          formatted = subprocess.run(
-              ['rustfmt', '--edition', '2024', '--config', 'skip_children=true', '--emit', 'stdout'],
-              input=source[start:end], text=True, capture_output=True, check=True,
-          ).stdout
-          path.write_text(source[:start] + formatted.rstrip() + '\n\n' + source[end:])
-          PYTHON
+          marker = '#[cfg(test)]\nmod rollback_durability_tests {'
+          assert source.count(marker) == 1, 'Expected exactly one rollback regression module'
+          start = source.index(marker)
+          fingerprint = source.index('/// GH#19: the embedder fingerprint')
+          if start < fingerprint:
+              blob = subprocess.check_output(['git', 'rev-parse', 'HEAD:src/core/index.rs'], text=True).strip()
+              assert blob == 'e725c1e1137d6e4a8d501d7d07a3917f13757bba', 'Index source changed; refusing an unreviewed edit'
+              tests = source[start:fingerprint].rstrip() + '\n'
+              assert tests.count('    #[test]') == 7
+              assert tests.endswith('}\n')
+              remaining = source[:start] + source[fingerprint:]
+              path.write_text(remaining.rstrip() + '\n\n' + tests)
+          else:
+              assert source[start:].count('    #[test]') == 7
+              print('Rollback regressions are already after production items')
+          PY
+          if ! git diff --quiet -- src/core/index.rs; then
             git diff --check
             test "$(git diff --name-only)" = src/core/index.rs
             git diff --stat
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add -- src/core/index.rs
-            git commit -m 'fix(index): persist rollback even when quarantine or restoration fails' -m 'Always attempt the parent-directory durability barrier after namespace changes, including the atomic-exchange quarantine error path. Preserve earlier rollback errors together with flush errors. Add seven regression tests, including real directory exchanges with injected quarantine/fsync failures. This bounded fix does not claim to solve admission of rejected retained generations after restart. Patch application, whitespace checks, and Rust formatting passed; behavioral execution is a separate verification job.'
+            git commit -m 'test(index): place rollback durability regressions after production items' -m 'Move the seven unchanged rollback regression tests to the end of the index module so items_after_test_module remains clean. No production behavior, assertions, or lint configuration changes.'
             pushed=0
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then pushed=1; break; fi
-              git fetch origin main
+              if test "$(git rev-parse --is-shallow-repository)" = true; then
+                git fetch --unshallow origin main
+              else
+                git fetch origin main
+              fi
               git diff --exit-code "$base" origin/main -- src/core/index.rs
               git merge --no-edit origin/main
               base=$(git rev-parse origin/main)
@@ -320,7 +81,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      RUSTUP_TOOLCHAIN: nightly
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -332,26 +92,48 @@ jobs:
         with:
           ref: ${{ needs.integrate.outputs.source_sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install the repository-pinned nightly toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          case "$channel" in nightly|nightly-*) ;; *) echo 'Expected a nightly toolchain' >&2; exit 1 ;; esac
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             target
-          key: rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.integrate.outputs.source_sha }}
+          key: rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.integrate.outputs.source_sha }}
           restore-keys: |
+            rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             diag-fidelity-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             global-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            seed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Execute the seven rollback durability regressions
+      - name: Execute all seven rollback durability regressions
         shell: bash
         run: |
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/rollback-source-sha.log"
+          rustc --version | tee "$RUNNER_TEMP/rollback-toolchain.log"
           cargo test --locked --lib rollback_durability_tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/rollback-tests.log"
           grep -Fq 'test result: ok. 7 passed; 0 failed;' "$RUNNER_TEMP/rollback-tests.log"
+      - name: Check the changed Rust sections without reformatting unrelated code
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, subprocess
+          source = pathlib.Path('src/core/index.rs').read_text()
+          start = source.index('fn rollback_published_index(')
+          end = source.index('/// GH#19: the embedder fingerprint', start)
+          tests = source.index('#[cfg(test)]\nmod rollback_durability_tests {')
+          for section in (source[start:end], source[tests:]):
+              subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', '--check'], input=section, text=True, check=True)
+          PY
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
