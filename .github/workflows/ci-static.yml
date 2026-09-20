@@ -77,7 +77,30 @@ concurrency:
   # run 35221242320 cancelled on 548ef61d6, which is why workflow_dispatch was
   # given a run_id-keyed group. Schedule needs the same treatment for the same
   # reason.
-  group: ci-static-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.run_id || github.ref }}
+  # bd-i4t23: PUSH NOW KEYS ON github.sha, NOT github.ref. Keying every push to
+  # main on the shared ref meant each push cancelled the previous commit's run,
+  # so a commit's verdict depended on nobody pushing for the ~2.6 minutes it
+  # takes. Measured 2026-09-20 over the last 100 runs: 45 cancelled, and ALL 45
+  # were `push` -- zero from the dispatch/schedule arms above, which is the
+  # evidence that those exemptions work and that the ref key was the whole
+  # remaining problem.
+  #
+  # THE "LATEST COMMIT WINS" RATIONALE DID NOT SURVIVE MEASUREMENT. It assumed
+  # queued runs stack up. They do not at this workflow's size: completed runs
+  # take a median 2.6 min (p90 6.2) while pushes arrive a median 3.5 min apart,
+  # so in the typical case a run finishes before the next push exists. What the
+  # cancellation actually did was discard runs at a median of 2.0 min -- roughly
+  # three quarters finished.
+  #
+  # AND THE LOSS WAS NOT EVENLY SPREAD. A burst cancels whatever is IN FLIGHT,
+  # and after a red what is in flight is the FIX: 3a97fc839 (an fmt repair) and
+  # ea8e9b0a5 (which contained it) were both cancelled, while the last completed
+  # run predated both the break and the repair. So main showed a red whose fix
+  # had already landed and could not be confirmed (bd-fy92m mechanisms B and C).
+  #
+  # cancel-in-progress stays TRUE: with a sha key it now cancels only a genuine
+  # duplicate of the SAME commit (a re-push or re-run), which is what it was for.
+  group: ci-static-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.run_id || github.sha }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' }}
 
 jobs:
