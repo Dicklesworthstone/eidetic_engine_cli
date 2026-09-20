@@ -150,11 +150,15 @@ fn assert_unknown_key_error(output: &Output, label: &str, expected_key: &str) ->
                 repair.contains("ee config show --json"),
                 format!("set repair must point at the full key listing; got {repair}"),
             )?;
+            // Naming `graph.*` is correct -- it is 26 of the 34 writable keys.
+            // The old hint's defect was pointing at a FILTERED listing, so a
+            // user who mistyped `cache.pack_l2.enabled` was sent to enumerate
+            // graph keys. The repair must offer the full listing instead.
             ensure(
-                !repair.contains("graph.*"),
+                !repair.contains("config show graph"),
                 format!(
-                    "set repair must not recommend `graph.*`, which the settable \
-                     surface accepts none of; got {repair}"
+                    "set repair must not send the user to a filtered `config show graph.*` \
+                     listing; the full listing is what answers `which keys exist`; got {repair}"
                 ),
             )?;
         }
