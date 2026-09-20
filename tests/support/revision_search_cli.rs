@@ -87,9 +87,31 @@ impl Fixture {
         };
         let stdout = fs::read(&stdout_path).map_err(|e| e.to_string())?;
         let parsed = serde_json::from_slice::<Value>(&stdout);
-        let envelope_valid = parsed
-            .as_ref()
-            .is_ok_and(|value| value["schema"] == "ee.response.v2" && value["success"] == true);
+        // Diagnostic search intentionally emits its dedicated v1 report, not
+        // the standard v2 command envelope. Validate that documented schema
+        // explicitly rather than accepting arbitrary JSON or weakening errors.
+        let is_diagnostic = args.starts_with(&["diag", "search"]);
+        let expected_schema = if is_diagnostic {
+            "ee.diag.search.v1"
+        } else {
+            "ee.response.v2"
+        };
+        let envelope_valid = parsed.as_ref().is_ok_and(|value| {
+            value["schema"] == expected_schema
+                && if is_diagnostic {
+                    value["command"] == "diag search"
+                        && value["errors"].as_array().is_some_and(Vec::is_empty)
+                        && value["final"]["errors"]
+                            .as_array()
+                            .is_some_and(Vec::is_empty)
+                        && matches!(
+                            value["final"]["status"].as_str(),
+                            Some("success" | "no_results")
+                        )
+                } else {
+                    value["success"] == true
+                }
+        });
         let event = json!({
             "test": "revision_search_cli",
             "command": args, "workspace": self.workspace,
@@ -97,7 +119,7 @@ impl Fixture {
                 "XDG_CONFIG_HOME": self.home, "EE_EMBED_DOWNLOAD": "off"},
             "elapsedMs": started.elapsed().as_millis(), "exitCode": status.code(),
             "timedOut": timed_out, "stdoutPath": stdout_path, "stderrPath": stderr_path,
-            "envelopeValidated": envelope_valid,
+            "envelopeValidated": envelope_valid, "expectedSchema": expected_schema,
         });
         fs::write(prefix.with_extension("json"), event.to_string()).map_err(|e| e.to_string())?;
         if timed_out || !status.success() || !envelope_valid {
@@ -216,17 +238,14 @@ fn revised_advice_is_current_in_cli_search_diagnostics_and_read_only_packs() -> 
         "--relevance-floor",
         "0",
     ])?;
+    assert_eq!(ids(&diag, "/final/results", "docId")?, vec![head.as_str()]);
     assert_eq!(
-        ids(&diag, "/data/final/results", "docId")?,
-        vec![head.as_str()]
-    );
-    assert_eq!(
-        ids(&diag, "/data/preFusion/lexical/results", "docId")?,
+        ids(&diag, "/preFusion/lexical/results", "docId")?,
         vec![head.as_str()]
     );
     for pointer in [
-        "/data/preFusion/semanticFast/results",
-        "/data/fusion/perDocContribution",
+        "/preFusion/semanticFast/results",
+        "/fusion/perDocContribution",
     ] {
         assert!(
             !ids(&diag, pointer, "docId")?.contains(&prior.as_str()),

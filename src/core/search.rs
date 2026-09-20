@@ -9883,8 +9883,35 @@ async fn run_diag_search_in_snapshot(
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
-    let (mut degraded, index_freshness) =
+    let (mut degraded, mut index_freshness) =
         search_degradations_with_connection(options, &index_dir, read_connection);
+    // Ordinary search only needs an explicit freshness object when degraded.
+    // Diagnostics must also identify the healthy generation actually selected,
+    // including a retained generation serving an older source snapshot. Read
+    // the selected directory while its lease is held, never the live pointer.
+    if source_generation.is_some() && index_freshness.is_none() {
+        let status =
+            cached_index_status_for_search(options, &index_dir, read_connection).map_err(|_| {
+                SearchError::Index(
+                    "Diagnostic index generation could not be verified; results withheld"
+                        .to_owned(),
+                )
+            })?;
+        let (Some(db_generation), Some(index_generation)) =
+            (status.db_generation, status.index_generation)
+        else {
+            return Err(SearchError::Index(
+                "Diagnostic index generation is incomplete; results withheld".to_owned(),
+            ));
+        };
+        index_freshness = Some(SearchIndexFreshness {
+            stale: status.health != IndexHealth::Ready,
+            db_generation: Some(db_generation),
+            index_generation: Some(index_generation),
+            generation_gap: Some(db_generation.saturating_sub(index_generation)),
+            large_gap: search_index_gap_is_large(db_generation, index_generation),
+        });
+    }
     let source_mode = if resolve_runtime_source_mode {
         resolve_source_mode(
             options,

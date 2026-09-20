@@ -86,7 +86,7 @@ pub(super) fn admit_memories(
         if connection
             .get_memory_seal(&row.id)
             .map_err(|_| admission_error())?
-            .is_some()
+            .is_some_and(|seal| seal.is_sealed())
         {
             continue;
         }
@@ -652,6 +652,65 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_admission_preserves_verified_reveals_without_reviving_closed_seals() -> TestResult
+    {
+        let (_temp, options, db) = fixture()?;
+        db.insert_memory(VISIBLE, &input(WORKSPACE, PHRASE))
+            .map_err(|e| e.to_string())?;
+        db.insert_memory(HIDDEN, &input(WORKSPACE, PHRASE))
+            .map_err(|e| e.to_string())?;
+        for id in [VISIBLE, HIDDEN] {
+            db.insert_memory_seal(
+                id,
+                &crate::models::memory_seal_commitment(PHRASE.as_bytes()),
+                "2026-07-01T00:00:00Z",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let mut closed = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
+        admit_memories(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut closed,
+            &mut Vec::new(),
+            Some(&db),
+        )
+        .map_err(|e| e.to_string())?;
+        assert_arms(&closed, &[]);
+        assert!(closed.final_hits.is_empty());
+        assert!(
+            db.mark_memory_seal_revealed(VISIBLE, "2026-07-02T00:00:00Z")
+                .map_err(|e| e.to_string())?
+        );
+        let mut revealed = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
+        admit_memories(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut revealed,
+            &mut Vec::new(),
+            Some(&db),
+        )
+        .map_err(|e| e.to_string())?;
+        assert_arms(&revealed, &[VISIBLE]);
+        assert_eq!(
+            revealed
+                .final_hits
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            [VISIBLE]
+        );
+        assert_eq!(revealed.pre_fusion.lexical.results[0].rank, 2);
+        assert!(
+            db.get_memory_seal(HIDDEN)
+                .map_err(|e| e.to_string())?
+                .ok_or("closed seal")?
+                .is_sealed()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn diagnostic_admission_withholds_on_source_failure_and_preserves_cancellation() -> TestResult {
         let (_temp, options, db) = fixture()?;
         db.insert_memory(VISIBLE, &input(WORKSPACE, PHRASE))
@@ -832,6 +891,16 @@ mod tests {
             .map_err(|e| e.to_string())??;
             let before_retained = index_bytes(&retained)?;
             let report = run_diag_search(&options).map_err(|e| format!("{corruption}: {e}"))?;
+            let serialized = report.data_json();
+            assert_eq!(
+                serialized["final"]["indexFreshness"]["dbGeneration"],
+                generation
+            );
+            assert_eq!(
+                serialized["final"]["indexFreshness"]["indexGeneration"],
+                generation
+            );
+            assert_eq!(serialized["final"]["indexFreshness"]["stale"], false);
             assert_eq!(
                 report
                     .final_report
@@ -1036,6 +1105,7 @@ mod tests {
         let freshness = report.final_report.index_freshness.ok_or("freshness")?;
         assert_eq!(freshness.db_generation, Some(generation));
         assert_eq!(freshness.index_generation, Some(generation));
+        assert!(!freshness.stale);
         snapshot.commit().map_err(|e| e.to_string())?;
         let next = run_diag_search(&options).map_err(|e| e.to_string())?;
         assert!(next.pre_fusion.lexical.results.is_empty());
