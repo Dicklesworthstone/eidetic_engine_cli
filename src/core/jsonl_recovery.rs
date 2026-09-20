@@ -147,6 +147,12 @@ impl ExpectedRecords {
             {
                 return Err(mismatch("memory fields differ"));
             }
+            if typed_fields_conflict_issue(connection, expected)
+                .map_err(unreadable)?
+                .is_some()
+            {
+                return Err(mismatch("typed memory fields differ"));
+            }
             if connection
                 .get_memory_logical_id(&expected.id)
                 .map_err(unreadable)?

@@ -18,6 +18,10 @@ use super::BackupTablePolicy;
 mod history;
 pub(super) use history::HistoryExpectation;
 
+#[cfg(test)]
+#[path = "backup_typed_memory_recovery_tests.rs"]
+mod typed_memory_tests;
+
 // One registry owns both capture policy and restore obligations. Rebuildable
 // indexes, host credentials, locks and migration metadata deliberately do not
 // appear here. Empty durable tables still need an explicit inventory entry.
