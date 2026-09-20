@@ -24,7 +24,15 @@ jobs:
     permissions:
       contents: write
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      # bd-niay4. PIN BOTH HALVES OR NEITHER. RUSTUP_TOOLCHAIN overrides the
+      # action's install AT INVOCATION TIME, so a bare rustfmt/cargo later in
+      # this job resolves through it, not through `toolchain:` below. Pinning
+      # only the action installs components onto nightly-2026-08-31 and then
+      # invokes floating nightly, which does not have them:
+      #   error: 'rustfmt' is not installed for the toolchain 'nightly-x86_64-...'
+      # That was d315cdc7f, repaired at 021a033b8. Keep equal to
+      # rust-toolchain.toml's `channel`; the action does not read that file.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -39,7 +47,7 @@ jobs:
         run: grep -Fq 'MAX_PREFETCH_RESIDENT_HISTORIES' src/core/cass_prefetch.rs
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@v4
         id: cache
