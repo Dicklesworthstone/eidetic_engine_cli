@@ -1,0 +1,109 @@
+name: Workflow memory recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/workflow-recovery-20260920.patch
+      - .github/workflows/workflow-recovery-20260920.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: workflow-memory-recovery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: workflow-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            workflow-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            prefetch-execution-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            prefetch-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply and test workflow membership before publishing production
+        run: |
+          set -euo pipefail
+          patch=scripts/delivery/workflow-recovery-20260920.patch
+          paths=(src/core/backup.rs src/core/backup_evidence_export.rs src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/memory.rs src/models/jsonl.rs src/output/jsonl_export.rs src/core/jsonl_workflow_tests.rs)
+          if ! grep -Fq 'mod workflow_tests;' src/core/jsonl_import.rs; then
+            git apply --check "$patch"
+            git apply "$patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          run_group() {
+            local filter=$1 expected=$2 label=$3 status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/workflow-$label.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/workflow-$label.log"
+            test "$status" -eq 0
+            if [ "$expected" = any ]; then
+              grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/workflow-$label.log"
+            else
+              grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/workflow-$label.log"
+            fi
+          }
+          run_group core::jsonl_import::workflow_tests 6 membership
+          run_group core::jsonl_import::recovery::tests any publication
+          run_group core::backup::evidence_export::tests 6 identities
+          run_group core::jsonl_import::typed_fields_tests any typed-fields
+          cargo check --locked --all-targets > "$RUNNER_TEMP/workflow-check.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/workflow-check.log"; exit 1; }
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/workflow-clippy.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/workflow-clippy.log"; exit 1; }
+          tail -n 20 "$RUNNER_TEMP/workflow-check.log"
+          tail -n 20 "$RUNNER_TEMP/workflow-clippy.log"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'fix(recovery): preserve workflow membership across memory export and import' -m 'Carry optional workflow IDs through backup capture, schema validation, privacy projection, import, duplicate checks and the source-bound recovery fence. Share the existing fixed-point identity projection with task/baseline history; reject invalid or secret-only carriers before destination creation. Six new workflow tests, recovery and identity controls, typed-sidecar controls, all-target checking and production Clippy passed before this commit.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/workflow-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/workflow-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: workflow-recovery-source-and-results
+          path: ${{ runner.temp }}/workflow-*
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

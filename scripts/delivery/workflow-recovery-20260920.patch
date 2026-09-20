@@ -1,0 +1,206 @@
+diff --git a/src/core/backup.rs b/src/core/backup.rs
+--- a/src/core/backup.rs
++++ b/src/core/backup.rs
+@@ -5818,6 +5818,9 @@
+         .created_at(memory.created_at.clone())
+         .redacted(false);
+     builder = builder.updated_at(memory.updated_at.clone());
++    if let Some(workflow_id) = &memory.workflow_id {
++        builder = builder.workflow_id(workflow_id.clone());
++    }
+     if let Some(trust_subclass) = &memory.trust_subclass {
+         builder = builder.trust_subclass(trust_subclass.clone());
+     }
+diff --git a/src/core/backup_evidence_export.rs b/src/core/backup_evidence_export.rs
+--- a/src/core/backup_evidence_export.rs
++++ b/src/core/backup_evidence_export.rs
+@@ -27,11 +27,7 @@
+ /// Identity keys are not prose. Preserve the precise opaque format emitted by
+ /// this projection, never an arbitrary string merely beginning with `key_`.
+ pub(super) fn redact_identity(key: &str, level: RedactionLevel) -> String {
+-    if canonical_digest(key, "key_") || redact_content(key, level) == key {
+-        key.to_owned()
+-    } else {
+-        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
+-    }
++    crate::output::jsonl_export::redact_recovery_identity(key, level)
+ }
+ 
+ pub(super) fn redact_evidence(
+diff --git a/src/core/jsonl_import.rs b/src/core/jsonl_import.rs
+--- a/src/core/jsonl_import.rs
++++ b/src/core/jsonl_import.rs
+@@ -14,6 +14,9 @@
+ #[cfg(test)]
+ #[path = "jsonl_typed_fields_tests.rs"]
+ mod typed_fields_tests;
++#[cfg(test)]
++#[path = "jsonl_workflow_tests.rs"]
++mod workflow_tests;
+ 
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::fmt;
+@@ -631,6 +634,7 @@
+ struct ValidatedMemory<'a> {
+     record: &'a ExportMemoryRecord,
+     typed_fields_json: Option<String>,
++    workflow_id: Option<String>,
+     id: String,
+     logical_id: String,
+     level: MemoryLevel,
+@@ -1461,6 +1465,9 @@
+     if existing.workspace_id != incoming.input.workspace_id {
+         divergences.push("workspace_id");
+     }
++    if existing.workflow_id != incoming.input.workflow_id {
++        divergences.push("workflow_id");
++    }
+     if existing.content != incoming.input.content {
+         divergences.push("content");
+     }
+@@ -2274,6 +2281,25 @@
+             )
+         })
+         .transpose()?;
++    // Use the native remember boundary, including its whitespace and UTF-8
++    // byte-length semantics. Validate before opening/creating the destination.
++    let workflow_id = crate::core::memory::parse_workflow_id(memory.workflow_id.as_deref())
++        .map_err(|_| {
++            JsonlImportIssue::error(
++                None,
++                "invalid_memory_workflow_id",
++                "workflow id must be nonblank and at most 128 bytes after trimming",
++            )
++        })?;
++    if workflow_id.as_deref().is_some_and(|workflow| {
++        crate::policy::redact_secret_like_content(workflow).redacted
++    }) {
++        return Err(JsonlImportIssue::error(
++            None,
++            "memory_workflow_id_contains_secret",
++            "workflow id contains secrets; redact before import",
++        ));
++    }
+     let bayes_posterior = exported_bayes_posterior(memory)?;
+     for (field, value) in [
+         ("created_at", Some(memory.created_at.as_str())),
+@@ -2301,6 +2327,7 @@
+     Ok(ValidatedMemory {
+         record: memory,
+         typed_fields_json,
++        workflow_id,
+         logical_id: id.clone(),
+         id,
+         level,
+@@ -2396,7 +2423,7 @@
+             level: validated.level.as_str().to_owned(),
+             kind: validated.kind.as_str().to_owned(),
+             content: validated.content.as_str().to_owned(),
+-            workflow_id: None,
++            workflow_id: validated.workflow_id,
+             confidence: validated
+                 .confidence
+                 .unwrap_or_else(|| trust_class.initial_confidence()),
+diff --git a/src/core/jsonl_recovery.rs b/src/core/jsonl_recovery.rs
+--- a/src/core/jsonl_recovery.rs
++++ b/src/core/jsonl_recovery.rs
+@@ -461,6 +461,7 @@
+         let fixture = Fixture::new(&rows)?;
+         for (field, value) in [
+             ("content", json!("Different recovered body.")),
++            ("workflow_id", json!("release-workflow")),
+             ("confidence", json!(0.1)),
+             ("utility", json!(0.2)),
+             ("importance", json!(0.3)),
+diff --git a/src/core/memory.rs b/src/core/memory.rs
+--- a/src/core/memory.rs
++++ b/src/core/memory.rs
+@@ -3926,7 +3926,7 @@
+     }
+ }
+ 
+-fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
++pub(crate) fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
+     let Some(raw) = workflow_id else {
+         return Ok(None);
+     };
+diff --git a/src/models/jsonl.rs b/src/models/jsonl.rs
+--- a/src/models/jsonl.rs
++++ b/src/models/jsonl.rs
+@@ -967,6 +967,10 @@
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub logical_id: Option<String>,
+     pub workspace_id: String,
++    /// Workflow membership is durable state, not a derived search hint. Older
++    /// exports omit it; its presence never grants workflow or producer trust.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub workflow_id: Option<String>,
+     pub level: String,
+     pub kind: String,
+     pub content: String,
+@@ -1034,6 +1038,7 @@
+     memory_id: Option<String>,
+     logical_id: Option<String>,
+     workspace_id: Option<String>,
++    workflow_id: Option<String>,
+     level: Option<String>,
+     kind: Option<String>,
+     content: Option<String>,
+@@ -1072,6 +1077,12 @@
+ 
+ impl ExportMemoryRecordBuilder {
+     #[must_use]
++    pub fn workflow_id(mut self, workflow_id: impl Into<String>) -> Self {
++        self.workflow_id = Some(workflow_id.into());
++        self
++    }
++
++    #[must_use]
+     pub fn typed_fields(mut self, typed_fields: serde_json::Value) -> Self {
+         self.typed_fields = Some(typed_fields);
+         self
+@@ -1303,6 +1314,7 @@
+             schema: EXPORT_MEMORY_SCHEMA_V1.to_owned(),
+             memory_id: required_string(ExportRecordType::Memory, "memory_id", self.memory_id)?,
+             logical_id: self.logical_id,
++            workflow_id: self.workflow_id,
+             workspace_id: required_string(
+                 ExportRecordType::Memory,
+                 "workspace_id",
+diff --git a/src/output/jsonl_export.rs b/src/output/jsonl_export.rs
+--- a/src/output/jsonl_export.rs
++++ b/src/output/jsonl_export.rs
+@@ -598,12 +598,33 @@
+     }
+ }
+ 
++/// Project a durable identity without collapsing distinct owners into a prose
++/// placeholder. Reuse exact canonical aliases across independent backups, and
++/// share this projection with task/baseline history so restored joins survive.
++/// A lookalike prefix alone is not an alias and confers no trust.
++pub(crate) fn redact_recovery_identity(key: &str, level: RedactionLevel) -> String {
++    let canonical = key.strip_prefix("key_").is_some_and(|suffix| {
++        suffix.len() == 64
++            && suffix
++                .bytes()
++                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++    });
++    if canonical || redact_content(key, level) == key {
++        key.to_owned()
++    } else {
++        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
++    }
++}
++
+ /// Apply redaction to an export memory record.
+ #[must_use]
+ pub fn redact_memory_record(
+     mut record: ExportMemoryRecord,
+     level: RedactionLevel,
+ ) -> ExportMemoryRecord {
++    if let Some(workflow_id) = record.workflow_id.as_mut() {
++        *workflow_id = redact_recovery_identity(workflow_id, level);
++    }
+     if let Some(fields) = record.typed_fields.as_mut() {
+         typed_fields::redact(fields, &record.kind, level);
+     }
