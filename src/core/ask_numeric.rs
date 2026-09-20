@@ -19,11 +19,21 @@ struct Claim {
 }
 
 /// Detect a different scalar setting in the same affirmative claim.
-/// The caller supplies the shared ask polarity detector's result; this helper
-/// never invents a second, subtly different vocabulary of negation words.
+/// Prose uses the caller's shared polarity detector, not another vocabulary
+/// of negation words. Exact setting syntax instead binds identifiers as keys:
+/// `NO_RETRY=1` is an assignment, not an English prohibition.
 /// Decimal canonicalization uses strings, never floating point or integer
 /// parsing, so sign, fractional precision and arbitrarily large values survive.
 pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negated: bool) -> bool {
+    match (setting_claim(left), setting_claim(right)) {
+        (Some(left), Some(right)) => {
+            return left.template == right.template && left.value != right.value;
+        }
+        // Do not equate a code identifier with a similarly worded prose claim,
+        // or infer how an expression relates to a literal assignment.
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
     if left_negated || right_negated {
         return false;
     }
@@ -31,6 +41,62 @@ pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negat
         return false;
     };
     left.template == right.template && left.value != right.value
+}
+
+/// One complete, single-line `key=value` or `key: value` statement.
+/// Whitespace around the operator is immaterial; key spelling, namespace,
+/// operator and unit remain exact. A YAML-style colon must be followed by
+/// horizontal whitespace so a URI, host:port or clock is not an assignment.
+/// This deliberately does not parse expressions, shell programs or documents.
+fn setting_claim(text: &str) -> Option<Claim> {
+    let text = text.trim();
+    let text = text
+        .strip_suffix('.')
+        .or_else(|| text.strip_suffix(';'))
+        .unwrap_or(text)
+        .trim_end();
+    let ticks = text.bytes().take_while(|&byte| byte == b'`').count();
+    let text = if ticks == 0 {
+        text
+    } else {
+        let closing = text.bytes().rev().take_while(|&byte| byte == b'`').count();
+        if closing != ticks || ticks >= text.len() - closing {
+            return None;
+        }
+        &text[ticks..text.len() - closing]
+    };
+    if text.contains(['\r', '\n']) {
+        return None;
+    }
+    let (key, operator, value) = if let Some((key, value)) = text.split_once('=') {
+        (key, "=", value)
+    } else {
+        let (key, value) = text.split_once(':')?;
+        if !value.starts_with([' ', '\t']) {
+            return None;
+        }
+        (key, ":", value)
+    };
+    let key = key.trim();
+    let identifier = key.strip_prefix("--").unwrap_or(key);
+    if !identifier.split('.').all(|part| {
+        let mut bytes = part.bytes();
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }) {
+        return None;
+    }
+    let (value, unit) = scalar(value.trim())?;
+    Some(Claim {
+        template: vec![
+            Token::Text(key.to_owned()),
+            Token::Text(operator.to_owned()),
+            Token::Scalar { unit },
+        ],
+        value,
+    })
 }
 
 fn claim(text: &str) -> Option<Claim> {
@@ -301,5 +367,179 @@ mod tests {
             "The power setting is 10MW.",
             "The power setting is 20mW."
         ));
+    }
+
+    #[test]
+    fn compact_and_spaced_settings_expose_the_same_scalar_slot() {
+        for (left, right) in [
+            ("PORT=5432", "PORT = 6432"),
+            ("port: 5432", "port : 6432"),
+            ("db.timeout = -30ms", "db.timeout=30ms"),
+            ("--timeout=1.25s", "--timeout = 1.75s"),
+            ("`PORT=5432`.", "``PORT = 6432``"),
+            ("PORT=5432;", "PORT=6432."),
+            ("limit=9007199254740992", "limit=9007199254740993"),
+        ] {
+            assert!(disagreement(left, right), "{left} / {right}");
+            assert!(disagreement(right, left), "symmetric settings");
+        }
+    }
+
+    #[test]
+    fn equivalent_setting_literals_do_not_manufacture_conflicts() {
+        for (left, right) in [
+            ("PORT=+005432", "PORT = 5432.0"),
+            ("timeout: -0ms", "timeout : +00.000ms"),
+            ("ratio=1.2500", "ratio=+01.25"),
+            ("`limit=10`", "limit = 10;"),
+        ] {
+            assert!(!disagreement(left, right), "{left} / {right}");
+        }
+    }
+
+    #[test]
+    fn setting_keys_keep_case_namespace_operator_and_unit_identity() {
+        for (left, right) in [
+            ("PORT=5432", "port=6432"),
+            ("production.port=5432", "staging.port=6432"),
+            ("node1.port=5432", "node2.port=6432"),
+            ("port=5432", "--port=6432"),
+            ("port=5432", "port: 6432"),
+            ("timeout=30ms", "timeout=40s"),
+            ("power=10MW", "power=20mW"),
+            ("port=5432", "The port is 6432."),
+        ] {
+            assert!(!disagreement(left, right), "{left} / {right}");
+        }
+    }
+
+    #[test]
+    fn a_negation_word_inside_a_setting_key_is_not_a_prohibition() {
+        for key in ["NO_RETRY", "cache.invalid_limit", "--no-retry"] {
+            let left = format!("{key}=1");
+            let right = format!("{key}=2");
+            assert!(crate::core::ask::has_negation(&left));
+            assert!(conflicts(&left, true, &right, true));
+        }
+        assert!(!conflicts(
+            "Do not use PORT=5432.",
+            true,
+            "Do not use PORT=6432.",
+            true,
+        ));
+    }
+
+    #[test]
+    fn endpoints_operators_expressions_and_multiple_assignments_are_not_guessed() {
+        for (left, right) in [
+            ("server:5432", "server:6432"),
+            ("12:30", "12:40"),
+            ("https://host:5432", "https://host:6432"),
+            ("PORT==5432", "PORT==6432"),
+            ("PORT!=5432", "PORT!=6432"),
+            ("PORT+=1", "PORT+=2"),
+            ("PORT=5432+1", "PORT=6432+1"),
+            ("PORT=5432 or 6432", "PORT=7432 or 8432"),
+            ("PORT=5432 RETRIES=1", "PORT=6432 RETRIES=2"),
+            ("PORT=5432\nRETRIES=1", "PORT=6432\nRETRIES=2"),
+            ("PORT=1e3", "PORT=2e3"),
+            ("version=1.2.3", "version=1.2.4"),
+            ("[0]=1", "[0]=2"),
+            ("`PORT=5432", "`PORT=6432"),
+        ] {
+            assert!(setting_claim(left).is_none(), "unsupported setting: {left}");
+            assert!(setting_claim(right).is_none(), "unsupported setting: {right}");
+            assert!(!disagreement(left, right), "{left} / {right}");
+        }
+    }
+
+    #[test]
+    fn public_ask_exposes_setting_conflicts_with_exact_citations() {
+        use crate::core::ask::{AskCandidate, AskRequest, ask_data_json, evaluate_ask};
+
+        for (left, right, question) in [
+            ("PORT=5432", "PORT = 6432", "PORT"),
+            ("timeout: 30ms", "timeout: 40ms", "timeout"),
+            ("NO_RETRY=1", "NO_RETRY=2", "NO_RETRY"),
+        ] {
+            let mut candidates: Vec<_> = [left, right]
+                .into_iter()
+                .enumerate()
+                .map(|(index, content)| AskCandidate {
+                    memory_id: format!("setting-{index}"),
+                    content: content.to_owned(),
+                    confidence: 1.0,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some(format!("manual://settings/{index}")),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    team_provenance: None,
+                })
+                .collect();
+            let request = AskRequest {
+                question: question.to_owned(),
+                ..AskRequest::default()
+            };
+            let report = evaluate_ask(&request, &candidates);
+            assert!(!report.abstained && !report.extractiveness_violated);
+            assert!(report.conflict_detected && report.conflict_link.is_none());
+            assert!(report.answer_text.is_none() && report.citations.is_empty());
+            let sides = report.sides.as_ref().expect("both conflicting settings");
+            assert_eq!(sides.len(), 2);
+            for citation in sides.iter().flat_map(|side| &side.citations) {
+                let original = candidates
+                    .iter()
+                    .find(|candidate| candidate.memory_id == citation.memory_id)
+                    .expect("cited source");
+                assert_eq!(
+                    original.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str())
+                );
+            }
+            let expected = ask_data_json(&report);
+            candidates.reverse();
+            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
+        }
+    }
+
+    #[test]
+    fn public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap() {
+        use crate::core::ask::{ASK_CANDIDATE_SCAN_CAP, AskCandidate, AskRequest, evaluate_ask};
+
+        let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
+            .map(|index| AskCandidate {
+                memory_id: format!("a-setting-{index:05}"),
+                content: "PORT=5432".to_owned(),
+                confidence: 1.0,
+                trust_class: "human_explicit".to_owned(),
+                provenance_uri: Some(format!("manual://settings/{index}")),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                team_provenance: None,
+            })
+            .collect();
+        let mut opposing = candidates[0].clone();
+        opposing.memory_id = "z-conflicting-setting".to_owned();
+        opposing.content = "PORT = 6432".to_owned();
+        candidates.push(opposing);
+        let report = evaluate_ask(
+            &AskRequest {
+                question: "PORT".to_owned(),
+                ..AskRequest::default()
+            },
+            &candidates,
+        );
+        assert!(!report.abstained && report.conflict_detected);
+        assert!(report.answer_text.is_none());
+        assert!(
+            report
+                .sides
+                .as_ref()
+                .expect("both settings")
+                .iter()
+                .flat_map(|side| &side.citations)
+                .any(|citation| citation.memory_id == "z-conflicting-setting"
+                    && citation.text == "PORT = 6432")
+        );
     }
 }
