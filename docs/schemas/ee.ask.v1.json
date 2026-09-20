@@ -29,7 +29,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "Overall confidence: top_span_score × corroboration × (1 − contradiction_penalty), clamped to [0,1]."
+      "description": "Overall heuristic confidence: topSpanScore × (1 − contradictionPenalty), clamped to [0,1]. topSpanScore already includes corroboration; do not multiply by that component again. This is not a calibrated probability."
     },
     "confidenceCalibration": {
       "type": "object",
@@ -90,7 +90,7 @@
     },
     "sides": {
       "type": ["array", "null"],
-      "description": "Present in conflict mode. Each side is a self-contained extractive answer with its own citations.",
+      "description": "Present in conflict mode. Each side is a self-contained extractive answer with its own citations. Supported differing scalar assignments for the same affirmative statement use query_match and numeric_alternative; this inference does not fabricate a conflictLink.",
       "items": {
         "$ref": "#/$defs/side"
       }
@@ -279,8 +279,8 @@
       "properties": {
         "label": {
           "type": "string",
-          "enum": ["affirming", "negating", "query_match", "linked_opposition"],
-          "description": "Which side of the conflict this represents."
+          "enum": ["affirming", "negating", "query_match", "linked_opposition", "numeric_alternative"],
+          "description": "Which side of the conflict this represents. numeric_alternative is an inferred, supported alternative scalar setting for the query-matched statement, not a stored relation or a claim that one side is true."
         },
         "answerText": {
           "type": "string",
