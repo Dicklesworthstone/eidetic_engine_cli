@@ -114,6 +114,28 @@ harness_init() {
         printf 'e2e_harness: reason. Build a native binary and pin EE_BIN to it.\n' >&2
         exit 2
     fi
+    # bd-kfhku. The format check above proves the binary RUNS here. It does not
+    # prove it is the binary this tree describes. Measured 2026-09-18:
+    # scripts/e2e_sandbox.sh reported "8 pass, 0 fail, PASS" with
+    # EE_BIN=~/.local/bin/ee at 0.14.2 against a 0.15.2 Cargo.toml -- eight
+    # assertions about CURRENT behaviour, certified against a binary two minor
+    # versions behind, and its own events.jsonl recorded the binary it used.
+    #
+    # ee_require_current_binary (bd-smxdr, 2026-09-16) has existed and worked
+    # since before that run. It was exercised only by its own self-test, so it
+    # was proven correct and never applied. A stage that TESTS a guard is not a
+    # gate that USES one.
+    #
+    # NO OPT-OUT, deliberately, and for the same reason the format check has
+    # none: an env var that waives this would be set once and then inherited
+    # forever, and a waived check reports the stale binary's behaviour as this
+    # suite's result -- which is the exact failure being closed. If a run needs
+    # a different binary it can pin EE_BIN to one that matches the tree.
+    if ! ee_require_current_binary "$EE_BIN" "e2e_harness"; then
+        printf 'e2e_harness: refusing -- assertions against a stale binary\n' >&2
+        printf 'e2e_harness: describe THAT binary, not this source tree.\n' >&2
+        exit 2
+    fi
     export EE_BIN
     local run_id="${EE_E2E_RUN_ID:-$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')}"
     LOG_DIR="${LOG_DIR:-$REPO_ROOT/tests/logs/wizard_e2e/${HARNESS_TEST_NAME}.${run_id}.${BASHPID:-$$}}"

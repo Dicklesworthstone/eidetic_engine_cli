@@ -71,6 +71,17 @@ require_ee_binary() {
         echo "    Build a native binary and pin EE_BINARY to it." >&2
         exit 2
     fi
+    # bd-kfhku. The format check proves the binary RUNS here; it does not prove
+    # it is the binary this tree describes. Eleven baselined orphans resolve
+    # through this library, and an epic that certifies current behaviour against
+    # an older ee reports THAT binary's behaviour under this tree's name.
+    # Same guard, same reason, as scripts/lib/e2e_harness.sh -- and no opt-out,
+    # for the same reason the format check has none.
+    if ! ee_require_current_binary "$EE_BINARY" "j3"; then
+        echo "    refusing -- assertions against a stale binary describe THAT" >&2
+        echo "    binary, not this source tree." >&2
+        exit 2
+    fi
 }
 
 # Report the binary this epic RESOLVED, so the parent's attestation is a
