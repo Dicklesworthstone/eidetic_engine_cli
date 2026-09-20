@@ -158,7 +158,23 @@ audit() {
         echo "[toolchain-pins] FAIL — toolchain pinning moved the wrong way:" >&2
         local p
         for p in "${problems[@]}"; do echo "    $p" >&2; done
-        echo "[toolchain-pins] fix: add 'toolchain: ${channel}' to the with: block of each install." >&2
+        # bd-niay4: THE REMEDIATION MUST NAME BOTH HALVES. This message used to
+        # say only "add toolchain: <channel> to the with: block". Following it
+        # literally on a job that also sets a floating RUSTUP_TOOLCHAIN pins the
+        # install and leaves the INVOCATION floating, which is d315cdc7f: the
+        # components land on the dated toolchain and the bare rustfmt/cargo runs
+        # on the floating one, which does not have them. A gate whose advice
+        # causes a regression is worse than a gate with no advice, because the
+        # fixer has every reason to trust it.
+        echo "[toolchain-pins] fix: PIN BOTH HALVES, OR NEITHER -- in the same commit:" >&2
+        echo "[toolchain-pins]   1. 'toolchain: ${channel}' in the action's with: block, AND" >&2
+        echo "[toolchain-pins]   2. any job-level 'env: RUSTUP_TOOLCHAIN:' set to ${channel} too." >&2
+        echo "[toolchain-pins] RUSTUP_TOOLCHAIN overrides the action AT INVOCATION TIME, so pinning" >&2
+        echo "[toolchain-pins] only the with: block installs components onto ${channel} and then runs" >&2
+        echo "[toolchain-pins] a bare rustfmt/cargo on floating nightly, which does not have them:" >&2
+        echo "[toolchain-pins]   error: 'rustfmt' is not installed for the toolchain 'nightly-...'" >&2
+        echo "[toolchain-pins] Working examples already in this repo: ask-evidence-20260918.yml," >&2
+        echo "[toolchain-pins] mcp-ask-20260918.yml, resume-coherence-20260919.yml." >&2
         echo "[toolchain-pins] '@nightly' in the uses: line is the ACTION REF and does not pin anything." >&2
         echo "[toolchain-pins] do NOT add a baseline row to silence a new finding." >&2
         return 1
