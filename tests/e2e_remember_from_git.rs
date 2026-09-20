@@ -591,3 +591,250 @@ pub const CAPTURE_TEST_OPENAI_KEY: &str = "{RAW_SECRET}";
         }),
     )
 }
+
+// ---------------------------------------------------------------------------
+// bd-iiva5 MEASUREMENT. Prints, does not assert.
+// ---------------------------------------------------------------------------
+
+/// Which input makes `remember --from-diff` return PolicyDenied, if any.
+///
+/// bd-iiva5 reports `--from-commit HEAD --apply` succeeding while
+/// `--from-diff HEAD~1` exits 7, and lists three untested candidates: the
+/// detectable token, the sub-threshold token, or having two tokens. Reading
+/// the code first turned up two more the bead does not name:
+///
+///  4. THE TWO COMMANDS DO NOT SEE THE SAME CONTENT. `commit_input` diffs the
+///     commit against its parent; `diff_input(Some(ref))` resolves an
+///     expression with no `..` to `(base, None)`
+///     (src/core/memory_git_capture_repo.rs:135-137), and a `None` target is
+///     the WORKING TREE. On a dirty tree those are different content sets, and
+///     this bead's fixture was mid-change.
+///  5. THE FLAGS DIFFER. The reported commands were `--from-commit HEAD
+///     --apply` versus `--from-diff HEAD~1` with no `--apply`.
+///
+/// Candidate 1 is additionally in doubt before running anything: the existing
+/// test in this file already puts RAW_SECRET (a 62-character suffix, well over
+/// the 40 minimum at src/policy/mod.rs:2246) in the committed fixture and then
+/// asserts `--from-diff HEAD~1` SUCCEEDS.
+///
+/// This prints a matrix rather than asserting one, because the bead's own
+/// instruction is to separate the candidates and "most plausible" is how the
+/// last three findings here turned out to be something else. The assertion
+/// comes after the measurement says what to assert.
+#[test]
+fn remember_git_capture_modes_agree_on_secret_handling() -> TestResult {
+    // Suffix lengths straddle the 40-character minimum for `sk-proj-`.
+    // Varied alphabet, not a repeated character, so entropy checks behave.
+    const DETECTABLE: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"; // 44
+    const SUB_THRESHOLD: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABC"; //  39
+
+    struct Variant {
+        label: &'static str,
+        committed: String,
+        dirty: Option<String>,
+    }
+
+    let body = |tokens: &[&str]| -> String {
+        let mut text = String::from("pub fn f() -> &'static str {\n    \"x\"\n}\n");
+        for (index, token) in tokens.iter().enumerate() {
+            text.push_str(&format!(
+                "pub const K{index}: &str = \"sk-proj-{token}\";\n"
+            ));
+        }
+        text
+    };
+
+    let variants = vec![
+        Variant {
+            label: "detectable-only",
+            committed: body(&[DETECTABLE]),
+            dirty: None,
+        },
+        Variant {
+            label: "subthreshold-only",
+            committed: body(&[SUB_THRESHOLD]),
+            dirty: None,
+        },
+        Variant {
+            label: "both-tokens",
+            committed: body(&[DETECTABLE, SUB_THRESHOLD]),
+            dirty: None,
+        },
+        Variant {
+            label: "clean-commit-DIRTY-worktree",
+            committed: body(&[]),
+            dirty: Some(body(&[DETECTABLE])),
+        },
+    ];
+
+    // (variant, mode, apply) -> did the sub-threshold token survive?
+    let mut observed: Vec<((&'static str, &'static str, bool), bool)> = Vec::new();
+    eprintln!("\n=== bd-iiva5 MATRIX (variant | mode | apply | exit | errorCode) ===");
+    for variant in &variants {
+        // The workspace IS the repo: git capture resolves the repository from
+        // the workspace path (src/core/memory.rs:812), there is no --repo flag.
+        let repo = unique_workspace(&format!("iiva5-{}", variant.label))?;
+        let workspace = repo.clone();
+        let log_path = repo.join("events.jsonl");
+
+        run_logged(
+            &log_path,
+            "git",
+            &["init", "--initial-branch=main"],
+            Some(&repo),
+        )?;
+        run_git(&log_path, &repo, &["config", "user.email", "a@b.test"])?;
+        run_git(&log_path, &repo, &["config", "user.name", "iiva5"])?;
+
+        // Commit 1: no tokens, so HEAD~1 exists and is clean.
+        write_file(&repo.join("src/lib.rs"), "pub fn base() {}\n")?;
+        run_git(&log_path, &repo, &["add", "."])?;
+        run_git(
+            &log_path,
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        )?;
+
+        // Commit 2: the variant's committed content.
+        write_file(&repo.join("src/lib.rs"), &variant.committed)?;
+        run_git(&log_path, &repo, &["add", "."])?;
+        run_git(
+            &log_path,
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "variant"],
+        )?;
+
+        // Optional uncommitted change, for candidate 4.
+        if let Some(dirty) = variant.dirty.as_deref() {
+            write_file(&repo.join("src/lib.rs"), dirty)?;
+        }
+
+        init_ee_workspace(&workspace, &log_path)?;
+        let workspace_arg = workspace
+            .to_str()
+            .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+        for (mode_flag, reference) in [("--from-commit", "HEAD"), ("--from-diff", "HEAD~1")] {
+            for apply in [false, true] {
+                let mut args = vec![
+                    "--workspace",
+                    workspace_arg,
+                    "--json",
+                    "remember",
+                    mode_flag,
+                    reference,
+                ];
+                if apply {
+                    args.push("--apply");
+                }
+                let output = run_ee_logged(&log_path, &args)?;
+                let parsed: Option<Value> = serde_json::from_slice(&output.stdout).ok();
+                let code = parsed
+                    .as_ref()
+                    .and_then(|value| value.pointer("/error/code").and_then(Value::as_str))
+                    .unwrap_or(if output.status.success() { "-" } else { "?" })
+                    .to_owned();
+                // `data.content` is the captured body (see `content()` above).
+                // Its LENGTH is the empty-world guard: a zero-length capture
+                // would make every leak column below read "clean" for the
+                // wrong reason.
+                let body = parsed
+                    .as_ref()
+                    .and_then(|value| value.pointer("/data/content").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned();
+                // Whole stdout, not just the body: a leak anywhere in the
+                // response is a leak.
+                let whole = String::from_utf8_lossy(&output.stdout);
+                let detectable_token = format!("sk-proj-{DETECTABLE}");
+                let sub_token = format!("sk-proj-{SUB_THRESHOLD}");
+                let leak44 = whole.contains(detectable_token.as_str());
+                let leak39 = whole.contains(sub_token.as_str());
+                eprintln!(
+                    "  {:<28} {:<14} apply={:<5} exit={:<3} err={:<14} len={:<5} leak44={:<5} leak39={}",
+                    variant.label,
+                    mode_flag,
+                    apply,
+                    output.status.code().unwrap_or(-1),
+                    code,
+                    body.len(),
+                    leak44,
+                    leak39,
+                );
+
+                // EMPTY-WORLD GUARD. Every leak column below is "clean" for
+                // free if nothing was captured, so prove capture happened
+                // before believing any of them.
+                if body.len() < 200 {
+                    return Err(format!(
+                        "{} {mode_flag} apply={apply}: captured only {} bytes; a near-empty \
+                         capture makes the redaction columns meaningless",
+                        variant.label,
+                        body.len()
+                    ));
+                }
+                // THE SECURITY INVARIANT. A token over the 40-character
+                // minimum (src/policy/mod.rs:2246) must never survive into
+                // the response, in ANY mode.
+                if leak44 {
+                    return Err(format!(
+                        "{} {mode_flag} apply={apply}: a detectable sk-proj- token survived \
+                         redaction into the response",
+                        variant.label
+                    ));
+                }
+                observed.push(((variant.label, mode_flag, apply), leak39));
+            }
+        }
+    }
+    eprintln!("=== end matrix ===\n");
+
+    // THE JOIN. bd-iiva5 reports the two documented routes reaching OPPOSITE
+    // decisions about the same content. This asserts they agree, by comparing
+    // them to EACH OTHER for the same fixture and flags -- not by pinning two
+    // literals, which drift apart silently and would still read as agreement.
+    //
+    // Measured: they agree in all 16 cells. The routes do capture different
+    // VOLUMES (commit ~5.3KB, diff ~10.4KB on the same fixture, because
+    // diff_input with a no-".." expression targets the working tree,
+    // src/core/memory_git_capture_repo.rs:135-137) -- so this is agreement
+    // about secret handling despite genuinely different inputs, which is the
+    // stronger result.
+    let lookup = |label: &str, mode: &str, apply: bool| -> Option<bool> {
+        observed
+            .iter()
+            .find(|((variant, flag, flag_apply), _)| {
+                *variant == label && *flag == mode && *flag_apply == apply
+            })
+            .map(|(_, leak)| *leak)
+    };
+    let mut compared = 0usize;
+    for variant in &variants {
+        for apply in [false, true] {
+            let commit = lookup(variant.label, "--from-commit", apply);
+            let diff = lookup(variant.label, "--from-diff", apply);
+            let (Some(commit), Some(diff)) = (commit, diff) else {
+                return Err(format!(
+                    "{} apply={apply}: missing an arm, so parity was never actually compared",
+                    variant.label
+                ));
+            };
+            if commit != diff {
+                return Err(format!(
+                    "{} apply={apply}: --from-commit and --from-diff disagree about whether a \
+                     secret-shaped token survives (commit={commit}, diff={diff}). That is the \
+                     divergence bd-iiva5 describes.",
+                    variant.label
+                ));
+            }
+            compared += 1;
+        }
+    }
+    // Guard the guard: an empty comparison set would satisfy the loop above.
+    if compared != variants.len() * 2 {
+        return Err(format!(
+            "expected {} parity comparisons, made {compared}",
+            variants.len() * 2
+        ));
+    }
+    Ok(())
+}
