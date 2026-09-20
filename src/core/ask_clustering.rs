@@ -25,7 +25,10 @@ use super::{
 fn numeric_literals(text: &str) -> Vec<String> {
     text.split(|ch: char| {
         ch.is_whitespace()
-            || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`')
+            || matches!(
+                ch,
+                ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`'
+            )
     })
     .filter(|token| token.chars().any(char::is_numeric))
     .map(|token| token.trim_end_matches(['.', '!', '?']).to_lowercase())
@@ -63,7 +66,10 @@ fn cluster_with_groups_and_observer(
         .map(|span| tokenize_for_ask(&span.text))
         .collect();
     let negated: Vec<bool> = spans.iter().map(|span| has_negation(&span.text)).collect();
-    let literals: Vec<_> = spans.iter().map(|span| numeric_literals(&span.text)).collect();
+    let literals: Vec<_> = spans
+        .iter()
+        .map(|span| numeric_literals(&span.text))
+        .collect();
     let mut postings: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, span_terms) in terms.iter().enumerate() {
         // tokenize_for_ask sorts and deduplicates, so each posting contributes
@@ -169,8 +175,18 @@ mod numeric_tests {
             ("10ms", "10s"),
         ] {
             let input = [
-                span("a", &format!("The production database service configuration uses the fixed value {left}.")),
-                span("b", &format!("The production database service configuration uses the fixed value {right}.")),
+                span(
+                    "a",
+                    &format!(
+                        "The production database service configuration uses the fixed value {left}."
+                    ),
+                ),
+                span(
+                    "b",
+                    &format!(
+                        "The production database service configuration uses the fixed value {right}."
+                    ),
+                ),
             ];
             let actual = cluster_spans(&input);
             assert_eq!(actual.len(), 2, "different values {left} / {right}");
@@ -193,7 +209,10 @@ mod numeric_tests {
         let actual = cluster_spans(&input);
         assert_eq!(actual.len(), 1);
         assert_eq!(actual[0].text, content);
-        assert_eq!(actual[0].score.to_bits(), (0.52_f32 * (1.0 + 0.1 * 2.0_f32.ln())).to_bits());
+        assert_eq!(
+            actual[0].score.to_bits(),
+            (0.52_f32 * (1.0 + 0.1 * 2.0_f32.ln())).to_bits()
+        );
         assert!(actual[0].score >= super::super::ASK_MIN_CONFIDENCE_DEFAULT);
     }
 
@@ -213,7 +232,10 @@ mod numeric_tests {
     #[test]
     fn value_order_and_missing_values_are_not_discarded() {
         for (left, right) in [
-            ("Use port 5432 and retry limit 3.", "Use port 3 and retry limit 5432."),
+            (
+                "Use port 5432 and retry limit 3.",
+                "Use port 3 and retry limit 5432.",
+            ),
             ("Use port 5432.", "Use the port."),
         ] {
             assert_ne!(numeric_literals(left), numeric_literals(right));
@@ -233,11 +255,18 @@ mod numeric_tests {
     fn opposite_polarities_with_equal_values_never_corroborate() {
         let input = [
             span("a", "The production database service must use port 5432."),
-            span("b", "The production database service must not use port 5432."),
+            span(
+                "b",
+                "The production database service must not use port 5432.",
+            ),
         ];
         let actual = cluster_spans(&input);
         assert_eq!(actual.len(), 2);
-        assert!(actual.iter().all(|item| item.score.to_bits() == 0.52_f32.to_bits()));
+        assert!(
+            actual
+                .iter()
+                .all(|item| item.score.to_bits() == 0.52_f32.to_bits())
+        );
     }
 
     #[test]
@@ -248,9 +277,17 @@ mod numeric_tests {
             span("c", "The production database service uses port 5432."),
         ];
         let signature = |rows: &[AskSpan]| {
-            cluster_spans(rows).into_iter().map(|item| {
-                (item.memory_id, item.text, item.score.to_bits(), item.provenance_uri)
-            }).collect::<Vec<_>>()
+            cluster_spans(rows)
+                .into_iter()
+                .map(|item| {
+                    (
+                        item.memory_id,
+                        item.text,
+                        item.score.to_bits(),
+                        item.provenance_uri,
+                    )
+                })
+                .collect::<Vec<_>>()
         };
         let expected = signature(&input);
         assert_eq!(expected.len(), 2);
