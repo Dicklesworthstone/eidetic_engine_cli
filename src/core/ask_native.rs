@@ -147,8 +147,9 @@ pub(super) fn markdown_identity(report: &AskReport, id: &str) -> String {
 }
 
 /// Rules and their derivation inputs are correlated, not independent votes.
-/// Excerpts from one CASS session, file or web document are likewise one source
-/// even when they have different entity IDs or line/fragment windows. Explicit
+/// Excerpts from one CASS session, file, web document or identified Agent Mail
+/// message are likewise one source even when they have different entity IDs or
+/// line/fragment windows. Thread-only mail references stay opaque. Explicit
 /// memory references join that same lineage rather than creating new votes.
 /// Join before counting support, including a shared parent outside the corpus.
 /// Root choice and path compression are deterministic.
@@ -214,10 +215,23 @@ fn source_support_groups<'a>(
                 format!("web-document:{document}")
             }
             ProvenanceUri::EeMemory(parent) => parent.to_string(),
+            ProvenanceUri::AgentMail {
+                thread,
+                message: Some(message),
+            } => {
+                // An identified message is one observation, not a new vote for
+                // each memory that quotes it. Keep distinct messages separate:
+                // sharing a thread does not prove shared evidence. Length-prefix
+                // the thread so opaque delimiter-bearing IDs cannot alias.
+                format!("agent-mail-message:{}:{thread}{message}", thread.len())
+            }
             // Opaque capture labels (especially manual://cli) need not name
             // an individual source. Treating them as lineage would collapse
             // unrelated observations just because they used the same tool.
-            ProvenanceUri::AgentMail { .. } | ProvenanceUri::External { .. } => continue,
+            // A mail thread without a message ID has the same ambiguity.
+            ProvenanceUri::AgentMail { message: None, .. } | ProvenanceUri::External { .. } => {
+                continue;
+            }
         };
         // Private document keys cannot collide with typed entity IDs and are
         // never exported as citations or as source_memory_ids. EeMemory uses
@@ -484,5 +498,139 @@ mod session_support_tests {
             span("invalid-memory", "ee-mem://not-a-memory-id"),
         ];
         assert!(support_groups(&spans, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn repeated_mail_message_citations_are_one_source_not_one_vote_per_memory() {
+        let spans = vec![
+            span("first", "agent-mail://release/42"),
+            span("copy", "agent-mail://release/42"),
+            span("other-message", "agent-mail://release/43"),
+            span("other-thread", "agent-mail://operations/42"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.len(), spans.len());
+        assert_eq!(groups.get("first"), groups.get("copy"));
+        assert_ne!(groups.get("first"), groups.get("other-message"));
+        assert_ne!(groups.get("first"), groups.get("other-thread"));
+        assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn thread_only_mail_references_do_not_invent_common_message_identity() {
+        let spans = vec![
+            span("first", "agent-mail://release"),
+            span("second", "agent-mail://release"),
+        ];
+        assert!(support_groups(&spans, &BTreeMap::new()).is_empty());
+
+        let mut mixed = spans;
+        mixed.push(span("message", "agent-mail://release/42"));
+        let groups = support_groups(&mixed, &BTreeMap::new());
+        assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn mail_message_composite_keys_preserve_opaque_identifier_boundaries() {
+        let spans = vec![
+            span("first", "agent-mail://a:b/c"),
+            span("second", "agent-mail://a/b:c"),
+            span("third", "agent-mail://ab/c"),
+            span("fourth", "agent-mail://a/bc"),
+            span("unicode", "agent-mail://café/c"),
+        ];
+        for item in &spans {
+            assert!(matches!(
+                item.provenance_uri
+                    .as_deref()
+                    .and_then(|uri| ProvenanceUri::from_str(uri).ok()),
+                Some(ProvenanceUri::AgentMail {
+                    message: Some(_), ..
+                })
+            ));
+        }
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.len(), spans.len());
+        assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), spans.len());
+    }
+
+    #[test]
+    fn mail_message_lineage_is_identical_for_candidate_admission_and_answer_support() {
+        let parent = MemoryId::from_uuid(uuid::Uuid::from_u128(15)).to_string();
+        let mut spans = vec![
+            span(&parent, "agent-mail://release/42"),
+            span("copy", "agent-mail://release/42"),
+            span("reference", &format!("ee-mem://{parent}")),
+            span("rule", "manual://rule"),
+            span("independent", "agent-mail://release/43"),
+        ];
+        let sources = BTreeMap::from([("rule".to_owned(), rule_source("copy"))]);
+        let expected = support_groups(&spans, &sources);
+        for id in ["copy", "reference", "rule"] {
+            assert_eq!(expected.get(&parent), expected.get(id));
+        }
+        assert_ne!(expected.get(&parent), expected.get("independent"));
+        let candidates: Vec<_> = spans
+            .iter()
+            .map(|item| AskCandidate {
+                memory_id: item.memory_id.clone(),
+                content: item.text.clone(),
+                confidence: item.memory_confidence,
+                trust_class: item.trust_class.clone(),
+                provenance_uri: item.provenance_uri.clone(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                team_provenance: None,
+            })
+            .collect();
+        assert_eq!(
+            candidate_support_groups(candidates.iter(), &sources),
+            expected
+        );
+        assert_eq!(
+            candidate_support_groups(candidates.iter().rev(), &sources),
+            expected
+        );
+        spans.reverse();
+        assert_eq!(support_groups(&spans, &sources), expected);
+        // Private grouping keys must not replace public evidence identity.
+        assert_eq!(sources["rule"].source_memory_ids, vec!["copy".to_owned()]);
+        assert!(
+            expected
+                .keys()
+                .all(|id| candidates.iter().any(|item| &item.memory_id == id))
+        );
+        assert_eq!(
+            candidates[1].provenance_uri.as_deref(),
+            Some("agent-mail://release/42")
+        );
+    }
+
+    #[test]
+    fn duplicate_mail_message_cannot_promote_weak_evidence_into_an_answer() {
+        let mut spans: Vec<_> = (0..32)
+            .map(|index| {
+                let mut item = span(&format!("copy-{index:02}"), "agent-mail://release/42");
+                item.score = 0.54;
+                item
+            })
+            .collect();
+        // This is the old, incorrect distinct-memory corroboration behavior.
+        let ungrouped = super::super::clustering::cluster_spans(&spans);
+        assert!(ungrouped[0].score > super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+        let groups = support_groups(&spans, &BTreeMap::new());
+        let clustered = super::super::clustering::cluster_spans_with_groups(&spans, &groups);
+        assert_eq!(clustered.len(), 1);
+        assert_eq!(clustered[0].score, 0.54);
+        assert!(clustered[0].score < super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+
+        // A different identified message is still eligible independent support.
+        let mut independent = span("independent", "agent-mail://release/43");
+        independent.score = 0.54;
+        spans.push(independent);
+        let groups = support_groups(&spans, &BTreeMap::new());
+        let clustered = super::super::clustering::cluster_spans_with_groups(&spans, &groups);
+        assert!(clustered[0].score > super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+        assert!((clustered[0].score - 0.54 * (1.0 + 0.1 * 2.0_f32.ln())).abs() < 1e-6);
     }
 }
