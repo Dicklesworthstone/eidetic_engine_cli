@@ -207,9 +207,15 @@ impl CassSessionReference {
         if let Some(line_start) = self.line_start {
             uri.push_str("#L");
             uri.push_str(&line_start.to_string());
-            if self.line_end.is_some_and(|line_end| line_end != line_start) {
+            // bd-4hr1v: emit the end whenever there is one, including when it
+            // equals the start. The previous `line_end != line_start` guard
+            // collapsed a one-line range to `#L2`, disagreeing with
+            // `EvidenceSpan::canonical_provenance_uri()` for the same span and
+            // failing the `#L[0-9]+-[0-9]+$` pattern that
+            // docs/schemas/ee.capture_suggestions.v2.json pins on this scheme.
+            if let Some(line_end) = self.line_end {
                 uri.push('-');
-                uri.push_str(&self.line_end.unwrap_or(line_start).to_string());
+                uri.push_str(&line_end.to_string());
             }
         }
         uri

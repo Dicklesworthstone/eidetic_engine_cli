@@ -5972,11 +5972,15 @@ fn rendered_provenance_label(uri: &ProvenanceUri) -> (String, Option<String>) {
     }
 }
 
+/// bd-4hr1v: delegate, do not repeat the rule.
+///
+/// This used to carry its own copy of the match in `LineSpan::fragment`,
+/// which is how pack's locator and pack's own URI could disagree with
+/// search's `canonical_provenance_uri()` without anything noticing. One
+/// renderer means a future change cannot land in one place and miss the
+/// other.
 fn line_span_locator(span: crate::models::LineSpan) -> String {
-    match span.end {
-        Some(end) if end != span.start => format!("L{}-{}", span.start, end),
-        _ => format!("L{}", span.start),
-    }
+    span.fragment()
 }
 
 fn source_index(index: usize) -> u32 {

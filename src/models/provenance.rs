@@ -83,8 +83,9 @@ const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
 /// Inclusive line range used by `cass-session://` and `file://` URIs.
 ///
 /// `start` is one-based. `end`, when present, must be greater than or
-/// equal to `start`. The renderer emits `#L<start>` for a single-line
-/// span and `#L<start>-<end>` for a range.
+/// equal to `start`. The renderer emits `#L<start>` when there is no end
+/// and `#L<start>-<end>` whenever one is present, so a one-line range
+/// stays distinguishable from an endless span (bd-4hr1v).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LineSpan {
     pub start: u64,
@@ -125,11 +126,37 @@ impl LineSpan {
         })
     }
 
-    /// Render as `#L<start>` or `#L<start>-<end>` without the `#`.
-    fn fragment(&self) -> String {
+    /// Render as `L<start>` when there is no end, or `L<start>-<end>`
+    /// whenever an end is present -- INCLUDING when it equals the start.
+    ///
+    /// bd-4hr1v: this previously collapsed `range(n, n)` to `L{n}`, which
+    /// erased the difference between a span that has no end and an explicit
+    /// one-line RANGE. Two consequences, both measured:
+    ///
+    /// - Pack renders its provenance URI through `Display` -> here
+    ///   (src/pack/mod.rs:1751), while search indexes
+    ///   `EvidenceSpan::canonical_provenance_uri()` (src/db/mod.rs:13733),
+    ///   which is unconditionally `#L<start>-<end>`. Every single-line
+    ///   evidence span therefore got two different URIs for one span, and
+    ///   any consumer joining on that URI silently matched nothing.
+    /// - The round trip was lossy: `range(2, 2)` rendered `L2`, which
+    ///   `parse` reads back as `single(2)`.
+    ///
+    /// The range form is the contract when an end exists: ADR 0085
+    /// (accepted) specifies `cass-session://<stable-session-id>#L<start>-<end>`
+    /// for public provenance, and
+    /// docs/schemas/ee.capture_suggestions.v2.json pins `provenanceUri` with
+    /// `^cass-session://sess_[0-9A-HJKMNP-TV-Z]{26}#L[0-9]+-[0-9]+$`, which
+    /// the collapsed spelling fails.
+    ///
+    /// This is the ONE renderer of the rule. `pack::line_span_locator`
+    /// delegates here rather than repeating the match, because the previous
+    /// duplication is what let the two spellings diverge unnoticed.
+    #[must_use]
+    pub fn fragment(&self) -> String {
         match self.end {
-            Some(end) if end != self.start => format!("L{}-{}", self.start, end),
-            _ => format!("L{}", self.start),
+            Some(end) => format!("L{}-{}", self.start, end),
+            None => format!("L{}", self.start),
         }
     }
 }
