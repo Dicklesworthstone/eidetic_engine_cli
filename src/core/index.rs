@@ -4609,177 +4609,6 @@ fn finish_index_rollback(
     }
 }
 
-#[cfg(test)]
-mod rollback_durability_tests {
-    use super::*;
-    use std::cell::Cell;
-
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    type TestResult = Result<(), String>;
-
-    #[test]
-    fn rollback_flushes_parent_after_an_earlier_error() {
-        let calls = Cell::new(0);
-        let index_dir = Path::new("workspace/index");
-        let result = finish_index_rollback(
-            index_dir,
-            vec!["injected restore failure".to_owned()],
-            |parent| {
-                assert_eq!(parent, Path::new("workspace"));
-                calls.set(calls.get() + 1);
-                Ok(())
-            },
-        );
-        assert_eq!(calls.get(), 1);
-        let error = result.expect_err("earlier failure must survive a successful flush");
-        assert!(error.to_string().contains("injected restore failure"));
-    }
-
-    #[test]
-    fn rollback_preserves_the_original_and_flush_errors() {
-        let error = finish_index_rollback(
-            Path::new("workspace/index"),
-            vec!["injected quarantine failure".to_owned()],
-            |_| {
-                Err(IndexRebuildError::Index(
-                    "injected flush failure".to_owned(),
-                ))
-            },
-        )
-        .expect_err("both failures must be reported")
-        .to_string();
-        assert!(error.contains("injected quarantine failure"));
-        assert!(error.contains("injected flush failure"));
-        assert!(error.contains("failed to persist index rollback"));
-    }
-
-    #[test]
-    fn rollback_cannot_succeed_when_only_the_flush_fails() {
-        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
-            Err(IndexRebuildError::Index(
-                "injected flush failure".to_owned(),
-            ))
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn rollback_success_requires_a_successful_flush() {
-        let calls = Cell::new(0);
-        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
-            calls.set(calls.get() + 1);
-            Ok(())
-        });
-        assert!(result.is_ok());
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    fn generations(root: &Path) -> Result<(PathBuf, PathBuf), String> {
-        let root = root.canonicalize().map_err(|error| error.to_string())?;
-        let active = root.join("index");
-        let retained = root.join("retained");
-        std::fs::create_dir(&active).map_err(|error| error.to_string())?;
-        std::fs::create_dir(&retained).map_err(|error| error.to_string())?;
-        std::fs::write(active.join("identity"), "rejected").map_err(|error| error.to_string())?;
-        std::fs::write(retained.join("identity"), "accepted").map_err(|error| error.to_string())?;
-        Ok((active, retained))
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    #[test]
-    fn exchange_rollback_flushes_the_restored_generation_when_quarantine_fails() -> TestResult {
-        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let (active, retained) = generations(root.path())?;
-        let flushes = Cell::new(0);
-        let error = rollback_index_by_exchange_with(
-            &active,
-            &retained,
-            |_, _| {
-                Err(IndexRebuildError::Index(
-                    "injected quarantine failure".to_owned(),
-                ))
-            },
-            |parent| {
-                assert_eq!(parent, active.parent().expect("active parent"));
-                assert_eq!(
-                    std::fs::read_to_string(active.join("identity")).expect("restored identity"),
-                    "accepted"
-                );
-                flushes.set(flushes.get() + 1);
-                sync_index_directory(parent)
-            },
-        )
-        .expect_err("quarantine failure must remain visible")
-        .to_string();
-        assert!(error.contains("injected quarantine failure"));
-        assert_eq!(flushes.get(), 1);
-        // Preserve rejected bytes for diagnosis; this patch does not claim
-        // to make failed quarantine safe for later recovery admission.
-        assert_eq!(
-            std::fs::read_to_string(retained.join("identity")).map_err(|error| error.to_string())?,
-            "rejected"
-        );
-        Ok(())
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    #[test]
-    fn exchange_rollback_preserves_both_quarantine_and_flush_failures() -> TestResult {
-        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let (active, retained) = generations(root.path())?;
-        let error = rollback_index_by_exchange_with(
-            &active,
-            &retained,
-            |_, _| Err(IndexRebuildError::Index("quarantine failure".to_owned())),
-            |_| Err(IndexRebuildError::Index("flush failure".to_owned())),
-        )
-        .expect_err("rollback failures must not be hidden")
-        .to_string();
-        assert!(error.contains("quarantine failure"));
-        assert!(error.contains("flush failure"));
-        assert_eq!(
-            std::fs::read_to_string(active.join("identity")).map_err(|error| error.to_string())?,
-            "accepted"
-        );
-        Ok(())
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    #[test]
-    fn exchange_rollback_keeps_the_live_name_and_quarantines_the_rejected_bytes() -> TestResult {
-        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let (active, retained) = generations(root.path())?;
-        let mut quarantined = None;
-        let flushes = Cell::new(0);
-        rollback_index_by_exchange_with(
-            &active,
-            &retained,
-            |from, to| {
-                quarantined = Some(to.to_path_buf());
-                rename_index_dir(from, to, "test quarantine")
-            },
-            |parent| {
-                flushes.set(flushes.get() + 1);
-                sync_index_directory(parent)
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        assert_eq!(flushes.get(), 1);
-        assert_eq!(
-            std::fs::read_to_string(active.join("identity")).map_err(|error| error.to_string())?,
-            "accepted"
-        );
-        let rejected = quarantined.ok_or_else(|| "quarantine was not attempted".to_owned())?;
-        assert_eq!(
-            std::fs::read_to_string(rejected.join("identity")).map_err(|error| error.to_string())?,
-            "rejected"
-        );
-        assert!(!path_exists_no_follow(&retained));
-        Ok(())
-    }
-}
-
 /// GH#19: the embedder fingerprint stamped into `.ee/index/meta.json` at
 /// publish time so the model-lifecycle readiness collector
 /// (`src/core/model.rs`) can prove "registry + asset + index agree".
@@ -20653,5 +20482,176 @@ mod remote_embedding_space_tests {
             stored_semantic_identity(&metadata),
             Some(("remote-api:all-minilm", 384))
         );
+    }
+}
+
+#[cfg(test)]
+mod rollback_durability_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    type TestResult = Result<(), String>;
+
+    #[test]
+    fn rollback_flushes_parent_after_an_earlier_error() {
+        let calls = Cell::new(0);
+        let index_dir = Path::new("workspace/index");
+        let result = finish_index_rollback(
+            index_dir,
+            vec!["injected restore failure".to_owned()],
+            |parent| {
+                assert_eq!(parent, Path::new("workspace"));
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(calls.get(), 1);
+        let error = result.expect_err("earlier failure must survive a successful flush");
+        assert!(error.to_string().contains("injected restore failure"));
+    }
+
+    #[test]
+    fn rollback_preserves_the_original_and_flush_errors() {
+        let error = finish_index_rollback(
+            Path::new("workspace/index"),
+            vec!["injected quarantine failure".to_owned()],
+            |_| {
+                Err(IndexRebuildError::Index(
+                    "injected flush failure".to_owned(),
+                ))
+            },
+        )
+        .expect_err("both failures must be reported")
+        .to_string();
+        assert!(error.contains("injected quarantine failure"));
+        assert!(error.contains("injected flush failure"));
+        assert!(error.contains("failed to persist index rollback"));
+    }
+
+    #[test]
+    fn rollback_cannot_succeed_when_only_the_flush_fails() {
+        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
+            Err(IndexRebuildError::Index(
+                "injected flush failure".to_owned(),
+            ))
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rollback_success_requires_a_successful_flush() {
+        let calls = Cell::new(0);
+        let result = finish_index_rollback(Path::new("workspace/index"), Vec::new(), |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    fn generations(root: &Path) -> Result<(PathBuf, PathBuf), String> {
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let active = root.join("index");
+        let retained = root.join("retained");
+        std::fs::create_dir(&active).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&retained).map_err(|error| error.to_string())?;
+        std::fs::write(active.join("identity"), "rejected").map_err(|error| error.to_string())?;
+        std::fs::write(retained.join("identity"), "accepted").map_err(|error| error.to_string())?;
+        Ok((active, retained))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn exchange_rollback_flushes_the_restored_generation_when_quarantine_fails() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (active, retained) = generations(root.path())?;
+        let flushes = Cell::new(0);
+        let error = rollback_index_by_exchange_with(
+            &active,
+            &retained,
+            |_, _| {
+                Err(IndexRebuildError::Index(
+                    "injected quarantine failure".to_owned(),
+                ))
+            },
+            |parent| {
+                assert_eq!(parent, active.parent().expect("active parent"));
+                assert_eq!(
+                    std::fs::read_to_string(active.join("identity")).expect("restored identity"),
+                    "accepted"
+                );
+                flushes.set(flushes.get() + 1);
+                sync_index_directory(parent)
+            },
+        )
+        .expect_err("quarantine failure must remain visible")
+        .to_string();
+        assert!(error.contains("injected quarantine failure"));
+        assert_eq!(flushes.get(), 1);
+        // Preserve rejected bytes for diagnosis; this patch does not claim
+        // to make failed quarantine safe for later recovery admission.
+        assert_eq!(
+            std::fs::read_to_string(retained.join("identity")).map_err(|error| error.to_string())?,
+            "rejected"
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn exchange_rollback_preserves_both_quarantine_and_flush_failures() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (active, retained) = generations(root.path())?;
+        let error = rollback_index_by_exchange_with(
+            &active,
+            &retained,
+            |_, _| Err(IndexRebuildError::Index("quarantine failure".to_owned())),
+            |_| Err(IndexRebuildError::Index("flush failure".to_owned())),
+        )
+        .expect_err("rollback failures must not be hidden")
+        .to_string();
+        assert!(error.contains("quarantine failure"));
+        assert!(error.contains("flush failure"));
+        assert_eq!(
+            std::fs::read_to_string(active.join("identity")).map_err(|error| error.to_string())?,
+            "accepted"
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn exchange_rollback_keeps_the_live_name_and_quarantines_the_rejected_bytes() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (active, retained) = generations(root.path())?;
+        let mut quarantined = None;
+        let flushes = Cell::new(0);
+        rollback_index_by_exchange_with(
+            &active,
+            &retained,
+            |from, to| {
+                quarantined = Some(to.to_path_buf());
+                rename_index_dir(from, to, "test quarantine")
+            },
+            |parent| {
+                flushes.set(flushes.get() + 1);
+                sync_index_directory(parent)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(flushes.get(), 1);
+        assert_eq!(
+            std::fs::read_to_string(active.join("identity")).map_err(|error| error.to_string())?,
+            "accepted"
+        );
+        let rejected = quarantined.ok_or_else(|| "quarantine was not attempted".to_owned())?;
+        assert_eq!(
+            std::fs::read_to_string(rejected.join("identity")).map_err(|error| error.to_string())?,
+            "rejected"
+        );
+        assert!(!path_exists_no_follow(&retained));
+        Ok(())
     }
 }
