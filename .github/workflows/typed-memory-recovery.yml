@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: typed-memory-delivery
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
