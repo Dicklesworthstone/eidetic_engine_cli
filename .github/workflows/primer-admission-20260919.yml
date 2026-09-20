@@ -1,0 +1,132 @@
+name: Primer sealed evidence admission
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/primer-admission-20260919.patch
+      - .github/workflows/primer-admission-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: primer-admission-20260919
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Commit sealed primer and historical global source admission
+        id: source
+        run: |
+          set -euo pipefail
+          paths=(src/core/primer.rs src/core/primer_seal_admission_tests.rs src/core/global_store.rs)
+          if test -f src/core/primer_seal_admission_tests.rs; then
+            grep -q 'primer_seal_admission(connection, workspace_id)' src/core/primer.rs
+            grep -q 'Keep that independent from this API' src/core/global_store.rs
+          else
+            test "$(git rev-parse HEAD:src/core/primer.rs)" = 3ce1fa281ded3b84f3b271ed4c60029f07d976b6
+            test "$(git rev-parse HEAD:src/core/global_store.rs)" = 50054605b43a249be1ef610ef6df0038064aad4a
+            base=$(git rev-parse HEAD)
+            git apply --check scripts/delivery/primer-admission-20260919.patch
+            git apply scripts/delivery/primer-admission-20260919.patch
+            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+            git diff --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- "${paths[@]}"
+            git commit -m 'fix(recall): bind primer caches to seal authority and preserve global history' -m 'Validate source seals before cold assembly or cache lookup; include a versioned deterministic admission digest in cache keys so seal-only writes cannot reuse old responses without a generation bump. Keep caller snapshots, read-only behavior and revealed controls intact. Separate global history visibility from tombstone exclusion. Add seven real-store tests covering cache invalidation, malformed authority, unmodified generations, global retirement/sealing and exact historical boundaries. Patch application and formatting passed; execution evidence follows separately.'
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=1; break; fi
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            test "$pushed" -eq 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/primer-source-sha.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: primer-admission-source
+          path: ${{ runner.temp }}/primer-source-sha.log
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: primer-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.integrate.outputs.source_sha }}
+          restore-keys: |
+            primer-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            global-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            seed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Check production library
+        run: |
+          set -o pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/primer-source-sha.log"
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/primer-check.log"
+      - name: Execute current and historical recall admission regressions
+        run: |
+          set -uo pipefail
+          failed=0
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/primer-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/primer-$name.log"
+            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/primer-$name.log"; then failed=1; fi
+          }
+          run_group admission 'core::primer::seal_tests::' 7
+          run_group existing 'core::primer::tests::' 16
+          run_group global 'core::global_store::' 27
+          run_group similar 'core::search::rule_admission::memory_revisions::seed_tests::' 6
+          exit "$failed"
+      - name: Check production Clippy and formatting
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/primer-clippy.log" || failed=1
+          rustfmt --edition 2024 --config skip_children=true --check src/core/primer.rs src/core/primer_seal_admission_tests.rs src/core/global_store.rs 2>&1 | tee "$RUNNER_TEMP/primer-fmt.log" || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: primer-admission-verification
+          path: ${{ runner.temp }}/primer-*.log
+          retention-days: 7
