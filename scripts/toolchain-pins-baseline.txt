@@ -37,14 +37,8 @@
 1	contradiction-graph-20260919.yml
 2	diagnostic-generation-20260919.yml
 1	diagnostic-snapshot-20260919.yml
-1	evidence-export-20260919.yml
-1	external-ingestion-20260919.yml
-1	git-capture-20260919.yml
-1	git-capture-mcp-20260919.yml
-1	git-capture-offline-20260919.yml
 2	global-authority-20260919.yml
 1	index-publication-20260918.yml
-1	journal-ingestion-20260919.yml
 1	learned-history-recovery-20260919.yml
 1	macos-ee-artifact.yml
 1	primary-recovery-20260919.yml
@@ -57,5 +51,4 @@
 1	session-arc-20260919.yml
 2	session-arc-learning-20260919.yml
 1	snapshot-recovery-20260919.yml
-1	trust-recovery-20260919.yml
 1	verify-ask-admission-20260917.yml
