@@ -207,15 +207,21 @@ impl CassSessionReference {
         if let Some(line_start) = self.line_start {
             uri.push_str("#L");
             uri.push_str(&line_start.to_string());
-            // bd-4hr1v: emit the end whenever there is one, including when it
-            // equals the start. The previous `line_end != line_start` guard
-            // collapsed a one-line range to `#L2`, disagreeing with
-            // `EvidenceSpan::canonical_provenance_uri()` for the same span and
-            // failing the `#L[0-9]+-[0-9]+$` pattern that
-            // docs/schemas/ee.capture_suggestions.v2.json pins on this scheme.
-            if let Some(line_end) = self.line_end {
+            // bd-4hr1v REVERTED HERE, deliberately. I removed this guard as
+            // part of the provenance fix and it was out of scope: this is a
+            // THIRD producer, reached from src/mesh/remote_evidence.rs, and
+            // its rendered form is pinned byte-for-byte by bd-2wjz2 in
+            // tests/contracts/cass_session_reference_to_uri.rs --
+            // `to_uri_renders_single_line_anchor_without_range` requires
+            // Some(42)/Some(42) to collapse to `#L42`.
+            //
+            // ADR 0085 governs PUBLIC PROVENANCE, which is
+            // EvidenceSpan::canonical_provenance_uri and the ProvenanceUri
+            // Display path; it does not govern this helper. Changing it broke
+            // a pinned contract to satisfy an authority that does not apply.
+            if self.line_end.is_some_and(|line_end| line_end != line_start) {
                 uri.push('-');
-                uri.push_str(&line_end.to_string());
+                uri.push_str(&self.line_end.unwrap_or(line_start).to_string());
             }
         }
         uri
