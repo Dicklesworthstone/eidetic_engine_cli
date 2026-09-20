@@ -34,7 +34,3 @@
 # DO NOT ADD A ROW HERE TO MAKE A NEW FINDING PASS. That is the one move this
 # file exists to refuse.
 
-2	diagnostic-generation-20260919.yml
-2	global-authority-20260919.yml
-2	primer-admission-20260919.yml
-2	seed-authority-20260919.yml

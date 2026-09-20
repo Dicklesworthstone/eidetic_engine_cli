@@ -28,6 +28,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           components: rustfmt
       - name: Publish source-backed global admission directly to main
         id: source
@@ -77,7 +78,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      # bd-niay4. PIN BOTH HALVES OR NEITHER. This overrides the action's install
+      # AT INVOCATION TIME, so a bare rustfmt/cargo in THIS job resolves through
+      # it, not through the `toolchain:` input. Pinning one half only installs
+      # components onto the dated toolchain and then invokes floating nightly,
+      # which does not have them. That was d315cdc7f, repaired at 021a033b8.
+      # NOTE: this env exists on THIS job only; the other job in this file has
+      # no override, so its invocation is pinned by its input alone and that is
+      # correct there. Keep equal to rust-toolchain.toml's `channel`.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -91,6 +100,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache@v4
         with:
