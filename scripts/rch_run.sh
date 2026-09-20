@@ -78,6 +78,36 @@ emit_verdict_block() {
         return 1
     fi
 
+    # A TERMINATOR IS AN ABSENCE, NOT A RED.
+    #
+    # bd-xo0fn: 137 is 128+9 (SIGKILL), 143 is 128+15 (SIGTERM). Neither means
+    # "the thing you ran reported failure"; both mean it was killed with work
+    # outstanding. On 2026-09-20 a capture e2e was executing assertions when the
+    # 900s cap killed it at 902s, and this block said
+    # `RED (non-test run exited 137)` -- attributing a terminator to the code.
+    #
+    # A false red costs what a false green costs, pointed the other way: it
+    # sends someone into archaeology over a change that is fine, and in a swarm
+    # it gets good commits reverted. One integer cannot express "failed" and
+    # "was killed", so the verdict must not pick the wrong one silently.
+    #
+    # The run's exit status is still printed verbatim above and still dominates
+    # the return code, as this file's header requires. Only the VERDICT changes.
+    case "$run_exit" in
+        137|143)
+            local signame='SIGTERM'
+            [ "$run_exit" -eq 137 ] && signame='SIGKILL'
+            printf 'verdict      : UNGRADEABLE (terminated by %s; exit %s is a kill, not a failure)\n' \
+                "$signame" "$run_exit"
+            if grep -qaiE 'timed? ?out|timeout|SIGKILL|killed' "$log" 2>/dev/null; then
+                printf '  [terminated] log carries a kill/timeout marker -- compare elapsed time to the cap before blaming the code.\n'
+            fi
+            printf '===== END VERDICT BLOCK =====\n'
+            warn "run was terminated (${signame}); that is an absence, not a red. Re-run with a larger cap or a bigger worker."
+            return "$run_exit"
+            ;;
+    esac
+
     if [ ! -f "$GRADER" ] || ! command -v python3 >/dev/null 2>&1; then
         printf 'verdict      : UNGRADEABLE (grader unavailable)\n'
         printf '===== END VERDICT BLOCK =====\n'
@@ -373,17 +403,39 @@ self_test() {
         # bd-k67bp: a recorded non-zero exit outranks a masked wrapper 0.
         "a masked non-zero exit reds despite Finished and exit 0|$tmp/masked_exit.log|0||1|--job -- bash -c './scripts/e2e_capture.sh; echo EXIT=\$?'"
         "...and the same shape with EXIT=0 is still green|$tmp/masked_exit_zero.log|0||0|--job -- bash -c './scripts/e2e_capture.sh; echo EXIT=\$?'"
+        # bd-xo0fn: a kill is an absence. The exit code still dominates the
+        # return value; it is the VERDICT that must not say RED.
+        "SIGKILL is UNGRADEABLE, not RED|$tmp/green.log|137||137|--job -- bash -c './x.sh'|UNGRADEABLE (terminated by SIGKILL"
+        "SIGTERM is UNGRADEABLE, not RED|$tmp/green.log|143||143|--job -- bash -c './x.sh'|UNGRADEABLE (terminated by SIGTERM"
+        # KNOWN POSITIVE: an ordinary non-zero exit is still a red, so the arms
+        # above discriminate on the signal instead of excusing every failure.
+        "an ordinary non-zero exit is still RED|$tmp/shelljob.log|75||75|--job -- bash -c './x.sh'|RED (non-test run exited 75)"
+        # bd-k67bp's arms, now pinned on wording too.
+        "a masked non-zero exit names the sentinel|$tmp/masked_exit.log|0||1|--job -- bash -c 'x; echo EXIT=\$?'|RED (E2E_CAPTURE_EXIT=2 recorded in the log"
     )
-    local entry name log rexit expect want cmd
+    # THE EXIT CODE ALONE CANNOT SEE A VERDICT CHANGE.
+    #
+    # An arm that only compares $? is blind to the thing most of these arms
+    # exist to pin. bd-xo0fn's fix turns `RED (non-test run exited 137)` into
+    # `UNGRADEABLE (terminated by SIGKILL...)` while BOTH paths return 137, so
+    # its first three arms passed identically before and after the repair --
+    # green on both sides, which is not evidence of anything. The optional 7th
+    # field pins a substring of the verdict line, so an arm that cares about the
+    # wording can fail on the wording.
+    local entry name log rexit expect want cmd wantverdict out
     for entry in "${cases[@]}"; do
-        IFS='|' read -r name log rexit expect want cmd <<< "$entry"
-        emit_verdict_block "$log" "$rexit" "self-test" "$expect" "${cmd:-self-test}" >/dev/null 2>&1
+        IFS='|' read -r name log rexit expect want cmd wantverdict <<< "$entry"
+        out="$(emit_verdict_block "$log" "$rexit" "self-test" "$expect" "${cmd:-self-test}" 2>&1)"
         got=$?
-        if [ "$got" -eq "$want" ]; then
-            say "self-test OK   ${name}: want ${want}, got ${got}"
-        else
+        if [ "$got" -ne "$want" ]; then
             warn "SELF-TEST FAIL ${name}: want ${want}, got ${got}"
             failures=$((failures + 1))
+        elif [ -n "${wantverdict:-}" ] && ! printf '%s\n' "$out" | grep -qaF "$wantverdict"; then
+            warn "SELF-TEST FAIL ${name}: exit ${got} as expected, but verdict did not contain '${wantverdict}'"
+            warn "  got: $(printf '%s\n' "$out" | grep -a 'verdict' | head -1)"
+            failures=$((failures + 1))
+        else
+            say "self-test OK   ${name}: want ${want}, got ${got}${wantverdict:+ (verdict pinned)}"
         fi
     done
 
