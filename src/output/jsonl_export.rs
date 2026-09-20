@@ -6,6 +6,9 @@
 
 use std::io::{self, Write};
 
+#[path = "jsonl_typed_fields.rs"]
+mod typed_fields;
+
 use crate::models::{
     EXPORT_FORMAT_VERSION, ExportAgentRecord, ExportArtifactRecord, ExportAuditRecord,
     ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord, ExportRecord, ExportScope,
@@ -601,6 +604,9 @@ pub fn redact_memory_record(
     mut record: ExportMemoryRecord,
     level: RedactionLevel,
 ) -> ExportMemoryRecord {
+    if let Some(fields) = record.typed_fields.as_mut() {
+        typed_fields::redact(fields, &record.kind, level);
+    }
     if level == RedactionLevel::None {
         return record;
     }
@@ -1062,17 +1068,34 @@ impl<W: Write> JsonlExporter<W> {
     /// # Errors
     ///
     /// Returns an error if writing fails.
-    pub fn write_memory(&mut self, record: ExportMemoryRecord) -> io::Result<()> {
+    pub fn write_memory(&mut self, mut record: ExportMemoryRecord) -> io::Result<()> {
         if !self.export_scope.includes_memories() {
             return Ok(());
         }
 
+        // Validate before emitting any bytes. A malformed durable sidecar is
+        // an export error, never a silently missing piece of memory.
+        if let Some(fields) = record.typed_fields.as_ref() {
+            if record.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sealed memory retains an unexpected typed sidecar",
+                ));
+            }
+            record.typed_fields = Some(typed_fields::canonical(&record.kind, fields)?);
+        }
         let redacted = redact_memory_record(record, self.redaction_level);
+        if let Some(fields) = redacted.typed_fields.as_ref() {
+            typed_fields::canonical(&redacted.kind, fields)?;
+        }
         let memory_id = redacted.memory_id.clone();
 
         let json = if self.export_scope == ExportScope::MetadataOnly {
             let mut meta_only = redacted;
             meta_only.content = String::new();
+            // Typed fields contain body-equivalent prose and commands. They
+            // must not bypass an explicitly metadata-only export scope.
+            meta_only.typed_fields = None;
             serde_json::to_string(&meta_only)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         } else {

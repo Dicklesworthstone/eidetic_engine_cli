@@ -1223,6 +1223,7 @@ struct BackupExportData {
     workspace: ExportWorkspaceRecord,
     workspace_row: crate::db::StoredWorkspace,
     memories: Vec<StoredMemory>,
+    typed_fields_by_memory: BTreeMap<String, JsonValue>,
     logical_ids_by_memory: BTreeMap<String, String>,
     /// bd-tmv70: see `superseded_by_within_export`.
     superseded_by_by_memory: BTreeMap<String, String>,
@@ -5529,6 +5530,24 @@ fn load_export_data_in_current_snapshot(
             message: error.to_string(),
             repair: Some("ee db check --workspace .".to_owned()),
         })?;
+    let mut typed_fields_by_memory = BTreeMap::new();
+    for memory in &memories {
+        if let Some(raw) = connection
+            .get_memory_typed_fields_json(&memory.id)
+            .map_err(work_history_error)?
+        {
+            let kind = memory
+                .kind
+                .parse()
+                .map_err(|_| work_history_error("invalid typed memory kind"))?;
+            let canonical =
+                crate::models::memory::canonicalize_typed_memory_fields_json(&kind, &raw)
+                    .map_err(|_| work_history_error("invalid durable typed memory fields"))?;
+            let value = serde_json::from_str(&canonical)
+                .map_err(|_| work_history_error("invalid durable typed memory fields"))?;
+            typed_fields_by_memory.insert(memory.id.clone(), value);
+        }
+    }
     let memory_ids = memories
         .iter()
         .map(|memory| memory.id.clone())
@@ -5649,6 +5668,7 @@ fn load_export_data_in_current_snapshot(
             .build()
             .map_err(export_build_error("build backup workspace record"))?,
         memories,
+        typed_fields_by_memory,
         logical_ids_by_memory,
         superseded_by_by_memory,
         superseded_at_by_memory,
@@ -5700,6 +5720,7 @@ fn render_records(
                 data.attempt_families_by_memory.get(&memory.id),
             )
             .map_err(export_build_error("build backup memory record"))?;
+            record.typed_fields = data.typed_fields_by_memory.get(&memory.id).cloned();
             record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
             // bd-tmv70: write the supersession fact the exporter already knows.
             // Without this the archive records no headship at all post-V123,

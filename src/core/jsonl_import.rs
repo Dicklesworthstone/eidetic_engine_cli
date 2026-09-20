@@ -11,6 +11,9 @@ pub(crate) mod recovery;
 mod recovery_regression_tests;
 #[path = "jsonl_revisions.rs"]
 mod revisions;
+#[cfg(test)]
+#[path = "jsonl_typed_fields_tests.rs"]
+mod typed_fields_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -618,6 +621,7 @@ struct PreparedMemory {
     /// bd-multiplicity-aware-trust-p0u7g: attempt-family block restored into
     /// the pointer columns and the family ledger after the memory row lands.
     attempt_family: Option<crate::models::ExportAttemptFamilyRecord>,
+    typed_fields_json: Option<String>,
     details: String,
     tag_count: u32,
 }
@@ -626,6 +630,7 @@ struct PreparedMemory {
 /// authentication and workspace binding happen only after these fields pass.
 struct ValidatedMemory<'a> {
     record: &'a ExportMemoryRecord,
+    typed_fields_json: Option<String>,
     id: String,
     logical_id: String,
     level: MemoryLevel,
@@ -967,7 +972,9 @@ fn import_jsonl_records_with_policy(
             match connection.get_memory(&memory.id)? {
                 Some(existing) => {
                     skipped_duplicate = skipped_duplicate.saturating_add(1);
-                    if let Some(issue) = reimport_conflict_issue(&existing, &memory) {
+                    if let Some(issue) = reimport_conflict_issue(&existing, &memory)
+                        .or(typed_fields_conflict_issue(&connection, &memory)?)
+                    {
                         report.issues.push(issue);
                         conflicting_memory_ids.insert(memory.id.clone());
                     } else {
@@ -988,6 +995,17 @@ fn import_jsonl_records_with_policy(
                 &memory.updated_at,
                 &memory.logical_id,
             )?;
+            // The setter intentionally refuses tombstoned rows. Restore the
+            // validated sidecar while the inserted row is live, then its
+            // historical tombstone and updated_at in this same transaction.
+            if let Some(fields) = memory.typed_fields_json.as_deref() {
+                if !connection.set_memory_typed_fields_json(&memory.id, Some(fields))? {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "imported memory could not retain its typed fields".to_owned(),
+                    });
+                }
+            }
             if let Some(at) = &memory.superseded_at {
                 if !connection.restore_imported_memory_supersession(&memory.id, at)? {
                     return Err(DbError::MalformedRow {
@@ -1377,7 +1395,8 @@ fn destination_lineage_issues(
         let existing_logical_id = connection.get_memory_logical_id(&memory.id)?;
         let chain_changed = existing_logical_id.as_deref() != Some(memory.logical_id.as_str());
         let fields_changed = revision_roots.contains(memory.logical_id.as_str())
-            && reimport_conflict_issue(&existing, memory).is_some();
+            && (reimport_conflict_issue(&existing, memory).is_some()
+                || typed_fields_conflict_issue(connection, memory)?.is_some());
         let supersession_changed = if let Some(expected) = &memory.superseded_at {
             connection.get_memory_superseded_at(&memory.id)?.as_ref() != Some(expected)
         } else {
@@ -1407,6 +1426,31 @@ fn destination_lineage_issues(
         }
     }
     Ok(issues)
+}
+
+fn typed_fields_conflict_issue(
+    connection: &DbConnection,
+    memory: &PreparedMemory,
+) -> Result<Option<JsonlImportIssue>, DbError> {
+    let actual = connection.get_memory_typed_fields_json(&memory.id)?;
+    // Canonicalize legacy v1 storage too; serialization version alone is not
+    // a content conflict. Missing vs present remains a real distinction.
+    let actual = actual.as_deref().map(|raw| {
+        let kind: MemoryKind = memory.input.kind.parse().ok()?;
+        crate::models::memory::canonicalize_typed_memory_fields_json(&kind, raw).ok()
+    });
+    let matches = match (actual, memory.typed_fields_json.as_ref()) {
+        (None, None) => true,
+        (Some(Some(actual)), Some(expected)) => actual == *expected,
+        _ => false,
+    };
+    Ok((!matches).then(|| {
+        JsonlImportIssue::warning(
+            None,
+            "reimport_divergent_existing_row",
+            "existing memory differs on typed_fields; the existing row is preserved",
+        )
+    }))
 }
 
 fn reimport_conflict_issue(
@@ -2028,6 +2072,29 @@ fn validate_memories(
         }
     }
     if issues.is_empty() {
+        let ids = memories
+            .iter()
+            .map(|memory| (memory.record.memory_id.clone(), memory.id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for memory in &mut memories {
+            if memory.kind == MemoryKind::Decision {
+                if let Some(raw) = memory.typed_fields_json.as_mut() {
+                    let mut value: JsonValue = serde_json::from_str(raw).map_err(|_| {
+                        vec![JsonlImportIssue::error(
+                            None,
+                            "invalid_memory_typed_fields",
+                            "invalid validated sidecar",
+                        )]
+                    })?;
+                    if let Some(reference) = value.pointer_mut("/fields/supersedes") {
+                        if let Some(mapped) = reference.as_str().and_then(|id| ids.get(id)) {
+                            *reference = JsonValue::String(mapped.clone());
+                        }
+                    }
+                    *raw = value.to_string();
+                }
+            }
+        }
         match revisions::supersession_timestamps(&memories) {
             Ok(markers) => {
                 for memory in &mut memories {
@@ -2175,6 +2242,38 @@ fn validate_memory(
             format!("memory `{}` {message}", memory.memory_id),
         )
     })?;
+    let typed_fields_json = memory
+        .typed_fields
+        .as_ref()
+        .map(|value| {
+            // Refuse sidecar-only secrets as early as body secrets: no destination
+            // directory, migration, row, audit, or search job exists at this point.
+            let raw = value.to_string();
+            if crate::policy::redact_secret_like_content(&raw).redacted {
+                return Err(JsonlImportIssue::error(
+                    None,
+                    "memory_typed_fields_contain_secret",
+                    "typed memory fields contain secrets; redact before import",
+                ));
+            }
+            if content.as_str() == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+                return Err(JsonlImportIssue::error(
+                    None,
+                    "invalid_memory_typed_fields",
+                    "sealed memory must not carry a readable typed sidecar",
+                ));
+            }
+            crate::models::memory::canonicalize_typed_memory_fields_json(&kind, &raw).map_err(
+                |_| {
+                    JsonlImportIssue::error(
+                        None,
+                        "invalid_memory_typed_fields",
+                        "typed memory fields do not match the memory kind or field registry",
+                    )
+                },
+            )
+        })
+        .transpose()?;
     let bayes_posterior = exported_bayes_posterior(memory)?;
     for (field, value) in [
         ("created_at", Some(memory.created_at.as_str())),
@@ -2201,6 +2300,7 @@ fn validate_memory(
 
     Ok(ValidatedMemory {
         record: memory,
+        typed_fields_json,
         logical_id: id.clone(),
         id,
         level,
@@ -2348,6 +2448,7 @@ fn prepare_memory(
         superseded_at: validated.superseded_at,
         bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),
+        typed_fields_json: validated.typed_fields_json,
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,

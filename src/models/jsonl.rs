@@ -972,6 +972,10 @@ pub struct ExportMemoryRecord {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// Validated, kind-specific sidecar. Absent in pre-V070 exports. The
+    /// optional carrier is authenticated as part of the emitted memory line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_fields: Option<serde_json::Value>,
     pub importance: Option<f64>,
     pub confidence: Option<f64>,
     pub utility: Option<f64>,
@@ -1034,6 +1038,7 @@ pub struct ExportMemoryRecordBuilder {
     kind: Option<String>,
     content: Option<String>,
     content_hash: Option<String>,
+    typed_fields: Option<serde_json::Value>,
     importance: Option<f64>,
     confidence: Option<f64>,
     utility: Option<f64>,
@@ -1066,6 +1071,12 @@ pub struct ExportMemoryRecordBuilder {
 }
 
 impl ExportMemoryRecordBuilder {
+    #[must_use]
+    pub fn typed_fields(mut self, typed_fields: serde_json::Value) -> Self {
+        self.typed_fields = Some(typed_fields);
+        self
+    }
+
     #[must_use]
     pub fn memory_id(mut self, memory_id: impl Into<String>) -> Self {
         self.memory_id = Some(memory_id.into());
@@ -1306,6 +1317,7 @@ impl ExportMemoryRecordBuilder {
                 .filter(|content| !content.trim().is_empty())
                 .ok_or_else(|| missing_required(ExportRecordType::Memory, "content"))?,
             content_hash: self.content_hash,
+            typed_fields: self.typed_fields,
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,
