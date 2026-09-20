@@ -2,13 +2,13 @@ name: Typed memory recovery
 on:
   push:
     branches: [main]
-    paths: [scripts/delivery/typed-fields-transport.patch.xz.b64, scripts/delivery/typed-fields-fence.patch.xz.b64, .github/workflows/typed-memory-recovery.yml]
+    paths: [scripts/delivery/recovery-live-consumers.patch, .github/workflows/typed-memory-recovery.yml]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: typed-memory-delivery
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -27,57 +27,41 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Publish typed transport and final-boundary recovery
+      - name: Exercise live typed queries and exact redacted lineage
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          decode() {
-            base64 -d "scripts/delivery/$1.patch.xz.b64" | xz -d > "$RUNNER_TEMP/$1.patch"
-            echo "$2  $RUNNER_TEMP/$1.patch" | sha256sum -c
-          }
-          publish() {
-            local title=$1
-            shift
-            rustfmt --edition 2024 --config skip_children=true "$@"
-            git diff --check
-            git add -- "$@"
-            if ! git diff --cached --quiet; then
-              git commit -m "$title" -m 'Implement durable typed memory preservation (bd-psjkr), retaining registry validation, redaction, authenticated records, tombstones and immutable recovery expectations. Includes real-store regressions. Patch checks and pinned-toolchain formatting passed; compilation and runtime verdicts are reported separately.'
-              for attempt in 1 2 3; do
-                if git push origin HEAD:main; then break; fi
-                test "$attempt" -lt 3
-                git fetch origin main
-                git diff --exit-code "$base" origin/main -- "$@"
-                git merge --no-edit origin/main
-                base=$(git rev-parse origin/main)
-              done
-            fi
-            base=$(git rev-parse HEAD)
-          }
-          decode typed-fields-transport 14ea310de2820b97afbd4f3c55e71a70225b828af178f1d849d678518057dd23
-          if ! test -f src/output/jsonl_typed_fields.rs; then
-            test "$(git rev-parse HEAD:src/models/jsonl.rs)" = e2fdba5d5dc5c4a53db74b300e53edffafcaa438
-            test "$(git rev-parse HEAD:src/output/jsonl_export.rs)" = 13ccb791bbdea4c68c8d221946720d2c076292cf
-            test "$(git rev-parse HEAD:src/core/backup.rs)" = e4c2e66227737eb5e2bedd400e408a197d7b2e74
-            test "$(git rev-parse HEAD:src/core/jsonl_import.rs)" = c0c0208939ec965c922db4817ed2fe60328e3c13
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/typed-fields-transport.patch"
-            git apply "$RUNNER_TEMP/typed-fields-transport.patch"
+          patch=scripts/delivery/recovery-live-consumers.patch
+          echo "fba60a23f8fa667abd91f598214a66eb54df7a70882d7e13d91ab47a8a278ac1  $patch" | sha256sum -c
+          if ! grep -Fq 'fn mapped_recovery_reference(' src/core/backup.rs; then
+            test "$(git rev-parse HEAD:src/core/backup.rs)" = 536d1be7d4574ab4fee26296402a06924df6a156
+            test "$(git rev-parse HEAD:src/core/backup_import_recovery_tests.rs)" = 21e8e6fd91dfa9ef7429567aa893037e42062ad8
+            test "$(git rev-parse HEAD:src/core/backup_operational_recovery_tests.rs)" = 5705223a0195cadf66ecff1caa55aea085d25e1d
+            test "$(git rev-parse HEAD:src/core/backup_typed_memory_recovery_tests.rs)" = 0fc14cc3fc0599cabff05f93cf4367cb5154ac44
+            git apply --check --whitespace=error-all "$patch"
+            git apply "$patch"
           fi
-          publish 'fix(backup): preserve typed memory fields through authenticated JSONL recovery' src/models/jsonl.rs src/output/jsonl_export.rs src/core/backup.rs src/core/jsonl_import.rs src/output/jsonl_typed_fields.rs src/output/jsonl_typed_fields_tests.rs src/core/jsonl_typed_fields_tests.rs
-          decode typed-fields-fence 194d2d238cc3020a0bc94f73d6cfa6d363fd236beefc09c058164d39dab203e0
-          if ! test -f src/core/backup_typed_memory_recovery_tests.rs; then
-            test "$(git rev-parse HEAD:src/core/jsonl_recovery.rs)" = 2e227d4d3c38d6dab673892f2999f4f3a47ba5c0
-            test "$(git rev-parse HEAD:src/core/backup_recovery.rs)" = ff67d24be5cba678e857559f41e4828c4f34699d
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/typed-fields-fence.patch"
-            git apply "$RUNNER_TEMP/typed-fields-fence.patch"
+          files=(src/core/backup.rs src/core/backup_import_recovery_tests.rs src/core/backup_operational_recovery_tests.rs src/core/backup_typed_memory_recovery_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'test(backup): verify live typed queries and exact redacted recovery lineage' -m 'Exercise the rebuilt strict lexical index and chosen-field filter after every typed round trip. Repair four execution-proven fixture failures without weakening expectations: mutate one CASS source instead of violating source uniqueness, and rebind only named memory references across redacted generations while checking every referenced memory exists and every other value remains identical. Patch and formatting checks passed; runtime verdicts are reported separately.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
           fi
-          publish 'fix(backup): enforce typed-field fidelity at both publication boundaries' src/core/jsonl_recovery.rs src/core/backup_recovery.rs src/core/backup_typed_memory_recovery_tests.rs
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/typed-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/typed-source.tar.gz"
+          tar -czf "$RUNNER_TEMP/typed-source.tar.gz" "${files[@]}"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
@@ -122,20 +106,23 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/typed-identity.log"
           timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/typed-check.log"
-      - name: Test real export, import, backup, decisions and resume
+      - name: Test typed transport, live consumers and corrected recovery cases
         run: |
           set -euo pipefail
           failed=0
           group() {
-            if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/typed-$2.log"; then
+            if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/typed-$3.log"; then
               failed=1
-            elif ! grep -Fq 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/typed-$2.log"; then
+            elif ! grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/typed-$3.log"; then
               failed=1
             fi
           }
-          group core::jsonl_import::typed_fields_tests import
-          group output::jsonl_export::typed_fields::tests export
-          group core::backup::recovery::typed_memory_tests recovery
+          group core::jsonl_import::typed_fields_tests 5 import
+          group output::jsonl_export::typed_fields::tests 5 export
+          group core::backup::recovery::typed_memory_tests 5 recovery
+          group core::backup::recovery::history::imports::tests 7 checkpoints
+          group core::backup::recovery::history::operational::tests 9 operational
+          group core::backup::tests::provenance_recovery_survives_rebackup_without_rejudging_evidence 1 provenance
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}

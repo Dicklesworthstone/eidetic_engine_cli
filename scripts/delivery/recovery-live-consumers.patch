@@ -1,0 +1,186 @@
+--- a/src/core/backup_import_recovery_tests.rs
++++ b/src/core/backup_import_recovery_tests.rs
+@@ -209,7 +209,7 @@
+ fn import_fence_preserves_cass_source_query() -> TestResult {
+     assert_refused(
+         "import_ledger",
+-        "UPDATE import_ledger SET source_id = 'RECOVERY_PRIVATE_CANARY' WHERE source_kind = 'cass'",
++        "UPDATE import_ledger SET source_id = 'RECOVERY_PRIVATE_CANARY' WHERE id = 'imp_00000000000000000000000000'",
+         false,
+         false,
+     )
+@@ -219,7 +219,7 @@
+ fn import_fence_rejects_paired_source_and_workspace_retargeting() -> TestResult {
+     assert_refused(
+         "workspaces",
+-        "UPDATE import_ledger SET source_id = 'cass://sessions?workspace=/RECOVERY_PRIVATE_CANARY&limit=7&since=2026-09-01T00:00:00Z' WHERE source_kind = 'cass'",
++        "UPDATE import_ledger SET source_id = 'cass://sessions?workspace=/RECOVERY_PRIVATE_CANARY&limit=7&since=2026-09-01T00:00:00Z' WHERE id = 'imp_00000000000000000000000000'",
+         true,
+         false,
+     )
+--- a/src/core/backup_operational_recovery_tests.rs
++++ b/src/core/backup_operational_recovery_tests.rs
+@@ -296,8 +296,12 @@
+         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+         seed(&db, &workspace_id).map_err(|e| e.to_string())?;
+         db.close().map_err(|e| e.to_string())?;
+-        let mut first = None;
++        let mut first: Option<serde_json::Value> = None;
+         for round in 0..2 {
++            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
++            let memories = source.list_memories(&workspace_id, None, true).map_err(|e| e.to_string())?;
++            let mapping = backup_memory_id_mapping(&memories, redaction).map_err(|e| e.message())?;
++            source.close().map_err(|e| e.to_string())?;
+             let backup = create(&workspace, &database, redaction)?;
+             let side = root
+                 .path()
+@@ -345,8 +349,29 @@
+             );
+             assert_eq!(state["links"].as_array().ok_or("missing links")?.len(), 1);
+             assert_eq!(state["originalAudit"]["action"], "memory.create");
+-            if let Some(previous) = &first {
+-                assert_eq!(previous, &state);
++            for new in mapping.values() {
++                assert!(db.get_memory(new).map_err(|e| e.to_string())?.is_some());
++            }
++            if let Some(previous) = &mut first {
++                use crate::core::backup::tests::mapped_recovery_reference;
++                for row in previous["jobs"].as_array_mut().ok_or("missing jobs")? {
++                    if row["documentSource"] == "memory" {
++                        row["documentId"] = mapped_recovery_reference(&row["documentId"], &mapping)?;
++                    }
++                }
++                for row in previous["episodes"].as_array_mut().ok_or("missing episodes")? {
++                    for reference in row["retrievedMemoryIds"].as_array_mut().ok_or("missing episode references")? {
++                        *reference = mapped_recovery_reference(reference, &mapping)?;
++                    }
++                }
++                for row in previous["links"].as_array_mut().ok_or("missing artifact links")? {
++                    if row["targetType"] == "memory" {
++                        row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
++                    }
++                }
++                // Every other value, including the original audit and its
++                // historical target ID, must remain byte-for-byte identical.
++                assert_eq!(&*previous, &state);
+             } else {
+                 first = Some(state);
+             }
+--- a/src/core/backup.rs
++++ b/src/core/backup.rs
+@@ -24214,6 +24214,18 @@
+         Ok(())
+     }
+ 
++    /// Rebind only an explicitly identified memory-reference field in a test
++    /// expectation. Unknown references fail; private prose and source audit
++    /// targets must not be rewritten to make a round-trip comparison pass.
++    pub(super) fn mapped_recovery_reference(
++        value: &JsonValue,
++        mapping: &BTreeMap<String, String>,
++    ) -> Result<JsonValue, String> {
++        let old = value.as_str().ok_or("missing memory reference")?;
++        let new = mapping.get(old).ok_or("unmapped memory reference")?;
++        Ok(JsonValue::String(new.clone()))
++    }
++
+     #[test]
+     fn provenance_recovery_survives_rebackup_without_rejudging_evidence() -> TestResult {
+         let (root, workspace, database) = fixture().map_err(|e| e.message())?;
+@@ -24221,8 +24233,15 @@
+         seed_provenance_recovery_state(&database, &workspace_id)?;
+         let mut source_workspace = workspace;
+         let mut source_database = database;
+-        let mut first_state = None;
++        let mut first_state: Option<JsonValue> = None;
+         for round in 0..2 {
++            let source = DbConnection::open_file(&source_database).map_err(|e| e.to_string())?;
++            let source_memories = source
++                .list_memories(&workspace_id, None, true)
++                .map_err(|e| e.to_string())?;
++            let mapping = backup_memory_id_mapping(&source_memories, RedactionLevel::Standard)
++                .map_err(|e| e.message())?;
++            source.close().map_err(|e| e.to_string())?;
+             let backup = create_backup(&BackupCreateOptions {
+                 workspace_path: source_workspace.clone(),
+                 database_path: Some(source_database.clone()),
+@@ -24272,8 +24291,29 @@
+                 "harmful",
+                 "recovery does not endorse a failed repair",
+             )?;
+-            if let Some(first) = &first_state {
+-                ensure_equal(&state, first, "all provenance survives rebackup")?;
++            for new in mapping.values() {
++                ensure(db.get_memory(new).map_err(|e| e.to_string())?.is_some(), "mapped memory exists")?;
++            }
++            if let Some(first) = &mut first_state {
++                for row in first["traces"].as_array_mut().ok_or("missing traces")? {
++                    for reference in row["trace"]["linkedMemoryIds"].as_array_mut().ok_or("missing memory links")? {
++                        *reference = mapped_recovery_reference(reference, &mapping)?;
++                    }
++                }
++                for row in first["links"].as_array_mut().ok_or("missing trace links")? {
++                    if row["targetType"] == "memory" {
++                        row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
++                    }
++                }
++                for row in first["causal"].as_array_mut().ok_or("missing causal evidence")? {
++                    for field in ["failureId", "candidateCauseId"] {
++                        row[field] = mapped_recovery_reference(&row[field], &mapping)?;
++                    }
++                }
++                for row in first["repairs"].as_array_mut().ok_or("missing repair lineage")? {
++                    row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
++                }
++                ensure_equal(&state, &*first, "all provenance survives rebackup with the declared ID mapping")?;
+             } else {
+                 first_state = Some(state);
+             }
+--- a/src/core/backup_typed_memory_recovery_tests.rs
++++ b/src/core/backup_typed_memory_recovery_tests.rs
+@@ -224,6 +224,45 @@
+                 resume.open_loops.revisit_decisions[0].revisit_by.as_deref(),
+                 Some(REVISIT)
+             );
++            // Use the real rebuilt lexical index, then the public typed
++            // filter, rather than merely proving that metadata can be parsed.
++            use crate::core::search::{
++                SearchDedupMode, SearchOptions, SearchSourceMode, TypedMemoryFieldFilter,
++                apply_memory_kind_and_typed_field_filters_to_report, run_search,
++            };
++            let search_options = SearchOptions {
++                workspace_path: opts.side_path.clone(),
++                database_path: Some(path.clone()),
++                index_dir: None,
++                query: "Typed carrier".to_owned(),
++                limit: 20,
++                speed: crate::search::SpeedMode::Default,
++                explain: true,
++                as_of: None,
++                include_tombstoned: false,
++                include_expired: false,
++                include_future: false,
++                include_stale: false,
++                relevance_floor: None,
++                dedup_mode: SearchDedupMode::DocId,
++                source_mode: SearchSourceMode::LexicalOnly,
++                strict_source_mode: true,
++                memory_scope: crate::models::MemoryScope::Swarm,
++                strict_scope: false,
++            };
++            let mut search = run_search(&search_options).unwrap();
++            assert_eq!(search.source_mode_applied, SearchSourceMode::LexicalOnly);
++            assert!(!search.source_mode_fallback);
++            apply_memory_kind_and_typed_field_filters_to_report(
++                &search_options,
++                &mut search,
++                Some("decision"),
++                &[TypedMemoryFieldFilter::parse("chosen=CypressStore").unwrap()],
++            )
++            .unwrap();
++            assert_eq!(search.results.len(), 1);
++            let decision_record = records.iter().find(|row| row.kind == "decision").unwrap();
++            assert_eq!(search.results[0].doc_id, import_memory_id(decision_record, level).unwrap());
+             workspace = opts.side_path;
+             database = path;
+         }
