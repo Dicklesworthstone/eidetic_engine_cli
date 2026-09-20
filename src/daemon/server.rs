@@ -24,6 +24,10 @@
 
 #![cfg(unix)]
 
+#[path = "cass_prefetch_worker.rs"]
+mod cass_prefetch_worker;
+use cass_prefetch_worker::CassPrefetchWorker;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -39,7 +43,8 @@ use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
 use crate::core::cass_prefetch::{
-    AgentScope, CassPrefetchCoordinator, PrefetchGeneration, RecencyWeightedFrequencyPredictor,
+    AgentScope, CassPrefetchCoordinator, GatedPrediction, PrefetchGeneration,
+    RecencyWeightedFrequencyPredictor,
 };
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
@@ -239,6 +244,9 @@ pub struct DaemonDispatchPolicy {
     /// The coordinator itself reads no clock and does no I/O, so holding it
     /// behind a `Mutex` keeps `ee.daemon.context` deterministic.
     cass_prefetch: Arc<Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>>,
+    /// One idle, bounded, read-only warm batch per server; absent for cold mode
+    /// and for direct dispatches which have no supervised server lifetime.
+    cass_prefetch_worker: Option<CassPrefetchWorker>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
     /// runtime + a clone of the actor's submit handle to `dispatch_write`
@@ -1145,6 +1153,11 @@ fn start_server_with_dispatch_policy(
     let listener_path_in_thread = socket_path.clone();
     let pool = InflightPool::new(configured_max_inflight());
     let pool_in_thread = Arc::clone(&pool);
+    // A cloned policy is configuration, not ownership of another daemon's
+    // observations, shutdown flag or speculative single-flight slot.
+    dispatch_policy.cass_prefetch = Arc::new(Mutex::new(CassPrefetchCoordinator::new()));
+    dispatch_policy.cass_prefetch_worker =
+        should_warm.then(|| CassPrefetchWorker::new(Arc::clone(&shutdown), Arc::clone(&pool)));
 
     // Host the long-lived write-owner actor when bound to a workspace (Inc 2,
     // bd-wx6ou.3): a current_thread asupersync runtime drives the actor task;
@@ -2327,6 +2340,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             shutdown,
             search_advisory_session,
             policy.cass_prefetch(),
+            policy.cass_prefetch_worker.as_ref(),
             defer_advisory_until_socket_write,
         ),
         METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown),
@@ -5421,6 +5435,7 @@ fn dispatch_context(
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
     cass_prefetch: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    prefetch_worker: Option<&CassPrefetchWorker>,
     defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
@@ -5534,17 +5549,18 @@ fn dispatch_context(
     // prefetch history and ask the coordinator for gated warm-fetch
     // candidates. Deliberately placed after the pack is assembled so it can
     // only ever add an envelope degraded code, never change the pack.
-    let prefetch_degraded = observe_and_schedule_cass_prefetch(
+    let prefetch_generation = context_response
+        .data
+        .slo
+        .as_ref()
+        .and_then(|slo| slo.actuals.index_generation);
+    let prefetch_prediction = plan_and_observe_cass_prefetch(
         cass_prefetch,
         shutdown,
         &request.agent_id,
         &advisory_workspace_id,
         &params.query,
-        context_response
-            .data
-            .slo
-            .as_ref()
-            .and_then(|slo| slo.actuals.index_generation),
+        prefetch_generation,
     );
     if params.explain && !params.no_pack_dna {
         let database_path = options
@@ -5621,7 +5637,7 @@ fn dispatch_context(
     }
     // Prefetch gate outcomes ride on the envelope, never on `/data/degraded`,
     // so the rendered pack stays byte-identical to the non-daemon path.
-    if let Some(code) = prefetch_degraded {
+    if let Some(code) = prefetch_prediction.degraded {
         response = response.with_degraded(code);
     }
     if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
@@ -5634,6 +5650,22 @@ fn dispatch_context(
                 "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
                 super::DAEMON_RESPONSE_MAX_BYTES
             ),
+        );
+    }
+    // Submit only after successful rendering and size/deadline checks. This
+    // never waits for warming, modifies the response or awards evidence-use
+    // hit/miss credit. Semantic-only requests do not opt into lexical work.
+    if params.source_mode != SearchSourceMode::SemanticOnly
+        && let Some((worker, generation)) = prefetch_worker.zip(prefetch_generation)
+    {
+        worker.submit(
+            crate::config::workspace::resolve_store_index_dir(
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                options.index_dir.as_deref(),
+            ),
+            generation,
+            prefetch_prediction.candidates,
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
@@ -5665,20 +5697,23 @@ fn dispatch_context(
 /// compiled index contract, the coordinator reads no clock, and the history
 /// store is `BTreeMap`-backed, so the same call sequence yields the same
 /// candidates and the same metrics.
-fn observe_and_schedule_cass_prefetch(
+fn plan_and_observe_cass_prefetch(
     coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
     shutdown: &AtomicBool,
     agent_id: &str,
     workspace_id: &str,
     topic: &str,
     index_generation: Option<u64>,
-) -> Option<&'static str> {
+) -> GatedPrediction {
     // Speculative work is the first thing to go when the daemon is stopping.
     if shutdown.load(Ordering::SeqCst) {
-        return None;
+        return GatedPrediction::default();
     }
     // Fail closed rather than stamping a placeholder generation.
-    let generation = PrefetchGeneration::new(0, index_generation?);
+    let Some(index_generation) = index_generation else {
+        return GatedPrediction::default();
+    };
+    let generation = PrefetchGeneration::new(0, index_generation);
     let corpus_revision = crate::core::index::expected_index_corpus_revision();
     // `AgentScope::new` maps an empty or whitespace-only owner onto the
     // `unknown` sentinel, so an unidentified caller still gets its own
@@ -5691,19 +5726,14 @@ fn observe_and_schedule_cass_prefetch(
 
     // Schedule BEFORE observing, and not the other way round.
     //
-    // `CassPrefetchHistoryStore::observe` re-stamps the WHOLE history with the
-    // generation it is handed, so observing first would overwrite the
-    // generation the earlier requests were actually measured against. The
-    // gate would then always compare a generation against itself and the
-    // stale-generation path could never fire — the invalidation this bead
-    // exists to enforce would be dead code.
+    // Observe restarts changed-generation/corpus windows. Scheduling first
+    // still matters: report the stale-history refusal instead of silently
+    // replacing it with an empty prediction against the fresh window.
     //
     // Reading first is also the right semantics: "given the requests I have
     // already seen, what should I warm next?", gated against the index
     // generation live right now.
-    let degraded = prefetch
-        .schedule(&agent_scope, workspace_id, generation, corpus_revision)
-        .degraded;
+    let prediction = prefetch.schedule(&agent_scope, workspace_id, generation, corpus_revision);
 
     // Now record the current request so the NEXT context call has it.
     // `observe` redacts the topic at `TopicId` construction (bd-3aczq), so a
@@ -5716,7 +5746,28 @@ fn observe_and_schedule_cass_prefetch(
         corpus_revision,
     );
 
-    degraded
+    prediction
+}
+
+// Keep the existing envelope/isolation regressions on their original seam.
+#[cfg(test)]
+fn observe_and_schedule_cass_prefetch(
+    coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    shutdown: &AtomicBool,
+    agent_id: &str,
+    workspace_id: &str,
+    topic: &str,
+    index_generation: Option<u64>,
+) -> Option<&'static str> {
+    plan_and_observe_cass_prefetch(
+        coordinator,
+        shutdown,
+        agent_id,
+        workspace_id,
+        topic,
+        index_generation,
+    )
+    .degraded
 }
 
 fn attach_daemon_context_search_advisories_for_delivery(

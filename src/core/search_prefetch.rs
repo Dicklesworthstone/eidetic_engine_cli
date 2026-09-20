@@ -51,7 +51,10 @@ pub(crate) fn warm_prefetch_lexical(
         }
     };
     if let Some(stop) = checkpoint() {
-        return LexicalPrefetchReport { stop, ..Default::default() };
+        return LexicalPrefetchReport {
+            stop,
+            ..Default::default()
+        };
     }
     if candidates.is_empty() {
         return LexicalPrefetchReport::default();
@@ -60,23 +63,35 @@ pub(crate) fn warm_prefetch_lexical(
         let mut report = LexicalPrefetchReport::default();
         // Nonblocking generation lease: speculative work never queues behind
         // a publisher. Missing/stale/unsafe indexes are not repaired here.
-        let _lease = match IndexGenerationLease::try_read_for_prefetch(
-            &cx, index_dir, expected_generation,
-        ).await {
-            Ok(Some(lease)) => lease,
-            Ok(None) => return LexicalPrefetchReport {
-                stop: PrefetchStop::StaleGeneration, ..report
-            },
-            Err(_) => return LexicalPrefetchReport {
-                stop: checkpoint().unwrap_or(PrefetchStop::Unavailable), ..report
-            },
-        };
+        let _lease =
+            match IndexGenerationLease::try_read_for_prefetch(&cx, index_dir, expected_generation)
+                .await
+            {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    return LexicalPrefetchReport {
+                        stop: PrefetchStop::StaleGeneration,
+                        ..report
+                    };
+                }
+                Err(_) => {
+                    return LexicalPrefetchReport {
+                        stop: checkpoint().unwrap_or(PrefetchStop::Unavailable),
+                        ..report
+                    };
+                }
+            };
         if let Some(stop) = checkpoint() {
             return LexicalPrefetchReport { stop, ..report };
         }
         let reader = match open_lexical_searcher(index_dir) {
             Ok(Some(reader)) => reader,
-            _ => return LexicalPrefetchReport { stop: PrefetchStop::Unavailable, ..report },
+            _ => {
+                return LexicalPrefetchReport {
+                    stop: PrefetchStop::Unavailable,
+                    ..report
+                };
+            }
         };
         for candidate in candidates.iter().take(DEFAULT_PREFETCH_TOP_K) {
             if let Some(stop) = checkpoint() {
@@ -109,8 +124,10 @@ pub(crate) fn warm_prefetch_lexical(
             }
         }
         report
-    }).unwrap_or(LexicalPrefetchReport {
-        stop: PrefetchStop::Unavailable, ..Default::default()
+    })
+    .unwrap_or(LexicalPrefetchReport {
+        stop: PrefetchStop::Unavailable,
+        ..Default::default()
     })
 }
 

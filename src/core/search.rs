@@ -74,6 +74,12 @@ use crate::search::HashEmbedder;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalRead;
 
+#[cfg(unix)]
+#[path = "search_prefetch.rs"]
+mod prefetch;
+#[cfg(unix)]
+pub(crate) use prefetch::warm_prefetch_lexical;
+
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";

@@ -21,12 +21,19 @@ impl Drop for RunningBatch {
 
 impl CassPrefetchWorker {
     pub(super) fn new(shutdown: Arc<AtomicBool>, foreground: Arc<InflightPool>) -> Self {
-        Self { running: Arc::new(AtomicBool::new(false)), shutdown, foreground }
+        Self {
+            running: Arc::new(AtomicBool::new(false)),
+            shutdown,
+            foreground,
+        }
     }
 
     fn reserve(&self) -> Option<RunningBatch> {
         if self.shutdown.load(Ordering::Acquire)
-            || self.running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err()
+            || self
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
         {
             return None;
         }
@@ -35,7 +42,11 @@ impl CassPrefetchWorker {
 
     fn interrupted(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
-            || self.foreground.inflight.try_lock().map_or(true, |active| *active != 0)
+            || self
+                .foreground
+                .inflight
+                .try_lock()
+                .map_or(true, |active| *active != 0)
     }
 
     pub(super) fn submit(
@@ -47,29 +58,38 @@ impl CassPrefetchWorker {
         if candidates.is_empty() {
             return;
         }
-        let Some(batch) = self.reserve() else { return; };
+        let Some(batch) = self.reserve() else {
+            return;
+        };
         let worker = self.clone();
         // The originating response still owns its foreground permit. Wait only
         // here, never in dispatch, for that response to drain. There is at most
         // one speculative thread, including this bounded idle wait. A failed
         // spawn drops the captured guard and releases the single-flight slot.
-        let spawned = thread::Builder::new().name("ee-cass-prefetch".to_owned()).spawn(move || {
-            let _batch = batch;
-            if !worker.foreground.wait_until_idle(DEFAULT_PREFETCH_BUDGET) || worker.interrupted() {
-                return;
-            }
-            let report = warm_prefetch_lexical(
-                &index_dir, generation, &candidates, DEFAULT_PREFETCH_BUDGET,
-                || worker.interrupted(),
-            );
-            tracing::debug!(
-                target: "ee::cass_prefetch",
-                completed_queries = report.completed_queries,
-                matching_queries = report.matching_queries,
-                stop = ?report.stop,
-                "finished speculative lexical warming; no evidence-use credit recorded"
-            );
-        });
+        let spawned = thread::Builder::new()
+            .name("ee-cass-prefetch".to_owned())
+            .spawn(move || {
+                let _batch = batch;
+                if !worker.foreground.wait_until_idle(DEFAULT_PREFETCH_BUDGET)
+                    || worker.interrupted()
+                {
+                    return;
+                }
+                let report = warm_prefetch_lexical(
+                    &index_dir,
+                    generation,
+                    &candidates,
+                    DEFAULT_PREFETCH_BUDGET,
+                    || worker.interrupted(),
+                );
+                tracing::debug!(
+                    target: "ee::cass_prefetch",
+                    completed_queries = report.completed_queries,
+                    matching_queries = report.matching_queries,
+                    stop = ?report.stop,
+                    "finished speculative lexical warming; no evidence-use credit recorded"
+                );
+            });
         if spawned.is_err() {
             tracing::debug!(target: "ee::cass_prefetch", "speculative worker unavailable; foreground unchanged");
         }

@@ -8,29 +8,44 @@ type TestResult = Result<(), String>;
 
 fn fixture() -> Result<(tempfile::TempDir, PathBuf), String> {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let index = root.path().canonicalize().map_err(|e| e.to_string())?.join("index");
+    let index = root
+        .path()
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .join("index");
     let build_index = index.clone();
     crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
         let documents = vec![
             IndexableDocument::new("mem_prefetch", "cargo verification release command"),
-            IndexableDocument::new("evd_prefetch", "session evidence cargo verification history"),
+            IndexableDocument::new(
+                "evd_prefetch",
+                "session evidence cargo verification history",
+            ),
         ];
         IndexBuilder::new(&build_index)
             .with_embedder_stack(EmbedderStack::from_parts(
-                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>, None,
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
             ))
-            .add_documents(documents.clone()).build(&cx).await.map_err(|e| e.to_string())?;
+            .add_documents(documents.clone())
+            .build(&cx)
+            .await
+            .map_err(|e| e.to_string())?;
         crate::core::index::build_lexical_tier(&cx, &build_index, &documents)
-            .await.map_err(|e| e.to_string())?;
+            .await
+            .map_err(|e| e.to_string())?;
         crate::core::index::write_memory_eval_index_metadata_for_generation(&build_index, 7, 2)
             .map_err(|e| e.to_string())
-    }).map_err(|e| e.to_string())??;
+    })
+    .map_err(|e| e.to_string())??;
     Ok((root, index))
 }
 
 fn candidates() -> Vec<CassPrefetchCandidate> {
     ["cargo", "verification", "session", "release", "history"]
-        .into_iter().map(|query| CassPrefetchCandidate::new(query, 1.0, "test")).collect()
+        .into_iter()
+        .map(|query| CassPrefetchCandidate::new(query, 1.0, "test"))
+        .collect()
 }
 
 fn fingerprint(root: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
@@ -51,26 +66,45 @@ fn fingerprint(root: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
 }
 
 #[test]
-fn real_warming_reads_bounded_queries_and_reuses_the_production_reader_without_writes() -> TestResult {
+fn real_warming_reads_bounded_queries_and_reuses_the_production_reader_without_writes() -> TestResult
+{
     let (root, index) = fixture()?;
     let before = fingerprint(root.path())?;
     let report = warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false);
     assert_eq!(report.stop, PrefetchStop::Complete);
     assert_eq!(report.completed_queries, DEFAULT_PREFETCH_TOP_K);
     assert_eq!(report.matching_queries, DEFAULT_PREFETCH_TOP_K);
-    let cached = super::super::PROCESS_LEXICAL_SEARCHER_CACHE.get().unwrap()
-        .lock().unwrap().get(&index).unwrap().searcher.clone();
+    let cached = super::super::PROCESS_LEXICAL_SEARCHER_CACHE
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .get(&index)
+        .unwrap()
+        .searcher
+        .clone();
     let ordinary_reader = open_lexical_searcher(&index)?.unwrap();
     assert!(Arc::ptr_eq(&cached, &ordinary_reader));
     let ids = crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
-        ordinary_reader.search(&cx, "cargo", 16).await
-            .map(|hits| hits.into_iter().map(|hit| hit.doc_id.to_string()).collect::<Vec<_>>())
+        ordinary_reader
+            .search(&cx, "cargo", 16)
+            .await
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|hit| hit.doc_id.to_string())
+                    .collect::<Vec<_>>()
+            })
             .map_err(|e| e.to_string())
-    }).map_err(|e| e.to_string())??;
+    })
+    .map_err(|e| e.to_string())??;
     assert_eq!(ids.len(), 2);
     assert!(ids.iter().any(|id| id == "evd_prefetch"));
     assert!(ids.iter().any(|id| id == "mem_prefetch"));
-    assert_eq!(fingerprint(root.path())?, before, "prefetch must not create or rewrite any store/index asset");
+    assert_eq!(
+        fingerprint(root.path())?,
+        before,
+        "prefetch must not create or rewrite any store/index asset"
+    );
     Ok(())
 }
 
@@ -78,7 +112,13 @@ fn real_warming_reads_bounded_queries_and_reuses_the_production_reader_without_w
 fn newer_and_older_generation_requests_do_not_open_a_reader() -> TestResult {
     let (_root, index) = fixture()?;
     for generation in [6, 8] {
-        let report = warm_prefetch_lexical(&index, generation, &candidates(), Duration::from_secs(10), || false);
+        let report = warm_prefetch_lexical(
+            &index,
+            generation,
+            &candidates(),
+            Duration::from_secs(10),
+            || false,
+        );
         assert_eq!(report.stop, PrefetchStop::StaleGeneration);
         assert_eq!(report.completed_queries, 0);
     }
@@ -92,12 +132,19 @@ fn newer_and_older_generation_requests_do_not_open_a_reader() -> TestResult {
 fn changed_corpus_or_evidence_policy_is_not_warmed() -> TestResult {
     let (_root, index) = fixture()?;
     let metadata = index.join("meta.json");
-    let original: serde_json::Value = serde_json::from_slice(&std::fs::read(&metadata).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     for key in ["corpusRevision", "evidenceSecurityPolicyEpoch"] {
         let mut changed = original.clone();
         changed[key] = serde_json::Value::Null;
-        std::fs::write(&metadata, serde_json::to_vec(&changed).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        let report = warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false);
+        std::fs::write(
+            &metadata,
+            serde_json::to_vec(&changed).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let report =
+            warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false);
         assert_eq!(report.stop, PrefetchStop::StaleGeneration);
         assert_eq!(report.completed_queries, 0);
     }
@@ -106,7 +153,7 @@ fn changed_corpus_or_evidence_policy_is_not_warmed() -> TestResult {
 
 #[test]
 fn publisher_lease_is_not_waited_on_and_release_allows_warming() -> TestResult {
-    use rustix::fs::{flock, FlockOperation};
+    use rustix::fs::{FlockOperation, flock};
     let (_root, index) = fixture()?;
     let publisher = std::fs::File::open(index.parent().unwrap()).map_err(|e| e.to_string())?;
     flock(&publisher, FlockOperation::NonBlockingLockExclusive).map_err(|e| e.to_string())?;
@@ -158,7 +205,10 @@ fn symlinked_lexical_assets_are_rejected_before_backend_open() -> TestResult {
     let report = warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false);
     assert_eq!(report.stop, PrefetchStop::Unavailable);
     assert_eq!(report.completed_queries, 0);
-    assert_eq!(std::fs::read_to_string(target).map_err(|e| e.to_string())?, "not index data");
+    assert_eq!(
+        std::fs::read_to_string(target).map_err(|e| e.to_string())?,
+        "not index data"
+    );
     Ok(())
 }
 
@@ -174,7 +224,10 @@ fn invalid_topics_are_skipped_and_empty_predictions_do_no_io() -> TestResult {
     assert_eq!(report.completed_queries, 1);
     assert_eq!(report.matching_queries, 1);
     assert_eq!(report.stop, PrefetchStop::Complete);
-    let report = warm_prefetch_lexical(Path::new("absent"), 7, &[], Duration::from_secs(10), || false);
+    let report =
+        warm_prefetch_lexical(Path::new("absent"), 7, &[], Duration::from_secs(10), || {
+            false
+        });
     assert_eq!(report, LexicalPrefetchReport::default());
     Ok(())
 }

@@ -191,6 +191,38 @@ impl IndexGenerationLease {
         Self::acquire(cx, index_dir, false, MAX_WAIT).await
     }
 
+    /// Best-effort lexical warming never waits for a publisher, discovers a
+    /// retained generation, repairs files or initializes an embedding model.
+    /// Recheck the exact generation and corpus/security contract AFTER acquiring
+    /// the publication lease, then reject unsafe entries before the backend opens.
+    pub(crate) async fn try_read_for_prefetch(
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        expected_generation: u64,
+    ) -> Result<Option<Self>, IndexRebuildError> {
+        index_checkpoint(cx)?;
+        ensure_index_path_has_no_symlinks(index_dir, "prefetch lexical generation")?;
+        let lease = Self::acquire(cx, index_dir, false, Duration::ZERO).await?;
+        super::ensure_index_publish_target_is_directory_or_missing(
+            index_dir,
+            "prefetch lexical generation",
+        )?;
+        let metadata_path = index_dir.join(super::INDEX_METADATA_FILE);
+        let Some(metadata) =
+            super::parse_index_metadata(index_dir).map_err(IndexRebuildError::Index)?
+        else {
+            return Ok(None);
+        };
+        if metadata.generation != Some(expected_generation)
+            || super::index_metadata_compatibility_error(&metadata_path, &metadata).is_some()
+        {
+            return Ok(None);
+        }
+        index_checkpoint(cx)?;
+        ensure_generation_entries_are_regular(cx, &index_dir.join("lexical"))?;
+        Ok(Some(lease))
+    }
+
     /// Acquire BEFORE the database writer fence: a reader may still need DB
     /// access while draining, so waiting with that writer fence would invert
     /// the lock order. Only an explicit index writer creates missing parents.
