@@ -29,9 +29,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+      # bd-niay4: `toolchain: nightly` is FLOATING and overrides
+      # rust-toolchain.toml via RUSTUP_TOOLCHAIN. Pin it to the repo channel.
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@v4
         id: cache
