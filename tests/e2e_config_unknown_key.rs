@@ -1,17 +1,23 @@
 //! bd-339a0: real-binary pin test for the UnknownKey branch of
 //! `ee config get` and `ee config set`.
 //!
-//! `config_surface_error_to_domain` (src/cli/mod.rs:19006) maps
-//! `ConfigSurfaceError::UnknownKey` to
-//! `DomainError::Configuration { message: "Unknown config key
-//! \`{key}\`.", repair: Some("Use \`ee config show graph.* --json\` to
-//! list supported graph keys.") }`. This branch fires for both
-//! `ee config get <unknown>` and `ee config set <unknown> <value>` (and
-//! a similar Configuration error for InvalidValue on `ee config set`).
-//! tests/property_pack_metamorphic.rs:542 covers only the happy path for
-//! `config set search.graph_weight 0.0` and `config get
-//! search.graph_weight`; the UnknownKey + repair text are unpinned for
-//! both subcommands against the real binary.
+//! `config_surface_error_to_domain` (src/cli/mod.rs:28226) maps
+//! `ConfigSurfaceError` onto `DomainError::Configuration`. Under bd-p7wjm
+//! that mapping is no longer shared between the two subcommands: `set`
+//! reports an unwritable key, `get` reports the absence of a VALUE, and
+//! only `set` is entitled to assert that a key does not exist.
+//!
+//! bd-p7wjm: `get` previously answered "Unknown config key" for any key
+//! outside `config set`'s typed validation table, so it refused 83 of the
+//! 117 keys declared in src/config/merge.rs while `config show` printed
+//! every one of them with a value and a source. The two surfaces answer
+//! different questions -- `set` is bounded by what it can type-check and
+//! write, `get` by what the merged configuration actually holds -- and the
+//! read path had been gated on the write path's table.
+//!
+//! tests/property_pack_metamorphic.rs covers the happy path for
+//! `config set search.graph_weight` and `config get graph.ppr.alpha`, both
+//! inside that table; the refusal text is pinned here instead.
 //!
 //! This pin-test mirrors the
 //! `tests/e2e_schema_export_unknown.rs` harness shape.
@@ -110,17 +116,68 @@ fn assert_unknown_key_error(output: &Output, label: &str, expected_key: &str) ->
         format!("response must include an error object; got {parsed}"),
     )?;
     let message = error["message"].as_str().unwrap_or_default();
-    ensure(
-        message.contains(&format!("Unknown config key `{expected_key}`.")),
-        format!(
-            "Configuration error message must pin the UnknownKey text for `{expected_key}`; got {message}"
-        ),
-    )?;
     let repair = error["repair"].as_str().unwrap_or_default();
-    ensure(
-        repair.contains("Use `ee config show graph.* --json` to list supported graph keys."),
-        format!("Configuration error repair must pin the documented suggestion; got {repair}"),
-    )?;
+
+    // bd-p7wjm: `get` and `set` no longer say the same thing, and this
+    // assertion used to require that they did.
+    //
+    // It pinned "Unknown config key `X`." plus a repair naming `graph.*` for
+    // BOTH subcommands. That text was false for `get`, which resolves against
+    // the merged configuration: 83 of the 117 keys declared in
+    // src/config/merge.rs were reported as unknown while `config show`
+    // printed them with a value and a source. Measured end-to-end against the
+    // shipped 0.14.2 binary, 76 of the 110 keys `config show` prints were
+    // refused by `config get` -- the same 70%, and the same 34 accepted keys
+    // (graph 26, search 6, memory 2) by both counts.
+    //
+    // The repair was wrong in the opposite direction: it recommended
+    // `graph.*`, which is not the excluded prefix but 26 of the 34 accepted
+    // ones. It pointed users at the only prefix that already worked.
+    //
+    // The two subcommands are now pinned separately because they answer
+    // different questions. `set` genuinely cannot write outside its typed
+    // surface, so "not a key `ee config set` can write" is true. `get` cannot
+    // distinguish a misspelling from a valid-but-unset key -- only keys WITH
+    // a value are in the merged report -- so it must not assert
+    // non-existence.
+    match label {
+        "set" => {
+            ensure(
+                message.contains(&format!("`{expected_key}` is not a config key")),
+                format!("set must report the key as unwritable, not unknown; got {message}"),
+            )?;
+            ensure(
+                repair.contains("ee config show --json"),
+                format!("set repair must point at the full key listing; got {repair}"),
+            )?;
+            ensure(
+                !repair.contains("graph.*"),
+                format!(
+                    "set repair must not recommend `graph.*`, which the settable \
+                     surface accepts none of; got {repair}"
+                ),
+            )?;
+        }
+        _ => {
+            ensure(
+                message.contains(&format!("No value for config key `{expected_key}`")),
+                format!(
+                    "get must report absence of a VALUE, not absence of the key; got {message}"
+                ),
+            )?;
+            ensure(
+                !message.contains("Unknown config key"),
+                format!(
+                    "get must not assert the key does not exist -- it cannot tell a \
+                     misspelling from an unset key; got {message}"
+                ),
+            )?;
+            ensure(
+                repair.contains("ee config show --json"),
+                format!("get repair must point at the full key listing; got {repair}"),
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -175,6 +232,85 @@ fn config_get_unknown_key_returns_configuration_error() -> TestResult {
         phantom,
     ])?;
     assert_unknown_key_error(&output, "get", phantom)
+}
+
+/// `config get` returns a value for a key outside the settable surface.
+/// bd-p7wjm.
+///
+/// This is the assertion the bead is actually about. Changing the error text
+/// alone would leave the defect intact: 83 of the 117 keys declared in
+/// src/config/merge.rs were REFUSED by `config get` while `config show`
+/// printed them with a value and a source, because the read path gated on
+/// `config_key_spec` -- a table that exists for `config set`'s value
+/// validation. That table matches 8 keys directly and delegates its `_` arm
+/// to `graph_key_spec`, which matches 26 more: 34 accepted, 83 refused.
+///
+/// `cache.pack_l2.enabled` is the live instance that exposed it. It is
+/// declared at merge.rs:81, parsed at file.rs:480, policed at file.rs:1598
+/// and emitted by `to_show_report()` at merge.rs:502 -- and `config get`
+/// answered "Unknown config key". It is deliberately a key `config set`
+/// still cannot write, so this proves READ was decoupled from WRITE rather
+/// than the two surfaces being merged.
+#[test]
+fn config_get_returns_a_key_outside_the_settable_surface() -> TestResult {
+    let workspace = unique_workspace("get-nonsettable")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[cache.pack_l2]\nenabled = true\n",
+    )
+    .map_err(|error| format!("write config.toml: {error}"))?;
+
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "config",
+        "get",
+        "cache.pack_l2.enabled",
+    ])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "config get must succeed for a set key outside the settable surface; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("stdout must be JSON: {error}"))?;
+    ensure(
+        parsed["data"]["key"].as_str() == Some("cache.pack_l2.enabled"),
+        format!("response must echo the requested key; got {parsed}"),
+    )?;
+    ensure(
+        parsed["data"]["value"].as_str() == Some("true"),
+        format!("response must carry the configured value; got {parsed}"),
+    )?;
+
+    // The write surface is deliberately unchanged: this key is readable and
+    // still not settable. If a later change makes `config set` accept it,
+    // that is a separate decision and this assertion should fail loudly
+    // rather than pass quietly.
+    let set_output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "config",
+        "set",
+        "cache.pack_l2.enabled",
+        "false",
+    ])?;
+    ensure(
+        !set_output.status.success(),
+        "config set must still refuse a key outside its typed surface".to_owned(),
+    )?;
+    Ok(())
 }
 
 #[test]

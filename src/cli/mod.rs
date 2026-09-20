@@ -28225,10 +28225,34 @@ fn append_list(out: &mut String, indent: &str, label: &str, values: &[String], e
 
 fn config_surface_error_to_domain(error: ConfigSurfaceError) -> DomainError {
     match error {
+        // bd-p7wjm: `set` genuinely supports a narrow typed surface, so
+        // "unknown" is honest here. The old repair hint was not wrong about
+        // `graph.*` being settable -- it is, 26 of the 34 writable keys --
+        // but it answered a question nobody asked: a user who mistyped
+        // `cache.pack_l2.enabled` was told to go list graph keys.
         ConfigSurfaceError::UnknownKey { key } => DomainError::Configuration {
-            message: format!("Unknown config key `{key}`."),
+            message: format!("`{key}` is not a config key that `ee config set` can write."),
             repair: Some(
-                "Use `ee config show graph.* --json` to list supported graph keys.".into(),
+                "`ee config set` writes the 34 keys it can type-check (`graph.*`, `search.*`, \
+                 `memory.*`); run `ee config show --json` to see every key with a value, and \
+                 set anything else directly in `.ee/config.toml`."
+                    .into(),
+            ),
+        },
+        // bd-p7wjm: the state that used to be reported as "Unknown config
+        // key". The key may be perfectly valid and simply unset -- the merged
+        // config only carries keys that have a value -- so this must not
+        // assert that it does not exist. That assertion cost a real
+        // diagnostic detour: reading it for `cache.pack_l2.enabled` led to
+        // the conclusion that the config file had not been read, when the
+        // file was fine and the command had died of an unrelated deadline.
+        ConfigSurfaceError::UnsetKey { key } => DomainError::Configuration {
+            message: format!("No value for config key `{key}` in the merged configuration."),
+            repair: Some(
+                "The key may be valid but unset: only keys with a value appear. Run \
+                 `ee config show --json` to list them with their sources, or set it in \
+                 `.ee/config.toml`."
+                    .into(),
             ),
         },
         ConfigSurfaceError::InvalidPattern { pattern } => DomainError::Configuration {

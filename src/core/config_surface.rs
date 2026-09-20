@@ -72,7 +72,23 @@ pub struct ConfigSetReport {
 
 #[derive(Debug)]
 pub enum ConfigSurfaceError {
+    /// The key is not one `config set` can write. bd-p7wjm.
+    ///
+    /// Kept for the WRITE path only. `config set` validates values against a
+    /// `GraphValueKind`, so it genuinely supports a narrow typed surface and
+    /// "unknown" is the honest answer there.
     UnknownKey {
+        key: String,
+    },
+    /// The key has no value in the merged configuration. bd-p7wjm.
+    ///
+    /// Distinct from `UnknownKey` because the two call for opposite actions
+    /// and `config get` cannot tell them apart: it resolves against the
+    /// merged config, which only contains keys that have been SET, so a
+    /// perfectly valid key that nobody has configured is absent for an
+    /// entirely different reason than a misspelled one. Reporting both as
+    /// "unknown" is what made `get` deny 83 of the 117 declared keys.
+    UnsetKey {
         key: String,
     },
     InvalidPattern {
@@ -104,6 +120,9 @@ impl fmt::Display for ConfigSurfaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownKey { key } => write!(formatter, "unknown config key `{key}`"),
+            Self::UnsetKey { key } => {
+                write!(formatter, "no value for config key `{key}`")
+            }
             Self::InvalidPattern { pattern } => {
                 write!(formatter, "unsupported config pattern `{pattern}`")
             }
@@ -147,6 +166,7 @@ impl std::error::Error for ConfigSurfaceError {
             Self::Environment { source } => Some(source),
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::UnknownKey { .. }
+            | Self::UnsetKey { .. }
             | Self::InvalidPattern { .. }
             | Self::InvalidValue { .. }
             | Self::Parse { .. } => None,
@@ -202,18 +222,32 @@ pub fn get_config(
     options: &ConfigSurfaceOptions,
     key: &str,
 ) -> Result<ConfigGetReport, ConfigSurfaceError> {
-    let spec = config_key_spec(key).ok_or_else(|| ConfigSurfaceError::UnknownKey {
-        key: key.to_owned(),
-    })?;
-    let report = show_config(options, Some(spec.key))?;
-    let entry =
-        report
-            .entries
-            .into_iter()
-            .next()
-            .ok_or_else(|| ConfigSurfaceError::UnknownKey {
-                key: key.to_owned(),
-            })?;
+    // bd-p7wjm: resolve against the MERGED CONFIG, the same source
+    // `config show` reads, instead of against `config_key_spec`.
+    //
+    // That table exists for `config set`, which validates values against a
+    // `GraphValueKind`. It accepts 34 keys -- 26 `graph.*`, 6 `search.*`, 2
+    // `memory.*` -- while `src/config/merge.rs` declares 117. Gating reads on
+    // it meant `config get` answered "Unknown config key" for the other 83,
+    // every one of which `config show` prints with a value and a source.
+    //
+    // The two surfaces are bounded by different things and only coincided
+    // because they shared a table: `set` is limited to what it can
+    // type-check and write back, `get` to what the merged config holds.
+    // There is no reason a key has to be writable to be readable.
+    //
+    // Nothing from the spec was ever used here except `spec.key`, purely to
+    // obtain a `&'static str` for the report. `ConfigShowEntry::key` is
+    // already `&'static str`, so the entry supplies it directly and the read
+    // path no longer needs a typed table at all.
+    let report = show_config(options, None)?;
+    let entry = report
+        .entries
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .ok_or_else(|| ConfigSurfaceError::UnsetKey {
+            key: key.to_owned(),
+        })?;
     Ok(ConfigGetReport {
         schema: CONFIG_GET_SCHEMA_V1,
         key: entry.key,
