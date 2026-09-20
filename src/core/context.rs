@@ -11694,9 +11694,41 @@ fn temporal_record_matches(
         return false;
     }
     filters.as_of.is_none_or(|as_of| {
-        created_at <= as_of
-            && parse_stored_memory_timestamp(updated_at).is_some_and(|updated| updated <= as_of)
+        row_timestamp_within_bound(created_at, as_of)
+            && parse_stored_memory_timestamp(updated_at)
+                .is_some_and(|updated| row_timestamp_within_bound(updated, as_of))
     })
+}
+
+/// Compare a ROW BOOKKEEPING timestamp (`created_at`, `updated_at`) against an
+/// `as_of` bound, at the granularity the bound is actually expressed in.
+///
+/// bd-docid. `--as-of` is routinely handed a value that was read out of an
+/// AUTHOR VALIDITY column: the CLI surfaces take `valid_from` and
+/// `superseded_at` as revision boundaries, and `normalize_validity_timestamp`
+/// writes those at `SecondsFormat::Secs` (see `core::memory`, bd-o22r0). Row
+/// bookkeeping columns are written by `normalize_row_timestamp` and carry
+/// sub-second precision *by contract* — the two canons are deliberately
+/// different and rewriting either one is what those beads forbid.
+///
+/// Comparing the canons directly with `<=` therefore excludes every row whose
+/// row timestamp lands in the same second as the bound. `ee memory revise`
+/// produces exactly that: the new revision's `valid_from` is the truncated
+/// `revised_at` while its `created_at` is the untruncated instant, and the
+/// superseded predecessor's `updated_at` is bumped the same way — so a pack
+/// read at `--as-of <the revision boundary>` dropped BOTH revisions and came
+/// back empty.
+///
+/// The write side already obeys "use the canon of what you are comparing to".
+/// This is the read-side half of the same rule: when the bound carries no
+/// sub-second component, compare seconds to seconds. A bound that does carry
+/// sub-second precision is compared exactly, unchanged.
+fn row_timestamp_within_bound(row: DateTime<Utc>, bound: DateTime<Utc>) -> bool {
+    if bound.timestamp_subsec_nanos() == 0 {
+        row.timestamp() <= bound.timestamp()
+    } else {
+        row <= bound
+    }
 }
 
 fn memory_temporally_invalid_at(memory: &StoredMemory, reference_time: DateTime<Utc>) -> bool {
@@ -17952,6 +17984,71 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(
             super::temporal_memory_outcome(&boundary_update, &filters),
             super::TemporalCandidateOutcome::Include
+        );
+    }
+
+    /// bd-docid. A revision's row-bookkeeping timestamps carry sub-second
+    /// precision; the `--as-of` bound handed in at a revision boundary is an
+    /// author-validity value and is truncated to whole seconds. Compared
+    /// directly, the revision loses by milliseconds and the pack comes back
+    /// empty. These are the two rows `ee memory revise` actually writes.
+    #[test]
+    fn temporal_as_of_admits_subsecond_rows_at_a_whole_second_bound() {
+        let filters = QueryTemporalFilters {
+            as_of: Some(query_time("2026-05-02T00:00:00Z")),
+            ..QueryTemporalFilters::default()
+        };
+
+        // The new revision: created inside the bound's own second.
+        let head = stored_memory_with_time(
+            "2026-05-02T00:00:00.847231+00:00",
+            "2026-05-02T00:00:00.847231+00:00",
+            None,
+            None,
+        );
+        assert_eq!(
+            super::temporal_memory_outcome(&head, &filters),
+            super::TemporalCandidateOutcome::Include,
+            "a row created in the same second as the bound must not be excluded"
+        );
+
+        // The superseded predecessor: `mark_memory_superseded` bumps only
+        // `updated_at`, and it bumps it to a sub-second row-canon value.
+        let prior = stored_memory_with_time(
+            "2026-05-01T00:00:00+00:00",
+            "2026-05-02T00:00:00.847231+00:00",
+            None,
+            None,
+        );
+        assert_eq!(
+            super::temporal_memory_outcome(&prior, &filters),
+            super::TemporalCandidateOutcome::Include,
+            "a supersession bump inside the bound's second must not exclude the prior"
+        );
+
+        // The gate still holds where it is meant to: a genuinely later edit is
+        // excluded, sub-second precision or not.
+        let later = stored_memory_with_time(
+            "2026-05-01T00:00:00+00:00",
+            "2026-05-02T00:00:01.000001+00:00",
+            None,
+            None,
+        );
+        assert_eq!(
+            super::temporal_memory_outcome(&later, &filters),
+            super::TemporalCandidateOutcome::Exclude,
+            "an edit in a LATER second is still excluded"
+        );
+
+        // A bound that does carry sub-second precision is compared exactly.
+        let precise = QueryTemporalFilters {
+            as_of: Some(query_time("2026-05-02T00:00:00.500000Z")),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&head, &precise),
+            super::TemporalCandidateOutcome::Exclude,
+            "a sub-second bound must keep exact comparison"
         );
     }
 
