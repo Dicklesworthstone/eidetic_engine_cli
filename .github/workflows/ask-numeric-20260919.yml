@@ -4,19 +4,22 @@ on:
   push:
     branches: [main]
     paths:
-      - 'scripts/delivery/ask-numeric-polarity-20260919.patch'
-      - 'scripts/delivery/ask-numeric-links-20260919.patch'
+      - 'src/core/ask*.rs'
+      - 'tests/contracts/ask*.rs'
+      - 'docs/schemas/ee.ask.v1.json'
       - '.github/workflows/ask-numeric-20260919.yml'
   workflow_dispatch:
+
+# The production changes are integrated. Verification must not modify main or
+# replay historical delivery patches over later source changes.
 permissions:
   contents: read
+
 jobs:
-  integrate:
+  verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
@@ -28,13 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          persist-credentials: false
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-08-31
-          components: rustfmt
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -43,50 +45,26 @@ jobs:
           restore-keys: |
             ask-numeric-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
             ask-evidence-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
-      - name: Integrate numeric admission and composition
+      - name: Record the exact unmodified source
         run: |
-          git rev-parse HEAD
-          # The initial feature is already on main. Do not replay historical
-          # overlapping patches over its later, compiled amendments.
-          grep -qF 'mod numeric;' src/core/ask.rs
+          git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
+          test -z "$(git status --porcelain --untracked-files=no)"
           grep -qF 'mod numeric_answer_tests;' src/core/ask.rs
-          for patch in scripts/delivery/ask-numeric-links-20260919.patch scripts/delivery/ask-numeric-polarity-20260919.patch; do
-            if git apply --check --recount "$patch"; then
-              git apply --recount "$patch"
-            elif git apply --reverse --check --recount "$patch"; then
-              echo "Integration already present: $patch"
-            else
-              echo "Source context changed; refusing to overwrite it: $patch" >&2
-              exit 1
-            fi
-          done
-          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs src/core/ask_numeric_polarity_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs tests/contracts/ask_numeric_polarity.rs
-          git diff --check
-      - name: Execute the exact dependency-free scalar classifier
+          grep -qF 'fn same_numeric_context(' src/core/ask.rs
+          grep -qF 'mod polarity_tests;' src/core/ask_numeric_tests.rs
+          grep -qF 'mod polarity;' tests/contracts/ask_numeric.rs
+      - name: Execute the dependency-free scalar classifier
         run: |
           rustc --edition 2024 --test src/core/ask_numeric.rs -o "$RUNNER_TEMP/ask-numeric-classifier"
           "$RUNNER_TEMP/ask-numeric-classifier" --nocapture | tee "$RUNNER_TEMP/numeric-classifier.log"
           grep -Eq 'test result: ok\. 8 passed; 0 failed' "$RUNNER_TEMP/numeric-classifier.log"
-      - name: Compile integrated production library
+      - name: Compile production library
         id: compile
         run: |
           status=0
           cargo check --locked --lib > "$RUNNER_TEMP/numeric-check.log" 2>&1 || status=$?
           tail -n 140 "$RUNNER_TEMP/numeric-check.log"
           exit "$status"
-      - name: Commit compiled feature directly to main
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs src/core/ask_numeric_polarity_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs tests/contracts/ask_numeric_polarity.rs
-          if ! git diff --cached --quiet; then
-            git commit -m 'fix(ask): distinguish numeric subjects before inferring negation conflicts' -m 'Keep compatible different-value negative restrictions out of conflict detection, reserved opposition slots and conflict-side composition. Continue detecting opposite claims about the same numeric value, preserve generic prohibitions without literals and retain explicit-link precedence. Add four real-engine regressions and one public CLI/store contract. Eight scalar tests and production cargo check passed before publication; complete CLI and ask results are recorded separately.'
-            git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
-            # Fast-forward only. A concurrent main update must not be overwritten
-            # or silently merged into the tree whose compile result is reported.
-            git push origin HEAD:main
-          fi
-          git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
       - name: Execute real CLI numeric contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
@@ -100,9 +78,10 @@ jobs:
         run: |
           status=0
           cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/numeric-engine.log" 2>&1 || status=$?
-          tail -n 220 "$RUNNER_TEMP/numeric-engine.log"
+          tail -n 260 "$RUNNER_TEMP/numeric-engine.log"
           grep -q 'numeric_answer_tests::numeric_assignments_are_disclosed_not_confidently_combined ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
-          grep -q 'numeric_answer_tests::numeric_opposition_survives_the_candidate_cap_and_input_order ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
+          grep -q 'numeric_answer_tests::polarity_tests::compatible_negation_cannot_steal_the_numeric_opposition_slot ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
+          grep -q 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
           exit "$status"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

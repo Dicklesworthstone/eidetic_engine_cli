@@ -143,10 +143,16 @@ mod tests {
             "https://example.test/decisions#section-",
         ] {
             let request = AskRequest::default();
-            let mut rows: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
+            // Line references are one-based. L0 is invalid provenance, not
+            // another excerpt of the same document or session.
+            let mut rows: Vec<_> = (1..=ASK_CANDIDATE_SCAN_CAP + 4)
                 .map(|index| candidate(&format!("a-{index:05}"), 0.54, &format!("{prefix}{index}")))
                 .collect();
             rows.push(candidate("z-independent", 0.54, "file://independent.md#L1"));
+            for row in &rows {
+                let uri = row.provenance_uri.as_deref().expect("fixture provenance");
+                assert!(uri.parse::<crate::models::ProvenanceUri>().is_ok(), "{uri}");
+            }
             let selected = select(&request, &rows, ASK_CANDIDATE_SCAN_CAP);
             assert_eq!(selected.len(), ASK_CANDIDATE_SCAN_CAP);
             assert!(selected.iter().any(|row| row.memory_id == "z-independent"));
