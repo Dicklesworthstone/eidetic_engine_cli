@@ -61,10 +61,18 @@ run_cargo_gate() {
         # skip: an orphaned script announces itself in the invocation audit, a
         # permanently green stage does not.
         #
-        # A skip is now recorded as a skip, in the only vocabulary this harness
-        # has -- a counter this script owns. It asserts NOTHING, because a gate
-        # that did not run is not evidence about anything. The truth is carried
-        # by the exit status instead, below.
+        # A skip is now recorded as a skip. bd-gyn1a gave the harness itself a
+        # verb for this, so the record no longer stops at a counter this script
+        # owns: the private counter below still drives the stderr summary, but
+        # e2e_log_skip also puts the skip in the JSONL event stream, where a
+        # machine reading the log can see that this gate did not run. A private
+        # counter that never reaches the event stream is invisible to every
+        # reader that is not a human looking at stderr.
+        #
+        # It asserts NOTHING, because a gate that did not run is not evidence
+        # about anything. The truth is carried by the exit status instead.
+        e2e_log_skip "$label.remote_required" \
+            "EE_DETERMINISM_PROPTEST_USE_RCH is not 1; this gate requires remote execution and was not run"
         gates_skipped=$((gates_skipped + 1))
         return 0
     fi

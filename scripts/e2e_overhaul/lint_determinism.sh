@@ -35,6 +35,13 @@ run_cargo_gate() {
         # exists precisely so a skipped gate is not counted as a passed UI test
         # (:130) -- and then recorded a passing assertion anyway. The knowledge
         # was present and the report contradicted it.
+        #
+        # bd-gyn1a: the harness now has a verb for this, so the knowledge also
+        # reaches the JSONL event stream instead of living only in these two
+        # private counters. Emitting nothing here was still a gap: a gate that
+        # vanishes from the log cannot be told apart from one that was deleted.
+        e2e_log_skip "$label.remote_required" \
+            "EE_LINT_DETERMINISM_USE_RCH is not 1; this gate requires remote execution and was not run"
         last_cargo_gate_skipped=1
         gates_skipped=$((gates_skipped + 1))
         return 0

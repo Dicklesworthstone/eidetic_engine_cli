@@ -24,6 +24,13 @@ EE_TEST_LOG_LEVEL="${EE_TEST_LOG_LEVEL:-normal}"
 EE_TEST_LOG_STDERR_CAP="${EE_TEST_LOG_STDERR_CAP:-4096}"
 EE_TEST_LOG_ASSERTS_PASS=0
 EE_TEST_LOG_ASSERTS_FAIL=0
+# A skip is a THIRD outcome, not a quiet pass. With only two verbs, a script
+# that must not run a gate can either emit nothing -- and the gate vanishes
+# from the log, indistinguishable from one that was deleted or never written --
+# or emit assert_ok, which records "something held" about a check that never
+# ran. Both are lies; the second is the dangerous one, because it is counted.
+# A skipped gate asserts NOTHING and must never reach the pass counter.
+EE_TEST_LOG_ASSERTS_SKIP=0
 EE_TEST_LOG_SCHEMA="ee.test_event.v1"
 
 # ============================================================================
@@ -460,6 +467,7 @@ e2e_log_start() {
     fi
     EE_TEST_LOG_ASSERTS_PASS=0
     EE_TEST_LOG_ASSERTS_FAIL=0
+    EE_TEST_LOG_ASSERTS_SKIP=0
     _e2e_emit_event "note" "message" "test_start: $EE_TEST_LOG_TEST_ID"
 }
 
@@ -708,11 +716,34 @@ e2e_log_golden_compare() {
     [ "$matched" = "true" ]
 }
 
+# Record a gate that did NOT run. Emits assert_skip and increments only the
+# skip counter -- never the pass counter. A reason is REQUIRED: "skipped" with
+# no cause is the same dead end as no record at all, because the next reader
+# cannot tell a deliberate platform exclusion from a silent breakage.
+#
+# This asserts nothing and returns 0, because a gate that did not run is not
+# evidence either way. The caller remains responsible for deciding whether a
+# skip is acceptable; the logger's job is only to make it impossible for that
+# skip to be counted as a pass.
+# Usage: e2e_log_skip "label" "reason"
+e2e_log_skip() {
+    local label="${1:?label required}"
+    local reason="${2:?reason required -- a skip without a cause is not a record}"
+    EE_TEST_LOG_ASSERTS_SKIP=$((EE_TEST_LOG_ASSERTS_SKIP + 1))
+    _e2e_emit_event "assert_skip" "label" "$label" "reason" "$reason"
+}
+
 # Close the scenario. Writes a summary note and (if outer script wants) the
 # pass/fail counters via globals.
+#
+# asserts_skip is emitted UNCONDITIONALLY, including when it is zero. A field
+# that appears only when non-zero cannot be used to tell "nothing was skipped"
+# from "this harness predates skip accounting", so a reader would have to
+# assume the worst on every log that omits it.
 e2e_log_end() {
     _e2e_emit_event "note" \
         "message" "test_end: $EE_TEST_LOG_TEST_ID" \
         "asserts_pass" "$EE_TEST_LOG_ASSERTS_PASS" \
-        "asserts_fail" "$EE_TEST_LOG_ASSERTS_FAIL"
+        "asserts_fail" "$EE_TEST_LOG_ASSERTS_FAIL" \
+        "asserts_skip" "$EE_TEST_LOG_ASSERTS_SKIP"
 }
