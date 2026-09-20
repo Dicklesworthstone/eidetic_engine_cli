@@ -2851,12 +2851,15 @@ pub fn capture_suggestions(
         .iter()
         .map(|span| (span.id.as_str(), span))
         .collect::<BTreeMap<_, _>>();
+    // Only surface suggestions that the public review command can reproduce.
+    // Otherwise a one-tap accept command can point at a candidate that a
+    // subsequent `ee review session --propose` is unable to persist.
     let review_candidates = build_review_session_candidates(
         &prepared.workspace_id,
         &session,
         &evidence_spans,
         options.min_confidence,
-        u32::MAX,
+        MAX_REVIEW_SESSION_LIMIT,
     );
     let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
     let mut suggestions = Vec::new();
@@ -2881,18 +2884,22 @@ pub fn capture_suggestions(
             &evidence_by_id,
             dedupe_status,
             &prepared.workspace_path,
+            &prepared.database_path,
+            options.min_confidence,
         ));
     }
 
     let candidate_count = suggestions.len();
     let suppressed_count = suppressed.len();
     let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let database_arg = shell_quote_command_arg(&prepared.database_path.display().to_string());
     let session_arg = shell_quote_command_arg(&session.id);
     let next_action = if candidate_count == 0 {
         "no capture suggestions proposed".to_owned()
     } else {
         format!(
-            "ee review session {session_arg} --workspace {workspace_arg} --propose --json && ee curate accept <candidate-id> --workspace {workspace_arg} --json"
+            "ee review session {session_arg} --workspace {workspace_arg} --database {database_arg} --min-confidence {} --limit {MAX_REVIEW_SESSION_LIMIT} --propose --json && ee curate accept <candidate-id> --workspace {workspace_arg} --database {database_arg} --json",
+            options.min_confidence
         )
     };
 
@@ -3853,6 +3860,8 @@ fn capture_suggestion_from_review_candidate(
     evidence_by_id: &BTreeMap<&str, &StoredEvidenceSpan>,
     dedupe_status: CaptureSuggestionDedupeStatus,
     workspace_path: &Path,
+    database_path: &Path,
+    review_min_confidence: f32,
 ) -> CaptureSuggestion {
     let kind = capture_suggestion_memory_kind(candidate);
     let mut tags = BTreeSet::from([
@@ -3886,15 +3895,17 @@ fn capture_suggestion_from_review_candidate(
             .then_with(|| left.evidence_span_id.cmp(&right.evidence_span_id))
     });
     let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    let database_arg = shell_quote_command_arg(&database_path.display().to_string());
     let session_arg = shell_quote_command_arg(&session.id);
     let candidate_arg = shell_quote_command_arg(&candidate.candidate_id);
-    let review_command =
-        format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
+    let review_command = format!(
+        "ee review session {session_arg} --workspace {workspace_arg} --database {database_arg} --min-confidence {review_min_confidence} --limit {MAX_REVIEW_SESSION_LIMIT} --propose --json"
+    );
     let accept_command = format!(
-        "{review_command} && ee curate accept {candidate_arg} --workspace {workspace_arg} --json"
+        "{review_command} && ee curate accept {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"
     );
     let reject_command = format!(
-        "{review_command} && ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
+        "{review_command} && ee curate reject {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"
     );
 
     CaptureSuggestion {
@@ -19434,27 +19445,30 @@ mod tests {
         assert!(!suggestion.evidence.is_empty());
         let workspace_arg =
             super::shell_quote_command_arg(&fixture.workspace_path.display().to_string());
+        let database_arg =
+            super::shell_quote_command_arg(&fixture.database_path.display().to_string());
         let session_arg = super::shell_quote_command_arg(&fixture.session_id);
         let candidate_arg = super::shell_quote_command_arg(&suggestion.candidate_id);
-        let expected_review =
-            format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
+        let expected_review = format!(
+            "ee review session {session_arg} --workspace {workspace_arg} --database {database_arg} --min-confidence 0.5 --limit {MAX_REVIEW_SESSION_LIMIT} --propose --json"
+        );
         assert_eq!(suggestion.review_command, expected_review);
         assert_eq!(
             suggestion.accept_command,
             format!(
-                "{expected_review} && ee curate accept {candidate_arg} --workspace {workspace_arg} --json"
+                "{expected_review} && ee curate accept {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"
             )
         );
         assert_eq!(
             suggestion.reject_command,
             format!(
-                "{expected_review} && ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
+                "{expected_review} && ee curate reject {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"
             )
         );
         assert_eq!(
             report.next_action,
             format!(
-                "{expected_review} && ee curate accept <candidate-id> --workspace {workspace_arg} --json"
+                "{expected_review} && ee curate accept <candidate-id> --workspace {workspace_arg} --database {database_arg} --json"
             )
         );
 
