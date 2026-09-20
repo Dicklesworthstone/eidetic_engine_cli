@@ -48,20 +48,50 @@ deliberate — the latest commit should win — but it means **most human pushes
 also ungated**, just less visibly than the bot's. This was measured, not
 isolated: I did not confirm each cancellation was a supersession.
 
-### The mechanism, stated as the hypothesis it is
+### The mechanism: OBSERVED 2026-09-20, no longer a hypothesis
 
 GitHub does not trigger workflow runs for pushes authenticated with the default
-`GITHUB_TOKEN`, to prevent recursive workflow loops. All 35 dated delivery
-workflows here push with that token:
+`GITHUB_TOKEN`, to prevent recursive workflow loops. The delivery workflows here
+push with exactly that token, and the step is citable:
+
+```yaml
+# resume-coherence-20260919.yml
+37:  - uses: actions/checkout@11d5960a...
+38:    with:
+39:      ref: main
+40:      fetch-depth: 0        # no `token:`, no `persist-credentials:`
+...
+98:      git push origin HEAD:main
+```
+
+`actions/checkout` defaults `persist-credentials` to **true**, so it writes the
+job's default `GITHUB_TOKEN` into `.git/config` as the auth header for `origin`,
+and the plain push at `:98` uses it.
+
+**Why this is uniform and not one anecdote.** Every credential *spelling* was
+enumerated across all 49 workflow files — `secrets.*`, `github.token`,
+`GITHUB_TOKEN`, `ssh-key`, `deploy-key`, `app-id`, `private-key`:
 
 ```
-grep -rnE 'secrets\.[A-Z_]+' .github/workflows/*.yml   # nothing but GITHUB_TOKEN
+secrets.GITHUB_TOKEN        1   release.yml:862
+secrets.HOMEBREW_TAP_TOKEN  1   release.yml:981
+github.token                2   ci.yml — GH_TOKEN for the gh CLI, not a push
+GITHUB_TOKEN                6   the two above, plus ci-static.yml COMMENTS
 ```
 
-So **there is no control in this repository.** No workflow pushes with a PAT or
-deploy key, which means there is no case where the hypothesis predicts a run and
-one appears. The 0-of-29 is measured; the token is inferred and has simply never
-been contradicted.
+Both real secrets live in `release.yml`, which is tag-triggered and is not a
+delivery workflow. No ssh-key, deploy-key, app-id or private-key exists anywhere.
+So **there is no non-default credential in this repository** for a delivery
+workflow to push with — whatever a checkout persists can only be the default
+token, because nothing else exists to persist. That argument does not depend on
+matching checkout steps to jobs, which is where a file-level census gets it
+wrong: a `persist-credentials: false` in a delivery workflow generally belongs to
+a *later verification job* pinned to a source sha, not to the job that pushes.
+
+There is still **no positive control** — no workflow pushes with a PAT, so no
+case exists where the mechanism predicts a run and one appears. What changed is
+that the leading alternative is now measured false (it is not paths) and the
+credential is directly read rather than assumed.
 
 ### Why this is worse than an untested commit
 
