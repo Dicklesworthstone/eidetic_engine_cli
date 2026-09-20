@@ -16607,7 +16607,7 @@ mod tests {
         CandidateStatus, CandidateType, CaptureSuggestOptions, CurateCandidatesDegradation,
         CurateCandidatesFilter, CurateCandidatesOptions, CurateCandidatesReport,
         CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
+        MAX_REVIEW_SESSION_LIMIT, REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
         REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN, REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE,
         REVIEW_SESSION_SCHEMA_V2, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
