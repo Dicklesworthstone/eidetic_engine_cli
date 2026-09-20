@@ -90,7 +90,11 @@ impl CassExpectation {
             let row = BackupCassEvidenceRecord::from_stored(&span);
             actual.insert("evidence_spans", &row.id, &row)?;
         }
-        self.rows.verify(&actual, CASS_TABLES)
+        // These readers are workspace-scoped. Equality alone cannot detect
+        // extra rows hidden in another workspace in this isolated side store.
+        // Recheck the complete population in the caller's pinned snapshot,
+        // including the second publication fence after derived-state rebuild.
+        self.rows.verify_complete(&actual, db, CASS_TABLES)
     }
 }
 
@@ -119,5 +123,172 @@ impl Rows {
                 &row.metadata_json,
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::db::{
+        CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
+    };
+    use crate::models::{EvidenceId, SessionId, WorkspaceId};
+
+    fn workspace(db: &DbConnection, n: u128) -> String {
+        let id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(n)).to_string();
+        db.insert_workspace(
+            &id,
+            &CreateWorkspaceInput {
+                path: format!("/recovery-population/{n}"),
+                name: None,
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    fn session(db: &DbConnection, workspace_id: &str, n: u128) -> String {
+        let id = SessionId::from_uuid(uuid::Uuid::from_u128(n)).to_string();
+        db.insert_session(
+            &id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: format!("recovery-session-{n}"),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 1,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"session").to_hex()),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    fn evidence(db: &DbConnection, workspace_id: &str, session_id: &str) -> String {
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let body = "Recovery transcript evidence.";
+        db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.to_owned(),
+                session_id: session_id.to_owned(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: "recovery-span".to_owned(),
+                span_kind: "message".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                excerpt: body.to_owned(),
+                content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    fn capture(db: &DbConnection, workspace_id: &str) -> CassExpectation {
+        let mut rows = Rows::default();
+        for row in db.list_sessions(workspace_id).unwrap() {
+            rows.insert_session(&row).unwrap();
+        }
+        for span in db.list_evidence_spans_for_workspace(workspace_id).unwrap() {
+            let row = BackupCassEvidenceRecord::from_stored(&span);
+            rows.insert("evidence_spans", &row.id, &row).unwrap();
+        }
+        CassExpectation {
+            workspace_id: workspace_id.to_owned(),
+            rows,
+        }
+    }
+
+    #[test]
+    fn empty_cass_population_is_valid() {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let target = workspace(&db, 1);
+        CassExpectation::from_assets(&[], &target)
+            .unwrap()
+            .verify_connection(&db)
+            .unwrap();
+    }
+
+    #[test]
+    fn complete_cass_population_preserves_denied_evidence_without_rescreening() {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let target = workspace(&db, 1);
+        let source = session(&db, &target, 1);
+        evidence(&db, &target, &source);
+        db.execute_raw(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'",
+        )
+        .unwrap();
+        let expected = capture(&db, &target);
+        expected.verify_connection(&db).unwrap();
+        let span = db.list_evidence_spans_for_workspace(&target).unwrap();
+        assert_eq!(span.len(), 1);
+        let row = BackupCassEvidenceRecord::from_stored(&span[0]);
+        assert_eq!(row.search_eligibility, "denied");
+        assert_eq!(row.pack_eligibility, "denied");
+    }
+
+    #[test]
+    fn publication_recheck_rejects_foreign_session_hidden_by_scoped_reader() {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let target = workspace(&db, 1);
+        let foreign = workspace(&db, 2);
+        session(&db, &target, 1);
+        let expected = capture(&db, &target);
+        expected.verify_connection(&db).unwrap();
+
+        session(&db, &foreign, 2);
+        assert_eq!(db.list_sessions(&target).unwrap().len(), 1);
+        assert_eq!(db.count_table_rows("sessions").unwrap(), 2);
+        let error = expected.verify_connection(&db).err().unwrap();
+        let message = error.message();
+        assert!(message.contains("Restored durable population differs for sessions"));
+        assert!(!message.contains(&foreign));
+        assert!(!message.contains("recovery-session"));
+    }
+
+    #[test]
+    fn evidence_population_fence_rejects_rows_outside_the_selected_workspace() {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let target = workspace(&db, 1);
+        let foreign = workspace(&db, 2);
+        let source = session(&db, &foreign, 2);
+        evidence(&db, &foreign, &source);
+        assert!(
+            db.list_evidence_spans_for_workspace(&target)
+                .unwrap()
+                .is_empty()
+        );
+        let scoped = Rows::default();
+        let expected = Rows::default();
+        // Scoped row equality alone passes even though the side store contains
+        // a transcript that was never part of the selected workspace.
+        expected.verify(&scoped, &["evidence_spans"]).unwrap();
+        let error = expected
+            .verify_complete(&scoped, &db, &["evidence_spans"])
+            .err()
+            .unwrap();
+        let message = error.message();
+        assert!(message.contains("Restored durable population differs for evidence_spans"));
+        assert!(!message.contains(&foreign));
+        assert!(!message.contains("Recovery transcript evidence"));
     }
 }
