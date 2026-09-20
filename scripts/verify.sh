@@ -298,6 +298,47 @@ if [ -z "${EE_BINARY:-}" ]; then
     export EE_BINARY="${CURRENT_SOURCE_EE_BINARY}"
 fi
 
+# EE_BINARY IDENTITY, NOT MERELY ITS PATH (bd-reality-core-convergence-1azkt.5,
+# acceptance bullet 5).
+#
+# Everything above this point is PATH SELECTION: it picks a string and falls
+# back to ${REPO_ROOT}/target/debug/ee if cargo cannot be asked. Nothing checked
+# that the file at that path exists, can execute on this host, or was built from
+# this source. Stages from :1266 onward consume CURRENT_SOURCE_EE_BINARY and the
+# only `cargo build --bin ee` in this file is at :1607, so the binary those
+# earlier stages run is whatever happened to be on disk.
+#
+# This repo has already been bitten by precisely that: an RCH run can exit 0
+# having written a LINUX ELF over target/debug/ee on a macOS checkout. Every
+# assertion afterwards then fails for one reason that has nothing to do with the
+# code under test, and a reader sees a wall of product failures.
+#
+# ee_require_current_binary already implements the check -- existence, executes
+# on THIS host, and binary version == source version, printing provenance BEFORE
+# it decides. It lived in scripts/lib/ee_binary_resolution.sh, sourced at :133,
+# and this runner never called it. No new mechanism is added here; the existing
+# one is invoked.
+#
+# WHAT THIS DOES NOT COVER, because bullet 5 names five properties and this
+# verifies three: the binary's HASH is recorded below but not compared against
+# anything, and neither the TARGET TRIPLE nor the FEATURE SET is checked at all.
+# Those remain open on that bullet. Recording the hash now is what lets the
+# proof capsule bind the binary that produced a verdict.
+if ! ee_require_current_binary "${EE_BINARY}" "verify"; then
+    printf 'verify: refusing to run stages against an unverified binary.\n' >&2
+    printf 'verify: build it first (cargo build --locked --bin ee) or export\n' >&2
+    printf 'verify: EE_BINARY to one built from this source tree.\n' >&2
+    exit 1
+fi
+EE_BINARY_SHA256="$(
+    { shasum -a 256 "${EE_BINARY}" 2>/dev/null || sha256sum "${EE_BINARY}" 2>/dev/null; } \
+        | awk 'NR==1 {print $1}'
+)"
+export EE_BINARY_SHA256
+printf 'verify: ee_binary_sha256=%s target_hint=%s\n' \
+    "${EE_BINARY_SHA256:-unavailable}" \
+    "$(file -b "${EE_BINARY}" 2>/dev/null | cut -c1-60 || printf 'unavailable')" >&2
+
 # shellcheck disable=SC2329
 beads_lock_wait_seconds() {
     case "$BEADS_LOCK_WAIT_SECONDS" in
