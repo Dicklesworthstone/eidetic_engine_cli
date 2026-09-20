@@ -209,7 +209,7 @@ fn import_fence_preserves_accounted_progress() -> TestResult {
 fn import_fence_preserves_cass_source_query() -> TestResult {
     assert_refused(
         "import_ledger",
-        "UPDATE import_ledger SET source_id = 'RECOVERY_PRIVATE_CANARY' WHERE source_kind = 'cass'",
+        "UPDATE import_ledger SET source_id = 'RECOVERY_PRIVATE_CANARY' WHERE id = 'imp_00000000000000000000000000'",
         false,
         false,
     )
@@ -219,7 +219,7 @@ fn import_fence_preserves_cass_source_query() -> TestResult {
 fn import_fence_rejects_paired_source_and_workspace_retargeting() -> TestResult {
     assert_refused(
         "workspaces",
-        "UPDATE import_ledger SET source_id = 'cass://sessions?workspace=/RECOVERY_PRIVATE_CANARY&limit=7&since=2026-09-01T00:00:00Z' WHERE source_kind = 'cass'",
+        "UPDATE import_ledger SET source_id = 'cass://sessions?workspace=/RECOVERY_PRIVATE_CANARY&limit=7&since=2026-09-01T00:00:00Z' WHERE id = 'imp_00000000000000000000000000'",
         true,
         false,
     )

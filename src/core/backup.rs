@@ -24214,6 +24214,18 @@ mod tests {
         Ok(())
     }
 
+    /// Rebind only an explicitly identified memory-reference field in a test
+    /// expectation. Unknown references fail; private prose and source audit
+    /// targets must not be rewritten to make a round-trip comparison pass.
+    pub(super) fn mapped_recovery_reference(
+        value: &JsonValue,
+        mapping: &BTreeMap<String, String>,
+    ) -> Result<JsonValue, String> {
+        let old = value.as_str().ok_or("missing memory reference")?;
+        let new = mapping.get(old).ok_or("unmapped memory reference")?;
+        Ok(JsonValue::String(new.clone()))
+    }
+
     #[test]
     fn provenance_recovery_survives_rebackup_without_rejudging_evidence() -> TestResult {
         let (root, workspace, database) = fixture().map_err(|e| e.message())?;
@@ -24221,8 +24233,15 @@ mod tests {
         seed_provenance_recovery_state(&database, &workspace_id)?;
         let mut source_workspace = workspace;
         let mut source_database = database;
-        let mut first_state = None;
+        let mut first_state: Option<JsonValue> = None;
         for round in 0..2 {
+            let source = DbConnection::open_file(&source_database).map_err(|e| e.to_string())?;
+            let source_memories = source
+                .list_memories(&workspace_id, None, true)
+                .map_err(|e| e.to_string())?;
+            let mapping = backup_memory_id_mapping(&source_memories, RedactionLevel::Standard)
+                .map_err(|e| e.message())?;
+            source.close().map_err(|e| e.to_string())?;
             let backup = create_backup(&BackupCreateOptions {
                 workspace_path: source_workspace.clone(),
                 database_path: Some(source_database.clone()),
@@ -24272,8 +24291,45 @@ mod tests {
                 "harmful",
                 "recovery does not endorse a failed repair",
             )?;
-            if let Some(first) = &first_state {
-                ensure_equal(&state, first, "all provenance survives rebackup")?;
+            for new in mapping.values() {
+                ensure(
+                    db.get_memory(new).map_err(|e| e.to_string())?.is_some(),
+                    "mapped memory exists",
+                )?;
+            }
+            if let Some(first) = &mut first_state {
+                for row in first["traces"].as_array_mut().ok_or("missing traces")? {
+                    for reference in row["trace"]["linkedMemoryIds"]
+                        .as_array_mut()
+                        .ok_or("missing memory links")?
+                    {
+                        *reference = mapped_recovery_reference(reference, &mapping)?;
+                    }
+                }
+                for row in first["links"].as_array_mut().ok_or("missing trace links")? {
+                    if row["targetType"] == "memory" {
+                        row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
+                    }
+                }
+                for row in first["causal"]
+                    .as_array_mut()
+                    .ok_or("missing causal evidence")?
+                {
+                    for field in ["failureId", "candidateCauseId"] {
+                        row[field] = mapped_recovery_reference(&row[field], &mapping)?;
+                    }
+                }
+                for row in first["repairs"]
+                    .as_array_mut()
+                    .ok_or("missing repair lineage")?
+                {
+                    row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
+                }
+                ensure_equal(
+                    &state,
+                    &*first,
+                    "all provenance survives rebackup with the declared ID mapping",
+                )?;
             } else {
                 first_state = Some(state);
             }

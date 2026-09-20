@@ -296,8 +296,15 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         seed(&db, &workspace_id).map_err(|e| e.to_string())?;
         db.close().map_err(|e| e.to_string())?;
-        let mut first = None;
+        let mut first: Option<serde_json::Value> = None;
         for round in 0..2 {
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let memories = source
+                .list_memories(&workspace_id, None, true)
+                .map_err(|e| e.to_string())?;
+            let mapping =
+                backup_memory_id_mapping(&memories, redaction).map_err(|e| e.message())?;
+            source.close().map_err(|e| e.to_string())?;
             let backup = create(&workspace, &database, redaction)?;
             let side = root
                 .path()
@@ -345,8 +352,39 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
             );
             assert_eq!(state["links"].as_array().ok_or("missing links")?.len(), 1);
             assert_eq!(state["originalAudit"]["action"], "memory.create");
-            if let Some(previous) = &first {
-                assert_eq!(previous, &state);
+            for new in mapping.values() {
+                assert!(db.get_memory(new).map_err(|e| e.to_string())?.is_some());
+            }
+            if let Some(previous) = &mut first {
+                use crate::core::backup::tests::mapped_recovery_reference;
+                for row in previous["jobs"].as_array_mut().ok_or("missing jobs")? {
+                    if row["documentSource"] == "memory" {
+                        row["documentId"] =
+                            mapped_recovery_reference(&row["documentId"], &mapping)?;
+                    }
+                }
+                for row in previous["episodes"]
+                    .as_array_mut()
+                    .ok_or("missing episodes")?
+                {
+                    for reference in row["retrievedMemoryIds"]
+                        .as_array_mut()
+                        .ok_or("missing episode references")?
+                    {
+                        *reference = mapped_recovery_reference(reference, &mapping)?;
+                    }
+                }
+                for row in previous["links"]
+                    .as_array_mut()
+                    .ok_or("missing artifact links")?
+                {
+                    if row["targetType"] == "memory" {
+                        row["targetId"] = mapped_recovery_reference(&row["targetId"], &mapping)?;
+                    }
+                }
+                // Every other value, including the original audit and its
+                // historical target ID, must remain byte-for-byte identical.
+                assert_eq!(&*previous, &state);
             } else {
                 first = Some(state);
             }

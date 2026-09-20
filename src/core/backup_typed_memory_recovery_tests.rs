@@ -224,6 +224,48 @@ fn all_typed_kinds_survive_two_backups_and_restore_live_decision_consumers() {
                 resume.open_loops.revisit_decisions[0].revisit_by.as_deref(),
                 Some(REVISIT)
             );
+            // Use the real rebuilt lexical index, then the public typed
+            // filter, rather than merely proving that metadata can be parsed.
+            use crate::core::search::{
+                SearchDedupMode, SearchOptions, SearchSourceMode, TypedMemoryFieldFilter,
+                apply_memory_kind_and_typed_field_filters_to_report, run_search,
+            };
+            let search_options = SearchOptions {
+                workspace_path: opts.side_path.clone(),
+                database_path: Some(path.clone()),
+                index_dir: None,
+                query: "Typed carrier".to_owned(),
+                limit: 20,
+                speed: crate::search::SpeedMode::Default,
+                explain: true,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: None,
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Swarm,
+                strict_scope: false,
+            };
+            let mut search = run_search(&search_options).unwrap();
+            assert_eq!(search.source_mode_applied, SearchSourceMode::LexicalOnly);
+            assert!(!search.source_mode_fallback);
+            apply_memory_kind_and_typed_field_filters_to_report(
+                &search_options,
+                &mut search,
+                Some("decision"),
+                &[TypedMemoryFieldFilter::parse("chosen=CypressStore").unwrap()],
+            )
+            .unwrap();
+            assert_eq!(search.results.len(), 1);
+            let decision_record = records.iter().find(|row| row.kind == "decision").unwrap();
+            assert_eq!(
+                search.results[0].doc_id,
+                import_memory_id(decision_record, level).unwrap()
+            );
             workspace = opts.side_path;
             database = path;
         }
