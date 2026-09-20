@@ -48289,6 +48289,95 @@ UPDATE memories
         Ok(())
     }
 
+    /// bd-4hr1v: pack must re-render search's provenance URI unchanged.
+    ///
+    /// This is asserted AT THE JOIN, not as two pinned literals, because two
+    /// independently pinned strings drift back apart silently. The join is a
+    /// single input: `src/core/context.rs:12744` builds pack's provenance with
+    ///
+    ///     ProvenanceUri::from_str(&span.canonical_provenance_uri())
+    ///
+    /// and `src/pack/mod.rs:1751` emits it with `.to_string()`. So pack does
+    /// not derive the URI independently -- it PARSES search's canonical value
+    /// and renders it back. Any disagreement is therefore a lossy round trip,
+    /// and round-trip identity is the exact property that must hold.
+    ///
+    /// It failed for every single-line span: `#L2-2` parsed to `range(2, 2)`,
+    /// which `LineSpan::fragment` collapsed to `L2`. Search indexed `#L2-2`
+    /// (src/search/mod.rs:1114) while pack emitted `#L2` for the same row, so
+    /// a consumer joining the two matched nothing -- silently, since a
+    /// provenance URI is an identity and a miss looks like absent data.
+    ///
+    /// The authority is ADR 0085 (accepted, docs/adr/0085-typed-pack-entity-identity.md:124),
+    /// which specifies `cass-session://<stable-session-id>#L<start>-<end>` for
+    /// public provenance, and docs/schemas/ee.capture_suggestions.v2.json:149,
+    /// which pins `^cass-session://sess_[0-9A-HJKMNP-TV-Z]{26}#L[0-9]+-[0-9]+$`.
+    /// The collapsed spelling satisfies neither.
+    #[test]
+    fn pack_reparse_of_canonical_provenance_uri_is_identity() -> TestResult {
+        fn span_with_lines(start: u32, end: u32) -> super::StoredEvidenceSpan {
+            super::StoredEvidenceSpan {
+                id: "ev_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                session_id: "sess_01J04CTK4MDPAZAM9V47SNMMDX".to_owned(),
+                memory_id: None,
+                cass_span_id: "blake3:fixture".to_owned(),
+                span_kind: "message".to_owned(),
+                start_line: start,
+                end_line: end,
+                start_byte: None,
+                end_byte: None,
+                role: None,
+                excerpt: "fixture excerpt".to_owned(),
+                content_hash: "blake3:fixture".to_owned(),
+                metadata_json: None,
+                producer_kind: "cass_import".to_owned(),
+                screening_version: 1,
+                secret_redaction_status: "clean".to_owned(),
+                redaction_classes_json: "[]".to_owned(),
+                instruction_risk: "none".to_owned(),
+                search_eligibility: "eligible".to_owned(),
+                pack_eligibility: "eligible".to_owned(),
+                canonical_provenance_revision: 1,
+                canonical_excerpt_hash: None,
+                security_policy_epoch: 1,
+                upstream_ref_hash: None,
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                updated_at: "2026-01-01T00:00:00Z".to_owned(),
+            }
+        }
+
+        // The single-line case is the regression. The multi-line case is the
+        // CONTROL: it round-tripped correctly before this fix, so if it ever
+        // fails too, the cause is the parser or Display generally and not the
+        // one-line collapse this test exists for.
+        for (start, end, label) in [(2u32, 2u32, "single-line"), (2, 5, "multi-line")] {
+            let span = span_with_lines(start, end);
+            let canonical = span.canonical_provenance_uri();
+
+            // Guard the premise: if the producer ever stops emitting the range
+            // form, this test would pass vacuously by comparing a collapsed
+            // string to itself.
+            ensure_equal(
+                &canonical,
+                &format!("cass-session://{}#L{start}-{end}", span.session_id),
+                &format!("{label}: canonical producer must emit the range form"),
+            )?;
+
+            // Pack's exact two steps. `parse` dispatches to the same FromStr
+            // impl that src/core/context.rs:12744 calls directly.
+            let reparsed = canonical
+                .parse::<crate::models::ProvenanceUri>()
+                .map_err(|error| format!("{label}: canonical URI must parse: {error}"))?;
+            ensure_equal(
+                &reparsed.to_string(),
+                &canonical,
+                &format!("{label}: pack re-render must equal the canonical URI it parsed"),
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn evidence_insert_boundary_redacts_secrets_and_removes_raw_provenance() -> TestResult {
         let connection = DbConnection::open_memory()?;
