@@ -1,0 +1,115 @@
+name: CASS prefetch execution
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/cass-prefetch-20260920/apply_worker.py
+      - src/core/search_prefetch*.rs
+      - src/daemon/cass_prefetch_worker.rs
+      - .github/workflows/cass-prefetch-execution-20260920.yml
+  workflow_run:
+    workflows: [CASS prefetch residency safety]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cass-prefetch-execution
+  cancel-in-progress: false
+jobs:
+  integrate-and-test:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Require integrated history safety before executing predictions
+        run: grep -Fq 'MAX_PREFETCH_RESIDENT_HISTORIES' src/core/cass_prefetch.rs
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: prefetch-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            prefetch-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Execute real lexical reads and worker regressions before publishing wiring
+        run: |
+          set -euo pipefail
+          trap 'tail -n 80 "$RUNNER_TEMP"/prefetch-worker-*.log 2>/dev/null || true' EXIT
+          python3 scripts/delivery/cass-prefetch-20260920/apply_worker.py
+          paths=(src/core/index_read_lease.rs src/core/search.rs src/core/search_prefetch.rs src/core/search_prefetch_tests.rs src/daemon/server.rs src/daemon/cass_prefetch_worker.rs)
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          run_group() {
+            local name="$1" filter="$2" count="$3"
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/prefetch-worker-$name.log" 2>&1
+            tail -n 80 "$RUNNER_TEMP/prefetch-worker-$name.log"
+            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/prefetch-worker-$name.log"
+          }
+          run_group lexical core::search::prefetch::tests 8
+          run_group lifecycle daemon::server::cass_prefetch_worker::tests 6
+          cargo test --locked --lib core::cass_prefetch:: -- --test-threads=2 > "$RUNNER_TEMP/prefetch-worker-history.log" 2>&1
+          cargo test --locked --lib daemon::server::tests::cass_prefetch -- --test-threads=2 > "$RUNNER_TEMP/prefetch-worker-envelope.log" 2>&1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-worker-envelope.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/prefetch-worker-clippy.log" 2>&1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'feat(prefetch): execute idle scoped lexical warming without changing packs' -m 'Consume the existing gated predictions rather than discarding them. Warm only the shared read-only lexical reader under a nonblocking publication lease, with exact generation/corpus/security checks, no DB or model access, a three-query cap, one per-server batch and foreground/shutdown checkpoints. Preserve cold mode, semantic-only requests and evidence-use metrics. Eight real lexical-index tests, six worker lifecycle tests, existing coordinator/envelope regressions and production Clippy passed before publication.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/prefetch-worker-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/prefetch-worker-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: prefetch-worker-source-and-tests
+          path: ${{ runner.temp }}/prefetch-worker-*
+          retention-days: 7
+      - name: Check all targets
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/prefetch-worker-check.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: prefetch-worker-verification
+          path: ${{ runner.temp }}/prefetch-worker-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
