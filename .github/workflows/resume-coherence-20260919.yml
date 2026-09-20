@@ -1,0 +1,119 @@
+name: Resume coherent source snapshot
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/resume-coherence-20260919.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: resume-coherence-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply the complete reviewed source change against exact source blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object src/core/resume.rs)" = 85a0e2d9d8d4bbcbe1edf2eeb0371179cc825b31
+          test ! -e src/core/resume_snapshot.rs
+          test ! -e src/core/resume_snapshot_tests.rs
+          cat <<'PAYLOAD' | base64 --decode | xz --decompress > "$RUNNER_TEMP/resume.patch"
+          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
+          PAYLOAD
+          echo "0c03932fb257d6499d54129b48b0a6ec3471ced2d5731b09875d8a3fdad7a237  $RUNNER_TEMP/resume.patch" | sha256sum --check
+          git apply --check --whitespace=error-all "$RUNNER_TEMP/resume.patch"
+          git apply --whitespace=error-all "$RUNNER_TEMP/resume.patch"
+          test "$(git hash-object src/core/resume.rs)" = bc0a57ae87a7d08f4a6ebf0d1ace385e1f4b7cee
+          test "$(git hash-object src/core/resume_snapshot.rs)" = 1a3b66cb160cc1edbdcb110f6e9fbadea6b01bfc
+          test "$(git hash-object src/core/resume_snapshot_tests.rs)" = 9a032f8451409d83c85fa4f02633cc4032e03815
+          rustfmt --edition 2024 --config skip_children=true src/core/resume.rs src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs
+          git diff --check
+      - name: Prove real-writer snapshot coherence and existing resume behavior before source publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_group() {
+            local name="$1" filter="$2" count="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/resume-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/resume-$name.log"
+            test "$status" -eq 0
+            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/resume-$name.log"
+          }
+          run_group snapshot core::resume::snapshot::tests 6
+          run_group existing core::resume::tests 22
+          paths=(src/core/resume.rs src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs)
+          base=$(git rev-parse HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          git commit -m 'fix(resume): assemble session state from one owned source snapshot' -m 'Pin workspace binding, memory bodies, session tags and canonical decision fields together. Release the read snapshot before projection and nearby discovery. Six real-database interleaving and lifetime regressions plus all 22 existing resume unit tests passed before publication. No policy or scope admission is relaxed.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            test "$attempt" -lt 3
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            git merge --no-edit origin/main
+            run_group snapshot core::resume::snapshot::tests 6
+            run_group existing core::resume::tests 22
+            base=$(git rev-parse origin/main)
+          done
+          git rev-parse HEAD > "$RUNNER_TEMP/resume-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/resume-source.tar.gz"
+      - name: Check all targets and production Clippy
+        if: ${{ success() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/resume-check.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/resume-check.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/resume-clippy.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/resume-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: resume-coherence-source-and-verification
+          path: ${{ runner.temp }}/resume-*
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
