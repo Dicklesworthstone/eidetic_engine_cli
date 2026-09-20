@@ -38,12 +38,9 @@
 2	global-authority-20260919.yml
 1	index-publication-20260918.yml
 1	learned-history-recovery-20260919.yml
-1	macos-ee-artifact.yml
 2	primer-admission-20260919.yml
 1	recovery-headship-admission-20260919.yml
 2	release.yml
 1	revision-record-recovery-20260919.yml
 2	seed-authority-20260919.yml
-2	session-arc-learning-20260919.yml
-1	snapshot-recovery-20260919.yml
 1	verify-ask-admission-20260917.yml

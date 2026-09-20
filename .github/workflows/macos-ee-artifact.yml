@@ -37,6 +37,14 @@ jobs:
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
+          # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. "Pin both halves"
+          # is CONDITIONAL on a job-level RUSTUP_TOOLCHAIN existing to override
+          # the action at invocation time. This workflow sets none, so there is
+          # no second half and this is not d315cdc7f. The ref `@nightly` selects
+          # FLOATING nightly by itself; this input is what dates the install --
+          # which matters more here than elsewhere, since this job produces a
+          # RELEASE ARTIFACT and a floating compiler makes it unreproducible.
+          toolchain: nightly-2026-08-31
           targets: aarch64-apple-darwin
 
       - name: Build ee
