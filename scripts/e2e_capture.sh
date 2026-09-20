@@ -263,7 +263,17 @@ with_temp_workspace WS
 FIXTURE_REPO="$WS/capture-fixture-repo"
 SESSION_PATH="$WS/cass-session-capture.jsonl"
 CASS_BIN="$WS/cass"
-SECRET="sk-proj-capture-e2e-redacted-000000000000000000"
+# This sentinel is only a secret if the product's detector agrees it is one.
+# src/policy/mod.rs RAW_TOKEN_PATTERNS carries
+#     ("sk-proj-", "openai_api_key", 40, false)
+# where 40 is a MINIMUM SUFFIX LENGTH and the gate is `suffix_len >= 40`.
+# This value previously carried a 39-character suffix, one below the floor, so
+# the redactor never matched it: the leak assertion at the end of this file
+# could not fail for the reason it names, because nothing was ever redacted.
+# The suffix below is 48 characters. If that pattern's threshold is ever raised
+# above 48, the precondition beside the leak assertion fails loudly rather than
+# letting this go quietly back to testing nothing.
+SECRET="sk-proj-capture-e2e-redacted-000000000000000000000000000"
 
 step "init capture workspace and fixture inputs"
 mkdir -p "$FIXTURE_REPO"
@@ -912,6 +922,17 @@ if remember_git_capture_available; then
         and (.data.content | test("ee-anchor:symbol:(capture_lesson|redacted_secret_marker)"))
         and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "git capture includes file/symbol anchors and drift fingerprint"
+    # PRECONDITION FIRST. `contains($SECRET) | not` is satisfied by any response
+    # that never carried diff evidence at all -- an absent excerpt contains no
+    # secret for the same reason an empty string contains nothing. It cannot
+    # tell "the redactor removed the value" from "there was nothing here to
+    # remove". Require positive proof that a diff excerpt was rendered AND that
+    # the redactor fired naming this pattern's reason code; only then does the
+    # negative below distinguish a redacted capture from an empty one.
+    assert_jq "$apply_commit" '
+        (.data.content | contains("Redacted diff excerpt:"))
+        and (.data.content | test("Redaction:.*openai_api_key"))
+    ' "precondition: the capture rendered a diff excerpt and redacted an openai_api_key from it, so the leak assertion below is not vacuous"
     assert_jq "$apply_commit" "tostring | contains(\"$SECRET\") | not" \
         "git capture redacts secret-like diff evidence"
     assert_audit_mentions_capture "$FIXTURE_REPO" "from-commit apply"
