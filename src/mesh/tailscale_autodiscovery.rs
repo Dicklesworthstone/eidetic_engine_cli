@@ -23,6 +23,7 @@ use crate::mesh::hello::{
     serialize_within_budget,
 };
 use crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT;
+use crate::models::DegradationSeverity;
 
 pub const TAILSCALE_AUTODISCOVERY_SCHEMA_V1: &str = "ee.tailscale.autodiscovery.v1";
 
@@ -151,7 +152,17 @@ pub struct TailscaleAutodiscoverySkippedPeer {
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleAutodiscoveryDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    /// bd-fixture-severity-not-a-variant-3renk: typed, not `&'static str`.
+    ///
+    /// While this was a free string, `discovery_lists_unreadable` shipped
+    /// `"error"` -- not a `DegradationSeverity` variant -- to two emission
+    /// sites, a catalog fixture and two docs before anything objected.
+    /// `normalize_severity_for_aggregation` then parsed it as unknown and
+    /// gave it `(Info, -1)`, a rank below every genuine severity, so a
+    /// refusal raised to avoid probing denied peers sorted last and was the
+    /// first entry truncated out of the response. Typing the field makes
+    /// that unrepresentable.
+    pub severity: DegradationSeverity,
     pub message: String,
     pub repair: &'static str,
 }
@@ -160,7 +171,7 @@ impl TailscaleAutodiscoveryDegradation {
     #[must_use]
     pub fn new(
         code: &'static str,
-        severity: &'static str,
+        severity: DegradationSeverity,
         message: impl Into<String>,
         repair: &'static str,
     ) -> Self {
@@ -422,7 +433,7 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
             &mut report,
             TailscaleAutodiscoveryDegradation::new(
                 TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
-                "warning",
+                DegradationSeverity::Warning,
                 "Tailscale peer list was unavailable because the local probe did not run.",
                 "Enable mesh probing with EE_MESH_ENABLED=1 and re-run `ee mesh status --json`.",
             ),
@@ -435,7 +446,7 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
             &mut report,
             TailscaleAutodiscoveryDegradation::new(
                 TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
-                "warning",
+                DegradationSeverity::Warning,
                 "Tailscale peer autodiscovery was skipped because mesh is disabled.",
                 "Set EE_MESH_ENABLED=1 or configure [mesh].enabled when this workspace should join a mesh.",
             ),
@@ -448,7 +459,7 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
             &mut report,
             TailscaleAutodiscoveryDegradation::new(
                 TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
-                "warning",
+                DegradationSeverity::Warning,
                 "Tailscale peer list was unavailable because the local daemon is not reachable or not authenticated.",
                 "Run `tailscale status` and authenticate with `tailscale up` before mesh discovery.",
             ),
@@ -613,7 +624,7 @@ fn push_probe_timeout(report: &mut TailscaleAutodiscoveryReport) {
         report,
         TailscaleAutodiscoveryDegradation::new(
             TAILSCALE_PEER_PROBE_TIMEOUT_CODE,
-            "warning",
+            DegradationSeverity::Warning,
             "At least one Tailscale peer did not answer the ee hello probe within budget.",
             "Increase EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS or retry discovery later.",
         ),
@@ -625,7 +636,7 @@ fn push_no_ee_peers(report: &mut TailscaleAutodiscoveryReport) {
         report,
         TailscaleAutodiscoveryDegradation::new(
             NO_EE_PEERS_ON_TAILNET_CODE,
-            "info",
+            DegradationSeverity::Info,
             "Tailscale is healthy, but no eligible ee peers were discovered on this tailnet.",
             "Run ee with mesh enabled on another tailnet machine.",
         ),
@@ -637,7 +648,7 @@ fn push_workspace_mismatch(report: &mut TailscaleAutodiscoveryReport) {
         report,
         TailscaleAutodiscoveryDegradation::new(
             PEER_DISCOVERY_WORKSPACE_MISMATCH_CODE,
-            "info",
+            DegradationSeverity::Info,
             "At least one ee peer advertised only different workspace IDs and was not enrolled.",
             "Use explicit `ee mesh peer add` or auto-enroll only when cross-workspace sharing is intended.",
         ),
@@ -649,7 +660,7 @@ fn push_budget_exhausted(report: &mut TailscaleAutodiscoveryReport, total_budget
         report,
         TailscaleAutodiscoveryDegradation::new(
             PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE,
-            "warning",
+            DegradationSeverity::Warning,
             format!(
                 "Tailscale peer autodiscovery exhausted the {total_budget_ms}ms total discovery budget."
             ),

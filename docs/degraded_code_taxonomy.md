@@ -740,7 +740,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `tailscale_peer_list_unavailable` | warning | bd-36bbk.1.2 |
 | `peer_discovery_workspace_mismatch` | info | bd-36bbk.1.2 |
 | `peer_discovery_budget_exhausted` | warning | bd-36bbk.1.2 |
-| `discovery_lists_unreadable` | error | bd-xwzeh |
+| `discovery_lists_unreadable` | high | bd-xwzeh |
 
 #### Mesh hello negotiation (1)
 | Code | Severity | Bead |

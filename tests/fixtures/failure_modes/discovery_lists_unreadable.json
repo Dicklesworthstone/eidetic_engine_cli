@@ -8,7 +8,7 @@
   "surfaces": [
     "mesh status"
   ],
-  "severity": "error",
+  "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The workspace discovery lists exist but cannot be honoured, so no peer is probed. load_node_key_list spells every benign case Ok(empty) -- absent file, non-regular path, NotFound, no node_keys key -- so an error here always means an operator supplied a list that could not be read, parsed or bounded. Probing with an empty denylist would contact exactly the peers the workspace denies, which is the fail-open bd-xwzeh closed.",
@@ -20,7 +20,7 @@
   },
   "expected_emission": {
     "code": "discovery_lists_unreadable",
-    "severity": "error",
+    "severity": "high",
     "message_contains": [
       "no peer was probed",
       "empty denylist"

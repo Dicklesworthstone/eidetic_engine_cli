@@ -84,7 +84,7 @@ use crate::mesh::tailscale_autodiscovery::{
     tailscale_peer_probe_timeout_ms_from_env_value,
 };
 use crate::mesh::transport_session::{SessionCapabilities, SessionChannelLimits};
-use crate::models::{DomainError, ProcessExitCode};
+use crate::models::{DegradationSeverity, DomainError, ProcessExitCode};
 use crate::output;
 use crate::policy::{
     MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, OsSecretFindingRandom,
@@ -3010,7 +3010,14 @@ fn build_tailscale_autodiscovery_report_from_local(
         Err(error) => {
             return TailscaleAutodiscoveryReport::refused(TailscaleAutodiscoveryDegradation::new(
                 DISCOVERY_LISTS_UNREADABLE_CODE,
-                "error",
+                // bd-fixture-severity-not-a-variant-3renk: was "error", which
+                // is not a DegradationSeverity variant. High per the enum's own
+                // doc comments: the response is UNRELIABLE, not merely
+                // affected -- a consumer reads an empty peer set as "no peer
+                // responded" when the truth is "we refused to ask" -- and not
+                // Critical, which is documented as unrecoverable while this
+                // repairs by fixing a file.
+                DegradationSeverity::High,
                 format!(
                     "Discovery policy could not be loaded, so no peer was probed: {error}. \
                      Probing with an empty denylist would contact peers this workspace denies."
@@ -3032,7 +3039,9 @@ fn build_tailscale_autodiscovery_report_from_local(
                 return TailscaleAutodiscoveryReport::refused(
                     TailscaleAutodiscoveryDegradation::new(
                         DISCOVERY_LISTS_UNREADABLE_CODE,
-                        "error",
+                        // bd-fixture-severity-not-a-variant-3renk: see the
+                        // sibling arm above. Same refusal, same severity.
+                        DegradationSeverity::High,
                         format!(
                             "Discovery lists exist but could not be honoured, so no peer was \
                              probed: {error}. Probing with an empty denylist would contact peers \
@@ -5094,7 +5103,9 @@ fn load_discovery_policy_state(
     .filter(|item| tags_were_probed || item.code != DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE)
     .map(|item| MeshCliDegradation {
         code: item.code,
-        severity: item.severity,
+        // MeshCliDegradation.severity is still &'static str. Sourcing it from
+        // the typed field means only a real variant can arrive here.
+        severity: item.severity.as_str(),
         message: item.message,
         repair: item.repair.to_owned(),
     })

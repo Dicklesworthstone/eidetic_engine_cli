@@ -389,6 +389,128 @@ mod tests {
         assert_eq!(aggregates[0].sources, vec!["ego", "ppr", "voronoi"]);
     }
 
+    /// bd-fixture-severity-not-a-variant-3renk: the CONSEQUENCE of the
+    /// severity fix, not the assignment.
+    ///
+    /// `discovery_lists_unreadable` shipped severity `"error"`, which is not a
+    /// `DegradationSeverity` variant, so `normalize_severity_for_aggregation`
+    /// scored it `(Info, -1)` -- below every genuine severity, including Info
+    /// itself. Because output is sorted by DESCENDING severity and truncated
+    /// to `MAX - 1`, that ranking decided whether the entry survived at all.
+    ///
+    /// The emission exists to announce that mesh REFUSED to probe, so denied
+    /// peers are not contacted (bd-xwzeh, a P0 outbound hazard). Being dropped
+    /// from a truncated response is the whole defect: the consumer sees an
+    /// empty peer set and reads "nobody answered" instead of "we refused to
+    /// ask".
+    ///
+    /// Both arms run against the same sort-and-truncate path with the same
+    /// filler, so only the severity differs. The negative arm is constructible
+    /// because `DegradationAggregationInput::severity` is a `String` -- typing
+    /// the mesh field stopped mesh from EMITTING a non-variant, but the
+    /// aggregation API still accepts one from any source, which is exactly
+    /// why it must keep ranking them safely.
+    #[test]
+    fn unknown_severity_is_truncated_away_while_high_survives() {
+        // 20 filler codes at "info", the LOWEST genuine severity. Plus the
+        // real code = 21 entries, one over the cap of 20, so the tail is cut.
+        let filler: [&'static str; 20] = [
+            "filler_aa",
+            "filler_ab",
+            "filler_ac",
+            "filler_ad",
+            "filler_ae",
+            "filler_af",
+            "filler_ag",
+            "filler_ah",
+            "filler_ai",
+            "filler_aj",
+            "filler_ak",
+            "filler_al",
+            "filler_am",
+            "filler_an",
+            "filler_ao",
+            "filler_ap",
+            "filler_aq",
+            "filler_ar",
+            "filler_as",
+            "filler_at",
+        ];
+        let arm = |severity: &'static str| -> Vec<AggregatedDegradation> {
+            let mut entries: Vec<(&'static str, DegradationReport)> = filler
+                .into_iter()
+                .map(|code| ("emitter_filler", report(code, "info", "filler", "none")))
+                .collect();
+            entries.push((
+                "mesh_status",
+                report(
+                    crate::mesh::tailscale_autodiscovery::DISCOVERY_LISTS_UNREADABLE_CODE,
+                    severity,
+                    "Discovery lists exist but could not be honoured, so no peer was probed.",
+                    "Fix or remove the offending file under .ee/",
+                ),
+            ));
+            aggregate_degraded(entries)
+        };
+        let code = crate::mesh::tailscale_autodiscovery::DISCOVERY_LISTS_UNREADABLE_CODE;
+        let survives = |aggregates: &[AggregatedDegradation]| {
+            aggregates.iter().any(|entry| entry.code == code)
+        };
+
+        // NEGATIVE ARM -- the shipped-and-broken value.
+        let before = arm("error");
+        assert_eq!(
+            before.len(),
+            DEGRADED_AGGREGATION_MAX_ENTRIES,
+            "the fixture for this test must actually truncate, or neither arm proves anything"
+        );
+        assert!(
+            !survives(&before),
+            "control failed: `error` must rank below the filler and be truncated away, \
+             otherwise this test cannot detect the regression it exists for; got {:?}",
+            before.iter().map(|e| &e.code).collect::<Vec<_>>()
+        );
+        let before_trailer = before.last().expect("trailer present");
+        assert_eq!(before_trailer.code, DEGRADED_AGGREGATION_TRUNCATED_CODE);
+        assert!(
+            before_trailer
+                .sources
+                .iter()
+                .any(|source| source.as_str() == code),
+            "the dropped refusal must at least appear in the trailer's dropped codes; got {:?}",
+            before_trailer.sources
+        );
+
+        // POSITIVE ARM -- the value this bead landed.
+        let after = arm(DegradationSeverity::High.as_str());
+        assert!(
+            survives(&after),
+            "High must outrank the filler and survive truncation; got {:?}",
+            after.iter().map(|e| &e.code).collect::<Vec<_>>()
+        );
+        let kept = after
+            .iter()
+            .find(|entry| entry.code == code)
+            .expect("retained above");
+        assert_eq!(kept.severity, "high");
+        assert_eq!(
+            after.first().map(|entry| entry.code.as_str()),
+            Some(code),
+            "descending sort must put the only above-info entry first"
+        );
+
+        // The ordering fact underneath both arms, asserted directly so a
+        // future change to rank() cannot silently re-break this.
+        assert!(
+            DegradationSeverity::High.rank() > DegradationSeverity::Info.rank(),
+            "High must outrank Info"
+        );
+        assert!(
+            DegradationSeverity::parse("error").is_none(),
+            "if `error` ever becomes a variant this test's premise is void"
+        );
+    }
+
     /// Rule 4: the visible array is capped at
     /// DEGRADED_AGGREGATION_MAX_ENTRIES; excess produces a
     /// synthetic trailer carrying the dropped codes.

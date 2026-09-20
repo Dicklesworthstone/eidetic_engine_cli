@@ -12270,7 +12270,7 @@ EE_MESH_ENABLED=1 EE_TAILSCALE_DISCOVERY_BUDGET_MS=500 ee mesh status --workspac
 
 ## `discovery_lists_unreadable`
 
-**Severity:** error
+**Severity:** high
 
 **Surfaces:** mesh status
 

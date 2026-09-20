@@ -3184,7 +3184,7 @@ fn auto_status_discovery_report(signals: &MeshAutoStatusSignals) -> TailscaleAut
         skipped_peers: Vec::new(),
         degraded: vec![TailscaleAutodiscoveryDegradation::new(
             TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
-            "warning",
+            crate::models::DegradationSeverity::Warning,
             if signals.tailscale_authenticated.is_none() {
                 "Tailscale peer list was unavailable because the local probe did not run."
             } else {
