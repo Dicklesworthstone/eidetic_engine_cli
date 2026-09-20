@@ -266,121 +266,209 @@ pub struct AskReport {
 
 // ─── sentence segmenter (ADR §1) ────────────────────────────────────────────
 
-/// Segment `content` into byte-addressed spans.
+/// Segment `content` into byte-addressed spans without rewriting evidence.
 ///
-/// Code-fence awareness: a ``` ... ``` block is one span. URL dots and
-/// common abbreviations ("e.g.", "i.e.", "vs.", "etc.") do not split.
-/// Bullet-list items (`- `, `* `, `N. `) each become their own span.
-/// Regular sentence boundaries: `. `, `! `, `? ` before an uppercase letter
-/// or end of string.
+/// Fenced blocks retain their delimiter kind and length; inline code protects
+/// embedded sentence punctuation. Prose splits on paragraphs, genuine list
+/// markers and sentence boundaries, including CRLF and Unicode whitespace.
+/// This is an evidence segmenter, not a Markdown renderer: block quotes,
+/// indented code and nested container syntax are not interpreted.
 pub fn segment_spans(content: &str) -> Vec<(usize, usize)> {
-    if content.is_empty() {
-        return Vec::new();
+    let bytes = content.as_bytes();
+    let mut spans = Vec::new();
+    let mut prose_start = 0;
+    let mut line_start = 0;
+    let mut fence: Option<(usize, u8, usize)> = None;
+
+    while line_start < bytes.len() {
+        let next_line = advance_to_newline(bytes, line_start);
+        if let Some((marker, width, tail)) = ask_fence_line(bytes, line_start, next_line) {
+            if let Some((block_start, opening_marker, opening_width)) = fence {
+                // A shorter run, a different marker or non-whitespace suffix
+                // belongs to the body; it cannot expose a partial code block.
+                if marker == opening_marker
+                    && width >= opening_width
+                    && bytes[tail..next_line]
+                        .iter()
+                        .all(|&byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+                {
+                    push_span(&mut spans, content, block_start, next_line);
+                    prose_start = next_line;
+                    fence = None;
+                }
+            } else if marker != b'`' || !bytes[tail..next_line].contains(&b'`') {
+                segment_ask_prose(&mut spans, content, prose_start, line_start);
+                fence = Some((line_start, marker, width));
+            }
+        }
+        line_start = next_line;
     }
 
+    if let Some((block_start, _, _)) = fence {
+        // An unterminated fence owns the remaining bytes, not just the first
+        // sentence or the first accidental triple-backtick inside its body.
+        push_span(&mut spans, content, block_start, bytes.len());
+    } else {
+        segment_ask_prose(&mut spans, content, prose_start, bytes.len());
+    }
+    spans
+}
+
+fn ask_fence_line(bytes: &[u8], start: usize, end: usize) -> Option<(u8, usize, usize)> {
+    let mut marker_start = start;
+    while marker_start < end && bytes[marker_start] == b' ' {
+        marker_start += 1;
+    }
+    if marker_start - start > 3 || marker_start == end {
+        return None;
+    }
+    let marker = bytes[marker_start];
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let mut tail = marker_start;
+    while tail < end && bytes[tail] == marker {
+        tail += 1;
+    }
+    let width = tail - marker_start;
+    (width >= 3).then_some((marker, width, tail))
+}
+
+fn segment_ask_prose(
+    spans: &mut Vec<(usize, usize)>,
+    content: &str,
+    start: usize,
+    end: usize,
+) {
     let bytes = content.as_bytes();
-    let len = content.len();
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut span_start = 0_usize;
-    let mut i = 0_usize;
-    let mut in_code_fence = false;
-
-    while i < len {
-        // Code fence detection (``` at column 0 after whitespace trim)
-        if bytes[i] == b'`' && i + 2 < len && bytes[i + 1] == b'`' && bytes[i + 2] == b'`' {
-            if in_code_fence {
-                // Closing fence — consume through end of line and emit
-                let fence_end = advance_to_newline(bytes, i + 3);
-                push_span(&mut spans, content, span_start, fence_end);
-                span_start = fence_end;
-                i = fence_end;
-                in_code_fence = false;
-            } else {
-                // Opening fence — emit any pending text, then start fence span
-                if i > span_start {
-                    push_span(&mut spans, content, span_start, i);
-                }
-                span_start = i;
-                in_code_fence = true;
-                i += 3; // skip ```
-            }
-            continue;
-        }
-
-        if in_code_fence {
-            i += char_len_at(bytes, i);
-            continue;
-        }
-
-        // Newline — check for list item or blank line (paragraph break)
-        if bytes[i] == b'\n' {
-            let next = i + 1;
-            if next < len {
-                let next_char = bytes[next];
-                // Bullet list item: `- `, `* `, `+ `, or `N. `
-                let is_list_item = next_char == b'-'
-                    || next_char == b'*'
-                    || next_char == b'+'
-                    || (next_char.is_ascii_digit() && {
-                        let mut j = next;
-                        while j < len && bytes[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        j < len && bytes[j] == b'.' && j + 1 < len && bytes[j + 1] == b' '
-                    });
-                // Blank line = paragraph break
-                let is_blank = next_char == b'\n';
-
-                if is_list_item || is_blank {
-                    let end = if is_blank { i } else { i + 1 };
-                    if end > span_start {
-                        push_span(&mut spans, content, span_start, end);
-                        span_start = end;
-                    }
-                }
-            }
-            i += 1;
-            continue;
-        }
-
-        // Sentence boundary: `. `, `! `, `? ` before uppercase or end
-        if (bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?')
-            && i + 1 < len
-            && bytes[i + 1] == b' '
+    let mut paragraph_start = start;
+    let mut line_start = start;
+    while line_start < end {
+        let next_line = advance_to_newline(bytes, line_start).min(end);
+        if content[line_start..next_line].trim().is_empty() {
+            segment_ask_sentences(spans, content, paragraph_start, line_start);
+            paragraph_start = next_line;
+        } else if ask_list_content_start(bytes, line_start, next_line).is_some()
+            && paragraph_start < line_start
         {
-            // Skip common abbreviations
-            if bytes[i] == b'.' && is_abbreviation_end(content, i) {
+            segment_ask_sentences(spans, content, paragraph_start, line_start);
+            paragraph_start = line_start;
+        }
+        line_start = next_line;
+    }
+    segment_ask_sentences(spans, content, paragraph_start, end);
+}
+
+/// Return the first byte after a list marker, not the beginning of the span.
+/// Marker bytes stay in the citation, but `1. ` must not become an answer by
+/// itself. Signed numbers and `*identifier` are not list items.
+fn ask_list_content_start(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut i = start;
+    while i < end && bytes[i] == b' ' {
+        i += 1;
+    }
+    if i - start > 3 || i == end {
+        return None;
+    }
+    if matches!(bytes[i], b'-' | b'*' | b'+') {
+        i += 1;
+    } else {
+        let digits = i;
+        while i < end && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits || i - digits > 9 || i == end || !matches!(bytes[i], b'.' | b')') {
+            return None;
+        }
+        i += 1;
+    }
+    if i == end || !matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+        return None;
+    }
+    while i < end && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    Some(i)
+}
+
+/// Pair each backtick run with the next run of exactly the same length in
+/// this prose block. Precomputing avoids quadratic suffix rescans for many
+/// unmatched delimiters. Closers inside code may be backslash-prefixed;
+/// escaping is checked only when interpreting a run as an opener.
+fn ask_inline_code_ends(bytes: &[u8], start: usize, end: usize) -> BTreeMap<usize, usize> {
+    let mut runs = Vec::new();
+    let mut i = start;
+    while i < end {
+        if bytes[i] == b'`' {
+            let run_start = i;
+            while i < end && bytes[i] == b'`' {
                 i += 1;
+            }
+            runs.push((run_start, i));
+        } else {
+            i += 1;
+        }
+    }
+    let mut next_by_width = BTreeMap::new();
+    let mut closers = BTreeMap::new();
+    for (run_start, run_end) in runs.into_iter().rev() {
+        if let Some(closer_end) = next_by_width.insert(run_end - run_start, run_end) {
+            closers.insert(run_start, closer_end);
+        }
+    }
+    closers
+}
+
+fn ask_byte_is_escaped(bytes: &[u8], start: usize, position: usize) -> bool {
+    let slashes = bytes[start..position]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count();
+    slashes % 2 == 1
+}
+
+fn segment_ask_sentences(
+    spans: &mut Vec<(usize, usize)>,
+    content: &str,
+    start: usize,
+    end: usize,
+) {
+    let bytes = content.as_bytes();
+    let code_ends = ask_inline_code_ends(bytes, start, end);
+    let mut span_start = start;
+    let mut i = ask_list_content_start(bytes, start, end).unwrap_or(start);
+    while i < end {
+        if bytes[i] == b'`' {
+            if !ask_byte_is_escaped(bytes, start, i)
+                && let Some(&code_end) = code_ends.get(&i)
+            {
+                i = code_end;
                 continue;
             }
-            // Check the character after the space
-            let after = i + 2;
-            let sentence_end = i + 1; // include the punctuation, not the space
-            if after >= len || bytes[after].is_ascii_uppercase() || bytes[after] == b'\n' {
-                if sentence_end > span_start {
-                    push_span(&mut spans, content, span_start, sentence_end);
-                    // Skip the space after punctuation
-                    span_start = after;
-                    i = after;
-                    continue;
-                }
+            while i < end && bytes[i] == b'`' {
+                i += 1;
+            }
+            continue;
+        }
+        if matches!(bytes[i], b'.' | b'!' | b'?')
+            && !ask_byte_is_escaped(bytes, start, i)
+            && !(bytes[i] == b'.' && is_abbreviation_end(content, i))
+        {
+            let remainder = &content[i + 1..end];
+            let following = remainder.trim_start();
+            if following.len() != remainder.len()
+                && following.chars().next().is_none_or(char::is_uppercase)
+            {
+                push_span(spans, content, span_start, i + 1);
+                i = end - following.len();
+                span_start = i;
+                continue;
             }
         }
-
-        // Advance by character boundary
         i += char_len_at(bytes, i);
     }
-
-    // Emit any trailing text
-    if span_start < len {
-        push_span(&mut spans, content, span_start, len);
-    }
-
-    // Filter empty/whitespace-only spans
-    spans
-        .into_iter()
-        .filter(|(s, e)| !content[*s..*e].trim().is_empty())
-        .collect()
+    push_span(spans, content, span_start, end);
 }
 
 fn push_span(spans: &mut Vec<(usize, usize)>, content: &str, start: usize, end: usize) {
@@ -430,6 +518,165 @@ fn is_abbreviation_end(text: &str, pos: usize) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod code_evidence_segmentation_tests {
+    use super::*;
+
+    fn slices(content: &str) -> Vec<&str> {
+        let spans = segment_spans(content);
+        assert!(spans.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+        for &(start, end) in &spans {
+            assert!(start < end && end <= content.len());
+            assert!(content.is_char_boundary(start) && content.is_char_boundary(end));
+            assert_eq!(&content[start..end], content[start..end].trim());
+        }
+        spans
+            .into_iter()
+            .map(|(start, end)| &content[start..end])
+            .collect()
+    }
+
+    #[test]
+    fn longer_fences_keep_embedded_examples_atomic() {
+        let block = "````markdown\n```sh\ncargo fmt --check\n```\n````";
+        let text = format!("Before.\n{block}\nAfter.");
+        assert_eq!(slices(&text), ["Before.", block, "After."]);
+    }
+
+    #[test]
+    fn tilde_fences_and_crlf_keep_exact_bytes() {
+        let block = "~~~sh\r\nprintf 'A. B.'\r\n~~~";
+        let text = format!("Before.\r\n{block}\r\nAfter.");
+        assert_eq!(slices(&text), ["Before.", block, "After."]);
+    }
+
+    #[test]
+    fn closing_fences_require_the_same_marker_and_a_blank_tail() {
+        let block = "```sh\n~~~\n```not-a-close\n``\ncargo fmt\n`````";
+        let text = format!("{block}\nAfter.");
+        assert_eq!(slices(&text), [block, "After."]);
+    }
+
+    #[test]
+    fn an_unterminated_fence_keeps_the_entire_remainder() {
+        let block = "````sh\n```\nOne. Two.\n- Never split this.";
+        let text = format!("Before.\n{block}");
+        assert_eq!(slices(&text), ["Before.", block]);
+    }
+
+    #[test]
+    fn indented_fences_have_a_bounded_opening_indent() {
+        let text = "Before.\n   ~~~sh\nA. B.\n  ~~~\nAfter.";
+        assert_eq!(slices(text), ["Before.", "~~~sh\nA. B.\n  ~~~", "After."]);
+        assert!(ask_fence_line(b"    ```\n", 0, 8).is_none());
+    }
+
+    #[test]
+    fn inline_code_is_not_a_fence_or_a_sentence_boundary() {
+        for text in [
+            "Use `printf 'A. B.'` before release.",
+            "Use ``one ` literal. Two`` before release.",
+            "Use ```A. B.``` before release.",
+        ] {
+            assert_eq!(slices(text), [text]);
+        }
+    }
+
+    #[test]
+    fn escaped_openers_and_unmatched_runs_do_not_swallow_prose() {
+        assert_eq!(slices("Use \\`literal. Next."), ["Use \\`literal.", "Next."]);
+        assert_eq!(slices("Use `literal. Next."), ["Use `literal.", "Next."]);
+        assert_eq!(slices("Use `A. B\\` safely."), ["Use `A. B\\` safely."]);
+    }
+
+    #[test]
+    fn inline_delimiters_do_not_cross_paragraph_or_fence_boundaries() {
+        assert_eq!(
+            slices("Use `first.\n\nNext `line."),
+            ["Use `first.", "Next `line."]
+        );
+        let block = "~~~sh\necho `literal`\n~~~";
+        let text = format!("Use `first.\n{block}\nNext `line.");
+        assert_eq!(slices(&text), ["Use `first.", block, "Next `line."]);
+    }
+
+    #[test]
+    fn ordered_markers_remain_with_their_answer_text() {
+        assert_eq!(
+            slices("1. Run cargo fmt.\n2) Run cargo test.\n   - Check output."),
+            ["1. Run cargo fmt.", "2) Run cargo test.", "- Check output."]
+        );
+    }
+
+    #[test]
+    fn signed_values_and_operators_are_not_list_markers() {
+        for text in [
+            "The offset is\n-30 degrees.",
+            "Evaluate\n*pointer first.",
+            "The offset is\n+30 degrees.",
+        ] {
+            assert_eq!(slices(text), [text]);
+        }
+    }
+
+    #[test]
+    fn whitespace_and_unicode_sentence_boundaries_preserve_offsets() {
+        let text = "  Run cargo fmt.\r\nNever skip it.\t\tÉvitez les erreurs.\u{2003}Check again.  ";
+        assert_eq!(
+            slices(text),
+            [
+                "Run cargo fmt.",
+                "Never skip it.",
+                "Évitez les erreurs.",
+                "Check again."
+            ]
+        );
+        assert_eq!(slices("Before\n \t\r\nAfter"), ["Before", "After"]);
+        assert!(slices(" \r\n\t").is_empty());
+        assert!(slices("").is_empty());
+    }
+
+    #[test]
+    fn many_distinct_unmatched_runs_preserve_the_prose() {
+        let text = (1..=128)
+            .map(|width| format!("{}x ", "`".repeat(width)))
+            .collect::<String>();
+        assert_eq!(slices(&text), [text.trim()]);
+    }
+
+    #[test]
+    fn public_ask_cites_a_fenced_command_without_truncating_it() {
+        for body in [
+            "~~~sh\ncargo fmt --check\n~~~",
+            "````markdown\n```sh\ncargo fmt --check\n```\n````",
+        ] {
+            let report = evaluate_ask(
+                &AskRequest {
+                    question: "cargo fmt --check".to_owned(),
+                    ..AskRequest::default()
+                },
+                &[AskCandidate {
+                    memory_id: "format-command".to_owned(),
+                    content: body.to_owned(),
+                    confidence: 1.0,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some("manual://format-command".to_owned()),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    team_provenance: None,
+                }],
+            );
+            assert!(!report.abstained && !report.extractiveness_violated);
+            assert_eq!(report.citations.len(), 1);
+            assert_eq!(report.citations[0].text, body);
+            assert_eq!(
+                &body[report.citations[0].byte_start..report.citations[0].byte_end],
+                body
+            );
+        }
+    }
 }
 
 // ─── lexical tokenizer ───────────────────────────────────────────────────────
