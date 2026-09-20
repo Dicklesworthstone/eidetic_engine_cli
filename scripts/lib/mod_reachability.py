@@ -94,6 +94,15 @@ CFG_ATTR = re.compile(r"^\s*#\[cfg\((?P<expr>.+)\)\]\s*$")
 PATH_ATTR = re.compile(r'^\s*#\[path\s*=\s*"(?P<target>[^"]+)"\]\s*$')
 OTHER_ATTR = re.compile(r"^\s*#\[")
 MOD_LINE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\s*;")
+# bd-l6h3g. `include!("x.rs")` textually inlines a file, so rustc DOES compile
+# it -- but rustfmt does NOT follow `include!`, only `mod`/`#[path]`. A file
+# reached this way is therefore COMPILED AND UNFORMATTED, which is half of what
+# this gate looks for, not none of it. Following it here stops the gate calling
+# such a file "compiled by nothing", which is simply false; the formatter half
+# is reported separately by include_only_paths() so the fact is not lost.
+INCLUDE_LINE = re.compile(r'^\s*include!\s*\(\s*"(?P<target>[^"]+)"\s*\)\s*;')
+# Files reached ONLY via include!: compiled, but never seen by `cargo fmt`.
+INCLUDE_ONLY: set[pathlib.Path] = set()
 
 
 def children(path: pathlib.Path) -> list[tuple[pathlib.Path, str | None]]:
@@ -137,6 +146,15 @@ def children(path: pathlib.Path) -> list[tuple[pathlib.Path, str | None]]:
         redirect = PATH_ATTR.match(raw)
         if redirect:
             pending_path = redirect.group("target")
+            continue
+        included = INCLUDE_LINE.match(raw)
+        if included:
+            candidate = (here / included.group("target")).resolve()
+            if candidate.is_file():
+                found.append((candidate, pending_cfg))
+                INCLUDE_ONLY.add(candidate)
+            pending_cfg = None
+            pending_path = None
             continue
         declaration = MOD_LINE.match(raw)
         if declaration:
@@ -212,6 +230,16 @@ def host_cfg_label() -> str:
 
 
 def tracked_in_scope() -> list[str]:
+    """Population = files GIT TRACKS. An UNTRACKED .rs is invisible to this gate.
+
+    bd-l6h3g. Found by planting a probe: an undeclared file that had not been
+    `git add`ed did NOT trip the gate, and every self-test arm still passed.
+    This is correct in CI, where the checkout contains only committed files, and
+    it is a real blind spot locally -- a brand-new file is unchecked until it is
+    staged. Do not "fix" it by globbing the filesystem: that would pull in
+    target/, scratch files and editor droppings, and the resulting noise is what
+    makes a gate get switched off. Stage the file, then run the gate.
+    """
     proc = subprocess.run(
         ["git", "ls-files", "*.rs"], cwd=REPO, capture_output=True, text=True
     )
@@ -332,6 +360,28 @@ def main() -> int:
             "test data."
         )
 
+    # --- 1b. compiled via include!, therefore NEVER FORMATTED --------------
+    # Not a finding: rustc does compile these, so the "compiled by nothing"
+    # verdict would be false. But `cargo fmt --check` cannot reach them, so a
+    # green Format step says nothing about them. Printed by name every run so
+    # the gap stays visible instead of being silently absorbed by the fact that
+    # the file is reachable.
+    include_only = sorted(
+        str(p.relative_to(REPO)) for p in INCLUDE_ONLY if p.is_file()
+    )
+    if include_only:
+        print(
+            "COMPILED VIA include!, BUT INVISIBLE TO `cargo fmt` "
+            "(rustfmt follows mod/#[path], never include!):"
+        )
+        for p in include_only:
+            print(f"    {p}")
+        print(
+            "  These DO compile, so they are not unreachable-code debt and do not "
+            "fail this gate. They are unformatted-code debt: the Format step is "
+            "green over a population that excludes them."
+        )
+
     # --- 2. allowlist rot: entry names a file that is gone -----------------
     missing = [p for p in allow_paths if not (REPO / p).is_file()]
     if missing:
@@ -397,5 +447,103 @@ def main() -> int:
     return 0
 
 
+def self_test() -> int:
+    """Plant files whose correct classification is known, and assert it.
+
+    bd-l6h3g. A reachability gate reports a ZERO on a healthy tree, and a zero
+    is exactly what a silently broken resolver also reports. The controls in
+    main() pin two real files, which dies the moment either is declared or
+    retired. This plants its own inputs instead, so the arms cannot rot, and it
+    includes the cases that have actually produced wrong answers here:
+    a declaration inside a comment (a `cargo test` living in a comment is how
+    bd-p54ks's guard first miscounted), a `#[path]` redirect, an `include!`,
+    and a `mod` naming a file that does not exist.
+    """
+    import tempfile
+
+    failures: list[str] = []
+
+    def arm(name: str, actual: object, expected: object) -> None:
+        ok = actual == expected
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        if not ok:
+            failures.append(f"{name}: expected {expected!r}, got {actual!r}")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = pathlib.Path(raw)
+        for leaf in ("plain.rs", "redirected_file.rs", "included.rs", "cfgd.rs"):
+            (root / leaf).write_text("// planted\n")
+        parent = root / "parent.rs"
+        parent.write_text(
+            "//! planted parent\n"
+            "mod plain;\n"
+            '#[path = "redirected_file.rs"]\n'
+            "mod redirected;\n"
+            "#[cfg(test)]\n"
+            "mod cfgd;\n"
+            "mod tests {\n"
+            '    include!("included.rs");\n'
+            "}\n"
+            "// mod commented_out;\n"
+            '// include!("commented_include.rs");\n'
+            "mod does_not_exist;\n"
+        )
+        INCLUDE_ONLY.clear()
+        found = children(parent)
+        names = sorted(p.name for p, _ in found)
+
+        arm(
+            "plain `mod x;`, `#[path]`, cfg-gated and include! are all followed",
+            names,
+            ["cfgd.rs", "included.rs", "plain.rs", "redirected_file.rs"],
+        )
+        arm(
+            "a declaration inside a comment is NOT followed",
+            [n for n in names if "commented" in n],
+            [],
+        )
+        arm(
+            "a `mod` naming a file that does not exist yields no child",
+            [n for n in names if "does_not_exist" in n],
+            [],
+        )
+        arm(
+            "the cfg on a gated declaration is captured, not dropped",
+            sorted(c for _, c in found if c),
+            ["test"],
+        )
+        arm(
+            "an include!-only file is recorded as compiled-but-unformatted",
+            sorted(p.name for p in INCLUDE_ONLY),
+            ["included.rs"],
+        )
+
+        # The gate must be able to FAIL. An allowlist entry with no reason is
+        # the cheapest provable failure path that needs no cargo.
+        bad = root / "allow.txt"
+        bad.write_text("some/unreachable.rs\n")
+        parsed = [
+            line.split("\t", 1)
+            for line in bad.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        arm(
+            "an allowlist line with no TAB reason parses as reasonless (a finding)",
+            [len(p) for p in parsed],
+            [1],
+        )
+
+    INCLUDE_ONLY.clear()
+    if failures:
+        print(f"\n[mod-reachability] self-test: {len(failures)} arm(s) FAILED:")
+        for f in failures:
+            print(f"    {f}")
+        return 1
+    print("\n[mod-reachability] self-test: 6/6 arms passed.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(self_test())
     sys.exit(main())

@@ -33,7 +33,7 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 
 # =========================================================================
 # @SECTION-2-BEGIN
-# @SECTION-2-BUDGET: 8
+# @SECTION-2-BUDGET: 11
 #
 # THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
 # sentence here. The gate fails in BOTH directions: more entries than the budget
@@ -50,6 +50,22 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 # to weaken this gate, and it is exactly what the ratchet exists to refuse.
 #
 # Every line names what has to happen for it to be removed.
+#
+# 8 -> 11 ON 2026-09-20, AND HERE IS WHY THAT IS NOT THE FORBIDDEN MOVE.
+# (It was briefly 12. 204c07f2b landed workflow_id and DECLARED
+# src/core/jsonl_workflow_tests.rs while this commit was being verified, so that
+# entry became an obsolete exemption within minutes of being written -- and the
+# gate's third failure direction caught it on the re-verify after rebase, which
+# is exactly the rot this file says it must not accumulate. Entry removed,
+# budget lowered in the same commit, per the rule directly above.)
+# The prohibition above is on absorbing debt SOMEONE JUST CREATED. These two
+# mcp entries are the opposite case: they have been undeclared since
+# 2026-09-18, this gate has been FAILING on them ever since it was written, and
+# nobody noticed because NOTHING EVER RAN THE GATE -- it was referenced by zero
+# workflows until this commit wired it into CI Static. Recording pre-existing
+# debt so enforcement can BEGIN is what section 2 is for; raising the number
+# again to absorb a file added after this date is not. If you are reading this
+# while adding a line, that is the distinction to check.
 # =========================================================================
 src/core/preflight_token.rs	bd-l6h3g item 1. DEAD: 0f68778a0 removed `pub mod preflight_token;` finishing the command-authorization control-plane retirement, and nothing references PreflightToken or preflight_token:: today. 1151 lines, security-adjacent (bypass-token issue/use/reject/revoke). Deletion escalated to the user under AGENTS.md RULE 1; REMOVE THIS LINE WHEN THE FILE IS DELETED OR RE-DECLARED.
 src/core/ask_evidence.rs	bd-l6h3g item 2. LIVE, declaration owed. scripts/delivery/ask-evidence-20260918.patch already specifies `#[path = "ask_evidence.rs"] pub(super) mod evidence;` in src/core/ask_admission.rs; the delivery applied the file and not the declaration. Ask lane owns it. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
@@ -59,3 +75,6 @@ tests/fixtures/closure_lint/test_assertion_cases/empty_test.rs	bd-l6h3g item 5. 
 tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/glob_match.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/real_test_exists.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/real_test_exists.rs; byte-identical, unreferenced.
+src/mcp_ask.rs	bd-l6h3g. LIVE FEATURE THAT NEVER REACHED THE PRODUCT. f23932576 (2026-09-18) "feat(mcp): preserve ask scope and literal targets with true read-only execution" added this file and NOTHING ELSE -- 274 insertions, one file, no `mod` line and no call site. It is not a duplicate of the inline ask handling in src/mcp.rs: `memoryScope` appears 9 times here and 0 times there, so the scope preservation the commit message announces is absent from the shipped MCP path. Declaring it as-is would only make its 5 private items dead code; WIRING it is a product decision and is not this gate's to take. MCP lane owns it. REMOVE THIS LINE WHEN IT IS WIRED INTO src/mcp.rs OR RETIRED.
+src/mcp_ask_live_tests.rs	bd-l6h3g. Test module for the above, added 3e904a635 (2026-09-18), likewise never declared. It calls crate::mcp::handle_json_rpc_message, which DOES exist, so it would compile and run once declared -- but it asserts the scope behaviour that src/mcp_ask.rs implements and the product does not, so declaring it before its subject is wired would red the suite. REMOVE THIS LINE WHEN src/mcp_ask.rs IS WIRED OR RETIRED, TOGETHER WITH IT.
+src/core/backup_workflow_recovery_tests.rs	bd-l6h3g. DOES NOT COMPILE. Shipped by dec5235e1 (2026-09-20) "fix(workflow): deliver atomic completion and full recovery lifecycle". I declared it and ran `cargo check --profile test --lib`: CHECK_RC=101. It asserts `expected.workflow_id` on jsonl::ExportMemoryRecord, a field that does not exist. The declaration is NOT the fix -- the feature the commit says it delivered is absent, and declaring this file only moves a red from invisible to main. Workflow lane owns it. REMOVE THIS LINE WHEN workflow_id EXISTS AND THE FILE COMPILES DECLARED.
