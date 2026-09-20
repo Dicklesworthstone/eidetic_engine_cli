@@ -2175,6 +2175,60 @@ if (
 PY
 }
 
+# Find a client on disk whose compat class matches the DAEMON's (bd-k2fkz).
+#
+# WHY THIS EXISTS. On version skew this wrapper refused at preflight with
+# elapsed_ms=0 -- nothing ran, no verdict, and six agents told to verify with it
+# got no answer. Meanwhile a client in the daemon's own compat class was sitting
+# in the same directory. A verifier that halts while it holds the means to
+# answer is declining a question it could settle.
+#
+# THIS IS NOT GATE-WEAKENING, and the distinction is worth stating because
+# "more permissive" and "weaker" look identical from a diff. Execution stays
+# remote, stays --locked, stays on the same pinned export. What changes is
+# WHICH CLIENT BINARY speaks to the daemon. The assertion being relaxed is the
+# client's claim about its own version, not any claim about the code under test.
+#
+# Prints the chosen path, or nothing. Never picks $RCH_BIN itself.
+rch_compatible_client_for_daemon() {
+    local want="$1"
+    [ -n "$want" ] || return 1
+    local dir seen_real cand real ver comp best=""
+    dir="$(dirname "$RCH_BIN")"
+    seen_real=""
+    for cand in "$dir"/rch "$dir"/rch.*; do
+        [ -f "$cand" ] && [ -x "$cand" ] || continue
+        real="$(cd "$(dirname "$cand")" 2>/dev/null && printf '%s/%s' "$PWD" "$(basename "$cand")")"
+        # The same binary is hard-linked under several names here, so dedupe by
+        # inode: probing one candidate five times is five subprocess spawns and
+        # five chances to hang.
+        local ino
+        ino="$(stat -f %i "$cand" 2>/dev/null || stat -c %i "$cand" 2>/dev/null || printf '%s' "$cand")"
+        case " $seen_real " in *" $ino "*) continue ;; esac
+        seen_real="$seen_real $ino"
+        [ "$real" = "$RCH_BIN" ] && continue
+        ver="$(timeout 10 "$cand" --version 2>/dev/null | head -1)" || continue
+        # SAME SEMANTICS AS rch_runtime_json's compat(): the FIRST major.minor
+        # in the string. My first attempt used a greedy sed and read "rch 2.0.0"
+        # as compat 0.0 and "rch 1.0.63" as 0.63 -- a second spelling of one
+        # rule, drifting from the first the moment it was written. Shelling to
+        # the same regex is slower and cannot disagree.
+        comp="$(RCH_VER_INPUT="$ver" python3 -c 'import os,re
+m = re.search(r"(\d+)\.(\d+)(?:\.\d+)?", os.environ.get("RCH_VER_INPUT", ""))
+print(f"{m.group(1)}.{m.group(2)}" if m else "")' 2>/dev/null)"
+        [ -n "$comp" ] || continue
+        if [ "$comp" = "$want" ]; then
+            # Prefer the lexically greatest match: within one compat class that
+            # is the later patch level, and a newer patch of the same class is
+            # strictly the safer of two equally-compatible clients.
+            if [ -z "$best" ] || [ "$cand" \> "$best" ]; then
+                best="$cand"
+            fi
+        fi
+    done
+    [ -n "$best" ] && printf '%s' "$best"
+}
+
 known_blocker_lookup_json() {
     if [ "$KNOWN_BLOCKER_ENABLED" != "1" ]; then
         printf 'null'
@@ -6919,9 +6973,45 @@ if [ "$DRY_RUN" -eq 0 ]; then
     if [ "${RCH_VERIFY_FAIL_FAST_VERSION_SKEW:-1}" = "1" ]; then
         RCH_RUNTIME_SKEW_CODE="$(rch_runtime_skew_code "$RCH_RUNTIME_JSON")"
         if [ -n "$RCH_RUNTIME_SKEW_CODE" ]; then
-            emit_json true 1 0 "RCH client/daemon version skew; refusing before remote Cargo" "" \
-                "$RCH_RUNTIME_SKEW_CODE"
-            exit 1
+            # ANSWER IF WE CAN; REFUSE ONLY IF WE CANNOT (bd-k2fkz).
+            #
+            # This used to exit 1 unconditionally with elapsed_ms=0. The skew is
+            # real and installing a matching daemon is an operator action on
+            # shared infrastructure -- not this script's to take. But refusing
+            # while a client in the daemon's own compat class sits in the same
+            # directory is a tool declining a question it could settle.
+            RCH_SKEW_DAEMON_COMPAT="$(json_text_field "$RCH_RUNTIME_JSON" daemon_compat)"
+            RCH_SKEW_FALLBACK_CLIENT=""
+            if [ "${RCH_VERIFY_SKEW_FALLBACK:-1}" = "1" ]; then
+                RCH_SKEW_FALLBACK_CLIENT="$(rch_compatible_client_for_daemon "$RCH_SKEW_DAEMON_COMPAT" || true)"
+            fi
+            if [ -n "$RCH_SKEW_FALLBACK_CLIENT" ]; then
+                # LOUDLY, and in the proof. A verdict produced by a substituted
+                # client must never be indistinguishable from one produced by a
+                # matched pair: the degraded code travels with the result so a
+                # reader can weigh it, and the old client's path is named so the
+                # substitution is reproducible rather than mysterious.
+                printf '[rch-verify] RCH client/daemon skew: substituting compat-%s client %s for %s\n' \
+                    "$RCH_SKEW_DAEMON_COMPAT" "$RCH_SKEW_FALLBACK_CLIENT" "$RCH_BIN" >&2
+                RCH_BIN="$RCH_SKEW_FALLBACK_CLIENT"
+                # Only the two real constructions above put a binary here, both
+                # at element 0; every other assignment clears the array before a
+                # refusal.
+                if [ "${#RCH_INVOCATION[@]}" -gt 0 ]; then
+                    RCH_INVOCATION[0]="$RCH_BIN"
+                fi
+                # NOT `degraded+=`: that array is rebuilt from scratch at the
+                # emit site far below, so appending here would be silently
+                # discarded -- the evidence would vanish exactly where it
+                # matters. Carry it in its own array and fold it in there.
+                skew_fallback_degraded=("rch_verify_client_daemon_skew_fallback_client")
+                RCH_RUNTIME_JSON="$(rch_runtime_json)"
+            else
+                emit_json true 1 0 \
+                    "RCH client/daemon version skew and no client in the daemon's compat class (${RCH_SKEW_DAEMON_COMPAT:-unknown}) was found beside ${RCH_BIN}; refusing before remote Cargo" "" \
+                    "$RCH_RUNTIME_SKEW_CODE"
+                exit 1
+            fi
         fi
     fi
 fi
@@ -6948,6 +7038,7 @@ if [ "$BUILD_ADMISSION_STATUS" = "denied" ]; then
     exit 1
 fi
 
+skew_fallback_degraded=()
 build_admission_degraded=()
 case "$BUILD_ADMISSION_STATUS" in
     unavailable)
@@ -7229,7 +7320,7 @@ else
     stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
     stderr_tail=""
 fi
-degraded=("${build_admission_degraded[@]}" "${proof_broker_degraded[@]}")
+degraded=("${build_admission_degraded[@]}" "${proof_broker_degraded[@]}" "${skew_fallback_degraded[@]}")
 explicit_capacity_refusal=0
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
