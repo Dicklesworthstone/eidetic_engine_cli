@@ -1647,6 +1647,183 @@ fn normal_verify_test_gate_excludes_criterion_benches() {
 /// verify.sh is still checked against the literal spelling by
 /// `normal_verify_test_gate_excludes_criterion_benches`: verify.sh is where
 /// that spelling is defined, so pinning it there is a definition, not a shape.
+/// bd-p54ks: pin WHICH workflows can run on an arbitrary push to main.
+///
+/// Measured 2026-09-20: of 48 workflow files, 36 invoke a compiling cargo
+/// command, but 35 of those are PATH-FILTERED to their own delivery payload
+/// (`paths: ['scripts/delivery/<name>.patch', '.github/workflows/<name>.yml']`),
+/// so they never observe an ordinary source commit. Exactly one compiling
+/// workflow is unfiltered -- ci.yml -- and `gh workflow list --all` reports it
+/// `disabled_manually`. The one active unfiltered workflow, ci-static.yml,
+/// runs `cargo fmt --check` and nothing that typechecks; its own header says
+/// "Do not read a green CI Static run as 'CI is restored.'"
+///
+/// This guard pins the UNFILTERED set only, deliberately. Pinning totals would
+/// red on every new delivery workflow -- 29 arrived in 24h -- and a guard that
+/// reds on ordinary activity gets edited away. The unfiltered set is stable
+/// precisely because delivery workflows are payload-scoped, so a change to it
+/// means someone altered what gates main, which is the thing worth noticing.
+///
+/// It is a SNAPSHOT, not an assertion that main is ungated. Phrasing it as
+/// "nothing compiles main" would go red the day somebody fixes that, and a
+/// guard that fails when its subject improves teaches people to delete it --
+/// the same trap the comment above this test already warns about.
+///
+/// Enabling ci.yml is not this guard's business: ci-static.yml records why it
+/// is off (90-minute cargo shards queued against a predicted-red tree during a
+/// 6-agent swarm). That is a capacity decision, and this test only makes the
+/// current shape visible.
+#[test]
+fn unfiltered_push_to_main_workflows_are_pinned() {
+    // (file name, runs a compiling cargo command)
+    //
+    // TWO workflows can run on an arbitrary push to main. ci.yml compiles and
+    // is disabled_manually; ci-static.yml is active and compiles nothing. So
+    // exactly one workflow observes an ordinary main commit, and it does not
+    // typecheck.
+    //
+    // My first draft of this list had three entries. It wrongly included
+    // recovery-source-snapshot.yml, because the scan I built it from applied
+    // the `paths:` check only to workflows that compile, and that one does
+    // not -- so a path-filtered workflow arrived here looking unfiltered.
+    // This test failed on it, which is the negative arm doing its job against
+    // a real mistake rather than a planted one.
+    const EXPECTED_UNFILTERED: [(&str, bool); 2] = [("ci-static.yml", false), ("ci.yml", true)];
+
+    let actual = classify_unfiltered_push_to_main(&project_root().join(".github/workflows"));
+    let expected: Vec<(String, bool)> = EXPECTED_UNFILTERED
+        .iter()
+        .map(|(name, compiles)| ((*name).to_owned(), *compiles))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the set of workflows that run on an ARBITRARY push to main changed. \
+         Update this snapshot in the same commit, and say in the message whether \
+         main's compiling coverage went up or down."
+    );
+
+    // NEGATIVE ARM, in-test: prove the classifier still detects an unfiltered
+    // compiling workflow. Without this, the assertion above passes equally well
+    // when the classifier is broken and when nothing changed, and those are
+    // different facts.
+    let probe_dir = std::env::temp_dir().join(format!(
+        "ee-p54ks-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::create_dir_all(&probe_dir).expect("create probe dir");
+    fs::write(
+        probe_dir.join("synthetic-unfiltered.yml"),
+        "name: Synthetic\non:\n  push:\n    branches: [main]\njobs:\n  a:\n    steps:\n      - run: cargo test --lib\n",
+    )
+    .expect("write probe workflow");
+    fs::write(
+        probe_dir.join("synthetic-filtered.yml"),
+        "name: Filtered\non:\n  push:\n    branches: [main]\n    paths:\n      - 'x.patch'\njobs:\n  a:\n    steps:\n      - run: cargo test --lib\n",
+    )
+    .expect("write probe workflow");
+    fs::write(
+        probe_dir.join("synthetic-commented.yml"),
+        "# this one only MENTIONS cargo test in prose\nname: Commented\non:\n  push:\n    branches: [main]\njobs:\n  a:\n    steps:\n      - run: echo hi\n",
+    )
+    .expect("write probe workflow");
+
+    let probe = classify_unfiltered_push_to_main(&probe_dir);
+    let _ = fs::remove_dir_all(&probe_dir);
+    assert_eq!(
+        probe,
+        vec![
+            ("synthetic-commented.yml".to_owned(), false),
+            ("synthetic-unfiltered.yml".to_owned(), true),
+        ],
+        "classifier probe failed: it must see the unfiltered one, skip the \
+         path-filtered one, and NOT count a cargo mention that lives in a comment"
+    );
+}
+
+/// Workflows whose `push:` trigger includes main with no `paths:` filter,
+/// paired with whether they invoke a compiling cargo command. bd-p54ks.
+///
+/// Comments are stripped first. That is not incidental: ci-static.yml's header
+/// contains the sentence "Clippy and cargo test stay on RCH", so a scan that
+/// keeps comments reads a workflow's prose about what it does NOT do as proof
+/// that it does. My first pass made exactly that mistake.
+fn classify_unfiltered_push_to_main(dir: &Path) -> Vec<(String, bool)> {
+    const COMPILING: [&str; 6] = [
+        "cargo build",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "cargo nextest",
+        "cargo bench",
+    ];
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "yml"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let body: String = raw
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The `on:` block runs to the next top-level key.
+        let mut on_block = String::new();
+        let mut in_on = false;
+        for line in body.lines() {
+            if in_on {
+                if !line.trim().is_empty() && !line.starts_with(char::is_whitespace) {
+                    break;
+                }
+                on_block.push_str(line);
+                on_block.push('\n');
+            } else if line.trim_end() == "on:" {
+                in_on = true;
+            }
+        }
+        // The `push:` sub-block runs to the next key at its own indent.
+        let mut push_block = String::new();
+        let mut in_push = false;
+        let mut push_indent = 0usize;
+        for line in on_block.lines() {
+            let indent = line.len() - line.trim_start().len();
+            if in_push {
+                if !line.trim().is_empty() && indent <= push_indent {
+                    break;
+                }
+                push_block.push_str(line);
+                push_block.push('\n');
+            } else if line.trim_start().starts_with("push:") {
+                in_push = true;
+                push_indent = indent;
+            }
+        }
+        if !push_block.contains("main") || push_block.contains("paths:") {
+            continue;
+        }
+        let compiles = COMPILING.iter().any(|needle| body.contains(needle));
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push((name, compiles));
+    }
+    out
+}
+
 #[test]
 fn ci_workflow_uses_normal_non_benchmark_test_gate() {
     let ci_workflow =
