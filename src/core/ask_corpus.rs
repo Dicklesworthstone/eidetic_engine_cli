@@ -28,9 +28,10 @@ pub struct AskCorpus {
 /// Load current evidence for one already-resolved workspace.
 ///
 /// `reference_time` is captured once by the caller, not separately per row.
-/// Bounds are inclusive, matching search's validity-window contract. Invalid
-/// timestamps or inverted windows fail the entire read without exposing the
-/// offending body, identifier, or timestamp in the error.
+/// Author validity bounds are inclusive; supersession closes a revision at its
+/// exclusive cutoff. A closed seal withholds the body regardless of the clock
+/// or placeholder spelling. Invalid timestamps or inverted windows fail the
+/// entire read without exposing the offending body, identifier, or timestamp.
 ///
 /// Memory bodies, validity metadata, and every batch of incident links come
 /// from one database read snapshot. The snapshot is released before returning
@@ -173,6 +174,15 @@ fn load_corpus_with_path_boundary(
         .map(|memory| memory.id.clone())
         .collect();
     after_memory_read()?;
+    // V123 separates revision identity from author expiry. Neither a future
+    // valid_to nor an unexpectedly populated sealed body grants admission.
+    // Read both authority tables in bulk inside this same body/link snapshot;
+    // never reopen the store or perform one authority query per memory.
+    let withheld = if stored.is_empty() {
+        BTreeSet::new()
+    } else {
+        withheld_memory_ids(connection, workspace_id, reference_time)?
+    };
     let mut tags = std::collections::BTreeMap::new();
     if scope.scope == MemoryScope::Global {
         let ids: Vec<_> = stored.iter().map(|memory| memory.id.as_str()).collect();
@@ -191,6 +201,7 @@ fn load_corpus_with_path_boundary(
             memory.valid_to.as_deref(),
             reference_time,
         )? && memory.workspace_id == workspace_id
+            && !withheld.contains(&memory.id)
             && scope.memory_in_scope_with_tags(
                 &memory,
                 tags.get(&memory.id).map(Vec::as_slice).unwrap_or(&[]),
@@ -226,6 +237,40 @@ fn load_corpus_with_path_boundary(
         contradictions,
         native_sources,
     })
+}
+
+/// Current source authority is separate from validity, trust, and relevance.
+/// This deliberately uses the repository's seal classifier, not a second
+/// interpretation of reveal flags. Historical reference times never unseal a
+/// body. All timestamps are validated before any candidates can be returned.
+fn withheld_memory_ids(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+) -> Result<BTreeSet<String>, DomainError> {
+    let revisions = connection
+        .list_memory_supersession_markers(workspace_id)
+        .map_err(|_| corpus_storage_error())?;
+    let mut withheld: BTreeSet<_> = connection
+        .list_memory_seals_for_recovery(workspace_id)
+        .map_err(|_| corpus_storage_error())?
+        .into_iter()
+        .filter(|seal| seal.is_sealed())
+        .map(|seal| seal.memory_id)
+        .collect();
+    for (id, raw) in revisions {
+        let cutoff = DateTime::parse_from_rfc3339(&raw)
+            .map_err(|_| DomainError::Storage {
+                message: "Ask evidence contains invalid revision metadata; answer withheld"
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .with_timezone(&Utc);
+        if reference_time >= cutoff {
+            withheld.insert(id);
+        }
+    }
+    Ok(withheld)
 }
 
 fn load_rules(
@@ -476,3 +521,272 @@ mod native_tests;
 #[cfg(test)]
 #[path = "ask_evidence_tests.rs"]
 mod evidence_tests;
+
+#[cfg(test)]
+mod source_authority_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use crate::core::ask::{AskRequest, ask_data_json, evaluate_ask};
+    use crate::db::{
+        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, MemoryLinkRelation,
+        MemoryLinkSource,
+    };
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000051";
+    const PRIOR: &str = "mem_00000000000000000000000051";
+    const CURRENT: &str = "mem_00000000000000000000000052";
+    const CUTOFF: &str = "2026-09-17T12:00:00Z";
+    const OLD_BODY: &str = "Never run cargo fmt before release.";
+    const NEW_BODY: &str = "Run cargo fmt before release.";
+
+    fn at(raw: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(raw)
+            .expect("fixture time")
+            .with_timezone(&Utc)
+    }
+
+    fn fixture() -> (tempfile::TempDir, DbConnection) {
+        let root = tempfile::tempdir().expect("temporary real store");
+        let path = root.path().canonicalize().expect("physical root");
+        let db = DbConnection::open_file(&path.join("ask.db")).expect("open store");
+        db.migrate().expect("migrate real schema");
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: path.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .expect("workspace");
+        (root, db)
+    }
+
+    fn seed(db: &DbConnection, id: &str, workspace: &str, body: &str) {
+        db.insert_memory(
+            id,
+            &CreateMemoryInput {
+                workspace_id: workspace.to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: body.to_owned(),
+                workflow_id: None,
+                confidence: 1.0,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some("manual://source-authority".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                valid_to: Some("2099-01-01T00:00:00Z".to_owned()),
+            },
+        )
+        .expect("memory");
+    }
+
+    fn answer(corpus: &AskCorpus) -> crate::core::ask::AskReport {
+        evaluate_ask(
+            &AskRequest {
+                question: "Run cargo fmt before release".to_owned(),
+                contradictions: corpus.contradictions.clone(),
+                native_sources: corpus.native_sources.clone(),
+                ..AskRequest::default()
+            },
+            &corpus.candidates,
+        )
+    }
+
+    fn withhold(db: &DbConnection, sealed: bool) {
+        if sealed {
+            db.insert_memory_seal(PRIOR, &format!("blake3:{}", "a".repeat(64)), CUTOFF)
+                .expect("closed seal with a populated body");
+        } else {
+            assert!(
+                db.restore_imported_memory_supersession(PRIOR, CUTOFF)
+                    .expect("supersession independent of expiry")
+            );
+        }
+    }
+
+    #[test]
+    fn corrected_advice_does_not_compete_with_its_superseded_revision() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        db.insert_memory_link(
+            "link_00000000000000000000000051",
+            &CreateMemoryLinkInput {
+                src_memory_id: PRIOR.to_owned(),
+                dst_memory_id: CURRENT.to_owned(),
+                relation: MemoryLinkRelation::Contradicts,
+                weight: 1.0,
+                confidence: 1.0,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Human,
+                created_by: None,
+                metadata_json: None,
+            },
+        )
+        .expect("explicit old/new opposition");
+        withhold(&db, false);
+        assert_eq!(
+            db.get_memory(PRIOR).unwrap().unwrap().valid_to.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(corpus.candidates[0].memory_id, CURRENT);
+        assert!(corpus.contradictions.is_empty());
+        let report = answer(&corpus);
+        assert!(!report.abstained && !report.conflict_detected);
+        assert_eq!(report.citations.len(), 1);
+        assert_eq!(report.citations[0].memory_id, CURRENT);
+        assert_eq!(report.citations[0].text, NEW_BODY);
+        let output = ask_data_json(&report).to_string();
+        assert!(!output.contains(PRIOR) && !output.contains(OLD_BODY));
+    }
+
+    #[test]
+    fn closed_sources_do_not_escape_through_nearest_evidence_or_capture_hints() {
+        for sealed in [false, true] {
+            let (_root, db) = fixture();
+            seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+            withhold(&db, sealed);
+            let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+            assert!(corpus.candidates.is_empty());
+            let report = answer(&corpus);
+            assert!(report.abstained);
+            assert!(report.nearest_evidence.as_ref().unwrap().is_empty());
+            let output = ask_data_json(&report).to_string();
+            assert!(!output.contains(PRIOR) && !output.contains(OLD_BODY));
+            assert!(report.citations.is_empty() && report.sides.is_none());
+        }
+    }
+
+    #[test]
+    fn supersession_is_exclusive_and_compares_actual_rfc3339_instants() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        db.execute_raw(
+            "UPDATE memories SET superseded_at = '2026-09-17T08:00:00-04:00'",
+        )
+        .unwrap();
+        for (reference, expected) in [
+            ("2026-09-17T11:59:59.999999999Z", 1),
+            (CUTOFF, 0),
+            ("2026-09-17T14:00:00+02:00", 0),
+            ("2026-09-17T12:00:00.000000001Z", 0),
+        ] {
+            let corpus = load_current_ask_corpus(&db, WORKSPACE, at(reference)).unwrap();
+            assert_eq!(corpus.candidates.len(), expected, "{reference}");
+        }
+    }
+
+    #[test]
+    fn a_real_seal_not_the_body_spelling_controls_readmission() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, NEW_BODY);
+        withhold(&db, true);
+        let before = db.get_memory(PRIOR).unwrap();
+        let audits = db.count_table_rows("audit_log").unwrap();
+        for reference in ["2026-01-01T00:00:00Z", CUTOFF] {
+            assert!(
+                load_current_ask_corpus(&db, WORKSPACE, at(reference))
+                    .unwrap()
+                    .candidates
+                    .is_empty()
+            );
+        }
+        assert_eq!(db.get_memory(PRIOR).unwrap(), before);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
+        assert!(db.mark_memory_seal_revealed(PRIOR, CUTOFF).unwrap());
+        let revealed = db.get_memory(PRIOR).unwrap();
+        let revealed_audits = db.count_table_rows("audit_log").unwrap();
+        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(answer(&corpus).citations[0].text, NEW_BODY);
+        assert_eq!(db.get_memory(PRIOR).unwrap(), revealed);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), revealed_audits);
+    }
+
+    #[test]
+    fn revealing_a_seal_cannot_resurrect_a_superseded_revision() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        withhold(&db, false);
+        withhold(&db, true);
+        assert!(db.mark_memory_seal_revealed(PRIOR, CUTOFF).unwrap());
+        assert!(
+            load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF))
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_revision_fails_closed_without_leaking_or_pinning_the_snapshot() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        db.execute_raw("UPDATE memories SET superseded_at = 'PRIVATE-REVISION-CANARY'")
+            .unwrap();
+        let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
+        assert!(matches!(error, DomainError::Storage { .. }));
+        assert!(!format!("{error:?}").contains("PRIVATE-REVISION-CANARY"));
+        assert!(!format!("{error:?}").contains(PRIOR));
+        db.begin_read_snapshot().expect("owned snapshot released");
+        db.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn authority_and_bodies_observe_one_snapshot_during_a_concurrent_write() {
+        for sealed in [false, true] {
+            let (root, writer) = fixture();
+            seed(&writer, PRIOR, WORKSPACE, NEW_BODY);
+            let reader = DbConnection::open_file_read_only(
+                &root.path().canonicalize().unwrap().join("ask.db"),
+            )
+            .unwrap();
+            let corpus = load_corpus_with_boundary(&reader, WORKSPACE, at(CUTOFF), || {
+                withhold(&writer, sealed);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(corpus.candidates.len(), 1, "the captured body was public");
+            assert_eq!(answer(&corpus).citations[0].text, NEW_BODY);
+            assert!(
+                load_current_ask_corpus(&reader, WORKSPACE, at(CUTOFF))
+                    .unwrap()
+                    .candidates
+                    .is_empty(),
+                "a later snapshot must observe the closure"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_workspace_authority_cannot_poison_the_selected_corpus() {
+        let (root, db) = fixture();
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        let other = "wsp_00000000000000000000000052";
+        db.insert_workspace(
+            other,
+            &CreateWorkspaceInput {
+                path: root.path().join("other").to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        seed(&db, PRIOR, other, OLD_BODY);
+        db.execute_raw(&format!(
+            "UPDATE memories SET superseded_at = 'PRIVATE-OTHER-CANARY' WHERE id = '{PRIOR}'"
+        ))
+        .unwrap();
+        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
+    }
+}
