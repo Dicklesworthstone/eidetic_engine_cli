@@ -42,6 +42,15 @@ jobs:
           retention-days: 7
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. The "pin both
+          # halves" rule is CONDITIONAL: it applies when a job-level
+          # RUSTUP_TOOLCHAIN exists, because that env var overrides the action
+          # at invocation time. This workflow sets no RUSTUP_TOOLCHAIN anywhere,
+          # so there is no second half to pin and this is not d315cdc7f.
+          # The action ref `@nightly` selects FLOATING nightly by itself, so this
+          # input is what makes the install dated. Keep equal to
+          # rust-toolchain.toml's `channel`.
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@v4
         id: cache

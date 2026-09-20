@@ -31,6 +31,12 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. "Pin both halves"
+          # is CONDITIONAL on a job-level RUSTUP_TOOLCHAIN existing to override
+          # the action at invocation time. This workflow sets none, so there is
+          # no second half and this is not d315cdc7f. The ref `@nightly` selects
+          # FLOATING nightly by itself; this input is what dates the install.
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@v4
         id: cache
