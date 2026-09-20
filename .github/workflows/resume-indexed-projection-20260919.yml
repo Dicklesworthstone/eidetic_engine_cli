@@ -42,71 +42,67 @@ jobs:
           key: resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply the reviewed snapshot and precise-clock repair
-        shell: bash
+      - name: Recover exact reviewed source stages from the immutable delivery commit
         run: |
-          set -euo pipefail
-          test "$(git hash-object src/core/resume.rs)" = 85a0e2d9d8d4bbcbe1edf2eeb0371179cc825b31
-          test "$(git hash-object src/db/mod.rs)" = b874261b1bbdf86fe4bf931f4ab33cfd06bece68
-          test "$(git hash-object src/core/context.rs)" = 8d597b3d659dad5cebbfb23aa778c6738b02e1c6
-          test ! -e src/core/resume_snapshot.rs
-          test ! -e src/core/resume_snapshot_tests.rs
           python3 - <<'PYCODE'
-          import base64, hashlib, json, lzma, re, subprocess
+          import hashlib, os, subprocess
           from pathlib import Path
-          previous = subprocess.check_output(['git', 'show', 'a07bdc207b5c7dd6e2ed283e8668ed812edf5f5c:.github/workflows/resume-coherence-20260919.yml'], text=True)
-          candidates = re.findall(r'^\s+([A-Za-z0-9+/=]{100,})$', previous, re.M)
-          assert len(candidates) == 1
-          patch = lzma.decompress(base64.b64decode(candidates[0], validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '0c03932fb257d6499d54129b48b0a6ec3471ced2d5731b09875d8a3fdad7a237'
-          subprocess.run(['git', 'apply', '--check', '--whitespace=error-all', '-'], input=patch, check=True)
-          subprocess.run(['git', 'apply', '--whitespace=error-all', '-'], input=patch, check=True)
-          delivery = subprocess.check_output(['git', 'show', '4a80096c619a1134e51bd14e5e866d1a96903cde:.github/workflows/resume-current-state-20260919.yml'], text=True)
-          candidates = re.findall(r"raw = lzma.decompress\(base64.b64decode\('([A-Za-z0-9+/=]+)', validate=True\)\)", delivery)
-          assert len(candidates) == 1
-          raw = lzma.decompress(base64.b64decode(candidates[0], validate=True))
-          assert hashlib.sha256(raw).hexdigest() == 'e539a4cd68959f32c14a8bb97206aa9f35b26c08148f9bf1a9bce141e434cd63'
-          change = json.loads(raw)
-          exec(compile(change['apply'], 'reviewed_recency_clock_fix.py', 'exec'))
-          tests = Path('src/core/resume_snapshot_tests.rs')
-          tests.write_text(tests.read_text() + change['tests'])
+          raw = subprocess.check_output(['git', 'show', 'd3de72b1af8c1b08faba69da3a353eb0e7b85c66:.github/workflows/resume-indexed-projection-20260919.yml'])
+          assert hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() == '1f51ab70ddc94063e106f5a32977fe3f113b4af1'
+          lines = raw.decode().splitlines()
+          for number, name in enumerate([
+              'Apply the reviewed snapshot and precise-clock repair',
+              'Verify and commit coherent fresh session state before the second increment',
+              'Apply bounded session projection and shared staleness index',
+              'Verify all resume tests and emitted public schema before source publication',
+          ], 1):
+              start = lines.index('      - name: ' + name)
+              run = lines.index('        run: |', start) + 1
+              body = []
+              for line in lines[run:]:
+                  if line and not line.startswith('          '):
+                      break
+                  body.append(line[10:] if line else '')
+              assert body and body[0] == 'set -euo pipefail'
+              script = Path(os.environ['RUNNER_TEMP']) / f'resume-stage-{number}.sh'
+              script.write_text('\n'.join(body) + '\n')
+              subprocess.run(['bash', '-n', str(script)], check=True)
           PYCODE
-          rustfmt --edition 2024 --config skip_children=true src/core/resume.rs src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs src/core/context.rs src/db/mod.rs
-          git diff --check
-      - name: Verify and commit coherent fresh session state before the second increment
-        shell: bash
+      - name: Apply the source repair with a correctly dated real-database fixture
         run: |
           set -euo pipefail
-          run_group() {
-            local name="$1" filter="$2" count="$3" status=0
-            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/resume-$name.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/resume-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/resume-$name.log"
-          }
-          prove() {
-            run_group snapshot core::resume::snapshot::tests 10
-            run_group existing core::resume::tests 22
-            run_group recency same_instant_fractional_created_at_does_not_outrank_fractionless_head 1
-          }
-          prove
-          paths=(src/core/resume.rs src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs src/core/context.rs src/db/mod.rs)
-          base=$(git rev-parse HEAD)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- "${paths[@]}"
-          git commit -m 'fix(resume): read coherent session state without losing freshly committed memories' -m 'Pin workspace, bodies, tags and canonical decisions to one owned read snapshot, releasing it before projection/discovery. Preserve precise row-clock bounds in resume and fast context retrieval while separately canonicalizing author-validity and supersession bounds. Ten snapshot/clock regressions, all 22 unchanged resume tests and the existing fractional-time recency regression passed before this source commit.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then break; fi
-            test "$attempt" -lt 3
-            git fetch origin main
-            git diff --exit-code "$base" origin/main -- "${paths[@]}"
-            git merge --no-edit origin/main
-            prove
-            base=$(git rev-parse origin/main)
-          done
-          git rev-parse HEAD > "$RUNNER_TEMP/resume-first-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/resume-first-source.tar.gz"
+          bash "$RUNNER_TEMP/resume-stage-1.sh"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          p = Path('src/core/resume_snapshot_tests.rs')
+          s = p.read_text()
+          pattern = re.compile(r'(?m)^( +)valid_from: None,\n\1valid_to: None,')
+          assert len(pattern.findall(s)) == 1
+          replacement = [
+              '// Match the deterministic August row clock below. A missing',
+              '// author-validity bound defaults to the real insertion time,',
+              '// which would legitimately exclude this row from August reads.',
+              'valid_from: Some("2026-08-09T10:00:00Z".to_owned()),',
+              'valid_to: None,',
+          ]
+          s = pattern.sub(lambda match: '\n'.join(match[1] + line for line in replacement), s, count=1)
+          anchor = '    let now = super::super::parse_ts("2026-08-09T10:00:00.750Z").unwrap();'
+          check = '''    // Differential control: the old whole-second caller hides this row,
+              // even though the authored validity is already active.
+              let workspace_id = crate::core::workspace::stable_workspace_id(&fixture.workspace);
+              assert!(fixture.reader.list_recent_current_memories_for_retrieval(
+                  &workspace_id, "2026-08-09T10:00:00Z", 8,
+              ).unwrap().is_empty());
+          '''
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, check + anchor, 1)
+          p.write_text(s)
+          PYCODE
+          rustfmt --edition 2024 --config skip_children=true src/core/resume_snapshot_tests.rs
+          git diff --check
+      - name: Verify and publish the coherent fresh-state source increment
+        run: bash "$RUNNER_TEMP/resume-stage-2.sh"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -114,54 +110,9 @@ jobs:
           path: ${{ runner.temp }}/resume-*
           retention-days: 7
       - name: Apply bounded session projection and shared staleness index
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f src/core/resume_snapshot.rs
-          test ! -e src/core/resume_projection.rs
-          test ! -e src/core/resume_projection_tests.rs
-          cat <<'PAYLOAD' | base64 --decode | xz --decompress > "$RUNNER_TEMP/resume-projection.patch"
-          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
-          PAYLOAD
-          echo "b8beddd434907f774f46ed4488e49159cbf512787d7a090af43cc9c9fb1c82ca  $RUNNER_TEMP/resume-projection.patch" | sha256sum --check
-          git apply --check --whitespace=error-all "$RUNNER_TEMP/resume-projection.patch"
-          git apply --whitespace=error-all "$RUNNER_TEMP/resume-projection.patch"
-          rustfmt --edition 2024 --config skip_children=true src/core/resume.rs src/core/resume_projection.rs src/core/resume_projection_tests.rs
-          git diff --check
-      - name: Verify all resume tests and emitted public schema before source publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          prove() {
-            local status=0
-            cargo test --locked --lib core::resume:: -- --test-threads=2 > "$RUNNER_TEMP/resume-all.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/resume-all.log"
-            test "$status" -eq 0
-            grep -Fq 'test result: ok. 42 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/resume-all.log"
-            status=0
-            cargo test --locked --test contracts resume_schema::real_core_resume_report_validates_against_public_schema -- --exact --test-threads=1 > "$RUNNER_TEMP/resume-schema.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/resume-schema.log"
-            test "$status" -eq 0
-            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/resume-schema.log"
-          }
-          prove
-          paths=(src/core/resume.rs src/core/resume_projection.rs src/core/resume_projection_tests.rs)
-          base=$(git rev-parse HEAD)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- "${paths[@]}"
-          git commit -m 'perf(resume): bound session rendering and index cross-session staleness' -m 'Select requested sessions before projecting bodies/provenance, reuse one kind/subject staleness index over all admitted rows, and order timestamps by actual RFC3339 instants. Keep complete counts, stable identities, cross-level superseders, public redaction and read-only database/sidecar behavior. Ten new regressions include differential equality against the old exhaustive algorithm, 4096-session bounded projection, a 10k-row index, offset/fraction chronology and real-store immutability. All 42 resume tests and emitted public-schema validation passed before publication.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then break; fi
-            test "$attempt" -lt 3
-            git fetch origin main
-            git diff --exit-code "$base" origin/main -- "${paths[@]}"
-            git merge --no-edit origin/main
-            prove
-            base=$(git rev-parse origin/main)
-          done
-          git rev-parse HEAD > "$RUNNER_TEMP/resume-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/resume-source.tar.gz"
+        run: bash "$RUNNER_TEMP/resume-stage-3.sh"
+      - name: Verify all 42 resume tests and emitted schema then publish the second source increment
+        run: bash "$RUNNER_TEMP/resume-stage-4.sh"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
