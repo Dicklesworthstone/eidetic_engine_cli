@@ -1,0 +1,85 @@
+diff --git a/src/core/ask_clustering.rs b/src/core/ask_clustering.rs
+--- a/src/core/ask_clustering.rs
++++ b/src/core/ask_clustering.rs
+@@ -24,4 +24,4 @@
+ /// Formatting differences may withhold a corroboration bonus, never invent one.
+-fn numeric_literals(text: &str) -> Vec<String> {
++pub(super) fn numeric_literals(text: &str) -> Vec<String> {
+     text.split(|ch: char| {
+         ch.is_whitespace()
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -603,6 +603,19 @@
+ fn numeric_conflict(left: &str, right: &str) -> bool {
+     numeric::conflicts(left, has_negation(left), right, has_negation(right))
+ }
+ 
++/// Opposite polarity about different numeric subjects is not proof of a
++/// contradiction: using port 5432 and forbidding port 6432 are compatible.
++/// Keep the existing generic-prohibition behavior when either passage has no
++/// numeric literal. Otherwise require the same ordered, case-sensitive literal
++/// context before inferring opposition; more complex relations need an edge.
++fn same_numeric_context(left: &str, right: &str) -> bool {
++    let left = clustering::numeric_literals(left);
++    let right = clustering::numeric_literals(right);
++    left.is_empty() || right.is_empty() || left == right
++}
++
+ /// Look for supported opposition to the best answer throughout the admitted
+ /// clusters, not just at rank two. The caller has already applied the evidence
+@@ -621,5 +634,6 @@
+     clusters.iter().skip(1).any(|span| {
+         (has_negation(&span.text) != anchor_negated
++            && same_numeric_context(&anchor.text, &span.text)
+             && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
+             || numeric_conflict(&anchor.text, &span.text)
+     })
+@@ -987,5 +1001,8 @@
+             let related: Vec<_> = clusters
+                 .iter()
+-                .filter(|span| same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
++                .filter(|span| {
++                    same_numeric_context(&clusters[0].text, &span.text)
++                        && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text))
++                })
+                 .collect();
+             (
+diff --git a/src/core/ask_candidates.rs b/src/core/ask_candidates.rs
+--- a/src/core/ask_candidates.rs
++++ b/src/core/ask_candidates.rs
+@@ -321,5 +321,8 @@
+             let text = &candidate.content[start..end];
+             let numeric_opposition = super::numeric_conflict(anchor_text, text);
+-            if has_negation(text) == anchor_negated && !numeric_opposition {
++            if (has_negation(text) == anchor_negated
++                || !super::same_numeric_context(anchor_text, text))
++                && !numeric_opposition
++            {
+                 continue;
+             }
+diff --git a/src/core/ask_numeric_tests.rs b/src/core/ask_numeric_tests.rs
+--- a/src/core/ask_numeric_tests.rs
++++ b/src/core/ask_numeric_tests.rs
+@@ -1,5 +1,8 @@
+ //! Behavior of numeric alternatives through the real ask selection/composition engine.
+ use super::*;
+ 
++#[path = "ask_numeric_polarity_tests.rs"]
++mod polarity_tests;
++
+ const FIRST: &str = "The production database service port is 5432.";
+ const SECOND: &str = "The production database service port is 6432.";
+diff --git a/tests/contracts/ask_numeric.rs b/tests/contracts/ask_numeric.rs
+--- a/tests/contracts/ask_numeric.rs
++++ b/tests/contracts/ask_numeric.rs
+@@ -1,6 +1,9 @@
+ //! Real CLI/store numeric-dispute contracts, including a fail-closed consumer.
+ use ee::db::DbConnection;
+ use serde_json::Value;
+ 
++#[path = "ask_numeric_polarity.rs"]
++mod polarity;
++
+ const FIRST: &str = "The production database service port is 5432.";
+ const SECOND: &str = "The production database service port is 6432.";

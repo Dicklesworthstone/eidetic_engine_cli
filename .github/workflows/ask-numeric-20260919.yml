@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'scripts/delivery/ask-numeric-20260919.patch'
+      - 'scripts/delivery/ask-numeric-polarity-20260919.patch'
       - 'scripts/delivery/ask-numeric-links-20260919.patch'
       - '.github/workflows/ask-numeric-20260919.yml'
   workflow_dispatch:
@@ -46,7 +46,11 @@ jobs:
       - name: Integrate numeric admission and composition
         run: |
           git rev-parse HEAD
-          for patch in scripts/delivery/ask-numeric-20260919.patch scripts/delivery/ask-numeric-links-20260919.patch; do
+          # The initial feature is already on main. Do not replay historical
+          # overlapping patches over its later, compiled amendments.
+          grep -qF 'mod numeric;' src/core/ask.rs
+          grep -qF 'mod numeric_answer_tests;' src/core/ask.rs
+          for patch in scripts/delivery/ask-numeric-links-20260919.patch scripts/delivery/ask-numeric-polarity-20260919.patch; do
             if git apply --check --recount "$patch"; then
               git apply --recount "$patch"
             elif git apply --reverse --check --recount "$patch"; then
@@ -56,7 +60,7 @@ jobs:
               exit 1
             fi
           done
-          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs
+          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs src/core/ask_numeric_polarity_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs tests/contracts/ask_numeric_polarity.rs
           git diff --check
       - name: Execute the exact dependency-free scalar classifier
         run: |
@@ -74,14 +78,23 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs
+          git add -- src/core/ask.rs src/core/ask_candidates.rs src/core/ask_clustering.rs src/core/ask_numeric.rs src/core/ask_numeric_tests.rs src/core/ask_numeric_polarity_tests.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_numeric.rs tests/contracts/ask_numeric_polarity.rs
           if ! git diff --cached --quiet; then
-            git commit -m 'test(ask): distinguish invalid links from independently supported numeric disputes' -m 'Reject missing, weak, automatic and nonfinite contradiction links without suppressing independently supported same-statement numeric opposition. Preserve the separate paraphrase case requiring an explicit edge. Eight scalar-classifier tests and cargo check --locked --lib passed before publication; full ask and CLI results are recorded separately.'
+            git commit -m 'fix(ask): distinguish numeric subjects before inferring negation conflicts' -m 'Keep compatible different-value negative restrictions out of conflict detection, reserved opposition slots and conflict-side composition. Continue detecting opposite claims about the same numeric value, preserve generic prohibitions without literals and retain explicit-link precedence. Add four real-engine regressions and one public CLI/store contract. Eight scalar tests and production cargo check passed before publication; complete CLI and ask results are recorded separately.'
             git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
-            # Fast-forward only: do not overwrite concurrent source changes.
+            # Fast-forward only. A concurrent main update must not be overwritten
+            # or silently merged into the tree whose compile result is reported.
             git push origin HEAD:main
           fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/numeric-source-sha.log"
+      - name: Execute real CLI numeric contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/numeric-cli.log"
+          grep -Eq 'test result: ok\. 5 passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
+          exit "$status"
       - name: Execute complete ask engine regressions
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
@@ -90,14 +103,6 @@ jobs:
           tail -n 220 "$RUNNER_TEMP/numeric-engine.log"
           grep -q 'numeric_answer_tests::numeric_assignments_are_disclosed_not_confidently_combined ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
           grep -q 'numeric_answer_tests::numeric_opposition_survives_the_candidate_cap_and_input_order ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
-          exit "$status"
-      - name: Execute real CLI numeric contracts
-        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
-        run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || status=$?
-          tail -n 180 "$RUNNER_TEMP/numeric-cli.log"
-          grep -Eq 'test result: ok\. 4 passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
           exit "$status"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
