@@ -801,7 +801,9 @@ fn read_global_rows_in_snapshot(
         return Ok(Vec::new());
     };
     let memories = connection
-        .list_memories(&workspace.id, None, include_tombstoned)
+        // The false arm of list_memories also excludes superseded history.
+        // Keep that independent from this API's tombstone and as-of policies.
+        .list_memories(&workspace.id, None, true)
         .map_err(global_read_error)?;
     let revisions = connection
         .list_memory_supersession_markers(&workspace.id)
@@ -815,6 +817,9 @@ fn read_global_rows_in_snapshot(
         .collect::<std::collections::BTreeSet<_>>();
     let mut admitted = Vec::with_capacity(memories.len());
     for memory in memories {
+        if memory.tombstoned_at.is_some() && !include_tombstoned {
+            continue;
+        }
         if let Some(raw) = revisions.get(&memory.id) {
             let cutoff = chrono::DateTime::parse_from_rfc3339(raw).map_err(global_read_error)?;
             if as_of.is_none_or(|reference| reference >= cutoff.with_timezone(&chrono::Utc)) {
