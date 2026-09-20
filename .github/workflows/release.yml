@@ -111,9 +111,22 @@ jobs:
         # toolchain. Stated explicitly anyway: once the ref is a bare SHA a
         # reader can no longer tell WHICH toolchain it selects, and the two
         # other workflows in this repo that pin this SHA already pass it.
+        #
+        # bd-niay4: the VALUE is now dated rather than floating, and for a
+        # release build that is the point. rust-toolchain.toml states the reason
+        # directly -- a floating nightly "breaks release reproducibility, since
+        # the host that gates a release and the host that builds the artifact can
+        # disagree about what `nightly` means".
+        #
+        # This does NOT contradict AGENTS.md:98 ("DSR/release hosts must export
+        # RUSTUP_TOOLCHAIN=nightly"). That rule's stated purpose is to stop rustc
+        # and cargo drifting onto STABLE mid-build (E0514); a dated nightly
+        # satisfies it strictly more tightly than a floating one. It also applies
+        # to DSR/release HOSTS, and this workflow sets no RUSTUP_TOOLCHAIN at
+        # all, so pinning this half alone is correct here -- see ce84cb0d6.
         uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-31
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -268,7 +281,11 @@ jobs:
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          # bd-niay4. Dated, same reasoning as the first invocation above. This
+          # is the job that actually produces the per-target artifacts, so a
+          # floating compiler here is the one that makes a RELEASE
+          # unreproducible across days.
+          toolchain: nightly-2026-08-31
           targets: ${{ matrix.target }}
 
       - name: Install cross

@@ -40,7 +40,6 @@
 1	learned-history-recovery-20260919.yml
 2	primer-admission-20260919.yml
 1	recovery-headship-admission-20260919.yml
-2	release.yml
 1	revision-record-recovery-20260919.yml
 2	seed-authority-20260919.yml
 1	verify-ask-admission-20260917.yml
