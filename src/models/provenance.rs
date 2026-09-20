@@ -126,34 +126,44 @@ impl LineSpan {
         })
     }
 
-    /// Render as `L<start>` when there is no end, or `L<start>-<end>`
-    /// whenever an end is present -- INCLUDING when it equals the start.
+    /// Collapsing form: `L<start>`, or `L<start>-<end>` when the endpoints
+    /// differ. This is the `file://` spelling.
     ///
-    /// bd-4hr1v: this previously collapsed `range(n, n)` to `L{n}`, which
-    /// erased the difference between a span that has no end and an explicit
-    /// one-line RANGE. Two consequences, both measured:
-    ///
-    /// - Pack renders its provenance URI through `Display` -> here
-    ///   (src/pack/mod.rs:1751), while search indexes
-    ///   `EvidenceSpan::canonical_provenance_uri()` (src/db/mod.rs:13733),
-    ///   which is unconditionally `#L<start>-<end>`. Every single-line
-    ///   evidence span therefore got two different URIs for one span, and
-    ///   any consumer joining on that URI silently matched nothing.
-    /// - The round trip was lossy: `range(2, 2)` rendered `L2`, which
-    ///   `parse` reads back as `single(2)`.
-    ///
-    /// The range form is the contract when an end exists: ADR 0085
-    /// (accepted) specifies `cass-session://<stable-session-id>#L<start>-<end>`
-    /// for public provenance, and
-    /// docs/schemas/ee.capture_suggestions.v2.json pins `provenanceUri` with
-    /// `^cass-session://sess_[0-9A-HJKMNP-TV-Z]{26}#L[0-9]+-[0-9]+$`, which
-    /// the collapsed spelling fails.
-    ///
-    /// This is the ONE renderer of the rule. `pack::line_span_locator`
-    /// delegates here rather than repeating the match, because the previous
-    /// duplication is what let the two spellings diverge unnoticed.
+    /// bd-4hr1v: the collapse is CORRECT here and wrong for `cass-session`,
+    /// which is why the two schemes no longer share one renderer. ADR 0065
+    /// (docs/adr/0065-workspace-primer-and-agentsmd-bridge.md:89,96) gives
+    /// file provenance as `file://<path>#L<n>` for a single line and
+    /// `file://<path>#L<n>-L<m>` for a range, so a one-line span is `#L<n>`
+    /// there. Use [`Self::range_fragment`] for `cass-session`.
     #[must_use]
     pub fn fragment(&self) -> String {
+        match self.end {
+            Some(end) if end != self.start => format!("L{}-{}", self.start, end),
+            _ => format!("L{}", self.start),
+        }
+    }
+
+    /// Non-collapsing form: `L<start>-<end>` whenever an end is present,
+    /// including when it equals the start. This is the `cass-session`
+    /// spelling. bd-4hr1v.
+    ///
+    /// ADR 0085 (accepted, docs/adr/0085-typed-pack-entity-identity.md:124)
+    /// specifies `cass-session://<stable-session-id>#L<start>-<end>` for
+    /// public provenance, and docs/schemas/ee.capture_suggestions.v2.json:149
+    /// pins it as
+    /// `^cass-session://sess_[0-9A-HJKMNP-TV-Z]{26}#L[0-9]+-[0-9]+$`, with
+    /// both bounds required. The collapsed spelling satisfies neither.
+    ///
+    /// Why it mattered: pack does not derive this URI independently. It
+    /// PARSES search's canonical value -- `src/core/context.rs:12744` calls
+    /// `ProvenanceUri::from_str(&span.canonical_provenance_uri())` -- and
+    /// re-renders it at `src/pack/mod.rs:1751`. Collapsing turned `#L2-2`
+    /// into `#L2`, so the round trip was lossy and the same span carried two
+    /// identities. A consumer joining search to pack matched nothing for
+    /// every single-line span, silently, because a provenance URI is an
+    /// identity and a miss reads as absent data.
+    #[must_use]
+    pub fn range_fragment(&self) -> String {
         match self.end {
             Some(end) => format!("L{}-{}", self.start, end),
             None => format!("L{}", self.start),
@@ -218,7 +228,11 @@ impl fmt::Display for ProvenanceUri {
                 formatter.write_str(session)?;
                 if let Some(span) = span {
                     formatter.write_str("#")?;
-                    formatter.write_str(&span.fragment())?;
+                    // bd-4hr1v: cass-session keeps both bounds (ADR 0085).
+                    // `file://` below collapses them (ADR 0065). The schemes
+                    // have different documented grammars, so they cannot
+                    // share one renderer.
+                    formatter.write_str(&span.range_fragment())?;
                 }
                 Ok(())
             }
@@ -1030,6 +1044,62 @@ mod tests {
     fn line_span_collapses_equal_endpoints_to_single_form() {
         let parsed = must_parse("file:///x#L7-7");
         assert_eq!(parsed.to_string(), "file:///x#L7");
+    }
+
+    /// bd-4hr1v: the two schemes render an equal-endpoint span DIFFERENTLY,
+    /// and that is deliberate. This test exists so the next person who
+    /// notices the asymmetry does not "unify" it.
+    ///
+    /// The grammars are separately specified and they disagree:
+    ///   ADR 0065:89,96   file://<path>#L<n>  and  file://<path>#L<n>-L<m>
+    ///                    -> a one-line span is #L<n>, so collapsing is right
+    ///   ADR 0085:124     cass-session://<id>#L<start>-<end>
+    ///                    -> both bounds always, so collapsing is wrong
+    /// docs/schemas/ee.capture_suggestions.v2.json:149 enforces the second
+    /// with `#L[0-9]+-[0-9]+$`.
+    ///
+    /// The asymmetry is asserted on ONE span rendered through both arms, so
+    /// it cannot be satisfied by two independently drifting literals.
+    #[test]
+    fn equal_endpoint_span_renders_per_scheme_grammar() {
+        let cass = must_parse("cass-session://sess_01J04CTK4MDPAZAM9V47SNMMDX#L7-7");
+        let file = must_parse("file:///x#L7-7");
+
+        assert_eq!(
+            cass.to_string(),
+            "cass-session://sess_01J04CTK4MDPAZAM9V47SNMMDX#L7-7",
+            "cass-session must keep both bounds (ADR 0085)"
+        );
+        assert_eq!(
+            file.to_string(),
+            "file:///x#L7",
+            "file:// must collapse an equal-endpoint span (ADR 0065)"
+        );
+        assert_ne!(
+            cass.to_string().rsplit('#').next(),
+            file.to_string().rsplit('#').next(),
+            "the schemes must not converge: that would silently reintroduce \
+             whichever collapse is wrong for the other grammar"
+        );
+    }
+
+    /// bd-4hr1v: the cass-session round trip is lossless.
+    ///
+    /// Pack re-renders what it parsed (src/core/context.rs:12744 ->
+    /// src/pack/mod.rs:1751), so anything the renderer drops becomes a second
+    /// identity for one span. Before the fix `#L2-2` came back as `#L2`,
+    /// which `parse` then reads as a span with no end at all.
+    #[test]
+    fn cass_session_span_round_trips_without_losing_the_end_bound() {
+        for uri in [
+            "cass-session://sess_01J04CTK4MDPAZAM9V47SNMMDX#L2-2",
+            "cass-session://sess_01J04CTK4MDPAZAM9V47SNMMDX#L2-5",
+            // No end at all stays no end -- the collapse is only wrong when
+            // an end EXISTS, and this arm keeps that boundary honest.
+            "cass-session://sess_01J04CTK4MDPAZAM9V47SNMMDX#L2",
+        ] {
+            assert_eq!(must_parse(uri).to_string(), uri, "round trip for {uri}");
+        }
     }
 
     #[test]

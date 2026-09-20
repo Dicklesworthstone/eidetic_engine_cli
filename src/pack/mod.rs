@@ -5943,7 +5943,11 @@ const fn plural_suffix(count: usize, singular: &'static str, plural: &'static st
 fn rendered_provenance_label(uri: &ProvenanceUri) -> (String, Option<String>) {
     match uri {
         ProvenanceUri::CassSession { session, span } => {
-            let locator = span.map(line_span_locator);
+            // bd-4hr1v: cass-session keeps both bounds (ADR 0085), so the
+            // locator must agree with the URI rendered beside it. `file://`
+            // below collapses them (ADR 0065) -- different documented
+            // grammars, so this cannot be one shared call.
+            let locator = span.map(|span| span.range_fragment());
             let label = match locator.as_deref() {
                 Some(locator) => format!("cass-session {session}#{locator}"),
                 None => format!("cass-session {session}"),
@@ -5974,11 +5978,11 @@ fn rendered_provenance_label(uri: &ProvenanceUri) -> (String, Option<String>) {
 
 /// bd-4hr1v: delegate, do not repeat the rule.
 ///
-/// This used to carry its own copy of the match in `LineSpan::fragment`,
-/// which is how pack's locator and pack's own URI could disagree with
-/// search's `canonical_provenance_uri()` without anything noticing. One
-/// renderer means a future change cannot land in one place and miss the
-/// other.
+/// This used to carry its own byte-identical copy of the match in
+/// `LineSpan::fragment`, which is how pack's rendering could drift from the
+/// model's without anything noticing. This is the collapsing (`file://`)
+/// form; the `cass-session` arm above calls `range_fragment` instead,
+/// because ADR 0065 and ADR 0085 specify different grammars.
 fn line_span_locator(span: crate::models::LineSpan) -> String {
     span.fragment()
 }
