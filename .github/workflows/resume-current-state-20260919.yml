@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: write
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@v4
         id: cache
@@ -54,14 +54,17 @@ jobs:
           python3 - <<'PYCODE'
           import base64, hashlib, json, lzma, re, subprocess
           from pathlib import Path
-          previous = Path('.github/workflows/resume-coherence-20260919.yml').read_text()
+          previous = subprocess.check_output(['git', 'show', 'a07bdc207b5c7dd6e2ed283e8668ed812edf5f5c:.github/workflows/resume-coherence-20260919.yml'], text=True)
           candidates = re.findall(r'^\s+([A-Za-z0-9+/=]{100,})$', previous, re.M)
           assert len(candidates) == 1
           patch = lzma.decompress(base64.b64decode(candidates[0], validate=True))
           assert hashlib.sha256(patch).hexdigest() == '0c03932fb257d6499d54129b48b0a6ec3471ced2d5731b09875d8a3fdad7a237'
           subprocess.run(['git', 'apply', '--check', '--whitespace=error-all', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '--whitespace=error-all', '-'], input=patch, check=True)
-          raw = lzma.decompress(base64.b64decode('/Td6WFoAAATm1rRGAgAhARYAAAB0L+Wj4BzcCQRdAD2IiCdMkVmJyhplizrgdbuyRnOk+4eatbz4L0hrHPG2ugp0DbNrvGTKlabDWcZdvgtWdABr/H19HzIZRZkEQZijSyfXkpnyvqoBX3qvz73KV7Etd6r0NHD+k2hHSX4e7HBTb9KrhTdUH2dE/xQxZX002xzyYv0RjwNt7Aqa0DwYxfw9uKMaraUCiEcSZKV+8C9I4fGEUJLjzCUwG4AQ/u+AcnfL/ftnVNHLPZ1TG6Sq8DmSgvr0is5zGdBLlr4Flt9vC/zpykx1rsgtCKgWHcgVy3uGF56pbd8kKREvJvjyBxHMw55I9IK9M3xcIyO8BaAqQTeEpNBl0OcjxWvZNQzxh0/wBdQF3Fqw67D1IZ6gMmuw4jibOVgxlc/YHGBM+6gsVdvMwVYzqUVOhbh7J/KkeDdgFbk8VfL/vw9eb8WzY8jggyq9J3iKWDJwr2sMuiFDhGK3CbIAtqAieuPON0TcrJR/y7zZbYmk/F4BYqb8TYzTA259PcCfpEqZsQ5W3TD90Sg+Bue7xBz7AWDMA81oymXynK6rWUg1NmZx9e+XqhjRNWvh70UoRu9oJg18pGleQz90G2pHk+QQAhj/cJlJtoMcAzimfMrRQDlyPAj06uHvB88IflyhYPpqdo8Gfang1B5tJK5RAMFyH1tv4fTU9kjpj37pkGzUWQ/5ng1qi/Y/RFCBZ/ZwZRxgS2DDL9SsYBiF3Ci4RcWGwjTQt3o5Yi2aNAbToKvn+e9e/tsbojhGVUWrkHegfGq/V4z7275yQNsajCQs4fXX4ZJKrB8aN3GJ303VwqlVD11Uf0UZ7Vd7DhHZSGcHuiRFtaOWYFvVOXut1l7J1LmFO0Rm1KBw/ybkZXzdBFdOpliXOQ8CMlGxuotApPE3P0XwZN59u8TVQrPSt3r1Ul4q6BlzGKBSP7Pq2Vq8o9A3qaZ6HxMiYQGE9O/YtPr6TPN9TFBDM35nytmuj1VYArkfylZdgJ8VoCqF5vEl1bYqLzd7s8Lj6uKYejYeBvvMZntQCG/cl4sVe2/kfZneKIsqM5vYsMFR1sen5iabRThvR7gInP3fHdtsKfH55GssQ8Np4TIYHicSUT447GIVChmTXdLsNUaAXlnRfy1cQpGTKh+wrRlnm22kMBiyBHiOc0Cw8XYxe8oYd9FhJDB9hGKIA4G7METz8LY6B/Jy/sdNZAf5Eg8o8/GIGXBTV8BVu7fhSjXwLvgoxzWE+aFDzZRk+871rEODC231GMCdNE7R09R43SQubw1yd/evHppy1Gezmsv90JsvA6MZ69j8D4txzqKigUQXZ3fLb7kHbcEklNqGYS08C++FbDAaZGEmUv/13NMtoSm3W7Aqp4Z3RY0cSmV6MOjHbbfnm+To2QPCe46oQJoEmYNzEcaO/jVj/ABqmbapIK5nfQga0ZKWaoA2iWNF8HPLbPlXtej8DXE3bA9QlTQk90pr4E3jq4/kjkRsKgc5GDwcfxschhlvS9CrEf/d8jfYXFnCbNXYitEjUQj5P7G5qTZDXLAJdqQ5OTF+TkFHJOle69sW1J/WCqvgYG3CNCgkxEkUxNLwXRgYd6nHHrtuvoLm2hy9TWdi5WQvKCdQ4oJvG9IVi3dWTfBVJLHu24HdkEzN43b05U7vsVYvVs3/It2WjdOEUSUHOe/V991An0x+twy1uxbu/aJNzD/UAnTgpgHFysR8Lf+cR1rK8hVe/zk0W4u8BhABCcPaQNUs8dOGJZTUYjWxqcy6fmpMhEZMedH7SNgP0sNmOBLikgnedrLmMphs8BpRWH4XLdUKfHQYZb3+ktZYVPr6QOoFJmykkYBQXzxO3/9lgSVSwPOZ2KA7XDVGr+ss5ArSw8lrIihFfiv+hncHfoVebKGB6peqPka4TCXxYyg4qwh5n7G4+SuL2AZXtygHqGmNNBRhiM80vbtKlAMNU+Mvep0Yxftm9KFNJOcn1lbs4sN90uLgxyFsumwwlhaRd2srTFQ2Ry1kzDzY5Jbd09ZsJGPiRafdfMpEwTcvqAkEcSEMxR7eWeROQJOhxZ6oOyNCV+jkrsq4dfZafPzWHbrOAtW1epyS5qtf8uFj2kT2unAtBXfjo/sBW9m8ZuyzYLC6mujCLnvEkoHTOVgHHKMwtg4v+gcLrFT5+egbCRSi4EK4Imm1vEIvwcT8D72KiHvcNue5OA+GRzYNFuIw02nqz+1rRCLASPmtfqNCURae+Frx/1NdUhn33pOePBPdWY33576+OXKm4GYKF/H+HJy16OUC4B4FJuov0LPnNiRW/glTPjp1oJz6hWskPeQ/Hpvha0xLBMGbJvhfCMLGnrMyAJ3ptI2UEDBb5U3xkoQrMUVRO/nW3GNccx2h/mV6oFiUXb5N4VKZf+v1nma43LUG3R1+sE2AjB4zro6qeY5jmMYXR7sigIVOOnLbEeBo6wOO4UkltKMySil+KnS5hKHK4L1V+iPknQTQNOXBUiUZ8Z7jKSeFXAq6WtTC3+Kw3FuDb1geekdRQE/GAnywr6JlM5Jk30NWfnOVNR2pNRT+mokhQWZbxSR6T7Ed+2Z+fcFv1vgqIzKLEb0OGKM3Hev535+24MQw86PvTlf3JkyM1SlBlM+MkqDiZuNUV/3qzYFiAgHL+M+WZbV9Avuu2GcsfjIk+lOgW8JQjZ2P01XMIttF15Ka8SVzv5mBZkkLgTppkpGIQleKcUTAUj0RZVJjAgheipWhUDXa3Jymi+DxMyxcZo3duk+3j2UvI/ymc4xlFD1DOWXZ8hihqs4X6e57XjXYr0wvEEjV6NwlVPRYFYMW+5UREVql8sb2jGNK7b0XuJDuHF1TpyWhpz9uAfHIMnLqiEgcPvgkDGCCpWbaGT1zgRrJIb7yED0mLo679yKyRLDjkdbQg5bpNO+ju1ROXuhh1YG5pr2T2iRoBAmPUVkRltkvrmYDmwolR4V3y43p8UwIztFPVCAv2zQ3mdV+Xq0q1VdIlq5QjF9S3V263j+5Gd7i8mThJvL5UZ9OMAW9rBPA52fo3C70P9iSExahjqbF5ZRI0WZLDkXCXlseGhmg+SHOhCiTVf7h1CVelbLQLcrbdXIpseAAJhWGQrbqMTgAAaAS3TkAAIq+7T+xxGf7AgAAAAAEWVo=', validate=True))
+          delivery = subprocess.check_output(['git', 'show', '4a80096c619a1134e51bd14e5e866d1a96903cde:.github/workflows/resume-current-state-20260919.yml'], text=True)
+          candidates = re.findall(r"raw = lzma.decompress\(base64.b64decode\('([A-Za-z0-9+/=]+)', validate=True\)\)", delivery)
+          assert len(candidates) == 1
+          raw = lzma.decompress(base64.b64decode(candidates[0], validate=True))
           assert hashlib.sha256(raw).hexdigest() == 'e539a4cd68959f32c14a8bb97206aa9f35b26c08148f9bf1a9bce141e434cd63'
           change = json.loads(raw)
           exec(compile(change['apply'], 'reviewed_recency_clock_fix.py', 'exec'))
