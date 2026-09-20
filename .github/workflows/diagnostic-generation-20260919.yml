@@ -1,0 +1,127 @@
+name: Diagnostic generation and reveal fidelity
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/diagnostic-generation-20260919.patch
+      - .github/workflows/diagnostic-generation-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: diagnostic-generation-20260919
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Commit diagnostic generation and verified reveal behavior
+        id: source
+        run: |
+          set -euo pipefail
+          paths=(src/core/search.rs src/core/search_diagnostic_snapshot.rs tests/support/revision_search_cli.rs)
+          if grep -q 'Diagnostic index generation is incomplete' src/core/search.rs; then
+            grep -q 'fn diagnostic_admission_preserves_verified_reveals' src/core/search_diagnostic_snapshot.rs
+            grep -q 'let is_diagnostic = args.starts_with' tests/support/revision_search_cli.rs
+          else
+            test "$(git rev-parse HEAD:src/core/search.rs)" = 8baa3a1f2adf7eb5fdedb011b9c1e0199fd64ade
+            test "$(git rev-parse HEAD:src/core/search_diagnostic_snapshot.rs)" = 536baf003b1655a83d6466588363e00e3232ef44
+            test "$(git rev-parse HEAD:tests/support/revision_search_cli.rs)" = f196d53330dc2dc00ab924d3164b57744571b85f
+            base=$(git rev-parse HEAD)
+            git apply --check scripts/delivery/diagnostic-generation-20260919.patch
+            git apply scripts/delivery/diagnostic-generation-20260919.patch
+            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+            git diff --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- "${paths[@]}"
+            git commit -m 'fix(diag): report selected generations and admit verified memory reveals' -m 'Record healthy diagnostic database/index generations while holding the selected generation lease, including retained indexes serving pinned older source snapshots. Keep ordinary-search freshness semantics unchanged. Withhold closed seals but admit verified reveals. Preserve and strengthen the two runtime-failing retained-generation tests and add a real-store reveal control. Validate the dedicated diagnostic JSON schema in CLI acceptance without changing the public wire format or weakening exact-identity assertions. Patch application and formatting passed; execution results remain separate.'
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=1; break; fi
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            test "$pushed" -eq 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: diag-fidelity-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.integrate.outputs.source_sha }}
+          restore-keys: |
+            diag-fidelity-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            primer-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            global-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            seed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Check library and execute all diagnostic regressions
+        run: |
+          set -o pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/diag-source-sha.log"
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/diag-check.log"
+          cargo test --locked --lib 'core::search::diagnostic_snapshot::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-tests.log"
+          grep -Fq 'test result: ok. 15 passed; 0 failed;' "$RUNNER_TEMP/diag-tests.log"
+      - name: Exercise actual CLI search and the registered global integration module
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          cargo test --locked --test search_conformal_e2e -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-cli.log" || failed=1
+          grep -Fq 'test result: ok. 3 passed; 0 failed;' "$RUNNER_TEMP/diag-cli.log" || failed=1
+          cargo test --locked --test integration_g_m 'global_store_e2e::' -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/diag-global-cli.log" || failed=1
+          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/diag-global-cli.log" || failed=1
+          exit "$failed"
+      - name: Production Clippy and changed-source format
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/diag-clippy.log" || failed=1
+          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_diagnostic_snapshot.rs tests/support/revision_search_cli.rs 2>&1 | tee "$RUNNER_TEMP/diag-fmt.log" || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: diagnostic-fidelity-verification
+          path: |
+            ${{ runner.temp }}/diag-*.log
+            target/tmp/revision-search-cli/**
+          retention-days: 7

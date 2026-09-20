@@ -1,0 +1,162 @@
+diff --git a/src/core/search.rs b/src/core/search.rs
+--- a/src/core/search.rs
++++ b/src/core/search.rs
+@@ -9883,8 +9883,32 @@
+         return Err(index_compatibility_search_error(&index_dir, reason));
+     }
+ 
+-    let (mut degraded, index_freshness) =
++    let (mut degraded, mut index_freshness) =
+         search_degradations_with_connection(options, &index_dir, read_connection);
++    // Ordinary search only needs an explicit freshness object when degraded.
++    // Diagnostics must also identify the healthy generation actually selected,
++    // including a retained generation serving an older source snapshot. Read
++    // the selected directory while its lease is held, never the live pointer.
++    if source_generation.is_some() && index_freshness.is_none() {
++        let status = cached_index_status_for_search(options, &index_dir, read_connection)
++            .map_err(|_| SearchError::Index(
++                "Diagnostic index generation could not be verified; results withheld".to_owned(),
++            ))?;
++        let (Some(db_generation), Some(index_generation)) =
++            (status.db_generation, status.index_generation)
++        else {
++            return Err(SearchError::Index(
++                "Diagnostic index generation is incomplete; results withheld".to_owned(),
++            ));
++        };
++        index_freshness = Some(SearchIndexFreshness {
++            stale: status.health != IndexHealth::Ready,
++            db_generation: Some(db_generation),
++            index_generation: Some(index_generation),
++            generation_gap: Some(db_generation.saturating_sub(index_generation)),
++            large_gap: search_index_gap_is_large(db_generation, index_generation),
++        });
++    }
+     let source_mode = if resolve_runtime_source_mode {
+         resolve_source_mode(
+             options,
+diff --git a/src/core/search_diagnostic_snapshot.rs b/src/core/search_diagnostic_snapshot.rs
+--- a/src/core/search_diagnostic_snapshot.rs
++++ b/src/core/search_diagnostic_snapshot.rs
+@@ -86,7 +86,7 @@
+         if connection
+             .get_memory_seal(&row.id)
+             .map_err(|_| admission_error())?
+-            .is_some()
++            .is_some_and(|seal| seal.is_sealed())
+         {
+             continue;
+         }
+@@ -648,6 +648,34 @@
+         )
+         .map_err(|e| e.to_string())?;
+         assert_arms(&diag, &[stale, VISIBLE]);
++        Ok(())
++    }
++
++    #[test]
++    fn diagnostic_admission_preserves_verified_reveals_without_reviving_closed_seals() -> TestResult {
++        let (_temp, options, db) = fixture()?;
++        db.insert_memory(VISIBLE, &input(WORKSPACE, PHRASE)).map_err(|e| e.to_string())?;
++        db.insert_memory(HIDDEN, &input(WORKSPACE, PHRASE)).map_err(|e| e.to_string())?;
++        for id in [VISIBLE, HIDDEN] {
++            db.insert_memory_seal(id, &crate::models::memory_seal_commitment(PHRASE.as_bytes()),
++                "2026-07-01T00:00:00Z").map_err(|e| e.to_string())?;
++        }
++        let mut closed = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
++        admit_memories(&asupersync::Cx::for_testing(), &options, &mut closed,
++            &mut Vec::new(), Some(&db)).map_err(|e| e.to_string())?;
++        assert_arms(&closed, &[]);
++        assert!(closed.final_hits.is_empty());
++        assert!(db.mark_memory_seal_revealed(VISIBLE, "2026-07-02T00:00:00Z")
++            .map_err(|e| e.to_string())?);
++        let mut revealed = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
++        admit_memories(&asupersync::Cx::for_testing(), &options, &mut revealed,
++            &mut Vec::new(), Some(&db)).map_err(|e| e.to_string())?;
++        assert_arms(&revealed, &[VISIBLE]);
++        assert_eq!(revealed.final_hits.iter().map(|hit| hit.doc_id.as_str()).collect::<Vec<_>>(),
++            [VISIBLE]);
++        assert_eq!(revealed.pre_fusion.lexical.results[0].rank, 2);
++        assert!(db.get_memory_seal(HIDDEN).map_err(|e| e.to_string())?
++            .ok_or("closed seal")?.is_sealed());
+         Ok(())
+     }
+ 
+@@ -832,6 +860,10 @@
+             .map_err(|e| e.to_string())??;
+             let before_retained = index_bytes(&retained)?;
+             let report = run_diag_search(&options).map_err(|e| format!("{corruption}: {e}"))?;
++            let serialized = report.data_json();
++            assert_eq!(serialized["final"]["indexFreshness"]["dbGeneration"], generation);
++            assert_eq!(serialized["final"]["indexFreshness"]["indexGeneration"], generation);
++            assert_eq!(serialized["final"]["indexFreshness"]["stale"], false);
+             assert_eq!(
+                 report
+                     .final_report
+@@ -1036,6 +1068,7 @@
+         let freshness = report.final_report.index_freshness.ok_or("freshness")?;
+         assert_eq!(freshness.db_generation, Some(generation));
+         assert_eq!(freshness.index_generation, Some(generation));
++        assert!(!freshness.stale);
+         snapshot.commit().map_err(|e| e.to_string())?;
+         let next = run_diag_search(&options).map_err(|e| e.to_string())?;
+         assert!(next.pre_fusion.lexical.results.is_empty());
+diff --git a/tests/support/revision_search_cli.rs b/tests/support/revision_search_cli.rs
+--- a/tests/support/revision_search_cli.rs
++++ b/tests/support/revision_search_cli.rs
+@@ -87,9 +87,19 @@
+         };
+         let stdout = fs::read(&stdout_path).map_err(|e| e.to_string())?;
+         let parsed = serde_json::from_slice::<Value>(&stdout);
+-        let envelope_valid = parsed
+-            .as_ref()
+-            .is_ok_and(|value| value["schema"] == "ee.response.v2" && value["success"] == true);
++        // Diagnostic search intentionally emits its dedicated v1 report, not
++        // the standard v2 command envelope. Validate that documented schema
++        // explicitly rather than accepting arbitrary JSON or weakening errors.
++        let is_diagnostic = args.starts_with(&["diag", "search"]);
++        let expected_schema = if is_diagnostic { "ee.diag.search.v1" } else { "ee.response.v2" };
++        let envelope_valid = parsed.as_ref().is_ok_and(|value| {
++            value["schema"] == expected_schema && if is_diagnostic {
++                value["command"] == "diag search"
++                    && value["errors"].as_array().is_some_and(Vec::is_empty)
++                    && value["final"]["errors"].as_array().is_some_and(Vec::is_empty)
++                    && matches!(value["final"]["status"].as_str(), Some("success" | "no_results"))
++            } else { value["success"] == true }
++        });
+         let event = json!({
+             "test": "revision_search_cli",
+             "command": args, "workspace": self.workspace,
+@@ -97,7 +107,7 @@
+                 "XDG_CONFIG_HOME": self.home, "EE_EMBED_DOWNLOAD": "off"},
+             "elapsedMs": started.elapsed().as_millis(), "exitCode": status.code(),
+             "timedOut": timed_out, "stdoutPath": stdout_path, "stderrPath": stderr_path,
+-            "envelopeValidated": envelope_valid,
++            "envelopeValidated": envelope_valid, "expectedSchema": expected_schema,
+         });
+         fs::write(prefix.with_extension("json"), event.to_string()).map_err(|e| e.to_string())?;
+         if timed_out || !status.success() || !envelope_valid {
+@@ -220,16 +230,16 @@
+         "0",
+     ])?;
+     assert_eq!(
+-        ids(&diag, "/data/final/results", "docId")?,
+-        vec![head.as_str()]
+-    );
+-    assert_eq!(
+-        ids(&diag, "/data/preFusion/lexical/results", "docId")?,
++        ids(&diag, "/final/results", "docId")?,
++        vec![head.as_str()]
++    );
++    assert_eq!(
++        ids(&diag, "/preFusion/lexical/results", "docId")?,
+         vec![head.as_str()]
+     );
+     for pointer in [
+-        "/data/preFusion/semanticFast/results",
+-        "/data/fusion/perDocContribution",
++        "/preFusion/semanticFast/results",
++        "/fusion/perDocContribution",
+     ] {
+         assert!(
+             !ids(&diag, pointer, "docId")?.contains(&prior.as_str()),
