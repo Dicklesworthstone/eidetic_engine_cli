@@ -3879,3 +3879,92 @@ fn declared_evidence_contract_holds_in_verify_sh() {
          single call means the index never prints on exactly the runs that need it."
     );
 }
+
+/// bd-unreachable-bench-tests-k0le8: STOP THE 75th.
+///
+/// There are 74 `#[test]` functions under `benches/` and NONE OF THEM HAS EVER
+/// RUN. This gate exists because the population is not static -- it grew while
+/// the bead describing it sat open -- and accretion has a cheap intervention
+/// that debt does not.
+///
+/// THERE ARE TWO INDEPENDENT CAUSES AND EACH IS SUFFICIENT ALONE. Read both
+/// before reaching for a fix, because the obvious one is a trap:
+///
+///   1. NOTHING SELECTS BENCHES. The unit/contract/golden gate is
+///      `cargo test --workspace --lib --bins --tests --examples`
+///      (scripts/verify.sh, the stage named unit_contract_golden_tests).
+///      Four target classes, and `--benches` is not among them. No workflow
+///      passes it either. The only `--benches` in the tree is
+///      `scripts/bench.sh`, and it is `cargo build --release --benches` -- a
+///      COMPILE. That is why these tests compile forever and execute never.
+///
+///   2. EVERY BENCH DECLARES `harness = false`. All 40 `[[bench]]` targets in
+///      Cargo.toml set it, because all 40 use criterion (Cargo.toml:182) and
+///      criterion REQUIRES it to install its own `main()`. With no libtest
+///      runner linked, `cargo test --bench <name>` runs that `main()`, not the
+///      `#[test]` functions.
+///
+/// DO NOT "FIX" THIS BY ADDING `--benches` TO THE GATE. That addresses cause 1
+/// only. Cause 2 still blocks, so zero additional tests run -- and the gate
+/// now LOOKS fixed. A change that makes a gate appear to cover something it
+/// does not is worse than the honest gap it replaces.
+///
+/// DO NOT remove `harness = false` either. It does not unblock the tests; it
+/// breaks all 40 benchmarks.
+///
+/// The tests cannot be made to run where they live. The only route is
+/// RELOCATION into a target that already runs -- and before relocating,
+/// read what they assert. Most are same-file tautologies of the shape
+/// `assert_eq!(super::BENCH_GROUP_NAME, "agent_profile")`: a constant checked
+/// against a literal three lines below it. Relocating a tautology preserves
+/// the tautology. The disposition is a fork on the bead, and retiring any of
+/// them is a RULE 1 operator decision.
+///
+/// THIS GATE IS A RATCHET IN BOTH DIRECTIONS. More than the floor means a 75th
+/// was added into a target that cannot run it. FEWER without lowering the
+/// floor in the same commit leaves a freed allowance that silently absorbs the
+/// next one.
+#[test]
+fn bench_test_functions_do_not_accumulate() {
+    const BENCH_TEST_FLOOR: usize = 74;
+
+    let mut total = 0usize;
+    let mut files = 0usize;
+    let dir = std::path::Path::new("benches");
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .expect("benches/ must exist")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    entries.sort();
+
+    for path in &entries {
+        let body = std::fs::read_to_string(path).expect("bench source must be readable");
+        let n = body.lines().filter(|l| l.trim() == "#[test]").count();
+        if n > 0 {
+            files += 1;
+        }
+        total += n;
+    }
+
+    // Empty-world guard: an empty or unreadable benches/ would make the count
+    // zero and read as "the problem is solved". It is not; it is the
+    // instrument failing.
+    assert!(
+        entries.len() >= 30,
+        "expected at least 30 bench sources under benches/, found {}; this gate \
+         counted almost nothing and a low count here is the directory moving, \
+         not the tests being relocated",
+        entries.len()
+    );
+
+    assert_eq!(
+        total, BENCH_TEST_FLOOR,
+        "#[test] functions under benches/ moved: {total} across {files} file(s), \
+         against a floor of {BENCH_TEST_FLOOR}. If you ADDED one, it will never \
+         run -- see the two causes above, and do not add `--benches`. If you \
+         RELOCATED or retired some, lower BENCH_TEST_FLOOR in the same commit \
+         and say where they went (bd-unreachable-bench-tests-k0le8)."
+    );
+}
