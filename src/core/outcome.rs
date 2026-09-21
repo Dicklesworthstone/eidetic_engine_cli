@@ -1292,13 +1292,13 @@ fn record_outcome_inner(
         decision,
         audit_id: id_source.next_audit_id(),
     });
-    let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+    let (audit_id, confidence) = crate::core::write_owner::run_one_shot_write_intake(
         outcome_write_intake_workspace_path(options.database_path),
         &write_operation,
         || {
             connection
                 .with_transaction(|| {
-                    record_outcome_in_txn(
+                    let audit_id = record_outcome_in_txn(
                         &connection,
                         OutcomeRecordInTxn::Feedback {
                             event_id: &event_id,
@@ -1306,7 +1306,16 @@ fn record_outcome_inner(
                             audit_id: id_source.next_audit_id(),
                             sprt_audit,
                         },
-                    )
+                    )?;
+                    let confidence = apply_memory_outcome_in_txn(
+                        &connection,
+                        &feedback_input,
+                        &event_id,
+                        options.actor.as_deref(),
+                        explicit_human_promotion,
+                        id_source,
+                    )?;
+                    Ok((audit_id, confidence))
                 })
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to record feedback event: {error}"),
@@ -1345,118 +1354,10 @@ fn record_outcome_inner(
         )?;
     }
 
-    // Bayesian (alpha, beta) posterior update — N7.1 / ADR 0032.
-    // Helpful: alpha += 1. Harmful: beta += harmful_weight (default
-    // 2.5 per README [curation] config; future Phase 7 wires the
-    // config override). Only memories carry posteriors today;
-    // procedures use the older scalar-score path above.
-    //
-    // Capture the posterior-mean confidence on either side of the update so
-    // the response can show the agent what the outcome signal changed.
-    let mut confidence_before: Option<f32> = None;
-    let mut confidence_after: Option<f32> = None;
-    if target_type == "memory" {
-        let confidence = connection
-            .with_transaction(|| {
-                let Some((current_alpha, current_beta)) =
-                    connection.get_memory_bayes_posterior(&target_id)?
-                else {
-                    return Ok(None);
-                };
-                let prior = BetaPosterior::new(current_alpha, current_beta)
-                    .unwrap_or_else(BetaPosterior::jeffreys);
-                let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&signal) {
-                    FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
-                    FeedbackSignal::Harmful => {
-                        let weight = DEFAULT_HARMFUL_WEIGHT;
-                        (prior.update_harmful(weight), weight)
-                    }
-                    // Neutral and unknown-safe signals are stored as feedback but
-                    // do not represent Bernoulli evidence for this posterior.
-                    FeedbackSignal::Neutral => (prior, 0.0),
-                };
-                if posterior != prior {
-                    tracing::debug!(
-                        target: "ee::trust::bayes",
-                        memory_id = %target_id,
-                        signal = %signal,
-                        prior_alpha = prior.alpha(),
-                        prior_beta = prior.beta(),
-                        posterior_alpha = posterior.alpha(),
-                        posterior_beta = posterior.beta(),
-                        harmful_weight = DEFAULT_HARMFUL_WEIGHT,
-                        applied_weight,
-                        "applying Bayesian posterior outcome update"
-                    );
-
-                    if !connection.update_memory_bayes_posterior(
-                        &target_id,
-                        posterior.alpha(),
-                        posterior.beta(),
-                    )? {
-                        return Ok(None);
-                    }
-
-                    let posterior_audit_id = id_source.next_audit_id();
-                    let details = serde_json::json!({
-                        "schema": "ee.audit.bayes_posterior_updated.v1",
-                        "feedbackEventId": &event_id,
-                        "signal": &signal,
-                        "appliedWeight": applied_weight,
-                        "priorAlpha": prior.alpha(),
-                        "priorBeta": prior.beta(),
-                        "posteriorAlpha": posterior.alpha(),
-                        "posteriorBeta": posterior.beta(),
-                        "priorMean": prior.mean(),
-                        "posteriorMean": posterior.mean(),
-                    })
-                    .to_string();
-                    connection.insert_audit(
-                        &posterior_audit_id,
-                        &CreateAuditInput {
-                            workspace_id: Some(target.workspace_id.clone()),
-                            actor: options.actor.clone(),
-                            action: audit_actions::OUTCOME_BAYES_UPDATE.to_string(),
-                            target_type: Some("memory".to_string()),
-                            target_id: Some(target_id.clone()),
-                            details: Some(details),
-                        },
-                    )?;
-
-                    let validation_events = connection
-                        .count_feedback_by_signal("memory", &target_id)?
-                        .positive_count;
-                    apply_memory_trust_class_transition_in_transaction(
-                        &connection,
-                        &target.workspace_id,
-                        &target_id,
-                        &event_id,
-                        &posterior,
-                        u64::from(validation_events),
-                        explicit_human_promotion,
-                        feedback_input.reason.as_deref(),
-                        options.actor.as_deref(),
-                        id_source,
-                    )?;
-                }
-                Ok(Some((prior.mean() as f32, posterior.mean() as f32)))
-            })
-            .map_err(|error| DomainError::Storage {
-                message: format!(
-                    "Failed to atomically update Bayesian posterior and trust class: {error}"
-                ),
-                repair: Some("ee doctor".to_string()),
-            })?;
-        if let Some((before, after)) = confidence {
-            confidence_before = Some(before);
-            confidence_after = Some(after);
-        }
-        // Posterior is None ⇒ memory row doesn't exist; the
-        // target-resolution step above already validated existence, so
-        // this only fires on a race with concurrent delete. Skip
-        // silently — the feedback event is already persisted and the
-        // posterior update was best-effort.
-    }
+    // These values describe the learning committed with the event, never a
+    // second best-effort transaction that an idempotent retry could skip.
+    let (confidence_before, confidence_after) =
+        confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
 
     let mut degraded = Vec::new();
     if target_type == "memory" && is_harmful_signal(&signal) {
@@ -1500,6 +1401,107 @@ fn record_outcome_inner(
         confidence_before,
         confidence_after,
     })
+}
+
+/// Apply memory learning inside the transaction that records its evidence.
+///
+/// The caller owns both the write-intake fence and transaction. An accepted
+/// feedback event must never survive without its posterior and trust changes:
+/// retries use that event as their idempotency key and will not learn it again.
+fn apply_memory_outcome_in_txn(
+    connection: &DbConnection,
+    feedback: &CreateFeedbackEventInput,
+    event_id: &str,
+    actor: Option<&str>,
+    explicit_human_promotion: bool,
+    id_source: &mut OutcomeIdSource<'_>,
+) -> crate::db::Result<Option<(f32, f32)>> {
+    if feedback.target_type != "memory" {
+        return Ok(None);
+    }
+    let missing_target = || crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Execute,
+        message: "Outcome memory disappeared before learning could commit".to_owned(),
+    };
+    let (current_alpha, current_beta) = connection
+        .get_memory_bayes_posterior(&feedback.target_id)?
+        .ok_or_else(missing_target)?;
+    let prior =
+        BetaPosterior::new(current_alpha, current_beta).unwrap_or_else(BetaPosterior::jeffreys);
+    // Preserve the established signal model. Event-weight calibration is a
+    // separate policy decision, not part of repairing commit atomicity.
+    let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&feedback.signal) {
+        FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
+        FeedbackSignal::Harmful => (
+            prior.update_harmful(DEFAULT_HARMFUL_WEIGHT),
+            DEFAULT_HARMFUL_WEIGHT,
+        ),
+        FeedbackSignal::Neutral => (prior, 0.0),
+    };
+    if posterior != prior {
+        tracing::debug!(
+            target: "ee::trust::bayes",
+            memory_id = %feedback.target_id,
+            signal = %feedback.signal,
+            prior_alpha = prior.alpha(),
+            prior_beta = prior.beta(),
+            posterior_alpha = posterior.alpha(),
+            posterior_beta = posterior.beta(),
+            harmful_weight = DEFAULT_HARMFUL_WEIGHT,
+            applied_weight,
+            "applying Bayesian posterior outcome update"
+        );
+        if !connection.update_memory_bayes_posterior(
+            &feedback.target_id,
+            posterior.alpha(),
+            posterior.beta(),
+        )? {
+            return Err(missing_target());
+        }
+        let details = serde_json::json!({
+            "schema": "ee.audit.bayes_posterior_updated.v1",
+            "feedbackEventId": event_id,
+            "signal": &feedback.signal,
+            "appliedWeight": applied_weight,
+            "priorAlpha": prior.alpha(),
+            "priorBeta": prior.beta(),
+            "posteriorAlpha": posterior.alpha(),
+            "posteriorBeta": posterior.beta(),
+            "priorMean": prior.mean(),
+            "posteriorMean": posterior.mean(),
+        })
+        .to_string();
+        connection.insert_audit(
+            &id_source.next_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(feedback.workspace_id.clone()),
+                actor: actor.map(ToOwned::to_owned),
+                action: audit_actions::OUTCOME_BAYES_UPDATE.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(feedback.target_id.clone()),
+                details: Some(details),
+            },
+        )?;
+        // This count includes the event inserted in the same transaction.
+        // Family-completeness admission, trust CAS and their audits therefore
+        // cannot observe a different evidence state from the posterior.
+        let validation_events = connection
+            .count_feedback_by_signal("memory", &feedback.target_id)?
+            .positive_count;
+        apply_memory_trust_class_transition_in_transaction(
+            connection,
+            &feedback.workspace_id,
+            &feedback.target_id,
+            event_id,
+            &posterior,
+            u64::from(validation_events),
+            explicit_human_promotion,
+            feedback.reason.as_deref(),
+            actor,
+            id_source,
+        )?;
+    }
+    Ok(Some((prior.mean() as f32, posterior.mean() as f32)))
 }
 
 fn outcome_quarantine_with_cause(
@@ -8562,3 +8564,7 @@ mod outcome_batch_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "outcome_atomic_learning_tests.rs"]
+mod atomic_learning_tests;
