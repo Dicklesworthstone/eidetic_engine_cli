@@ -6010,7 +6010,25 @@ def remediation_bead_for(blocker_kind):
         "topology_blocked": "bd-17c65.10.17.1.2",
         "local_fallback_refused": "bd-17c65.10.17.1",
     }
-    return mapping.get(blocker_kind, "bd-17c65.10.17.1")
+    # NO DEFAULT -- bd-sh3ew. This was `mapping.get(blocker_kind, "bd-17c65.10.17.1")`,
+    # answering every UNMAPPED blocker kind with a bead closed 2026-05-21.
+    #
+    # The value is not a hint. It lands in the persisted `known_blocker` entry
+    # beside `retry_after` and `expires_at`, so the receipt tells an operator:
+    # this is known, here is the bead, come back later. Against a closed bead
+    # that instruction costs more than silence -- the operator reads resolved
+    # work as their live blocker, waits out a retry window on nothing, and an
+    # agent treating `known_blocker` as "expected, not mine" excuses a real
+    # failure on a four-month-old closure.
+    #
+    # Deliberately NOT repointed at a fresher id. bd-17c65.10.17.1's own close
+    # reason names two successors for the residual work, bd-17c65.10.17.1.2 and
+    # bd-17c65.10.17.1.4, and BOTH ARE ALSO CLOSED -- there is no live bead in
+    # that chain to pick. Substituting one by inference is how a wrong reference
+    # becomes permanent, which is the rule bd-5d8rx exists to enforce.
+    #
+    # "I have no mapping for this kind" is true and immediately actionable.
+    return mapping.get(blocker_kind)
 
 def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     source_state_hash = (
@@ -6102,6 +6120,11 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     if ttl_seconds < 60:
         ttl_seconds = 60
     expires_at = now + dt.timedelta(seconds=ttl_seconds)
+    # An absent remediation bead must be legible AS ABSENT (bd-sh3ew). A bare
+    # null reads like a field nobody got round to filling in; "unmapped" says
+    # the verifier looked and has no bead for this kind. Those are two states
+    # and one null cannot carry both.
+    remediation_bead = remediation_bead_for(blocker_kind)
     entry = {
         "schema": "ee.rch.known_blocker.v1",
         "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
@@ -6123,7 +6146,8 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "last_seen": format_time(now),
         "expires_at": format_time(expires_at),
         "retry_after": format_time(expires_at),
-        "remediation_bead": remediation_bead_for(blocker_kind),
+        "remediation_bead": remediation_bead,
+        "remediation_bead_status": "mapped" if remediation_bead else "unmapped",
         "override_used": False,
     }
     if active_project_details:
