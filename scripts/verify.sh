@@ -252,10 +252,20 @@ VERIFY_EXIT_NOTHING_ATTEMPTED=70
 # unchanged code, the identical command returned 0 with 16 passed. The exit code
 # was the only thing that distinguished "no verdict" from "verdict".
 #
-# ADVISORY and TRACKED_RED are declared here but not yet ROUTED: neither has a
-# declaration surface on a stage, and inventing one silently would make the
-# vocabulary claim more than it enforces. That gap is recorded on the bead
-# rather than hidden behind a constant that nothing emits.
+# ADVISORY and TRACKED_RED WERE declared here without being routed -- no
+# declaration surface on a stage -- and that gap was recorded rather than hidden
+# behind a constant nothing emits. IT IS CLOSED: both are declared per stage in
+# scripts/verify-budget.toml (`requirement = "advisory" | "tracked_red"`, with
+# `tracked_red_bead` mandatory for the latter) and both are emitted into
+# STAGE_RESULTS at :1117 and :1129.
+#
+# The note is corrected rather than deleted because a comment asserting a gap
+# that has since been closed teaches a reader to distrust a vocabulary that now
+# enforces itself -- and because the two states are exactly the ones a
+# classifier test cannot reach, being policy-derived rather than
+# exit-code-derived. Their aggregation is held by
+# `advisory_and_tracked_red_are_counted_apart_from_passed` in
+# tests/verification_drift_guard.rs (1azkt.5 bullet 8, clause 2).
 STAGE_STATUS_VOCABULARY="PASS FAIL NOT_APPLICABLE SKIP ADVISORY TRACKED_RED INFRA_ERROR TIMEOUT CANCELLED"
 
 # Classify a stage's exit code into the vocabulary above.

@@ -3287,3 +3287,98 @@ fn every_run_stage_call_site_is_accountable_in_the_manifest() {
         );
     }
 }
+
+/// Run verify.sh's REAL summary banner over an injected counter state.
+///
+/// Extracts the function rather than restating its arithmetic, for the same
+/// reason `render_gated_off` does: the thing under test is what the script
+/// WOULD print, not what this test remembers it spelling.
+fn summary_banner_for(passed: u32, advisory: u32, tracked_red: u32, gated_off: u32) -> Output {
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
+STAGE_PASSED="$PASSED"
+STAGE_ADVISORY="$ADVISORY"
+STAGE_TRACKED_RED="$TRACKED_RED"
+STAGE_GATED_OFF="$GATED_OFF"
+STAGE_SKIPPED_CONTENTION=0
+STAGE_SKIPPED_CONTENTION_NAMES=""
+STAGE_GATED_OFF_NAMES=""
+STAGE_ADVISORY_NAMES=""
+STAGE_TRACKED_RED_NAMES=""
+verification_summary_banner
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("PASSED", passed.to_string())
+        .env("ADVISORY", advisory.to_string())
+        .env("TRACKED_RED", tracked_red.to_string())
+        .env("GATED_OFF", gated_off.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("render verification_summary_banner")
+}
+
+/// bd-reality-core-convergence-1azkt.5 bullet 8, second clause: "self-tests
+/// inject every state and prove aggregation."
+///
+/// ADVISORY and TRACKED_RED were the two states with NO injection coverage.
+/// The other seven already had it: `stage_status_for_exit_code` is driven over
+/// PASS/SKIP/TIMEOUT/INFRA_ERROR/CANCELLED and its default FAIL arm by
+/// `stage_status_names_the_kind_of_outcome_not_just_pass_or_fail`, and
+/// NOT_APPLICABLE by `render_gated_off`. These two are not exit-code-derived --
+/// they come from the requirement policy declared in verify-budget.toml -- so
+/// no classifier test could reach them.
+///
+/// WHAT IT PROVES, which is the aggregation half rather than the vocabulary
+/// half: a declared-non-required stage MUST NOT be laundered into the passed
+/// count. verify.sh's own comment at the counter declarations states the rule --
+/// "an advisory or tracked-red stage did not pass, and folding it into the
+/// passed count is precisely how an excuse becomes invisible" -- and this
+/// asserts the banner obeys it, by reading the numbers the banner actually
+/// prints.
+#[test]
+fn advisory_and_tracked_red_are_counted_apart_from_passed() {
+    // 4 passed + 1 advisory + 1 tracked-red: attempted is 6, passed is 4.
+    let out = summary_banner_for(4, 1, 1, 0);
+    let text = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !text.trim().is_empty(),
+        "the banner printed nothing; the awk extraction of \
+         verification_summary_banner failed, so this test asserted over an \
+         empty string rather than over a banner"
+    );
+
+    assert!(
+        text.contains("4/6"),
+        "an advisory and a tracked-red stage must be ATTEMPTED but not PASSED, \
+         so the banner must read 4/6. Got:\n{text}"
+    );
+    assert!(
+        !text.contains("6/6"),
+        "6/6 would mean the advisory and tracked-red stages were folded into \
+         the passed count, which is the excuse-becomes-invisible shape this \
+         vocabulary exists to prevent. Got:\n{text}"
+    );
+    assert!(
+        text.contains("1 advisory") && text.contains("1 tracked-red"),
+        "the census must NAME each excused state so it can be counted by a \
+         reader, not merely subtracted from the total. Got:\n{text}"
+    );
+
+    // The paired contrast: with no excused stages the same banner reads 4/4,
+    // so the 4/6 above is produced by the injected states and not by the
+    // banner always printing a shortfall.
+    let clean = summary_banner_for(4, 0, 0, 0);
+    let clean_text = String::from_utf8_lossy(&clean.stdout).to_string()
+        + &String::from_utf8_lossy(&clean.stderr);
+    assert!(
+        clean_text.contains("4/4"),
+        "with zero excused stages the banner must read 4/4; otherwise the \
+         assertion above proves nothing about ADVISORY and TRACKED_RED. Got:\n{clean_text}"
+    );
+}
