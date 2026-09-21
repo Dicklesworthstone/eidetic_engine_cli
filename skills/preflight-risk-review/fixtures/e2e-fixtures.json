@@ -151,9 +151,7 @@
       "id": "pfr_malformed_evidence",
       "description": "Malformed JSON or malformed evidence bundle must refuse.",
       "taskClass": "malformed-evidence",
-      "eeCommands": [
-        "ee status --workspace /tmp/ee-fixtures/malformed --json"
-      ],
+      "eeCommands": ["ee status --workspace /tmp/ee-fixtures/malformed --json"],
       "evidenceIds": [],
       "tripwireIds": [],
       "redactionStatus": "unknown",

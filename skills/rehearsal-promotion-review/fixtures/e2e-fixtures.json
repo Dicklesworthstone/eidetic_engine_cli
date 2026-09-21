@@ -35,7 +35,9 @@
       ],
       "evidenceIds": ["ev.rehearsal.failed.001", "ev.precondition.critical_fail"],
       "rehearsalArtifactIds": ["reh.plan.fail.001"],
-      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-failed/.ee/rehearsals/reh.plan.fail.001"],
+      "rehearsalArtifactPaths": [
+        "/tmp/ee-fixtures/rehearsal-failed/.ee/rehearsals/reh.plan.fail.001"
+      ],
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
       "promptInjectionQuarantined": false,
@@ -147,7 +149,9 @@
       ],
       "evidenceIds": [],
       "rehearsalArtifactIds": ["reh.plan.invalid"],
-      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-malformed/.ee/rehearsals/reh.plan.invalid"],
+      "rehearsalArtifactPaths": [
+        "/tmp/ee-fixtures/rehearsal-malformed/.ee/rehearsals/reh.plan.invalid"
+      ],
       "redactionStatus": "unknown",
       "rawSecretsIncluded": false,
       "promptInjectionQuarantined": false,
@@ -192,7 +196,9 @@
       ],
       "evidenceIds": ["ev.rehearsal.destructive.001", "ev.precondition.all_pass"],
       "rehearsalArtifactIds": ["reh.plan.005", "reh.artifact.delete_records"],
-      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-destructive/.ee/rehearsals/reh.plan.005"],
+      "rehearsalArtifactPaths": [
+        "/tmp/ee-fixtures/rehearsal-destructive/.ee/rehearsals/reh.plan.005"
+      ],
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
       "promptInjectionQuarantined": false,

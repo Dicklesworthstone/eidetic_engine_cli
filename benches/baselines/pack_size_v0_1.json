@@ -9,7 +9,7 @@
   },
   "thresholds": {
     "pack_json_bytes_for_1000_tokens_growth_max": 1.05,
-    "bytes_per_token_growth_max": 1.10
+    "bytes_per_token_growth_max": 1.1
   },
   "measurements": {
     "pack_json_bytes_for_500_tokens": {

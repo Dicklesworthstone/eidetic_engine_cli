@@ -6,9 +6,7 @@
       "id": "pd_insufficient_evidence",
       "fixtureHash": "blake3:pdinsufficientevidencefixturehash",
       "description": "No source run IDs, evidence IDs, procedure IDs, or bundle path were supplied.",
-      "eeCommands": [
-        "ee status --workspace /tmp/ee-fixtures/procedure-insufficient --json"
-      ],
+      "eeCommands": ["ee status --workspace /tmp/ee-fixtures/procedure-insufficient --json"],
       "sourceRunIds": [],
       "evidenceIds": [],
       "procedureIds": [],

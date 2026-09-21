@@ -5,9 +5,7 @@
     {
       "id": "cfa_no_evidence",
       "description": "No capture, replay, counterfactual, or bundle evidence is available.",
-      "eeCommands": [
-        "ee status --workspace /tmp/ee-fixtures/no-evidence --json"
-      ],
+      "eeCommands": ["ee status --workspace /tmp/ee-fixtures/no-evidence --json"],
       "evidenceIds": [],
       "redactionStatus": "unknown",
       "rawSecretsIncluded": false,

@@ -9,12 +9,8 @@
         "ee import cass --workspace <workspace> --dry-run --json",
         "cass view <session-id> --json"
       ],
-      "cassCommandTranscript": [
-        "cass view sess_empty --json"
-      ],
-      "sessionIds": [
-        "sess_empty"
-      ],
+      "cassCommandTranscript": ["cass view sess_empty --json"],
+      "sessionIds": ["sess_empty"],
       "lineRanges": [],
       "candidateIds": [],
       "evidenceIds": [],
@@ -34,19 +30,11 @@
         "ee review session sess_noisy --workspace <workspace> --propose --json",
         "ee curate candidates --workspace <workspace> --json"
       ],
-      "cassCommandTranscript": [
-        "cass view sess_noisy --json"
-      ],
-      "sessionIds": [
-        "sess_noisy"
-      ],
-      "lineRanges": [
-        "sess_noisy#L10-L18"
-      ],
+      "cassCommandTranscript": ["cass view sess_noisy --json"],
+      "sessionIds": ["sess_noisy"],
+      "lineRanges": ["sess_noisy#L10-L18"],
       "candidateIds": [],
-      "evidenceIds": [
-        "ev.sess.noisy.001"
-      ],
+      "evidenceIds": ["ev.sess.noisy.001"],
       "degradedCodes": [],
       "redactionStatus": "passed",
       "trustClass": "cass_evidence",
@@ -63,22 +51,12 @@
         "ee import cass --workspace <workspace> --dry-run --json",
         "cass view sess_prompt --json"
       ],
-      "cassCommandTranscript": [
-        "cass view sess_prompt --json"
-      ],
-      "sessionIds": [
-        "sess_prompt"
-      ],
-      "lineRanges": [
-        "sess_prompt#L20-L22"
-      ],
+      "cassCommandTranscript": ["cass view sess_prompt --json"],
+      "sessionIds": ["sess_prompt"],
+      "lineRanges": ["sess_prompt#L20-L22"],
       "candidateIds": [],
-      "evidenceIds": [
-        "ev.sess.prompt.001"
-      ],
-      "degradedCodes": [
-        "prompt_injection_unquarantined"
-      ],
+      "evidenceIds": ["ev.sess.prompt.001"],
+      "degradedCodes": ["prompt_injection_unquarantined"],
       "redactionStatus": "passed",
       "trustClass": "cass_evidence",
       "rawSecretsIncluded": false,
@@ -95,21 +73,11 @@
         "ee context \"prepare release\" --workspace <workspace> --json",
         "ee curate validate curate_duplicate --workspace <workspace> --dry-run --json"
       ],
-      "cassCommandTranscript": [
-        "cass view sess_duplicate --json"
-      ],
-      "sessionIds": [
-        "sess_duplicate"
-      ],
-      "lineRanges": [
-        "sess_duplicate#L30-L35"
-      ],
-      "candidateIds": [
-        "curate_duplicate"
-      ],
-      "evidenceIds": [
-        "ev.sess.duplicate.001"
-      ],
+      "cassCommandTranscript": ["cass view sess_duplicate --json"],
+      "sessionIds": ["sess_duplicate"],
+      "lineRanges": ["sess_duplicate#L30-L35"],
+      "candidateIds": ["curate_duplicate"],
+      "evidenceIds": ["ev.sess.duplicate.001"],
       "degradedCodes": [],
       "redactionStatus": "passed",
       "trustClass": "cass_evidence",
@@ -133,20 +101,10 @@
         "cass view sess_release --json",
         "ee curate validate curate_release_rule --workspace <workspace> --dry-run --json"
       ],
-      "sessionIds": [
-        "sess_release"
-      ],
-      "lineRanges": [
-        "sess_release#L40-L48",
-        "sess_release#L70-L74"
-      ],
-      "candidateIds": [
-        "curate_release_rule"
-      ],
-      "evidenceIds": [
-        "ev.sess.release.001",
-        "ev.sess.release.002"
-      ],
+      "sessionIds": ["sess_release"],
+      "lineRanges": ["sess_release#L40-L48", "sess_release#L70-L74"],
+      "candidateIds": ["curate_release_rule"],
+      "evidenceIds": ["ev.sess.release.001", "ev.sess.release.002"],
       "degradedCodes": [],
       "redactionStatus": "passed",
       "trustClass": "cass_evidence",
@@ -159,25 +117,13 @@
     {
       "id": "srmd_redacted_evidence",
       "task": "Review evidence whose redaction failed.",
-      "eeCommands": [
-        "ee import cass --workspace <workspace> --dry-run --json"
-      ],
-      "cassCommandTranscript": [
-        "cass view sess_secret --json"
-      ],
-      "sessionIds": [
-        "sess_secret"
-      ],
-      "lineRanges": [
-        "sess_secret#L50-L51"
-      ],
+      "eeCommands": ["ee import cass --workspace <workspace> --dry-run --json"],
+      "cassCommandTranscript": ["cass view sess_secret --json"],
+      "sessionIds": ["sess_secret"],
+      "lineRanges": ["sess_secret#L50-L51"],
       "candidateIds": [],
-      "evidenceIds": [
-        "ev.sess.redaction_failed"
-      ],
-      "degradedCodes": [
-        "redaction_failed"
-      ],
+      "evidenceIds": ["ev.sess.redaction_failed"],
+      "degradedCodes": ["redaction_failed"],
       "redactionStatus": "failed",
       "trustClass": "cass_evidence",
       "rawSecretsIncluded": true,
@@ -193,20 +139,12 @@
         "ee import cass --workspace <workspace> --dry-run --json",
         "ee review session sess_degraded --workspace <workspace> --propose --json"
       ],
-      "cassCommandTranscript": [
-        "cass health --json",
-        "cass view sess_degraded --json"
-      ],
-      "sessionIds": [
-        "sess_degraded"
-      ],
+      "cassCommandTranscript": ["cass health --json", "cass view sess_degraded --json"],
+      "sessionIds": ["sess_degraded"],
       "lineRanges": [],
       "candidateIds": [],
       "evidenceIds": [],
-      "degradedCodes": [
-        "cass_unavailable",
-        "review_session_unavailable"
-      ],
+      "degradedCodes": ["cass_unavailable", "review_session_unavailable"],
       "redactionStatus": "unknown",
       "trustClass": "unknown",
       "rawSecretsIncluded": false,

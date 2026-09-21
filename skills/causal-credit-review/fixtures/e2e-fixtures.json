@@ -24,9 +24,7 @@
           "action": "refuse",
           "gateReason": "No evidence available (T0)"
         },
-        "recommendedFollowUpCommands": [
-          "ee causal trace --workspace . --json"
-        ]
+        "recommendedFollowUpCommands": ["ee causal trace --workspace . --json"]
       },
       "assertions": [
         "recommendation.action == 'refuse'",
@@ -74,9 +72,7 @@
           "actionGated": true,
           "gateReason": "Confounders not controlled; recommend experiment"
         },
-        "recommendedFollowUpCommands": [
-          "ee learn experiment propose --workspace . --json"
-        ]
+        "recommendedFollowUpCommands": ["ee learn experiment propose --workspace . --json"]
       },
       "assertions": [
         "recommendation.action in ['hold', 'refuse']",
@@ -106,7 +102,7 @@
             {
               "sampleSize": 12,
               "upliftEstimate": 0.22,
-              "confidenceInterval": [-0.10, 0.54],
+              "confidenceInterval": [-0.1, 0.54],
               "confounders": [],
               "controlMethod": "none"
             }
@@ -283,10 +279,7 @@
           "redactionStatus": "passed"
         }
       },
-      "assertions": [
-        "evidenceBundle.redactionStatus == 'passed'",
-        "no raw secrets in output"
-      ]
+      "assertions": ["evidenceBundle.redactionStatus == 'passed'", "no raw secrets in output"]
     },
     {
       "id": "degraded_causal_ledger",

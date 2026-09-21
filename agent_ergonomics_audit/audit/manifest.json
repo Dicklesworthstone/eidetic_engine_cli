@@ -15,15 +15,27 @@
       "mode": "full",
       "applied_changes_count": 9,
       "applied_recommendations": [
-        {"id": "R-001", "commit": "50b6a628", "title": "clap error continuation + repair extraction"},
-        {"id": "R-002", "commit": "9dac422a", "title": "COMMAND_MANIFEST 19→49"},
-        {"id": "audit", "commit": "6cec7e0f", "title": "audit workspace landing"},
-        {"id": "R-003+R-004", "commit": "3a91b644", "title": "Levenshtein long-flag typo correction + GLOBAL_OPTIONS additions"},
-        {"id": "R-005", "commit": "c9c5a8b2", "title": "COMMAND_MANIFEST 49→75 (full parity)"},
-        {"id": "R-006+R-007", "commit": "84c08e6c", "title": "ee help <subcommand> + insights section help text"},
-        {"id": "R-008", "commit": "fe28f41a", "title": "robot-docs alias for agent-docs"},
-        {"id": "R-009", "commit": "d8053207", "title": "canonical memory kinds in --kind help"},
-        {"id": "audit", "commit": "b7f66921", "title": "audit manifest update"}
+        {
+          "id": "R-001",
+          "commit": "50b6a628",
+          "title": "clap error continuation + repair extraction"
+        },
+        { "id": "R-002", "commit": "9dac422a", "title": "COMMAND_MANIFEST 19→49" },
+        { "id": "audit", "commit": "6cec7e0f", "title": "audit workspace landing" },
+        {
+          "id": "R-003+R-004",
+          "commit": "3a91b644",
+          "title": "Levenshtein long-flag typo correction + GLOBAL_OPTIONS additions"
+        },
+        { "id": "R-005", "commit": "c9c5a8b2", "title": "COMMAND_MANIFEST 49→75 (full parity)" },
+        {
+          "id": "R-006+R-007",
+          "commit": "84c08e6c",
+          "title": "ee help <subcommand> + insights section help text"
+        },
+        { "id": "R-008", "commit": "fe28f41a", "title": "robot-docs alias for agent-docs" },
+        { "id": "R-009", "commit": "d8053207", "title": "canonical memory kinds in --kind help" },
+        { "id": "audit", "commit": "b7f66921", "title": "audit manifest update" }
       ]
     },
     {

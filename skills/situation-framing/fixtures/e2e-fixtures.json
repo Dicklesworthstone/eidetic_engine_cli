@@ -126,9 +126,7 @@
       "taskInput": "Make it better",
       "expectedClassification": "ambiguous",
       "requiredGate": "Output asks for evidence or decision point",
-      "eeCommands": [
-        "ee --workspace /tmp/ee-fixtures/ambiguous --json status"
-      ],
+      "eeCommands": ["ee --workspace /tmp/ee-fixtures/ambiguous --json status"],
       "evidenceIds": [],
       "provenanceIds": [],
       "redactionStatus": "unknown",

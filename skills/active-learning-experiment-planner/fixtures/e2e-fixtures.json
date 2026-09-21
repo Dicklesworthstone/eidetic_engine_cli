@@ -28,17 +28,9 @@
         "ee --workspace <workspace> learn experiment run --id <experiment-id> --dry-run --json",
         "ee learn observe <experiment-id> --measurement-name retrieval_precision --signal positive --evidence-id ev.learn.uncertainty.001 --redaction-status redacted --dry-run --json"
       ],
-      "observationRecordIds": [
-        "lobs_high_uncertainty_001",
-        "lobs_high_uncertainty_002"
-      ],
-      "evalRecordIds": [
-        "eval_retrieval_precision_001"
-      ],
-      "evidenceIds": [
-        "ev.learn.uncertainty.001",
-        "ev.eval.retrieval_precision.001"
-      ],
+      "observationRecordIds": ["lobs_high_uncertainty_001", "lobs_high_uncertainty_002"],
+      "evalRecordIds": ["eval_retrieval_precision_001"],
+      "evidenceIds": ["ev.learn.uncertainty.001", "ev.eval.retrieval_precision.001"],
       "degradedCodes": [],
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
@@ -54,17 +46,9 @@
         "ee causal compare --workspace <workspace> --json",
         "ee learn observe <experiment-id> --measurement-name stratified_replay --signal neutral --evidence-id ev.learn.contradiction.001 --redaction-status redacted --dry-run --json"
       ],
-      "observationRecordIds": [
-        "lobs_contradictory_001",
-        "lobs_contradictory_002"
-      ],
-      "evalRecordIds": [
-        "eval_release_success_001",
-        "eval_release_failure_001"
-      ],
-      "evidenceIds": [
-        "ev.learn.contradiction.001"
-      ],
+      "observationRecordIds": ["lobs_contradictory_001", "lobs_contradictory_002"],
+      "evalRecordIds": ["eval_release_success_001", "eval_release_failure_001"],
+      "evidenceIds": ["ev.learn.contradiction.001"],
       "degradedCodes": [],
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
@@ -79,15 +63,9 @@
         "ee --workspace <workspace> learn summary --period all --detailed --json",
         "ee learn observe <experiment-id> --measurement-name sample_size --signal neutral --evidence-id ev.learn.sample.001 --redaction-status redacted --dry-run --json"
       ],
-      "observationRecordIds": [
-        "lobs_sample_001",
-        "lobs_sample_002",
-        "lobs_sample_003"
-      ],
+      "observationRecordIds": ["lobs_sample_001", "lobs_sample_002", "lobs_sample_003"],
       "evalRecordIds": [],
-      "evidenceIds": [
-        "ev.learn.sample.001"
-      ],
+      "evidenceIds": ["ev.learn.sample.001"],
       "sampleSize": 3,
       "degradedCodes": [],
       "redactionStatus": "passed",
@@ -99,21 +77,11 @@
     {
       "id": "alp_redacted_evidence",
       "task": "Plan from observation evidence that still contains raw secrets.",
-      "eeCommands": [
-        "ee --workspace <workspace> learn summary --period week --detailed --json"
-      ],
-      "observationRecordIds": [
-        "lobs_secret_001"
-      ],
-      "evalRecordIds": [
-        "eval_secret_001"
-      ],
-      "evidenceIds": [
-        "ev.learn.redaction_failed"
-      ],
-      "degradedCodes": [
-        "redaction_failed"
-      ],
+      "eeCommands": ["ee --workspace <workspace> learn summary --period week --detailed --json"],
+      "observationRecordIds": ["lobs_secret_001"],
+      "evalRecordIds": ["eval_secret_001"],
+      "evidenceIds": ["ev.learn.redaction_failed"],
+      "degradedCodes": ["redaction_failed"],
       "redactionStatus": "failed",
       "rawSecretsIncluded": true,
       "expectedDisposition": "refuse",
@@ -127,17 +95,10 @@
         "ee --workspace <workspace> learn summary --period week --detailed --json",
         "ee economy score --workspace <workspace> --json"
       ],
-      "observationRecordIds": [
-        "lobs_degraded_001"
-      ],
+      "observationRecordIds": ["lobs_degraded_001"],
       "evalRecordIds": [],
-      "evidenceIds": [
-        "ev.learn.degraded.001"
-      ],
-      "degradedCodes": [
-        "learning_records_unavailable",
-        "economy_records_unavailable"
-      ],
+      "evidenceIds": ["ev.learn.degraded.001"],
+      "degradedCodes": ["learning_records_unavailable", "economy_records_unavailable"],
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
       "expectedDisposition": "request_repair",
