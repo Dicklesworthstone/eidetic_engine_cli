@@ -199,6 +199,19 @@ jobs:
       - name: Toolchain pins
         run: ./scripts/check-toolchain-pins.sh
 
+      # bd-uhml2. SIBLING OF THE GUARD ABOVE, AND DELIBERATELY SEPARATE FROM IT.
+      # check-toolchain-pins enforces the toolchain INPUT; this enforces the
+      # ACTION REF. Its header is explicit that those are different things, and
+      # a repo can be fully green on one while every action it runs is a
+      # movable tag -- which was the measured state: 75 of 262 pinnable refs
+      # pinned, 187 mutable, and release.yml the only fully pinned file of 43.
+      # Self-test first, same reason as its sibling.
+      - name: Action pin guard --self-test
+        run: python3 ./scripts/check-action-pins.py --self-test
+
+      - name: Action pins
+        run: python3 ./scripts/check-action-pins.py
+
       # bd-l6h3g. THIS MUST RUN BEFORE Format, NOT AFTER, AND THAT ORDER IS THE
       # WHOLE POINT. `cargo fmt --check` walks cargo targets and follows
       # mod/#[path] from each root, so a .rs file NO TARGET REACHES is reported

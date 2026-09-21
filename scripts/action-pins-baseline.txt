@@ -1,0 +1,62 @@
+# Shrink-only baseline: MUTABLE `uses:` references per workflow file (bd-uhml2).
+# Format: <mutable count><TAB><workflow basename>
+#
+# WHY A BASELINE AND NOT A HARD FAIL. Measured 2026-09-21: 51 workflow files,
+# 264 pinnable references, 75 pinned, 187 mutable across 42 files. A gate that
+# failed on all 187 could not be landed -- it would red main on its first run --
+# and a gate nobody can turn on protects nothing.
+#
+# WHAT THIS BUYS. The 188th mutable reference fails immediately, by name and
+# line. That is the actual request: stop the defect RECURRING while the existing
+# 187 are remediated separately (the fix bead), rather than blocking on a
+# 42-file change first.
+#
+# SHRINK-ONLY, ENFORCED BOTH WAYS. A file above its row fails. A row ABOVE
+# reality also fails, so a row cannot be left stale after a fix -- it must come
+# down in the same commit that removes the reference.
+#
+# release.yml is deliberately ABSENT: it is 14 of 14 pinned and must stay that
+# way, so any mutable reference appearing there fails on sight.
+
+29	ci.yml
+8	typed-memory-recovery.yml
+7	diagnostic-snapshot-20260919.yml
+7	global-authority-20260919.yml
+7	learned-history-recovery-20260919.yml
+7	primer-admission-20260919.yml
+7	seed-authority-20260919.yml
+6	contradiction-graph-20260919.yml
+6	diagnostic-generation-20260919.yml
+6	session-arc-20260919.yml
+5	ask-numeric-20260919.yml
+5	primary-recovery-20260919.yml
+5	recorded-provenance-20260919.yml
+5	revision-record-recovery-20260919.yml
+5	runtime-retrieval-20260919.yml
+5	snapshot-recovery-20260919.yml
+4	ask-evidence-20260918.yml
+4	ask-paths-20260918.yml
+4	ask-semantic-20260918.yml
+4	index-publication-20260918.yml
+4	mcp-ask-20260918.yml
+4	recovery-headship-admission-20260919.yml
+4	verify-ask-admission-20260917.yml
+3	index-rollback-durability-20260919.yml
+3	macos-ee-artifact.yml
+2	cass-prefetch-execution-20260920.yml
+2	cass-prefetch-residency-20260920.yml
+2	ci-static.yml
+2	evidence-export-20260919.yml
+2	external-ingestion-20260919.yml
+2	git-capture-20260919.yml
+2	git-capture-mcp-20260919.yml
+2	git-capture-offline-20260919.yml
+2	journal-ingestion-20260919.yml
+2	recovery-source-snapshot.yml
+2	resume-coherence-20260919.yml
+2	resume-current-state-20260919.yml
+2	resume-indexed-projection-20260919.yml
+2	session-arc-learning-20260919.yml
+2	trust-recovery-20260919.yml
+2	workflow-recovery-20260920.yml
+1	outcome-atomic-learning-20260920.yml
