@@ -409,9 +409,16 @@ name = "Vision Coverage"
 # no longer exists. Note the two runs are not directly comparable -- the earlier
 # median of 5 was taken at load 22.97 and this one at 7.88, so expect this stage
 # nearer its 9s advisory line under heavy fleet load. It was NOT raised to 7:
-# non-benchmark p50 totals 599 against the 600 ceiling, and spending the last
-# second of headroom in the whole file on a stage whose measured median is 5.67
-# would be taking room the number does not justify.
+# non-benchmark p50 totalled 599 against the 600 ceiling when this was written,
+# and spending the last second of headroom in the whole file on a stage whose
+# measured median is 5.67 would be taking room the number does not justify.
+#
+# That headroom is now GONE. 216286197 (2026-09-21) added the 91st stage and
+# took the non-benchmark total to exactly 600, so this stage cannot be raised
+# at all without cutting another stage's p50 -- which is precisely the
+# retune-to-fit that verification_drift_guard.rs:1361 calls fiction. Do not
+# read "599" above as live headroom; it is the figure as of 2026-09-17. See
+# bd-vihzq.
 expected_seconds_p50 = 6
 regression_factor = 1.5
 
