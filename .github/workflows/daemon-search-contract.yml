@@ -3,8 +3,10 @@ on:
   push:
     branches: [main]
     paths:
+      - src/core/mod.rs
       - src/core/search.rs
       - src/core/search_result_document.rs
+      - src/core/global_promotion.rs
       - src/cli/mod.rs
       - src/cli/daemon_search_diagnostics.rs
       - src/daemon/server.rs
@@ -27,7 +29,7 @@ jobs:
     permissions:
       contents: write
     env:
-      EE_DAEMON_SEARCH_CONTRACT_DELIVERY: '2'
+      EE_DAEMON_SEARCH_CONTRACT_DELIVERY: '3'
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -43,8 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/delivery/daemon-search-contract-56/test_apply.py
-          python3 scripts/delivery/daemon-search-contract-56/apply.py
-          python3 scripts/delivery/daemon-search-contract-56/apply.py --check
+          python3 scripts/delivery/daemon-search-contract-56/test_integrate.py
+          python3 scripts/delivery/daemon-search-contract-56/integrate.py
+          python3 scripts/delivery/daemon-search-contract-56/integrate.py --check
           git diff --check
           git diff > "$RUNNER_TEMP/daemon-search-contract-source.patch"
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
@@ -64,35 +67,36 @@ jobs:
             lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Verify the real served contract before publishing the repair
+      - name: Verify normal builds and the real served contract before publishing
         run: |
           set -euo pipefail
-          trap 'tail -n 80 "$RUNNER_TEMP"/daemon-search-contract-*.log 2>/dev/null || true' EXIT
-          paths=(src/core/mod.rs src/core/search.rs src/core/search_result_document.rs src/cli/mod.rs src/cli/daemon_search_diagnostics.rs src/daemon/server.rs src/daemon/search_result_contract.rs src/daemon/search_result_contract_tests.rs docs/schemas/ee.daemon.search.response.v3.json)
-          rustfmt --edition 2024 --config skip_children=true "${paths[@]:0:8}"
-          python3 scripts/delivery/daemon-search-contract-56/apply.py --check
+          trap 'tail -n 120 "$RUNNER_TEMP"/daemon-search-contract-*.log 2>/dev/null || true' EXIT
+          paths=(src/core/mod.rs src/core/search.rs src/core/search_result_document.rs src/cli/mod.rs src/cli/daemon_search_diagnostics.rs src/daemon/server.rs src/daemon/search_result_contract.rs src/daemon/search_result_contract_tests.rs src/core/global_promotion.rs docs/schemas/ee.daemon.search.response.v3.json)
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]:0:9}"
+          python3 scripts/delivery/daemon-search-contract-56/integrate.py --check
           git diff --check
+          git diff > "$RUNNER_TEMP/daemon-search-contract-source.patch"
+          cargo check --locked --lib > "$RUNNER_TEMP/daemon-search-contract-check.log" 2>&1
           cargo test --locked --lib daemon::server::search_result_contract::tests -- --test-threads=2 > "$RUNNER_TEMP/daemon-search-contract-tests.log" 2>&1
           grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-tests.log"
           cargo test --locked --lib core::search_result_document::tests > "$RUNNER_TEMP/daemon-search-contract-shared.log" 2>&1
           grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-shared.log"
           cargo test --locked --lib cli::daemon_search_diagnostics::tests > "$RUNNER_TEMP/daemon-search-contract-diagnostics.log" 2>&1
-          grep -Fq 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-diagnostics.log"
+          grep -Fq 'test result: ok. 4 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-diagnostics.log"
           cargo test --locked --lib daemon::server::tests::daemon_search_result_rejects_schema_and_field_drift -- --exact > "$RUNNER_TEMP/daemon-search-contract-existing.log" 2>&1
           grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-existing.log"
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/daemon-search-contract-clippy.log" 2>&1
-          git diff > "$RUNNER_TEMP/daemon-search-contract-source.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git diff --quiet -- "${paths[@]}"; then
             base=$(git rev-parse HEAD)
             git add -- "${paths[@]}"
-            git commit -m 'fix(search): share daemon result fields and preserve validation errors (#56)' -m 'Use a closed-key canonical document builder whose field declaration also generates daemon admission lists. Preserve all semantic validation, allow optional string/null calibrationId, expose the original validation error in fallback diagnostics, and wire the actual served/framed report regressions. Seventeen targeted tests and production Clippy passed before this commit.'
+            git commit -m 'fix(search): activate shared daemon result contract and lossless diagnostics (#56)' -m 'Wire the typed canonical producer and shared daemon validator, allow optional string/null calibrationId, preserve String and serde validation errors in normal CLI builds, and activate framed SearchReport round-trip regressions. Fix three pre-existing test count type errors that blocked lib-test compilation. Normal cargo check, eighteen targeted tests, and production Clippy passed before this commit.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
               git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${paths[@]}" scripts/delivery/daemon-search-contract-56/apply.py .github/workflows/daemon-search-contract.yml
+              git diff --exit-code "$base" origin/main -- "${paths[@]}" scripts/delivery/daemon-search-contract-56 .github/workflows/daemon-search-contract.yml
               git merge --no-edit origin/main
               base=$(git rev-parse origin/main)
             done
