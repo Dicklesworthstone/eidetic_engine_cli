@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 
 use crate::policy::redact_secret_like_content;
 
+#[path = "global_promotion_admission.rs"]
+mod admission;
+
 pub const GLOBAL_PROMOTION_PLAN_SCHEMA_V1: &str = "ee.global_promotion.plan.v1";
 
 /// Degraded/refusal code emitted when secret-like content blocks promotion.
@@ -77,6 +80,12 @@ pub enum PromotionRefusal {
     Tombstoned,
     /// Sealed memory: the body is withheld pending reveal.
     SealedPlaceholder,
+    /// A replaced revision cannot be promoted as a new global head.
+    Superseded,
+    /// The source's authored validity window has not opened yet.
+    NotYetValid,
+    /// The source's authored validity window has closed.
+    Expired,
     /// Trust class below the evidence gate.
     EvidenceGateTrustTooLow { trust_class: String },
     /// Secret-like content detected; promotion refuses rather than redacts.
@@ -90,6 +99,9 @@ impl PromotionRefusal {
             Self::LaneUnavailable => "global_lane_unavailable",
             Self::Tombstoned => "global_promotion_tombstoned",
             Self::SealedPlaceholder => "global_promotion_sealed",
+            Self::Superseded => "global_promotion_superseded",
+            Self::NotYetValid => "global_promotion_not_yet_valid",
+            Self::Expired => "global_promotion_expired",
             Self::EvidenceGateTrustTooLow { .. } => "global_promotion_evidence_gate",
             Self::RedactionRefused { .. } => GLOBAL_PROMOTION_REDACTION_REFUSED_CODE,
         }
@@ -108,6 +120,15 @@ impl PromotionRefusal {
             Self::SealedPlaceholder => {
                 "Sealed memories cannot be promoted until revealed; the global lane never carries withheld-content placeholders."
                     .to_owned()
+            }
+            Self::Superseded => {
+                "Superseded revisions cannot become current global memories.".to_owned()
+            }
+            Self::NotYetValid => {
+                "The source memory is not yet valid for global promotion.".to_owned()
+            }
+            Self::Expired => {
+                "Expired memories cannot be promoted as current global knowledge.".to_owned()
             }
             Self::EvidenceGateTrustTooLow { trust_class } => format!(
                 "Promotion requires trust class human_explicit or agent_validated; this memory is `{trust_class}`."
@@ -130,6 +151,12 @@ impl PromotionRefusal {
             Self::SealedPlaceholder => {
                 "Reveal the memory first: ee memory reveal <id> --content-file <path> --json"
                     .to_owned()
+            }
+            Self::Superseded | Self::Expired => {
+                "Promote a current, active revision instead.".to_owned()
+            }
+            Self::NotYetValid => {
+                "Retry after the authored validity window opens.".to_owned()
             }
             Self::EvidenceGateTrustTooLow { .. } => {
                 "Validate the memory first (record outcome evidence or human confirmation), then retry."
@@ -359,62 +386,29 @@ impl PromotionReport {
 /// as a report whose plan carries the refusal (typed code/message/repair)
 /// so callers render them honestly without string-matching.
 pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionReport, String> {
-    let workspace_connection = DbConnection::open_file(options.workspace_database_path)
-        .map_err(|error| format!("open workspace database: {error}"))?;
-    let memory = workspace_connection
-        .get_memory(options.memory_id)
-        .map_err(|error| format!("load memory: {error}"))?
-        .ok_or_else(|| format!("memory {} not found", options.memory_id))?;
-    let sealed = if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-        workspace_connection
-            .get_memory_seal(&memory.id)
-            .map_err(|error| format!("verify memory seal sidecar: {error}"))?
-            .is_some()
-    } else {
-        false
-    };
+    let reference = chrono::Utc::now();
+    let (memory, mut plan) = admission::load_source(options, reference)?;
+    // Refusals do not inspect, initialize, migrate, or repair the global store.
+    if !plan.allowed() {
+        return Ok(admission::preview_report(plan, None));
+    }
+    if options.dry_run {
+        let twin = admission::preview_twin(options.global_paths, &memory, reference)?;
+        admission::set_duplicate(&mut plan, twin.as_deref());
+        return Ok(admission::preview_report(plan, twin));
+    }
 
-    // Exact-content twin scan against the global store (deterministic v1
-    // duplicate signal; similarity 1.0 by construction).
+    let workspace_connection = DbConnection::open_file(options.workspace_database_path)
+        .map_err(|error| format!("open workspace database for audit: {error}"))?;
     let (global_connection, global_workspace_id) =
         super::global_store::open_or_create_global_store(options.global_paths)
             .map_err(|error| format!("open global store: {error}"))?;
-    let existing_twin = global_connection
-        .find_active_memory_by_content(&global_workspace_id, &memory.content)
-        .map_err(|error| format!("scan global duplicates: {error}"))?;
-
-    let plan = plan_promotion(&PromotionInput {
-        candidate: PromotionCandidate {
-            memory_id: memory.id.clone(),
-            workspace_id: memory.workspace_id.clone(),
-            content: memory.content.clone(),
-            level: memory.level.clone(),
-            kind: memory.kind.clone(),
-            trust_class: memory.trust_class.clone(),
-            confidence: memory.confidence,
-            tombstoned: memory.tombstoned_at.is_some(),
-            sealed,
-        },
-        nearest_global_duplicate: existing_twin.as_ref().map(|twin| GlobalNearDuplicate {
-            global_memory_id: twin.id.clone(),
-            similarity: 1.0,
-        }),
-        merge_similarity: None,
-        global_lane_available: options.global_lane_available,
-    });
-
-    if !plan.allowed() || options.dry_run {
-        let _ = global_connection.close();
-        return Ok(PromotionReport {
-            executed: false,
-            global_memory_id: existing_twin.map(|twin| twin.id),
-            already_promoted: false,
-            index_job_id: None,
-            index_status: "not_applicable".to_owned(),
-            index_error: None,
-            plan,
-        });
-    }
+    let snapshot = admission::ReadSnapshot::begin(&global_connection)
+        .map_err(|_| "Could not begin global duplicate snapshot".to_owned())?;
+    let twin = admission::find_twin(&global_connection, &global_workspace_id, &memory, reference)
+        .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
+    snapshot.finish().map_err(|_| "Could not release global duplicate snapshot".to_owned())?;
+    admission::set_duplicate(&mut plan, twin.as_deref());
 
     let (global_memory_id, already_promoted, index_job_id) = match &plan.verdict {
         PromotionVerdict::Allow {
@@ -446,8 +440,8 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                         trust_class: memory.trust_class.clone(),
                         trust_subclass: memory.trust_subclass.clone(),
                         tags,
-                        valid_from: None,
-                        valid_to: None,
+                        valid_from: memory.valid_from.clone(),
+                        valid_to: memory.valid_to.clone(),
                     },
                 )
                 .map_err(|error| format!("insert global memory: {error}"))?;
@@ -594,12 +588,14 @@ pub fn parse_promotion_provenance(uri: &str) -> Option<(String, String)> {
 /// global row does not exist.
 pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport, String> {
     let (global_connection, global_workspace_id) =
-        super::global_store::open_or_create_global_store(options.global_paths)
-            .map_err(|error| format!("open global store: {error}"))?;
+        admission::open_existing_global(options.global_paths, options.dry_run)?;
     let row = global_connection
         .get_memory(options.global_memory_id)
         .map_err(|error| format!("load global memory: {error}"))?
         .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
+    if row.workspace_id != global_workspace_id {
+        return Err("Memory does not belong to the addressed global workspace".to_owned());
+    }
     let origin = row
         .provenance_uri
         .as_deref()
@@ -773,13 +769,18 @@ impl BackflowReport {
 /// Returns a human-readable error string when storage access fails or the
 /// global row does not exist.
 pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<BackflowReport, String> {
+    if !options.weight.is_finite() {
+        return Err("Global feedback weight must be finite".to_owned());
+    }
     let (global_connection, global_workspace_id) =
-        super::global_store::open_or_create_global_store(options.global_paths)
-            .map_err(|error| format!("open global store: {error}"))?;
+        admission::open_existing_global(options.global_paths, options.dry_run)?;
     let row = global_connection
         .get_memory(options.global_memory_id)
         .map_err(|error| format!("load global memory: {error}"))?
         .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
+    if row.workspace_id != global_workspace_id {
+        return Err("Memory does not belong to the addressed global workspace".to_owned());
+    }
     let origin = row
         .provenance_uri
         .as_deref()
