@@ -243,5 +243,8 @@ jobs:
       # already covers, and it consumes mod_reachability's own include!-only set
       # (--list-include-only) instead of re-deriving it, so the two cannot
       # disagree about what `include!` means.
+      - name: Format (include!-only files) --self-test
+        run: ./scripts/check-include-fmt.sh --self-test
+
       - name: Format (include!-only files)
         run: ./scripts/check-include-fmt.sh
