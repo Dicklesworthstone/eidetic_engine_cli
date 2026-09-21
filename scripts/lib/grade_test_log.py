@@ -49,6 +49,7 @@ EXIT CODES
 USAGE
   grade_test_log.py <logfile>
   grade_test_log.py --expect-target lib <logfile>   # pick one target by substring
+  grade_test_log.py --all-targets <logfile>         # grade EVERY target together
   grade_test_log.py --self-test
 """
 
@@ -139,7 +140,7 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
     return pairs, problems
 
 
-def grade(path: pathlib.Path, expect_target: str | None) -> int:
+def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = False) -> int:
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError as error:
@@ -186,6 +187,43 @@ def grade(path: pathlib.Path, expect_target: str | None) -> int:
                 f"--expect-target {expect_target!r}."
             )
             return 1
+
+    if all_targets:
+        # AGGREGATE MODE (bd-reality-core-convergence-1azkt.5, bullet 4). The
+        # single-target path below refuses a multi-target log outright, which is
+        # right when you are proving ONE target ran -- and it is why this grader
+        # could not be pointed at `scripts/verify.sh`'s
+        # `cargo test --workspace --lib --bins --tests --examples`, whose whole
+        # job is to report many targets. Refusing for AMBIGUITY there would be a
+        # red that says nothing about the code.
+        #
+        # Here every pair has already been reconciled above, so what remains is
+        # to judge all of them together. ZERO IS CHECKED ON THE TOTAL, not per
+        # pair: a target that legitimately announces `running 0 tests` (an empty
+        # harness) is normal, while a whole invocation that announced nothing
+        # anywhere is the vacuous green this tool exists to refuse.
+        failing = [p for p in chosen if p["verdict"] != "ok" or p["failed"] != 0]
+        total_announced = sum(p["announced"] for p in chosen)
+        if failing:
+            for p in failing:
+                print(
+                    f"[grade-test-log] NOT GREEN: target={p['target']} "
+                    f"verdict={p['verdict']} failed={p['failed']}"
+                )
+            return 1
+        if total_announced == 0:
+            print(
+                f"[grade-test-log] NOT GREEN: {len(chosen)} summary/summaries and "
+                "ZERO tests announced in total. The invocation executed nothing -- "
+                "a filter that matched no test, or every target skipped. libtest "
+                "calls that `ok` and exits 0; it is not a pass."
+            )
+            return 1
+        print(
+            f"[grade-test-log] GREEN: {len(chosen)} target(s), "
+            f"{total_announced} tests announced, all reconciled."
+        )
+        return 0
 
     if len(chosen) > 1:
         print(
@@ -273,6 +311,38 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10076 filtered out
 """
 
 
+# Several targets, one of which FAILED. Aggregate mode must not let a passing
+# neighbour carry it: this is the case the old `tail -1` heuristic got wrong.
+SEQUENTIAL_ONE_FAILED = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 4 tests
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
+     Running tests/contracts.rs (target/debug/deps/contracts-bbb)
+running 7 tests
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+# Every target announced ZERO. Each pair reconciles (0 == 0) and libtest calls
+# them all `ok`, so only the TOTAL distinguishes this from a real run.
+ALL_ZERO = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10076 filtered out
+     Running tests/contracts.rs (target/debug/deps/contracts-bbb)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out
+"""
+
+# One empty harness beside a real one. This MUST be green: a target with no
+# tests is normal, and failing it would make the zero check unusable in
+# aggregate mode -- the arm that stops the fix over-correcting.
+ONE_EMPTY_ONE_REAL = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/contracts.rs (target/debug/deps/contracts-bbb)
+running 7 tests
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
 def self_test() -> int:
     cases = [
         ("clean single target", CLEAN, None, 0),
@@ -287,6 +357,23 @@ def self_test() -> int:
         # arm, "refuses everything" would pass every other arm.
         ("sequential, disambiguated by target", SEQUENTIAL, "contracts-bbb", 0),
     ]
+    # AGGREGATE MODE (1azkt.5 bullet 4). Same fixtures, graded together.
+    aggregate_cases = [
+        ("all-targets: multi-target log is graded, not refused", SEQUENTIAL, 0),
+        ("all-targets: one failing target fails the whole log", SEQUENTIAL_ONE_FAILED, 1),
+        ("all-targets: every target announced zero is NOT a pass", ALL_ZERO, 1),
+        # NEGATIVE CONTROL for the zero rule: an empty harness beside a real one
+        # is normal and must stay green, or the rule is unusable.
+        ("all-targets: one empty harness beside a real one is green", ONE_EMPTY_ONE_REAL, 0),
+        ("all-targets: a genuine failure still fails", FAILING, 1),
+        ("all-targets: a mismatch still refuses", MISMATCH, 1),
+        # NESTED still REFUSES in aggregate mode, and that is correct: the
+        # child's `running 1 test` lands between the parent's announcement and
+        # the parent's summary, so neither can be attributed. Aggregate mode
+        # widens WHICH targets are judged, never the fails-closed rule. I first
+        # wrote this arm expecting 0 and the harness caught the expectation.
+        ("all-targets: nested child is still refused, not attributed", NESTED_CHILD, 1),
+    ]
     failures = 0
     with tempfile.TemporaryDirectory() as directory:
         for name, body, expect_target, want in cases:
@@ -297,10 +384,19 @@ def self_test() -> int:
             if got != want:
                 failures += 1
             print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
+        for name, body, want in aggregate_cases:
+            path = pathlib.Path(directory) / "log.txt"
+            path.write_text(body)
+            got = grade(path, None, all_targets=True)
+            status = "OK  " if got == want else "FAIL"
+            if got != want:
+                failures += 1
+            print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
+    total = len(cases) + len(aggregate_cases)
     if failures:
-        print(f"[grade-test-log] SELF-TEST FAILED: {failures} of {len(cases)} arms")
+        print(f"[grade-test-log] SELF-TEST FAILED: {failures} of {total} arms")
         return 1
-    print(f"[grade-test-log] self-test: {len(cases)} of {len(cases)} arms passed")
+    print(f"[grade-test-log] self-test: {total} of {total} arms passed")
     return 0
 
 
@@ -308,6 +404,9 @@ def main(argv: list[str]) -> int:
     args = list(argv[1:])
     if "--self-test" in args:
         return self_test()
+    all_targets = "--all-targets" in args
+    if all_targets:
+        args.remove("--all-targets")
     expect_target = None
     if "--expect-target" in args:
         index = args.index("--expect-target")
@@ -320,7 +419,7 @@ def main(argv: list[str]) -> int:
     if len(args) != 1:
         print(__doc__.split("USAGE")[-1].strip(), file=sys.stderr)
         return 2
-    return grade(pathlib.Path(args[0]), expect_target)
+    return grade(pathlib.Path(args[0]), expect_target, all_targets)
 
 
 if __name__ == "__main__":
