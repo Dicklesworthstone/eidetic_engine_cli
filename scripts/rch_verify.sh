@@ -814,8 +814,29 @@ print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
 
+# EXECUTES-HERE, NOT MERELY EXECUTABLE (bd-reality-core-convergence-1azkt.5, B2
+# escape 5). scripts/lib/ee_binary_resolution.sh already owns this question and
+# 24 scripts source it, including scripts/verify.sh. Neither RCH harness did --
+# and the pinned lane is exactly where a wrong-platform artifact lands, because
+# an RCH run can exit 0 having written a LINUX ELF over a macOS target dir.
+#
+# Sourced lazily inside the resolver so the top-of-file re-exec block is
+# untouched; the lib defines functions only.
+ee_binary_executes_here_or_lib_missing() {
+    local binary="$1"
+    if ! declare -F ee_binary_executes_here >/dev/null 2>&1; then
+        # shellcheck source=scripts/lib/ee_binary_resolution.sh
+        . "$SCRIPT_DIR/lib/ee_binary_resolution.sh" 2>/dev/null || return 0
+    fi
+    ee_binary_executes_here "$binary"
+}
+
 candidate_ee_bin() {
     if [ -n "$BUILD_ADMISSION_EE_BIN" ]; then
+        # An EXPLICITLY supplied binary was returned blind: no check at all.
+        if ! ee_binary_executes_here_or_lib_missing "$BUILD_ADMISSION_EE_BIN"; then
+            return 1
+        fi
         printf '%s' "$BUILD_ADMISSION_EE_BIN"
         return 0
     fi
@@ -827,7 +848,16 @@ candidate_ee_bin() {
         "$PROJECT_ROOT/target/debug/ee" \
         "$PROJECT_ROOT/target/release/ee"
     do
-        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        # `-x` IS THE EXECUTABLE BIT, NOT "CAN RUN HERE": a Linux ELF has it set
+        # on macOS. And the probe below accepted any NON-EMPTY output, which an
+        # error message satisfies -- capture_command_with_timeout folds stderr
+        # into `output` (stderr=subprocess.STDOUT), so a foreign binary returned
+        # "exec format error: <path>" and PASSED this guard. Measured: that
+        # candidate exits 126 with non-empty output, which is why the run got as
+        # far as "ee diag build-admission did not emit valid JSON: OSError:
+        # [Errno 8] Exec format error" instead of naming the real cause here.
+        if [ -n "$candidate" ] && [ -x "$candidate" ] \
+            && ee_binary_executes_here_or_lib_missing "$candidate"; then
             version_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "$candidate" --version)"
             version_timed_out="$(json_text_field "$version_probe" timed_out)"
             version_output="$(json_text_field "$version_probe" output)"
