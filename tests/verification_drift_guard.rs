@@ -3124,3 +3124,65 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
         );
     }
 }
+
+/// bd-13y74 / bd-ogtco: the e2e temp root must stay DERIVED, not hardcoded.
+///
+/// WHY THIS GUARD EXISTS. c2e363a3c replaced thirty hardcoded
+/// `EE_E2E_TMPDIR=/private/tmp` stage arguments with a per-host resolver. Its
+/// only evidence was a RUN -- verify.sh on a Linux worker, roughly 73 minutes
+/// of remote time -- and nothing cheaper would have caught a reintroduced
+/// literal. A correctness property whose only check is too expensive to run
+/// casually is the same shape as a gate that cannot fail where it matters:
+/// technically verifiable, practically unverified.
+///
+/// /private/tmp is a macOS convention that ALSO EXISTS on the Linux fleet,
+/// root-owned and unwritable, so a reintroduced hardcode does not error --
+/// stages die at their first mktemp having executed ZERO assertions and exit
+/// nonzero in a way that reads as a test failure rather than a harness that
+/// never started. That is precisely the defect bd-13y74 was filed for, and it
+/// is invisible on the machine most people run verify.sh on.
+///
+/// The single mention that remains is the resolver's own macOS branch, which is
+/// the correct expression of the constraint (an ExFAT TMPDIR breaks DB opens on
+/// the dev host, bd-2vq2z) as a PLATFORM preference rather than a global
+/// default.
+#[test]
+fn verify_e2e_temp_root_is_derived_and_not_hardcoded() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    // EMPTY-WORLD GUARD. Both assertions below are satisfied by an empty or
+    // truncated file, so the population is asserted first: a zero here would
+    // mean the test read nothing, not that the script is clean.
+    let stage_uses = script.matches("EE_E2E_TMPDIR=\\\"${E2E_TMPDIR_BASE}\\\"").count();
+    assert!(
+        stage_uses >= 20,
+        "expected the e2e stages to take the derived root; found {stage_uses} \
+         references to ${{E2E_TMPDIR_BASE}} in verify.sh. A near-zero count means \
+         this test is reading the wrong file, not that verify.sh is clean."
+    );
+
+    // THE REGRESSION THIS EXISTS TO CATCH: a stage argument pinned back to the
+    // macOS literal.
+    let hardcodes = script.matches("EE_E2E_TMPDIR=/private/tmp").count();
+    assert_eq!(
+        hardcodes, 0,
+        "verify.sh hardcodes EE_E2E_TMPDIR=/private/tmp in {hardcodes} place(s). \
+         That path exists on the Linux fleet but is root-owned, so those stages \
+         die at mktemp having asserted nothing (bd-13y74). Use the resolved \
+         ${{E2E_TMPDIR_BASE}} instead."
+    );
+
+    // The resolver itself must still be present and still probe, rather than
+    // assuming a candidate is usable.
+    assert!(
+        script.contains("e2e_tmpdir_writable"),
+        "the e2e temp-root resolver must probe writability; existence is not \
+         writability, which is the whole reason /private/tmp passed a `-d` test \
+         on Linux and then failed at mktemp"
+    );
+    assert!(
+        script.contains("e2e_tmpdir_refuse"),
+        "the resolver must be able to REFUSE; a resolver that always returns a \
+         path cannot report that no writable root exists"
+    );
+}
