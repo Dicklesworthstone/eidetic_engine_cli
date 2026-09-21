@@ -164,28 +164,38 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
 
 /// Read only the exact-content candidate identities and lifecycle columns.
 /// The caller owns the snapshot/transaction. Expired, sealed, superseded,
-/// weakly trusted, and differently typed twins cannot absorb a valid source.
-/// A shorter-lived twin cannot silently shorten the promoted knowledge's life.
+/// differently trusted, and differently typed twins cannot absorb a source.
+/// Authored bounds must match as instants, including null/unbounded starts and
+/// ends. Promotion changes scope, never the source's lifetime or attestation.
 pub(super) fn find_twin(
     db: &DbConnection,
     workspace: &str,
     source: &StoredMemory,
     reference: DateTime<Utc>,
 ) -> DbResult<Option<String>> {
+    let source_start = source.valid_from.as_deref().map(timestamp).transpose()?;
     let source_end = source.valid_to.as_deref().map(timestamp).transpose()?;
     let rows = db.query(
-        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, s.memory_id, s.revealed_at FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class IN ('human_explicit', 'agent_validated') ORDER BY m.id ASC",
+        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, s.memory_id, s.revealed_at FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
         &[
             Value::Text(workspace.to_owned()),
             Value::Text(source.content.clone()),
             Value::Text(source.level.clone()),
             Value::Text(source.kind.clone()),
+            Value::Text(source.trust_class.clone()),
+            source
+                .trust_subclass
+                .clone()
+                .map_or(Value::Null, Value::Text),
         ],
     )?;
     for row in rows {
         let Some(Value::Text(id)) = row.get(0) else {
             return Err(invalid_authority());
         };
+        if id.parse::<crate::models::MemoryId>().is_err() {
+            return Err(invalid_authority());
+        }
         let from = optional_text(row.get(1))?;
         let to = optional_text(row.get(2))?;
         let superseded = optional_text(row.get(3))?;
@@ -202,8 +212,9 @@ pub(super) fn find_twin(
         if lifecycle.is_some() || (seal_id.is_some() && revealed.is_none()) {
             continue;
         }
+        let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if end.is_some_and(|end| source_end.is_none_or(|source_end| end < source_end)) {
+        if start != source_start || end != source_end {
             continue;
         }
         return Ok(Some(id.clone()));
@@ -306,3 +317,201 @@ impl Drop for ReadSnapshot<'_> {
 #[cfg(test)]
 #[path = "global_promotion_admission_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod duplicate_compatibility_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+
+    const SOURCE: &str = "mem_00000000000000000000000071";
+    const WORKSPACE: &str = "wsp_00000000000000000000000071";
+    const FROM: &str = "2020-01-01T00:00:00Z";
+    const TO: &str = "2099-01-01T00:00:00Z";
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        source_path: std::path::PathBuf,
+        paths: GlobalStorePaths,
+        memory: StoredMemory,
+        db: DbConnection,
+        workspace: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let physical = root.path().canonicalize().unwrap();
+            let source_path = physical.join("source.db");
+            let source = DbConnection::open_file(&source_path).unwrap();
+            source.migrate().unwrap();
+            source
+                .insert_workspace(
+                    WORKSPACE,
+                    &CreateWorkspaceInput {
+                        path: physical.to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .unwrap();
+            source
+                .insert_memory(
+                    SOURCE,
+                    &CreateMemoryInput {
+                        workspace_id: WORKSPACE.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Run cargo fmt before release.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: Some(FROM.to_owned()),
+                        valid_to: Some(TO.to_owned()),
+                    },
+                )
+                .unwrap();
+            let memory = source.get_memory(SOURCE).unwrap().unwrap();
+            source.close().unwrap();
+            let paths = GlobalStorePaths::from_root(&physical.join("global"));
+            let (db, workspace) =
+                crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+            Self {
+                _root: root,
+                source_path,
+                paths,
+                memory,
+                db,
+                workspace,
+            }
+        }
+
+        fn options(&self, dry_run: bool) -> PromoteGlobalOptions<'_> {
+            PromoteGlobalOptions {
+                workspace_database_path: &self.source_path,
+                memory_id: SOURCE,
+                global_paths: &self.paths,
+                global_lane_available: true,
+                actor: None,
+                dry_run,
+            }
+        }
+
+        fn publish(&self) -> String {
+            super::super::persist_global_promotion(
+                &self.db,
+                &self.workspace,
+                &self.memory,
+                None,
+                timestamp("2030-01-01T00:00:00Z").unwrap(),
+            )
+            .unwrap()
+            .0
+        }
+
+        fn matched(&self, memory: &StoredMemory) -> Option<String> {
+            let snapshot = ReadSnapshot::begin(&self.db).unwrap();
+            let matched = find_twin(
+                &self.db,
+                &self.workspace,
+                memory,
+                timestamp("2030-01-01T00:00:00Z").unwrap(),
+            )
+            .unwrap();
+            snapshot.finish().unwrap();
+            matched
+        }
+
+        fn update(&self, id: &str, fields: &str) {
+            self.db
+                .execute_raw(&format!("UPDATE memories SET {fields} WHERE id = '{id}'"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn compatible_twins_cannot_replace_authored_lifetime_type_or_trust() {
+        let f = Fixture::new();
+        let id = f.publish();
+        for (changed, restored) in [
+            ("valid_from = NULL", "valid_from = '2020-01-01T00:00:00Z'"),
+            (
+                "valid_from = '2021-01-01T00:00:00Z'",
+                "valid_from = '2020-01-01T00:00:00Z'",
+            ),
+            ("valid_to = NULL", "valid_to = '2099-01-01T00:00:00Z'"),
+            (
+                "valid_to = '2100-01-01T00:00:00Z'",
+                "valid_to = '2099-01-01T00:00:00Z'",
+            ),
+            (
+                "trust_class = 'agent_validated'",
+                "trust_class = 'human_explicit'",
+            ),
+            ("kind = 'note'", "kind = 'rule'"),
+        ] {
+            f.update(&id, changed);
+            assert_eq!(f.matched(&f.memory), None, "{changed}");
+            f.update(&id, restored);
+            assert_eq!(f.matched(&f.memory), Some(id.clone()));
+        }
+        // A null stored subclass is not a wildcard for a distinct source's
+        // attestation. No fabricated subclass needs to be persisted here.
+        let mut differently_attested = f.memory.clone();
+        differently_attested.trust_subclass = Some("different-attestation".to_owned());
+        assert_eq!(f.matched(&differently_attested), None);
+    }
+
+    #[test]
+    fn equivalent_timezone_bounds_match_without_bypassing_seal_or_revision_authority() {
+        let f = Fixture::new();
+        let id = f.publish();
+        f.update(
+            &id,
+            "valid_from = '2019-12-31T19:00:00-05:00', valid_to = '2099-01-01T01:00:00+01:00'",
+        );
+        assert_eq!(f.matched(&f.memory), Some(id.clone()));
+        f.db.insert_memory_seal(
+            &id,
+            &crate::models::memory_seal_commitment(f.memory.content.as_bytes()),
+            FROM,
+        )
+        .unwrap();
+        assert_eq!(f.matched(&f.memory), None);
+        assert!(f.db.mark_memory_seal_revealed(&id, FROM).unwrap());
+        assert_eq!(f.matched(&f.memory), Some(id.clone()));
+        f.update(&id, "superseded_at = '2098-01-01T00:00:00Z'");
+        assert_eq!(f.matched(&f.memory), None);
+    }
+
+    #[test]
+    fn preview_and_real_publication_keep_finite_advice_separate_from_an_unbounded_twin() {
+        let f = Fixture::new();
+        let original = f.publish();
+        f.update(&original, "valid_to = NULL");
+        let audits = f.db.count_table_rows("audit_log").unwrap();
+        let jobs = f.db.count_table_rows("search_index_jobs").unwrap();
+        let preview = super::super::promote_global(&f.options(true)).unwrap();
+        assert!(!preview.executed);
+        assert!(preview.global_memory_id.is_none());
+        assert_eq!(f.db.count_table_rows("audit_log").unwrap(), audits);
+        assert_eq!(f.db.count_table_rows("search_index_jobs").unwrap(), jobs);
+        let report = super::super::promote_global(&f.options(false)).unwrap();
+        assert!(report.executed && !report.already_promoted);
+        let bounded = report.global_memory_id.unwrap();
+        assert_ne!(bounded, original);
+        let copy = f.db.get_memory(&bounded).unwrap().unwrap();
+        assert_eq!(copy.valid_from, f.memory.valid_from);
+        assert_eq!(copy.valid_to, f.memory.valid_to);
+        let retry = super::super::promote_global(&f.options(false)).unwrap();
+        assert!(retry.executed && retry.already_promoted);
+        assert_eq!(retry.global_memory_id.as_deref(), Some(bounded.as_str()));
+        assert!(retry.index_job_id.is_none());
+        assert_eq!(f.db.count_table_rows("memories").unwrap(), 2);
+    }
+}
