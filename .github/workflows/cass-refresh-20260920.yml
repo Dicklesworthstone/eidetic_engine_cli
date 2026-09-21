@@ -1,0 +1,64 @@
+name: CASS session refresh delivery
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/cass-refresh-20260920.py
+      - .github/workflows/cass-refresh-20260920.yml
+permissions:
+  contents: read
+concurrency:
+  group: cass-refresh-delivery-20260920
+  cancel-in-progress: false
+jobs:
+  apply-and-commit:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Apply guarded production changes and parse Rust
+        run: |
+          set -euo pipefail
+          python3 scripts/delivery/cass-refresh-20260920.py
+          paths=(src/cass/import.rs src/cass/refresh.rs src/cass/refresh_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          rustfmt --edition 2024 --config skip_children=true --check "${paths[@]}"
+          git diff --check
+      - name: Commit feature directly to main without force
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          paths=(src/cass/import.rs src/cass/refresh.rs src/cass/refresh_tests.rs docs/indexing.md)
+          base=$(git rev-parse HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          git commit -m 'feat(cass): refresh growing sessions and backfill retained evidence' -m 'Revisit known CASS sessions when evidence capture is enabled. Preserve session/evidence identities, attachments and admission decisions; reject changed or missing retained excerpts. Atomically persist new screened spans, metadata, refresh/redaction audits and transition-specific index jobs. Reuse the complete-corpus publisher and reconcile unfinished work on unchanged retries. Add 17 database-backed regressions. Nightly rustfmt parsing, formatting and git diff checks passed; Rust compilation and runtime tests have not been run by this delivery.'
+          header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$header"
+          for attempt in 1 2 3; do
+            if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push origin HEAD:main; then
+              git rev-parse HEAD | tee "$RUNNER_TEMP/cass-refresh-commit.txt"
+              exit 0
+            fi
+            test "$attempt" -lt 3
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            git merge --no-edit origin/main
+            base=$(git rev-parse origin/main)
+          done
