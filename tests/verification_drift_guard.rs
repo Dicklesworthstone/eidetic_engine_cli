@@ -3458,3 +3458,83 @@ fn every_default_feature_is_reported_by_build_features() {
          vec in the same commit that adds them to `default`."
     );
 }
+
+/// The manifest names the candidate binary, and verify.sh's resolution agrees.
+///
+/// bd-reality-core-convergence-1azkt.5, bullet 1 ("candidate binary"). The
+/// manifest is required to declare WHICH binary a run verifies. It now does, in
+/// a `[candidate_binary]` table -- but a declaration nothing reads is
+/// decoration, and this repository has spent a night finding gates whose
+/// population was narrower than their name. So the declaration is bound to the
+/// resolution here: if verify.sh starts resolving `release/ee`, or the manifest
+/// claims a subpath verify.sh never builds, this reds in the commit that does it
+/// rather than at the next person to wonder which binary was tested.
+///
+/// It deliberately does NOT re-check features. Cargo.toml's `default = [...]`
+/// is the single source, guarded by
+/// `every_default_feature_is_reported_by_build_features` above; a third copy
+/// would be a third seat for drift.
+#[test]
+fn manifest_candidate_binary_matches_verify_sh_resolution() {
+    let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    let declared = |key: &str| -> Option<String> {
+        manifest
+            .lines()
+            .skip_while(|l| l.trim() != "[candidate_binary]")
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+            })
+    };
+
+    let binary_name = declared("binary_name");
+    let target_subpath = declared("target_subpath");
+    let resolver = declared("resolver");
+
+    // EMPTY-WORLD GUARD, asserted before any comparison: if the table is absent
+    // or renamed, every lookup returns None and the agreement checks below pass
+    // vacuously -- reporting clean while measuring nothing.
+    assert!(
+        binary_name.is_some() && target_subpath.is_some() && resolver.is_some(),
+        "verify-budget.toml must declare [candidate_binary] with binary_name, \
+         target_subpath and resolver; got binary_name={binary_name:?} \
+         target_subpath={target_subpath:?} resolver={resolver:?}. If this table \
+         moved, this test measures nothing until it is found again."
+    );
+    let binary_name = binary_name.unwrap();
+    let target_subpath = target_subpath.unwrap();
+    let resolver = resolver.unwrap();
+
+    // The declared subpath must be what verify.sh actually appends to the cargo
+    // target dir when it resolves CURRENT_SOURCE_EE_BINARY.
+    assert!(
+        script.contains(&format!("/{target_subpath}\"")),
+        "verify-budget.toml declares candidate_binary.target_subpath = \
+         \"{target_subpath}\", but verify.sh contains no resolution ending in \
+         that subpath. One of the two moved; they must move together."
+    );
+
+    // ...and the file it names as the resolver must exist and be sourced.
+    assert!(
+        project_root().join(&resolver).is_file(),
+        "verify-budget.toml declares candidate_binary.resolver = \"{resolver}\", \
+         which is not a file in the tree."
+    );
+    assert!(
+        script.contains(&resolver),
+        "verify-budget.toml declares candidate_binary.resolver = \"{resolver}\", \
+         but verify.sh never references it, so the declaration describes a \
+         resolver that does not govern the run."
+    );
+
+    assert!(
+        target_subpath.ends_with(&format!("/{binary_name}")),
+        "candidate_binary.target_subpath \"{target_subpath}\" does not end in \
+         binary_name \"{binary_name}\"; the table would name two different \
+         binaries."
+    );
+}

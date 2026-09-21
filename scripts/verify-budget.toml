@@ -58,6 +58,40 @@
 total_expected_seconds = 600
 total_regression_factor = 1.5
 
+# CANDIDATE BINARY (bd-reality-core-convergence-1azkt.5, bullet 1). The manifest
+# is required to name WHICH binary a run verifies. Until this block it did not:
+# the eight keys above and below declare stage names, budgets and requirement
+# policy only, and the string "binary" appeared solely in comments and in one
+# stage NAME ("EE Binary Resolution Contract"). A stage that VALIDATES a binary
+# is not a declaration of WHICH binary, so the clause was unmet.
+#
+# PLACEMENT IS FORCED, NOT STYLISTIC. Both manifest parsers mis-handle a table
+# that sits after the stages, in different ways:
+#   - scripts/verify.sh:894 sets `in_stage = 1` on `[[stage]]` and NEVER clears
+#     it on a later table header, so keys here would be read as fields of the
+#     LAST stage.
+#   - tests/verification_drift_guard.rs:1210 `budget_stage_blocks` starts a
+#     block on ANY line beginning `name = `, inside a stage or not, and then
+#     absorbs every following line until the next `[[stage]]`.
+# Hence: before the first [[stage]], and NO key literally named `name` -- which
+# is why the field below is `binary_name`. Verified by running the guard both
+# ways before committing.
+#
+# This block is DECLARATIVE. It does not resolve anything at run time; verify.sh
+# still resolves via scripts/lib/ee_binary_resolution.sh. It is load-bearing
+# because tests/verification_drift_guard.rs asserts verify.sh's resolution
+# agrees with it, so the two cannot drift apart silently. A declaration nothing
+# checks would be decoration.
+#
+# Features are deliberately NOT restated here. Cargo.toml's `default = [...]`
+# is the single source, cross-checked against build_features() by
+# every_default_feature_is_reported_by_build_features. A third copy would be a
+# third drift seat.
+[candidate_binary]
+binary_name = "ee"
+target_subpath = "debug/ee"
+resolver = "scripts/lib/ee_binary_resolution.sh"
+
 [[stage]]
 name = "Plan Doc Smoke (bd-3usjw.23)"
 expected_seconds_p50 = 2
