@@ -621,31 +621,151 @@ pub fn parse_promotion_provenance(uri: &str) -> Option<(String, String)> {
     (!workspace.is_empty() && !memory.is_empty()).then(|| (workspace.to_owned(), memory.to_owned()))
 }
 
-/// Demote (tombstone) a global row. The origin workspace row is never
-/// touched — demotion withdraws the global copy, it does not delete
-/// knowledge.
-///
-/// # Errors
-///
-/// Returns a human-readable error string when storage access fails or the
-/// global row does not exist.
-pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport, String> {
-    let (global_connection, global_workspace_id) =
-        admission::open_existing_global(options.global_paths, options.dry_run)?;
-    let row = global_connection
-        .get_memory(options.global_memory_id)
-        .map_err(|error| format!("load global memory: {error}"))?
-        .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
-    if row.workspace_id != global_workspace_id {
-        return Err("Memory does not belong to the addressed global workspace".to_owned());
+fn global_mutation_error(message: &'static str) -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: message.to_owned(),
     }
-    let origin = row
+}
+
+/// Reload authority in the write transaction. A caller's earlier preview does
+/// not authorize a row that has moved to another workspace in the meantime.
+fn global_mutation_target(
+    connection: &DbConnection,
+    workspace: &str,
+    id: &str,
+) -> crate::db::Result<crate::db::StoredMemory> {
+    if id.parse::<crate::models::MemoryId>().is_err() {
+        return Err(global_mutation_error("Invalid global memory identity"));
+    }
+    let memory = connection
+        .get_memory(id)?
+        .ok_or_else(|| global_mutation_error("Global memory not found"))?;
+    if memory.workspace_id != workspace {
+        return Err(global_mutation_error("Global memory workspace mismatch"));
+    }
+    Ok(memory)
+}
+
+fn demotion_audit_details(memory: &crate::db::StoredMemory) -> String {
+    let origin = memory
         .provenance_uri
         .as_deref()
         .and_then(parse_promotion_provenance);
+    json!({
+        "schema": GLOBAL_DEMOTION_REPORT_SCHEMA_V1,
+        "globalMemoryId": memory.id,
+        "originWorkspaceId": origin.as_ref().map(|(workspace, _)| workspace),
+        "originMemoryId": origin.as_ref().map(|(_, memory)| memory),
+    })
+    .to_string()
+}
 
+/// Commit withdrawal, its index repair, and its destination audit together.
+/// Repeating a withdrawal keeps the original tombstone timestamp but queues a
+/// fresh repair: an earlier process may have died before reconciling its job.
+fn persist_global_demotion(
+    connection: &DbConnection,
+    workspace: &str,
+    id: &str,
+    actor: Option<&str>,
+) -> crate::db::Result<(crate::db::StoredMemory, bool, String)> {
+    connection.with_transaction(|| {
+        let memory = global_mutation_target(connection, workspace, id)?;
+        let changed = memory.tombstoned_at.is_none();
+        if changed && !connection.tombstone_memory(id)? {
+            return Err(global_mutation_error("Global withdrawal was not applied"));
+        }
+        let job = promotion_index_job_id();
+        connection.insert_search_index_job(
+            &job,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace.to_owned(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(memory.id.clone()),
+                documents_total: 1,
+            },
+        )?;
+        connection.insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(workspace.to_owned()),
+                actor: actor.map(str::to_owned),
+                action: "memory.demote_global".to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(memory.id.clone()),
+                details: Some(demotion_audit_details(&memory)),
+            },
+        )?;
+        Ok((memory, changed, job))
+    })
+}
+
+/// The separate origin audit must not initialize an absent workspace or attach
+/// an event to a memory in a different workspace merely because its ID exists.
+fn audit_demotion_origin(
+    options: &DemoteGlobalOptions<'_>,
+    memory: &crate::db::StoredMemory,
+) -> Result<(), String> {
+    let Some((workspace, id)) = memory
+        .provenance_uri
+        .as_deref()
+        .and_then(parse_promotion_provenance)
+    else {
+        return Ok(());
+    };
+    let error = || "Could not record the demotion origin audit".to_owned();
+    if workspace.parse::<crate::models::WorkspaceId>().is_err()
+        || id.parse::<crate::models::MemoryId>().is_err()
+        || !options.workspace_database_path.try_exists().map_err(|_| error())?
+    {
+        return Err(error());
+    }
+    let source = DbConnection::open_file(options.workspace_database_path)
+        .map_err(|_| error())?;
+    source
+        .with_transaction(|| {
+            global_mutation_target(&source, &workspace, &id)?;
+            source.insert_audit(
+                &generate_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(workspace.clone()),
+                    actor: options.actor.map(str::to_owned),
+                    action: "memory.demote_global".to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(id.clone()),
+                    details: Some(demotion_audit_details(memory)),
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(|_| error())
+}
+
+/// Demote (tombstone) a global row. The origin workspace row is never
+/// touched — demotion withdraws the global copy, it does not delete
+/// knowledge. Destination state is atomic; origin audit is a separate step.
+///
+/// # Errors
+///
+/// Storage failures before destination commit roll back the withdrawal. An
+/// origin-audit failure explicitly reports the already-committed withdrawal;
+/// retrying repairs the audit and index without rewriting the tombstone.
+pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport, String> {
+    let (global_connection, global_workspace_id) =
+        admission::open_existing_global(options.global_paths, options.dry_run)?;
     if options.dry_run {
-        let _ = global_connection.close();
+        let snapshot = admission::ReadSnapshot::begin(&global_connection)
+            .map_err(|_| "Could not begin global demotion preview".to_owned())?;
+        let row = global_mutation_target(
+            &global_connection,
+            &global_workspace_id,
+            options.global_memory_id,
+        )
+        .map_err(|_| "Could not verify global demotion target".to_owned())?;
+        let origin = row.provenance_uri.as_deref().and_then(parse_promotion_provenance);
+        snapshot.finish().map_err(|_| "Could not release global demotion preview".to_owned())?;
         return Ok(DemotionReport {
             global_memory_id: row.id,
             executed: false,
@@ -657,58 +777,17 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
         });
     }
 
-    let tombstoned = global_connection
-        .tombstone_memory(&row.id)
-        .map_err(|error| format!("tombstone global memory: {error}"))?;
-    let index_job_id = promotion_index_job_id();
-    global_connection
-        .insert_search_index_job(
-            &index_job_id,
-            &CreateSearchIndexJobInput {
-                workspace_id: global_workspace_id.clone(),
-                job_type: SearchIndexJobType::SingleDocument,
-                document_source: Some("memory".to_owned()),
-                document_id: Some(row.id.clone()),
-                documents_total: 1,
-            },
-        )
-        .map_err(|error| format!("queue global demotion index job: {error}"))?;
-    let details = json!({
-        "schema": GLOBAL_DEMOTION_REPORT_SCHEMA_V1,
-        "globalMemoryId": row.id,
-        "originWorkspaceId": origin.as_ref().map(|(workspace, _)| workspace.clone()),
-        "originMemoryId": origin.as_ref().map(|(_, memory)| memory.clone()),
-    })
-    .to_string();
-    global_connection
-        .insert_audit(
-            &generate_audit_id(),
-            &CreateAuditInput {
-                workspace_id: Some(global_workspace_id.clone()),
-                actor: options.actor.map(str::to_owned),
-                action: "memory.demote_global".to_owned(),
-                target_type: Some("memory".to_owned()),
-                target_id: Some(row.id.clone()),
-                details: Some(details.clone()),
-            },
-        )
-        .map_err(|error| format!("global audit: {error}"))?;
-    if let Some((origin_workspace, origin_memory)) = &origin {
-        if let Ok(workspace_connection) = DbConnection::open_file(options.workspace_database_path) {
-            let _ = workspace_connection.insert_audit(
-                &generate_audit_id(),
-                &CreateAuditInput {
-                    workspace_id: Some(origin_workspace.clone()),
-                    actor: options.actor.map(str::to_owned),
-                    action: "memory.demote_global".to_owned(),
-                    target_type: Some("memory".to_owned()),
-                    target_id: Some(origin_memory.clone()),
-                    details: Some(details),
-                },
-            );
-            let _ = workspace_connection.close();
-        }
-    }
+    let (row, tombstoned, index_job_id) = persist_global_demotion(
+        &global_connection,
+        &global_workspace_id,
+        options.global_memory_id,
+        options.actor,
+    )
+    .map_err(|_| "Global demotion transaction failed; inspect the destination before retrying".to_owned())?;
+    let origin = row.provenance_uri.as_deref().and_then(parse_promotion_provenance);
+    let origin_audit = audit_demotion_origin(options, &row);
+    // Withdrawal must reach retrieval even when its separate origin audit is
+    // unavailable. The durable queue also survives a crash or index failure.
     let index_report = super::memory::reconcile_committed_memory_index_job(
         &global_connection,
         &global_workspace_id,
@@ -726,6 +805,10 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
     );
     let index_error = index_report.error;
     let _ = global_connection.close();
+    origin_audit.map_err(|_| format!(
+        "global_demotion_origin_audit_pending: withdrawal of global memory {} is committed and index repair is queued; retry demotion with the origin workspace to repair its audit",
+        row.id
+    ))?;
 
     Ok(DemotionReport {
         global_memory_id: row.id,
@@ -1590,6 +1673,128 @@ mod tests {
         let (again, already, job) = f.publish().expect("idempotent unbounded start");
         assert_eq!(again, id);
         assert!(already && job.is_none());
+    }
+
+    #[test]
+    fn global_demotion_commits_tombstone_job_and_audit_without_changing_origin() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().expect("publish");
+        let before = (f.count("search_index_jobs"), f.count("audit_log"));
+        let (_, changed, job) = persist_global_demotion(
+            &f.destination, &f.workspace, &id, Some("withdrawal-test"),
+        ).expect("withdraw");
+        assert!(changed);
+        let row = f.destination.get_memory(&id).unwrap().unwrap();
+        assert!(row.tombstoned_at.is_some());
+        assert_eq!(row.content, f.memory.content);
+        assert_eq!((f.count("search_index_jobs"), f.count("audit_log")), (before.0 + 1, before.1 + 1));
+        let jobs = f.destination.query(
+            "SELECT document_id FROM search_index_jobs WHERE id = ?1",
+            &[sqlmodel_core::Value::Text(job)],
+        ).unwrap();
+        assert!(matches!(jobs[0].get(0), Some(sqlmodel_core::Value::Text(target)) if target == &id));
+        let visible = super::super::global_store::read_global_store_memories(&f.paths, false).unwrap();
+        assert!(visible.iter().all(|memory| memory.id != id));
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
+    }
+
+    #[test]
+    fn global_demotion_queue_failure_rolls_back_the_tombstone() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let before = f.destination.get_memory(&id).unwrap();
+        let audits = f.count("audit_log");
+        f.destination.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_demotion_jobs").unwrap();
+        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).is_err());
+        assert_eq!(f.destination.get_memory(&id).unwrap(), before);
+        assert_eq!(f.count("audit_log"), audits);
+        f.destination.execute_raw("ALTER TABLE unavailable_demotion_jobs RENAME TO search_index_jobs").unwrap();
+        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap().1);
+    }
+
+    #[test]
+    fn global_demotion_audit_failure_rolls_back_tombstone_and_index_job() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let before = f.destination.get_memory(&id).unwrap();
+        let jobs = f.count("search_index_jobs");
+        f.destination.execute_raw("ALTER TABLE audit_log RENAME TO unavailable_demotion_audit").unwrap();
+        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).is_err());
+        assert_eq!(f.destination.get_memory(&id).unwrap(), before);
+        assert_eq!(f.count("search_index_jobs"), jobs);
+        f.destination.execute_raw("ALTER TABLE unavailable_demotion_audit RENAME TO audit_log").unwrap();
+        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap().1);
+    }
+
+    #[test]
+    fn demotion_retries_preserve_original_tombstone_and_queue_fresh_index_repair() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let (_, changed, first_job) = persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+        assert!(changed);
+        let first = f.destination.get_memory(&id).unwrap();
+        let (_, changed, next_job) = persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+        assert!(!changed);
+        assert_ne!(first_job, next_job);
+        assert_eq!(f.destination.get_memory(&id).unwrap(), first);
+    }
+
+    #[test]
+    fn demotion_rechecks_workspace_and_identity_before_any_mutation() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let before = f.destination.get_memory(&id).unwrap();
+        let counts = (f.count("search_index_jobs"), f.count("audit_log"));
+        assert!(persist_global_demotion(&f.destination, &f.memory.workspace_id, &id, None).is_err());
+        assert!(persist_global_demotion(&f.destination, &f.workspace, "PRIVATE_TARGET_CANARY", None).is_err());
+        assert_eq!(f.destination.get_memory(&id).unwrap(), before);
+        assert_eq!((f.count("search_index_jobs"), f.count("audit_log")), counts);
+    }
+
+    #[test]
+    fn public_demotion_reports_committed_withdrawal_without_creating_missing_origin() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let missing = f._temp.path().join("missing-origin.db");
+        let mut options = DemoteGlobalOptions {
+            workspace_database_path: &missing,
+            global_memory_id: &id,
+            global_paths: &f.paths,
+            actor: None,
+            dry_run: false,
+        };
+        let error = demote_global(&options).expect_err("explicit partial outcome");
+        assert!(error.contains("global_demotion_origin_audit_pending") && error.contains(&id));
+        assert!(!missing.exists());
+        let first = f.destination.get_memory(&id).unwrap();
+        assert!(first.as_ref().unwrap().tombstoned_at.is_some());
+        options.workspace_database_path = &f.source_path;
+        let retry = demote_global(&options).expect("repair origin audit");
+        assert!(retry.executed && !retry.tombstoned);
+        assert_eq!(f.destination.get_memory(&id).unwrap(), first);
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
+        assert!(source.count_table_rows("audit_log").unwrap() > 0);
+    }
+
+    #[test]
+    fn demotion_origin_audit_rejects_forged_workspace_attribution() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let mut row = f.destination.get_memory(&id).unwrap().unwrap();
+        row.provenance_uri = Some(promotion_provenance_uri("wsp_00000000000000000000000091", &f.memory.id));
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let before = source.count_table_rows("audit_log").unwrap();
+        assert!(audit_demotion_origin(&DemoteGlobalOptions {
+            workspace_database_path: &f.source_path,
+            global_memory_id: &id,
+            global_paths: &f.paths,
+            actor: None,
+            dry_run: false,
+        }, &row).is_err());
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), before);
+        assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
     }
 
 }
