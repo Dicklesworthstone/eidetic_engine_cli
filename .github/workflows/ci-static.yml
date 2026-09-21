@@ -243,6 +243,15 @@ jobs:
       # already covers, and it consumes mod_reachability's own include!-only set
       # (--list-include-only) instead of re-deriving it, so the two cannot
       # disagree about what `include!` means.
+      # bd-reality-core-convergence-1azkt.5 bullet 4. This grader decides the
+      # test-level states verify.sh's "Unit, Contract, and Golden Tests" stage
+      # now gates on -- ignored, zero and omitted tests, which cargo's exit code
+      # cannot express. Its 15 self-test arms were invoked by NOTHING until this
+      # step: a grader whose own control never runs is the defect it exists to
+      # find, one level up.
+      - name: Test-log grader --self-test
+        run: python3 scripts/lib/grade_test_log.py --self-test
+
       - name: Format (include!-only files) --self-test
         run: ./scripts/check-include-fmt.sh --self-test
 
