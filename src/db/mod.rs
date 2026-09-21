@@ -20379,103 +20379,129 @@ impl DbConnection {
         &self,
         input: ApplyProcedureFeedbackInput<'_>,
     ) -> Result<Option<ProcedureFeedbackUpdate>> {
-        self.with_transaction(|| {
-            let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
-                return Ok(None);
-            };
-            let helpful = matches!(input.signal, "helpful" | "positive" | "confirmation");
-            let harmful = matches!(
-                input.signal,
-                "harmful" | "negative" | "contradiction" | "inaccurate"
-            );
-            if !helpful && !harmful {
-                return Ok(None);
-            }
+        self.with_transaction(|| self.apply_procedure_feedback_in_txn(input))
+    }
 
-            let now = Utc::now().to_rfc3339();
-            let mut helpful_count = before.helpful_count;
-            let mut harmful_count = before.harmful_count;
-            let mut utility = before.utility;
-            let mut confidence = before.confidence;
-            if helpful {
-                helpful_count = helpful_count.saturating_add(1);
-                let new_utility = utility + 0.08 * input.weight;
-                utility = if new_utility.is_nan() { utility } else { new_utility.clamp(0.0, 1.0) };
-                let new_confidence = confidence + 0.04 * input.weight;
-                confidence = if new_confidence.is_nan() { confidence } else { new_confidence.clamp(0.0, 1.0) };
-            }
-            if harmful {
-                harmful_count = harmful_count.saturating_add(1);
-                let new_utility = utility - 0.12 * input.weight;
-                utility = if new_utility.is_nan() { utility } else { new_utility.clamp(0.0, 1.0) };
-                let new_confidence = confidence - 0.10 * input.weight;
-                confidence = if new_confidence.is_nan() { confidence } else { new_confidence.clamp(0.0, 1.0) };
-            }
-            let auto_retired = harmful
-                && harmful_count >= input.auto_retire_harmful_threshold
-                && before.maturity != "retired";
-            let next_maturity = if auto_retired {
-                "retired".to_owned()
-            } else {
-                before.maturity.clone()
-            };
-            let retire_reason = if auto_retired {
-                Some("harmful feedback threshold reached".to_owned())
-            } else {
-                before.retire_reason.clone()
-            };
+    /// Apply procedure learning in the caller's already-open transaction.
+    ///
+    /// Outcome recording must commit its feedback idempotency key, audit,
+    /// counters and retirement history together. Do not open or commit a
+    /// nested transaction here; standalone callers use the public wrapper.
+    pub(crate) fn apply_procedure_feedback_in_txn(
+        &self,
+        input: ApplyProcedureFeedbackInput<'_>,
+    ) -> Result<Option<ProcedureFeedbackUpdate>> {
+        let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
+            return Ok(None);
+        };
+        let helpful = matches!(input.signal, "helpful" | "positive" | "confirmation");
+        let harmful = matches!(
+            input.signal,
+            "harmful" | "negative" | "contradiction" | "inaccurate"
+        );
+        if !helpful && !harmful {
+            return Ok(None);
+        }
 
-            let affected = self.execute_for(
-                DbOperation::Execute,
-                "UPDATE procedures SET maturity = ?1, confidence = ?2, utility = ?3, helpful_count = ?4, harmful_count = ?5, updated_at = ?6, retired_at = ?7, retire_reason = ?8 WHERE workspace_id = ?9 AND id = ?10",
-                &[
-                    Value::Text(next_maturity.clone()),
-                    Value::Float(confidence),
-                    Value::Float(utility),
-                    Value::BigInt(i64::from(helpful_count)),
-                    Value::BigInt(i64::from(harmful_count)),
-                    Value::Text(now.clone()),
-                    if auto_retired { Value::Text(now.clone()) } else { before.retired_at.as_ref().map_or(Value::Null, |value| Value::Text(value.clone())) },
-                    retire_reason
-                        .as_ref()
-                        .map_or(Value::Null, |value| Value::Text(value.clone())),
-                    Value::Text(input.workspace_id.to_string()),
-                    Value::Text(input.procedure_id.to_string()),
-                ],
-            )?;
-            if affected == 0 {
-                return Ok(None);
-            }
-            let event = self.insert_procedure_event(
-                input.event_id,
-                &CreateProcedureEventInput {
-                    workspace_id: input.workspace_id.to_string(),
-                    procedure_id: input.procedure_id.to_string(),
-                    event_type: if helpful {
-                        "outcome_helpful".to_owned()
-                    } else {
-                        "outcome_harmful".to_owned()
-                    },
-                    from_maturity: Some(before.maturity),
-                    to_maturity: Some(next_maturity),
-                    reason: input.reason.map(str::to_owned),
-                    evidence_uris: Vec::new(),
-                    actor: input.actor.map(str::to_owned),
-                    created_at: Some(now),
+        let now = Utc::now().to_rfc3339();
+        let mut helpful_count = before.helpful_count;
+        let mut harmful_count = before.harmful_count;
+        let mut utility = before.utility;
+        let mut confidence = before.confidence;
+        if helpful {
+            helpful_count = helpful_count.saturating_add(1);
+            let new_utility = utility + 0.08 * input.weight;
+            utility = if new_utility.is_nan() {
+                utility
+            } else {
+                new_utility.clamp(0.0, 1.0)
+            };
+            let new_confidence = confidence + 0.04 * input.weight;
+            confidence = if new_confidence.is_nan() {
+                confidence
+            } else {
+                new_confidence.clamp(0.0, 1.0)
+            };
+        }
+        if harmful {
+            harmful_count = harmful_count.saturating_add(1);
+            let new_utility = utility - 0.12 * input.weight;
+            utility = if new_utility.is_nan() {
+                utility
+            } else {
+                new_utility.clamp(0.0, 1.0)
+            };
+            let new_confidence = confidence - 0.10 * input.weight;
+            confidence = if new_confidence.is_nan() {
+                confidence
+            } else {
+                new_confidence.clamp(0.0, 1.0)
+            };
+        }
+        let auto_retired = harmful
+            && harmful_count >= input.auto_retire_harmful_threshold
+            && before.maturity != "retired";
+        let next_maturity = if auto_retired {
+            "retired".to_owned()
+        } else {
+            before.maturity.clone()
+        };
+        let retire_reason = if auto_retired {
+            Some("harmful feedback threshold reached".to_owned())
+        } else {
+            before.retire_reason.clone()
+        };
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedures SET maturity = ?1, confidence = ?2, utility = ?3, helpful_count = ?4, harmful_count = ?5, updated_at = ?6, retired_at = ?7, retire_reason = ?8 WHERE workspace_id = ?9 AND id = ?10",
+            &[
+                Value::Text(next_maturity.clone()),
+                Value::Float(confidence),
+                Value::Float(utility),
+                Value::BigInt(i64::from(helpful_count)),
+                Value::BigInt(i64::from(harmful_count)),
+                Value::Text(now.clone()),
+                if auto_retired { Value::Text(now.clone()) } else { before.retired_at.as_ref().map_or(Value::Null, |value| Value::Text(value.clone())) },
+                retire_reason
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.workspace_id.to_string()),
+                Value::Text(input.procedure_id.to_string()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        let event = self.insert_procedure_event(
+            input.event_id,
+            &CreateProcedureEventInput {
+                workspace_id: input.workspace_id.to_string(),
+                procedure_id: input.procedure_id.to_string(),
+                event_type: if helpful {
+                    "outcome_helpful".to_owned()
+                } else {
+                    "outcome_harmful".to_owned()
                 },
-            )?;
-            let procedure = self
-                .get_procedure(input.workspace_id, input.procedure_id)?
-                .ok_or_else(|| DbError::MalformedRow {
-                    operation: DbOperation::Query,
-                    message: "updated procedure row could not be reloaded".to_owned(),
-                })?;
-            Ok(Some(ProcedureFeedbackUpdate {
-                procedure,
-                event,
-                auto_retired,
-            }))
-        })
+                from_maturity: Some(before.maturity),
+                to_maturity: Some(next_maturity),
+                reason: input.reason.map(str::to_owned),
+                evidence_uris: Vec::new(),
+                actor: input.actor.map(str::to_owned),
+                created_at: Some(now),
+            },
+        )?;
+        let procedure = self
+            .get_procedure(input.workspace_id, input.procedure_id)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "updated procedure row could not be reloaded".to_owned(),
+            })?;
+        Ok(Some(ProcedureFeedbackUpdate {
+            procedure,
+            event,
+            auto_retired,
+        }))
     }
 
     /// Get a feedback event by its ID.

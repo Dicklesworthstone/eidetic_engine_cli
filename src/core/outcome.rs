@@ -1315,6 +1315,12 @@ fn record_outcome_inner(
                         explicit_human_promotion,
                         id_source,
                     )?;
+                    apply_procedure_outcome_in_txn(
+                        &connection,
+                        &feedback_input,
+                        &event_id,
+                        options.actor.as_deref(),
+                    )?;
                     Ok((audit_id, confidence))
                 })
                 .map_err(|error| DomainError::Storage {
@@ -1324,23 +1330,6 @@ fn record_outcome_inner(
         },
     )?;
 
-    if target_type == "procedure" {
-        connection
-            .apply_procedure_feedback(ApplyProcedureFeedbackInput {
-                workspace_id: &target.workspace_id,
-                procedure_id: &target_id,
-                signal: &signal,
-                weight,
-                auto_retire_harmful_threshold: 3,
-                event_id: &procedure_event_id_for_feedback(&event_id),
-                reason: feedback_input.reason.as_deref(),
-                actor: options.actor.as_deref(),
-            })
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to update procedure feedback score: {error}"),
-                repair: Some("ee procedure show <id> --json".to_string()),
-            })?;
-    }
 
     if target_type == "memory" {
         record_agent_context_profile_update(
@@ -1401,6 +1390,48 @@ fn record_outcome_inner(
         confidence_before,
         confidence_after,
     })
+}
+
+/// Apply procedure scoring in the transaction that records its feedback.
+///
+/// Standalone procedure callers retain their transactional DB wrapper. The
+/// outcome path uses the caller-owned variant so a history-write failure also
+/// rolls back the feedback event and its audit, leaving its ID retryable.
+fn apply_procedure_outcome_in_txn(
+    connection: &DbConnection,
+    feedback: &CreateFeedbackEventInput,
+    event_id: &str,
+    actor: Option<&str>,
+) -> crate::db::Result<()> {
+    if feedback.target_type != "procedure" {
+        return Ok(());
+    }
+    let missing_target = || crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Execute,
+        message: "Outcome procedure disappeared before learning could commit".to_owned(),
+    };
+    // Target resolution happened before writer acquisition. Recheck ownership
+    // inside the transaction, including neutral signals that do not score.
+    connection
+        .get_procedure(&feedback.workspace_id, &feedback.target_id)?
+        .ok_or_else(missing_target)?;
+    let update = connection.apply_procedure_feedback_in_txn(ApplyProcedureFeedbackInput {
+        workspace_id: &feedback.workspace_id,
+        procedure_id: &feedback.target_id,
+        signal: &feedback.signal,
+        weight: feedback.weight,
+        auto_retire_harmful_threshold: 3,
+        event_id: &procedure_event_id_for_feedback(event_id),
+        reason: feedback.reason.as_deref(),
+        actor,
+    })?;
+    if update.is_none()
+        && (HELPFUL_SIGNALS.contains(&feedback.signal.as_str())
+            || is_harmful_signal(&feedback.signal))
+    {
+        return Err(missing_target());
+    }
+    Ok(())
 }
 
 /// Apply memory learning inside the transaction that records its evidence.
@@ -8568,3 +8599,7 @@ mod outcome_batch_tests {
 #[cfg(test)]
 #[path = "outcome_atomic_learning_tests.rs"]
 mod atomic_learning_tests;
+
+#[cfg(test)]
+#[path = "outcome_procedure_atomic_tests.rs"]
+mod procedure_atomic_tests;
