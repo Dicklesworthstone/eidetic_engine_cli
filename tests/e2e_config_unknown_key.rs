@@ -278,10 +278,17 @@ fn config_get_returns_a_key_outside_the_settable_surface() -> TestResult {
         "get",
         "cache.pack_l2.enabled",
     ])?;
+    // bd-w5bza: the exit code belongs in the message alongside the two
+    // streams. I introduced this site at df8f39ec0 with stdout and stderr but
+    // no code, which is exactly the `[code]` gap
+    // `open_coded_success_assertions_do_not_grow` reports: under `--json` the
+    // ee.error.v2 envelope goes to stdout and stderr stays empty, so without
+    // the code a cancellation (130) and a rejection are indistinguishable.
     ensure(
         output.status.success(),
         format!(
-            "config get must succeed for a set key outside the settable surface; stdout: {}; stderr: {}",
+            "config get must succeed for a set key outside the settable surface; exit: {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ),
