@@ -211,6 +211,56 @@ fi
 ARTIFACT_DIRS=""
 TRACE_LOG_DIRS=""
 STAGE_RESULTS=""
+
+# Record a stage's artifact directory in the end-of-run index, TAGGED WITH THE
+# STATUS THAT PRODUCED IT (bd-ovsjv).
+#
+# This capture used to live inline in run_stage's PASS branch only. Every other
+# terminal status -- FAIL, TIMEOUT, INFRA_ERROR, ADVISORY, TRACKED_RED, SKIP --
+# reached `rm -f "$output_file"` without it, so the artifact index had a
+# PASSES-ONLY POPULATION: it answered "where is the evidence for the things that
+# worked", which is the question nobody asks. Nothing was destroyed (run_stage
+# tees every stage's output to the log, and the directories are untouched on
+# disk) but the structured list a reader, a triage script or a proof capsule
+# scans omitted exactly the stages worth looking at.
+#
+# The status tag is the other half: an index that lists a directory without
+# saying the stage FAILED invites it to be read as a passing artifact.
+# Print the artifact index, if anything was recorded.
+#
+# THIS IS CALLED FROM TWO PLACES ON PURPOSE (bd-ovsjv). It used to be an inline
+# block at the very end of the file, which meant a run that HARD-FAILED never
+# reached it: run_stage exits with the stage's code the moment a required stage
+# fails, hundreds of lines earlier. So the index was not merely
+# passes-only-populated, it was not PRINTED AT ALL on exactly the runs where
+# someone needs to find a failed stage's evidence.
+#
+# Recording without printing would have been the dead-code shape this repository
+# keeps producing: a capture that runs, populates a variable, and is never read
+# on the path that matters.
+print_artifact_index() {
+    [ -n "$ARTIFACT_DIRS" ] || return 0
+    echo ""
+    echo "Artifact directories:"
+    printf "%b" "$ARTIFACT_DIRS"
+    return 0
+}
+
+record_stage_artifacts() {
+    local name="${1:?record_stage_artifacts: stage name required}"
+    local status="${2:?record_stage_artifacts: status required}"
+    local source_file="${3-}"
+    local artifacts
+
+    [ -n "$source_file" ] && [ -f "$source_file" ] || return 0
+
+    artifacts=$(grep -o 'Artifacts:[[:space:]]*[^ ]*' "$source_file" \
+        | head -1 | sed 's/Artifacts:[[:space:]]*//' || true)
+    if [ -n "$artifacts" ] && [ -d "$artifacts" ]; then
+        ARTIFACT_DIRS="${ARTIFACT_DIRS}  [${status}] ${name}: ${artifacts}\n"
+    fi
+    return 0
+}
 # Green has to carry its denominator. STAGE_RESULTS is a display string whose
 # "\n" stay literal until printf "%b", so it is not something to parse -- the
 # counts are recorded here as stages run instead.
@@ -1292,12 +1342,7 @@ run_stage() {
         STAGE_PASSED=$((STAGE_PASSED + 1))
         capture_test_trace_artifacts "$name"
 
-        # Capture artifact paths from E2E output
-        local artifacts
-        artifacts=$(grep -o 'Artifacts:[[:space:]]*[^ ]*' "$output_file" | head -1 | sed 's/Artifacts:[[:space:]]*//' || true)
-        if [ -n "$artifacts" ] && [ -d "$artifacts" ]; then
-            ARTIFACT_DIRS="${ARTIFACT_DIRS}  ${name}: ${artifacts}\n"
-        fi
+        record_stage_artifacts "$name" "PASS" "$output_file"
         rm -f "$output_file"
         enforce_stage_budget "$name" "$duration"
         echo ""
@@ -1316,6 +1361,7 @@ run_stage() {
             # separately and named in the banner.
             STAGE_SKIPPED_CONTENTION=$((STAGE_SKIPPED_CONTENTION + 1))
             STAGE_SKIPPED_CONTENTION_NAMES="${STAGE_SKIPPED_CONTENTION_NAMES}    - ${name} (beads lock held)\n"
+            record_stage_artifacts "$name" "SKIP" "$output_file"
             rm -f "$output_file"
             enforce_stage_budget "$name" "$duration"
             echo ""
@@ -1346,6 +1392,7 @@ run_stage() {
                 STAGE_RESULTS="${STAGE_RESULTS}ADVISORY ${name} (exit ${exit_code}, ${duration}s)\n"
                 STAGE_ADVISORY=$((STAGE_ADVISORY + 1))
                 STAGE_ADVISORY_NAMES="${STAGE_ADVISORY_NAMES}    - ${name} (exit ${exit_code})\n"
+                record_stage_artifacts "$name" "ADVISORY" "$output_file"
                 rm -f "$output_file"
                 enforce_stage_budget "$name" "$duration"
                 echo ""
@@ -1358,6 +1405,7 @@ run_stage() {
                 STAGE_RESULTS="${STAGE_RESULTS}TRACKED_RED ${name} (exit ${exit_code}, ${tracked_bead})\n"
                 STAGE_TRACKED_RED=$((STAGE_TRACKED_RED + 1))
                 STAGE_TRACKED_RED_NAMES="${STAGE_TRACKED_RED_NAMES}    - ${name} (${tracked_bead})\n"
+                record_stage_artifacts "$name" "TRACKED_RED" "$output_file"
                 rm -f "$output_file"
                 enforce_stage_budget "$name" "$duration"
                 echo ""
@@ -1370,7 +1418,11 @@ run_stage() {
         # STAGE_RESULTS at all, because the script exits here, so the ledger
         # silently described only the stages that had already succeeded.
         STAGE_RESULTS="${STAGE_RESULTS}${stage_status} ${name} (exit ${exit_code}, ${duration}s)\n"
+        record_stage_artifacts "$name" "$stage_status" "$output_file"
         rm -f "$output_file"
+        # The run stops here, so the end-of-file index is unreachable. Print it
+        # now or the failing stage's artifacts are recorded and never shown.
+        print_artifact_index
         exit $exit_code
     fi
 }
@@ -2451,11 +2503,7 @@ printf "%b" "$STAGE_RESULTS"
 echo ""
 echo "Total time: ${TOTAL_DURATION}s"
 
-if [ -n "$ARTIFACT_DIRS" ]; then
-    echo ""
-    echo "Artifact directories:"
-    printf "%b" "$ARTIFACT_DIRS"
-fi
+print_artifact_index
 
 echo ""
 echo "Test tracing log paths:"
