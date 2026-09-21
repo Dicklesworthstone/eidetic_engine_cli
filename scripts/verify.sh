@@ -354,6 +354,78 @@ printf 'verify: ee_binary_sha256=%s target_hint=%s\n' \
     "${EE_BINARY_SHA256:-unavailable}" \
     "$(file -b "${EE_BINARY}" 2>/dev/null | cut -c1-60 || printf 'unavailable')" >&2
 
+# THE CANDIDATE BINARY'S FEATURE SET, ASSERTED RATHER THAN RECORDED
+# (bd-reality-core-convergence-1azkt.5, acceptance bullet 5).
+#
+# Bullet 5 names five properties -- hash, version, source, target, features --
+# and before this the check verified three. Version and source are compared by
+# ee_require_current_binary above; target is established behaviourally, because
+# a binary that could not run on this host would have failed
+# ee_binary_executes_here. FEATURES were not checked at all, and the hash is
+# still only RECORDED (see the limit below).
+#
+# WHY IT MATTERS HERE SPECIFICALLY: a stage that needs an optional feature and
+# runs against a binary built without it does not error at the feature boundary
+# -- it takes whatever fallback path the product provides and then asserts
+# against the fallback. That is a green produced by a different code path than
+# the one the stage names, which is the failure shape this whole bead exists to
+# remove.
+#
+# THE EXPECTATION IS NOT INVENTED HERE. Cargo.toml's `default = [...]` is
+# already the declaration of what a plain `cargo build --bin ee` produces, and
+# that is what the stages below run. Introducing a second list in this file
+# would create two sources of truth that could disagree silently, which is
+# exactly the drift this bullet is about.
+ee_expected_default_features() {
+    python3 - "$REPO_ROOT/Cargo.toml" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'^default\s*=\s*\[(.*?)\]', text, re.M | re.S)
+if not m:
+    raise SystemExit(1)
+print(" ".join(sorted(re.findall(r'"([^"]+)"', m.group(1)))))
+PY
+}
+
+ee_binary_enabled_features() {
+    "${EE_BINARY}" version --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+node = doc.get("data", doc)
+feats = node.get("features")
+if not isinstance(feats, list):
+    raise SystemExit(1)
+print(" ".join(sorted(f["name"] for f in feats if f.get("enabled"))))
+'
+}
+
+if ! EE_EXPECTED_FEATURES="$(ee_expected_default_features)"; then
+    printf 'verify: refusing: could not read `default = [...]` from Cargo.toml.\n' >&2
+    printf 'verify: the feature expectation has no source, so the check below\n' >&2
+    printf 'verify: would compare against nothing and pass regardless.\n' >&2
+    exit 1
+fi
+if ! EE_ACTUAL_FEATURES="$(ee_binary_enabled_features)"; then
+    printf 'verify: refusing: %s could not report its build features.\n' "${EE_BINARY}" >&2
+    printf 'verify: `ee version --json` must carry features[] (src/core/mod.rs:274).\n' >&2
+    printf 'verify: an unreadable feature set is NOT a pass -- it is the same\n' >&2
+    printf 'verify: unknown the recorded-but-uncompared hash already is.\n' >&2
+    exit 1
+fi
+printf 'verify: ee_binary_features=%s\n' "${EE_ACTUAL_FEATURES}" >&2
+if [ "${EE_ACTUAL_FEATURES}" != "${EE_EXPECTED_FEATURES}" ]; then
+    printf 'verify: refusing: candidate binary feature set does not match Cargo.toml.\n' >&2
+    printf 'verify:   expected (Cargo.toml default): %s\n' "${EE_EXPECTED_FEATURES}" >&2
+    printf 'verify:   actual   (%s): %s\n' "${EE_BINARY}" "${EE_ACTUAL_FEATURES}" >&2
+    printf 'verify: stages would run against a binary built differently from the\n' >&2
+    printf 'verify: one this manifest describes.\n' >&2
+    exit 1
+fi
+export EE_BINARY_FEATURES="${EE_ACTUAL_FEATURES}"
+
 # E2E TEMP ROOT: DERIVED PER HOST, AND PROVEN WRITABLE BEFORE ANY STAGE RUNS
 # (bd-13y74).
 #
