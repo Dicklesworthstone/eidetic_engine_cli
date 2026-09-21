@@ -30,6 +30,14 @@
 # Recorded 2026-09-17 against the detector at that commit. Regenerate by
 # reading the gate, never by hand-adjusting a number to make it pass.
 #
+# THAT DATE IS THE ORIGINAL RECORDING, NOT THE AGE OF THE WHOLE FILE. Rows
+# have been added and amended by targeted patches since (38bc15fe3,
+# b406f7b35, both 2026-09-18), so this is a 2026-09-17 snapshot plus later
+# edits, not one coherent reading. Measured 2026-09-21: 447 count rows, which
+# is exactly the rule population -- allowed 283 + allowed_in 147 + must_fix 16
+# + must_fix_in 1 -- against the 331 rules bd-epvc1 measured on 09-17. Do not
+# quote a distribution from this file as "the 09-17 measurement"; re-derive it.
+#
 # Format: <count>\t<rule id>
 
 # RETIRED (bd-epvc1), each owned 0 while naming a CLOSED follow-up bead:
