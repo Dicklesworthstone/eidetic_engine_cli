@@ -3511,6 +3511,28 @@ for repository in known:
         })
 
     path_material = str(checkout.resolve(strict=False)).encode("utf-8", "replace")
+    # bd-405lm: `<unexpected>` IS A REDACTION, NOT AN OBSERVED VALUE.
+    #
+    # When the origin matches one of the accepted forms we echo the expected
+    # URL, which is already public. When it does NOT match we deliberately
+    # withhold what we actually read and substitute this placeholder, because
+    # an unrecognised remote URL can carry credentials -- a git `insteadOf`
+    # rewrite can inject a token into the URL that `git remote get-url`
+    # returns (:3475), and this JSON is pasted into beads and commit messages
+    # as evidence. `None` means there was no origin at all, which is a
+    # different fact from "there was one and we are not printing it".
+    #
+    # TO IDENTIFY THE WITHHELD VALUE WITHOUT EMITTING IT: compare
+    # `origin_hash` below -- sha256 of the raw origin -- against the sha256 of
+    # each form `origin_matches` accepts. That narrows it to "one of the
+    # expected spellings" or "something else entirely" while keeping the
+    # string out of the artifact. That check is what diagnosed bd-fcuvh.
+    #
+    # DO NOT "FIX" THIS BY PRINTING actual_origin. A reader who reads the
+    # placeholder as corrupted data and removes it turns a containment
+    # boundary into a credential leak in a committed file. It looked like a
+    # data anomaly to me for two turns before I recognised the mechanism,
+    # which is why this comment exists.
     origin_display = expected_origin if origin_matches(repository, actual_origin) else (
         "<unexpected>" if actual_origin else None
     )
@@ -4221,6 +4243,13 @@ def is_within(path, root):
         return False
 
 def display_path(path):
+    # bd-405lm, on placeholder vocabulary: the `<project>`, `<cargo_home>` and
+    # `<home>` tokens below are PATH NORMALISATIONS -- the path was observed
+    # and is shown, with a machine-specific prefix replaced so the proof is
+    # stable across checkouts. That is a DIFFERENT class from `<unexpected>`
+    # at the origin field (:3536), which means "a value was observed and is
+    # being WITHHELD because it may carry credentials". Both render as
+    # angle-bracket tokens; only one of them is hiding something.
     path = path.resolve(strict=False)
     if is_within(path, project_root):
         relative = path.relative_to(project_root)
