@@ -960,6 +960,53 @@ contract-drift-radar, and `cargo fmt --check`. A green `CI Static` run is not
 (`scripts/rch_verify.sh`). Dispatch a `CI Static` scratch run when you need a
 hosted proof that will not be cancelled by the next push to `main`.
 
+## Every Gate Has A Population, And Green Only Covers That Population
+
+A green gate answers one question: *did everything in this gate's population
+pass?* It does not answer *is the tree clean?* The two read identically in CI and
+come apart whenever the population is smaller than the thing a reader assumes it
+covers. The count of consecutive green runs says nothing about **which
+population** was green.
+
+Five gates were examined on 2026-09-21 and each turned out to under-cover in a
+different way. None was broken; each had a population narrower than its name
+suggests.
+
+| gate | population is actually | how it came apart |
+|---|---|---|
+| `e2e_invocation_audit.sh` | files ripgrep will search | ripgrep applies `.gitignore` only inside a repo; without `.git` it searched gitignored-but-synced files and counted *prose naming a script* as invoking it — 52 orphans vs 6 from the same commit. Fixed with `rg --no-require-git` (`a52fabd40`). |
+| `scripts/lib/mod_reachability.py` | what `git ls-files` returns | outside a repo it exits 128 with empty stdout; an unchecked return code made the population 0, so nothing was unreachable and the gate reported clean. Now raises (`a52fabd40`). |
+| `cargo clippy -- -D warnings` | whatever actually runs it | prescribed by AGENTS.md and run by no enabled workflow, so the lane accumulates and sheds reds unobserved and a measurement taken against it decays silently (`bd-clippy-gate-has-no-runner-186zj`). |
+| `cargo test` shards | workflows that are enabled | the shards exist in `ci.yml`, which is `disabled_manually`. A gate that exists in a disabled workflow is indistinguishable from one that passes. |
+| `cargo fmt --check` | **module-reachable files only** | rustfmt walks `mod` and `#[path]`; it never follows `include!`. `src/cass/backfill_public_tests.rs` is reached only by `include!` from `src/cass/import.rs:2435`, so it compiled and carried 329 lines of rustfmt diff behind consecutive green runs (`bd-39y21`). |
+
+The last one is the sharpest illustration, because nothing was hidden. The commit
+that introduced it (`6a425cf69`) states the consequence in the diff — "rustfmt
+does not follow `include!`, so the file compiles but stays unformatted, which the
+reachability gate reports on its own non-failing line" — and
+`mod_reachability.py` prints that blind spot in its own output on every run. The
+information was carried correctly in two places and still nobody acted on it,
+because neither place is where a reader looks when CI is green.
+
+Note also why the obvious remedy does not apply there: that file is a *fragment*,
+not a module. It uses `TestResult`, `unique_test_dir` and `write_fake_cass`
+unqualified and has no `use super::*`, so a `#[path] mod` would not inherit the
+scope it needs. `include!` is the mechanism it was authored for. Widening
+rustfmt's population — not re-declaring the file — is the tractable direction.
+
+**Rules that follow:**
+
+- State a gate's population next to its name, in the gate's own output or a
+  comment at its call site. "All root scratchpad patterns matched" is a better
+  pass line than "OK" because it names what was checked.
+- When a gate cannot run, say so with a distinct exit code rather than passing or
+  failing. `e2e_repo_hygiene.sh` exits 3 for "no git repository" precisely so it
+  is not read as a hygiene verdict.
+- Before citing a green run as evidence on a bead, write down the population it
+  covers. If that sentence is hard to write, the citation is weaker than it looks.
+- When a gate reports a caveat on a non-failing line, that caveat is a finding
+  with no owner. File it.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
