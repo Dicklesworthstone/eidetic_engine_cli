@@ -109,8 +109,38 @@ mod unix_fixture_harness {
                  never reach beyond its own child process tree"
             ));
         }
+        // bd-drapu: assert the runner USED the timeout we asked for, BEFORE
+        // bounding elapsed against it.
+        //
+        // `evidence.timing.timeout_ms` is what the runner recorded
+        // (src/core/source_run.rs:674); the bound below was computed from this
+        // function's own `timeout` parameter. When those differ, every elapsed
+        // failure reports "timeout was 750 ms" whatever the runner actually
+        // enforced, so "the timeout never reached the runner" and "the runner
+        // honoured it and was slow" produce identical text. The harness held
+        // the datum that separates them and did not assert on it.
+        //
+        // This can only fail when the two genuinely disagree, which is a
+        // runner defect either way -- it cannot red a run where the timeout
+        // was honoured.
+        let requested_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        // Mirror the runner's own `.max(1)` floor at the serialization
+        // boundary, so a sub-millisecond request is not reported as a
+        // mismatch it is not.
+        let expected_timeout_ms = requested_ms.max(1);
+        if evidence.timing.timeout_ms != expected_timeout_ms {
+            return Err(format!(
+                "{scenario}: runner recorded timeout_ms {} but the request asked for \
+                 {expected_timeout_ms}; the timeout under test did not govern this run, so any \
+                 elapsed bound is measuring something other than the configured timeout",
+                evidence.timing.timeout_ms
+            ));
+        }
         if let Some(elapsed_ms) = evidence.timing.elapsed_ms {
-            let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+            // Bound against the RECORDED timeout, now proven equal to the
+            // requested one, so the bound is definitionally about the value
+            // that governed the run.
+            let timeout_ms = evidence.timing.timeout_ms;
             // 2 * timeout + 5s absolute floor; the absolute floor
             // bounds very-short timeouts (e.g. 100ms) where scheduler
             // jitter can dominate the 2x multiplier.
