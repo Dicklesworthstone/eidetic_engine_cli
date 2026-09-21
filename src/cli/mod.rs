@@ -84296,23 +84296,24 @@ mod tests {
     /// duplicate it: the lie direction stays there, where `try_parse_from`
     /// exercises the real parser rather than inspecting an arg table.
     ///
-    /// WHY A PRECONDITION IS NEEDED. That test classifies by Clap error kind,
-    /// and `ErrorKind::UnknownArgument` CARRIES TWO STATES:
-    ///   - this command exists and refuses `--dry-run`  (a real manifest lie)
-    ///   - these tokens are not subcommands at all, Clap ate them as POSITIONAL
-    ///     ARGUMENTS of a command that takes positionals, and then refused
-    ///     `--dry-run`                                   (a stale manifest path)
-    /// Only `InvalidSubcommand` is unambiguous, and it fires only when the
-    /// parent takes no positionals. Measured at ddc11bb21 that hid two stale
-    /// paths -- `outcome quarantine release` (OutcomeCommand has one variant,
-    /// `Trace`) and `team steward run-once` (`Steward` is a ValueEnum variant
-    /// of DiagResourceSurfaceArg, a value for `--surface`) -- inside a list of
-    /// 92 liars, while only the three `daemon` paths reached the honest bucket.
+    /// WHY THE RESOLVE STEP IS SEPARATE. That test classifies by Clap error
+    /// kind, and `ErrorKind::UnknownArgument` carries two states: a command
+    /// that exists and refuses `--dry-run`, and tokens Clap swallowed as
+    /// POSITIONAL ARGUMENTS before refusing the flag. Resolving a path by
+    /// subcommand name never asks the parser to accept an argv, so it cannot
+    /// be fooled that way.
     ///
-    /// Asserting the precondition SEPARATELY fixes that, because resolving a
-    /// path by subcommand name never asks the parser to accept an argv, so
-    /// positional-swallowing cannot disguise a missing command as a flag
-    /// complaint.
+    /// WHAT I GOT WRONG HERE, RECORDED BECAUSE THE PREMISE IS SUBTLE. An
+    /// earlier version of this test reported every resolve failure as a STALE
+    /// MANIFEST PATH and recorded five of them as debt. All five were real
+    /// commands or deliberate modelling. A manifest `command_path` is a
+    /// DISPLAY PATH, not a Clap subcommand path, and `resolve` fails on at
+    /// least three mismatch kinds that are not staleness -- clap renaming,
+    /// collapsed granularity, and submodule nesting. See
+    /// `UNRESOLVABLE_BUDGET` below for the three worked cases.
+    ///
+    /// So an unresolved path is now reported as A PATH THIS GATE COULD NOT
+    /// EXAMINE, which is an unknown, not a verdict about the manifest.
     ///
     /// THE SECOND DIRECTION: a command that ACCEPTS `--dry-run` while the
     /// manifest says it does not. The other test `continue`s past every
@@ -84368,53 +84369,56 @@ mod tests {
         root.build();
         let manifest = crate::core::effect::EffectManifest::build();
 
-        /// Manifest paths that name no command, RECORDED AS DEBT SO
-        /// ENFORCEMENT CAN BEGIN. bd-3j6l3. This is the same device as
-        /// SECTION 2 of scripts/mod-reachability-allowlist.txt and carries the
-        /// same rule: IT MAY ONLY SHRINK.
+        /// PATHS THIS GATE COULD NOT EXAMINE. Not a finding about the
+        /// manifest. bd-3j6l3.
         ///
-        /// These five predate this gate. They were invisible because the only
-        /// test that could have seen them bucketed two of them as dry-run
-        /// liars, and the whole gate had never run to completion. Recording
-        /// pre-existing debt so a new stale path reds immediately is what this
-        /// list is for; adding a line to silence a path someone just broke is
-        /// the one way to weaken it.
+        /// THIS REPLACES A LIST THAT ACCUSED FIVE REAL COMMANDS OF NOT
+        /// EXISTING, and the retraction is worth keeping because the premise
+        /// was subtle. A manifest `command_path` is a DISPLAY PATH, not a Clap
+        /// subcommand path. `resolve` below walks subcommand names, so it
+        /// fails on at least three mismatch kinds that are not staleness:
         ///
-        /// Each entry names what must happen for it to go. None is a rename I
-        /// could apply: `--foreground` is a FLAG on `daemon start`, not a
-        /// subcommand, and `DiagQuarantineCommand` has only List and Show, so
-        /// there is no `release` to point at. The dispositions belong to the
-        /// daemon, outcome and team lanes.
-        const STALE_MANIFEST_PATHS: &[(&str, &str)] = &[
-            (
-                "daemon background",
-                "daemon lane: `daemon start` already has its own manifest entry and this \
-                 describes a MODE of it, not a command. Remove, or re-point at the real path.",
-            ),
-            (
-                "daemon foreground decay_sweep",
-                "daemon lane: `--foreground` is a flag on `daemon start` (DaemonHotModeStartArgs), \
-                 not a subcommand, and `decay_sweep` is a job type. Remove or re-point.",
-            ),
-            ("daemon foreground non-decay", "daemon lane: same as above."),
-            (
-                "outcome quarantine release",
-                "outcome lane: OutcomeCommand has exactly one variant, Trace. Quarantine moved \
-                 under `diag`, where DiagQuarantineCommand exposes only List and Show -- so \
-                 `release` exists nowhere. Remove, or ship the command.",
-            ),
-            (
-                "team steward run-once",
-                "team lane: `Steward` is a ValueEnum variant of DiagResourceSurfaceArg, a VALUE \
-                 for --surface. There is no steward subcommand. Remove, or ship the command.",
-            ),
-        ];
-        const STALE_BUDGET: usize = 5;
+        ///   CLAP RENAMING        `outcome quarantine release` is real;
+        ///                        src/cli/mod.rs declares
+        ///                        `#[command(name = "outcome-quarantine")]`,
+        ///                        so the walk looks for a `quarantine` child
+        ///                        of `outcome` and finds none.
+        ///   COLLAPSED GRANULARITY `extract_command_path` maps
+        ///                        `Command::Daemon(_) => "daemon"`, so the
+        ///                        manifest is deliberately FINER-GRAINED than
+        ///                        the extractor for daemon's modes.
+        ///   SUBMODULE NESTING    `team steward run-once` is real:
+        ///                        `team::TeamCommand::Steward(RunOnce)`, in
+        ///                        src/cli/team.rs. I concluded it did not
+        ///                        exist by grepping only src/cli/mod.rs.
+        ///
+        /// SO WHY KEEP COUNTING AT ALL, rather than deleting the direction:
+        /// the three checks in this test share ONE `resolve` call and a
+        /// failure hits `continue`. Every unresolved path is therefore
+        /// silently removed from the UNDERSTATEMENT check's population --
+        /// `outcome quarantine release` and `team steward run-once` are real
+        /// commands that nothing has ever checked for a missing
+        /// `DRY_RUN_CAPABLE` entry. Deleting this direction would trade a
+        /// noisy false positive for a silent false negative and shrink the
+        /// population with no signal at all.
+        ///
+        /// So the VERDICT is gone and the COUNT stays, worded as what it is:
+        /// an unknown. The pressure now sits where it belongs -- on teaching
+        /// `resolve` the three mismatch kinds, at which point this number
+        /// reaches zero on merit rather than by exemption.
+        ///
+        /// A NOTE ON WHAT DOES *NOT* JUSTIFY DELETING IT:
+        /// `mechanical_boundary_inventory.rs` carries a doc comment saying
+        /// the reverse direction "would fail on a granularity difference".
+        /// That is true, and it is PROSE. Prose does not gate. It is a
+        /// correct caveat with no owner and it cannot carry the weight of an
+        /// assertion someone removes on its authority.
+        const UNRESOLVABLE_BUDGET: usize = 5;
 
         let mut examined = 0usize;
-        let mut stale = Vec::new();
+        let mut resolved = 0usize;
+        let mut unresolvable = Vec::new();
         let mut understated = Vec::new();
-        let mut resolved_but_recorded_stale = Vec::new();
 
         for effect in manifest.mutating_commands() {
             examined += 1;
@@ -84422,19 +84426,11 @@ mod tests {
             let command = match resolve(&root, path) {
                 Ok(command) => command,
                 Err(reason) => {
-                    if !STALE_MANIFEST_PATHS.iter().any(|(known, _)| *known == path) {
-                        stale.push(format!("{path} ({reason})"));
-                    }
+                    unresolvable.push(format!("{path} ({reason})"));
                     continue;
                 }
             };
-            // THIRD DIRECTION, the one an allowlist rots without: a recorded
-            // path that RESOLVES again. Its debt entry is now fiction and must
-            // be deleted, or the list quietly grants an exemption nobody is
-            // checking.
-            if STALE_MANIFEST_PATHS.iter().any(|(known, _)| *known == path) {
-                resolved_but_recorded_stale.push(path);
-            }
+            resolved += 1;
             let parser_has_flag = command
                 .get_arguments()
                 .any(|arg| arg.get_long() == Some("dry-run"));
@@ -84450,66 +84446,55 @@ mod tests {
              gate examined no command and proved nothing",
         )?;
 
-        // The ratchet, in both directions. More recorded debt than the budget
-        // is new debt absorbed; FEWER without lowering the budget in the same
-        // commit leaves a freed allowance that would silently absorb the next
-        // stale path.
+        // `examined > 0` IS NOT ENOUGH, and the gap is the whole reason the
+        // count above survives. It counts the LOOP, not the SURVIVORS: a
+        // resolve failure hits `continue`, so if `resolve` broke for every
+        // path, `examined` would still be ~192 and the understatement check
+        // below would prove nothing while this test passed. Assert the
+        // population the check actually ran on.
         ensure(
-            STALE_MANIFEST_PATHS.len() == STALE_BUDGET,
-            &format!(
-                "STALE_MANIFEST_PATHS holds {} entries against STALE_BUDGET {}. If you FIXED \
-                 a path, lower the budget in the same commit. If you ADDED one, do not -- \
-                 raising this number to make a finding pass is the one way to weaken this \
-                 list",
-                STALE_MANIFEST_PATHS.len(),
-                STALE_BUDGET
+            resolved + UNRESOLVABLE_BUDGET >= examined,
+            format!(
+                "only {resolved} of {examined} declared mutating paths resolved against the \
+                 Clap tree, leaving {} unexaminable against a budget of {UNRESOLVABLE_BUDGET}. \
+                 The understatement check below runs ONLY on resolved paths, so this is a \
+                 shrinking population, not a passing gate:\n    {}",
+                unresolvable.len(),
+                unresolvable.join("\n    ")
             ),
         )?;
 
-        let mut report = String::new();
-        if !stale.is_empty() {
-            let mut sorted = stale.clone();
-            sorted.sort();
-            report.push_str(&format!(
-                "\n  {} declared mutating path(s) are NOT COMMAND PATHS and are not recorded \
-                 debt. Clap has no such subcommand, so the manifest describes something that \
-                 cannot be run:\n    {}\n",
-                sorted.len(),
-                sorted.join("\n    ")
-            ));
-        }
-        if !resolved_but_recorded_stale.is_empty() {
-            let mut sorted = resolved_but_recorded_stale.clone();
-            sorted.sort_unstable();
-            report.push_str(&format!(
-                "\n  {} path(s) are recorded in STALE_MANIFEST_PATHS but RESOLVE FINE now. \
-                 The debt entry is fiction; delete it and lower STALE_BUDGET in the same \
-                 commit:\n    {}\n",
-                sorted.len(),
-                sorted.join("\n    ")
-            ));
-        }
-        if !understated.is_empty() {
-            let mut sorted = understated.clone();
-            sorted.sort_unstable();
-            report.push_str(&format!(
-                "\n  {} command(s) ACCEPT --dry-run but are missing from DRY_RUN_CAPABLE, so \
-                 dry_run_refusal_message will refuse a flag that works:\n    {}\n",
-                sorted.len(),
-                sorted.join("\n    ")
-            ));
-        }
-
+        // Both directions, as a ratchet. More unexaminable paths than the
+        // budget is a population that shrank; FEWER without lowering the
+        // budget in the same commit leaves a freed allowance that would
+        // silently absorb the next one. Lowering it is the goal: teach
+        // `resolve` a mismatch kind and this number drops on merit.
         ensure(
-            report.is_empty(),
+            unresolvable.len() == UNRESOLVABLE_BUDGET,
             format!(
-                "checked {examined} mutating command(s) against the real Clap tree.{report}\n\
-                 Add a command to DRY_RUN_CAPABLE in src/core/effect.rs when it gains \
-                 `--dry-run`; fix or remove a path that does not resolve. Note that a \
-                 non-existent path may ALSO appear in \
-                 declared_dry_run_capable_mutating_commands_actually_accept_dry_run's liar \
-                 list -- that is the conflation this test exists to separate, not a second \
-                 defect."
+                "{} declared mutating path(s) could not be resolved, against \
+                 UNRESOLVABLE_BUDGET {UNRESOLVABLE_BUDGET}. If you taught `resolve` a new \
+                 mismatch kind, LOWER THE BUDGET in the same commit. If a new path stopped \
+                 resolving, do not raise it -- these are paths the dry-run understatement \
+                 check cannot see:\n    {}",
+                unresolvable.len(),
+                unresolvable.join("\n    ")
+            ),
+        )?;
+
+        let mut sorted = understated.clone();
+        sorted.sort_unstable();
+        ensure(
+            sorted.is_empty(),
+            format!(
+                "{} of {resolved} resolved mutating command(s) ACCEPT --dry-run but are \
+                 missing from DRY_RUN_CAPABLE, so dry_run_refusal_message will refuse a flag \
+                 that works:\n    {}\n\nAdd them to DRY_RUN_CAPABLE in src/core/effect.rs. \
+                 Note the denominator is {resolved}, not {examined}: {} declared paths could \
+                 not be resolved and were never examined by this check.",
+                sorted.len(),
+                sorted.join("\n    "),
+                unresolvable.len()
             ),
         )
     }
@@ -97018,13 +97003,15 @@ demos:
     /// READ THE LIAR LIST WITH THIS CAVEAT (bd-3j6l3). `InvalidSubcommand`
     /// only fires when the parent takes no positionals. When it DOES take
     /// them, Clap swallows unknown path tokens as positional arguments and
-    /// then rejects `--dry-run`, so a path that is not a command at all
-    /// arrives here as `UnknownArgument` and is reported as a liar. Two of the
-    /// 92 measured at ddc11bb21 were that, not this.
-    /// `mutating_dry_run_declarations_match_the_parser` resolves every
-    /// declared path by subcommand name and separates the two; if a name in
-    /// the liar list below also appears there, it is a stale path and fixing
-    /// the path is the fix, not the declaration.
+    /// then rejects `--dry-run`, so the two states arrive here as one kind.
+    ///
+    /// DO NOT conclude from that alone that a name is not a command. I did,
+    /// and was wrong about five paths: a manifest `command_path` is a DISPLAY
+    /// path, and Clap renaming (`outcome-quarantine`), collapsed granularity
+    /// (`Command::Daemon(_) => "daemon"`) and submodule nesting
+    /// (`team::TeamCommand`) all make a real command look absent. Before
+    /// calling a path non-existent, grep the whole of `src/cli/`, not just
+    /// `mod.rs`.
     #[test]
     fn declared_dry_run_capable_mutating_commands_actually_accept_dry_run() -> TestResult {
         let manifest = crate::core::effect::EffectManifest::build();
