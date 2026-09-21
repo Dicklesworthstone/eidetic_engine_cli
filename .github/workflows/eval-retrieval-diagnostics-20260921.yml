@@ -1,0 +1,145 @@
+name: Eval retrieval diagnostic implementation
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/eval-retrieval-diagnostics-20260921.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: eval-retrieval-diagnostics-20260921
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Apply reviewed implementation and publish coherent source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo '7cca07282172c2731e4d15380d80d6ac76862a48cf644d089ffca726cbcae4ca  scripts/delivery/eval-retrieval-diagnostics-20260921.patch' | sha256sum --check
+          git apply --check scripts/delivery/eval-retrieval-diagnostics-20260921.patch
+          git apply scripts/delivery/eval-retrieval-diagnostics-20260921.patch
+          rustfmt --edition 2024 --config skip_children=true src/eval/runner.rs src/cli/mod.rs tests/contracts/eval_science.rs tests/contracts/science_analytics.rs tests/eval_report_e2e.rs
+          git diff --check
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          assert os.environ['GITHUB_REPOSITORY'] == 'Dicklesworthstone/eidetic_engine_cli'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+          paths = ['src/eval/runner.rs', 'src/cli/mod.rs', 'tests/contracts/eval_science.rs', 'tests/contracts/science_analytics.rs', 'tests/eval_report_e2e.rs', 'tests/golden/eval-report.snap']
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().rstrip('\0').split('\0')
+          assert set(changed) == set(paths), 'Unreviewed paths changed'
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+          root = 'https://api.github.com/repos/Dicklesworthstone/eidetic_engine_cli/'
+          def api(method, suffix, data=None):
+              req = urllib.request.Request(root + suffix, method=method,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json', 'User-Agent': 'ee-eval-diagnostics'})
+              with urllib.request.urlopen(req, timeout=90) as response:
+                  return json.load(response)
+          commit = api('GET', 'git/commits/' + base)
+          entries = []
+          for path in paths:
+              content = pathlib.Path(path).read_text()
+              blob = api('POST', 'git/blobs', {'content': content, 'encoding': 'utf-8'})
+              local_blob = subprocess.check_output(['git', 'hash-object', path]).decode().strip()
+              assert local_blob == blob['sha'], 'Source transport changed'
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = api('POST', 'git/trees', {'base_tree': commit['tree']['sha'], 'tree': entries})
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          assert subprocess.check_output(['git', 'write-tree']).decode().strip() == tree['sha'], 'Tested tree differs from publication'
+          message = '''fix(eval): preserve per-query search degradations in run and report (bd-j09rg)
+
+          Carry source diagnostics with query metrics into the existing response
+          envelope, attributed to fixture and query. Preserve search status, requested
+          and applied modes, fallback posture and canonical recovery actions. Normalize
+          only the private scratch root and screen secret-like diagnostic text. Do not
+          leak raw SQL errors. Scores, thresholds, quality hashes, report schemas and
+          cancellation behavior are unchanged. Human output reports the same failures.
+
+          Add six unit regressions and two real-CLI contracts requiring actual hash
+          fallback evidence for every query. Replace obsolete empty-warning assertions
+          with positive attribution assertions while retaining the quality goldens.
+          Exact patch/digest, pinned rustfmt, whitespace and complete source-tree checks
+          passed before publication. Rust compilation/runtime tests run subsequently;
+          this commit does not claim their result.'''
+          new = api('POST', 'git/commits', {'tree': tree['sha'], 'parents': [base], 'message': message})
+          api('PATCH', 'git/refs/heads/main', {'sha': new['sha'], 'force': False})
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'eval-diagnostics-source.log').write_text(json.dumps({'sourceCommit': new['sha'], 'sourceTree': tree['sha'], 'baseCommit': base, 'files': entries}, indent=2))
+          print('Published and verified exact tested source:', new['sha'])
+          PY
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: eval-diagnostics-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            eval-diagnostics-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-retrieval-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            native-rule-scope-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Resolve pinned Franken dependencies
+        run: |
+          set -euo pipefail
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/eval-diagnostics-build-paths.patch"
+          rustc --version --verbose > "$RUNNER_TEMP/eval-diagnostics-toolchain.log"
+      - name: Execute six diagnostic unit regressions
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked --lib 'eval::runner::retrieval_diagnostic_tests::' -- --test-threads=2 > "$RUNNER_TEMP/eval-diagnostics-unit.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/eval-diagnostics-unit.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/eval-diagnostics-unit.log"
+      - name: Execute real CLI diagnostic contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked --test contracts 'eval_science::eval_retrieval_' -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-cli.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/eval-diagnostics-cli.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/eval-diagnostics-cli.log"
+      - name: Capture actual report and check historical quality golden
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          target/debug/ee --json eval report fx.release_failure.v1 > "$RUNNER_TEMP/eval-diagnostics-report.json" 2> "$RUNNER_TEMP/eval-diagnostics-report-stderr.log" || failed=1
+          cargo test --locked --test eval_report_e2e -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1 || failed=1
+          tail -n 120 "$RUNNER_TEMP/eval-diagnostics-golden.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: eval-diagnostics-verification
+          path: |
+            ${{ runner.temp }}/eval-diagnostics-*.log
+            ${{ runner.temp }}/eval-diagnostics-*.patch
+            ${{ runner.temp }}/eval-diagnostics-*.json
+          retention-days: 7
