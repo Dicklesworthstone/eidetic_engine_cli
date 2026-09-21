@@ -373,6 +373,36 @@ def read_allowlist() -> tuple[list[tuple[str, str, bool]], int | None]:
     return entries, budget
 
 
+def list_include_only() -> int:
+    """Print the include!-only files, one relative path per line, nothing else.
+
+    bd-39y21. This module already DERIVES the set -- `include!` textually
+    inlines a file that rustfmt never visits, because rustfmt follows
+    `mod`/`#[path]` and not `include!`. Until now the set was only ever printed
+    inside a prose paragraph on a non-failing line, which is a caveat with no
+    owner: true, visible on every run, and actionable by nobody.
+
+    This mode exists so `scripts/check-include-fmt.sh` can CONSUME the same
+    derivation instead of re-deriving it with its own regex. A second walker
+    would be a second copy of the rule, and the two would disagree the first
+    time an include! form changed.
+
+    Exit 2 for "could not determine", never an empty list, so a caller cannot
+    read an inconclusive run as "no files to check".
+    """
+    roots = target_roots()
+    if roots is None:
+        print(
+            "[mod-reachability] cargo unavailable or timed out — cannot list include!-only files",
+            file=sys.stderr,
+        )
+        return 2
+    reachable_set(roots)
+    for rel in sorted(str(p.relative_to(REPO)) for p in INCLUDE_ONLY if p.is_file()):
+        print(rel)
+    return 0
+
+
 def main() -> int:
     roots = target_roots()
     if roots is None:
@@ -735,4 +765,6 @@ def self_test() -> int:
 if __name__ == "__main__":
     if "--self-test" in sys.argv[1:]:
         sys.exit(self_test())
+    if "--list-include-only" in sys.argv[1:]:
+        sys.exit(list_include_only())
     sys.exit(main())
