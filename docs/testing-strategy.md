@@ -1120,6 +1120,38 @@ any non-empty `--version` output, and a foreign binary answered `exec format
 error: <path>` — non-empty, therefore accepted. Key on exit status (126/127 mean
 "could not execute"), not on output volume.
 
+### Two different blindnesses: the population, and the predicate
+
+Everything above this section is one failure: **the gate looked at the wrong
+set.** Ripgrep's filtering changing with the tree, `git ls-files` collapsing to
+zero, clippy with no runner, shards in a disabled workflow, rustfmt's module
+reachability, an artifact index keyed on success, a `--dry-run` probe that cannot
+reach three of five guards, a guard whose callers omit the one that needed it.
+All population.
+
+`candidate_ee_bin` is a different animal and worth separating, because the
+remedies differ. **It looked at exactly the right thing and asked it the wrong
+question.** The population was perfect — one binary, the correct one, probed
+directly — and the predicate could not tell success from failure. A guard like
+that is blind *over a perfect population*, so every population fix in this
+document would have left it broken.
+
+| blindness | question to ask | how it hides |
+|---|---|---|
+| **population** | *what did this actually examine?* | the missing members emit no signal |
+| **predicate** | *could this answer have come from a failure?* | the answer looks like data |
+
+The predicate check is the cheaper of the two and almost nobody runs it: **write
+down the output your guard would produce on a FAILING input, push it through your
+own condition, and confirm it comes out false.** `-x` on a Linux ELF under macOS
+is true; `--version` on it prints a non-empty string. Both inputs are failures
+that satisfy the predicate, and one minute with either would have shown it.
+
+Prefer predicates over proxies wherever a real one exists: an exit status over
+output volume, an explicit `[ -d ]` over a path prefix, a parsed value over a
+substring match. A proxy is a predicate you have not checked the failure case of
+yet.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
