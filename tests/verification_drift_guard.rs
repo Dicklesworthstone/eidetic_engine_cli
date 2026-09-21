@@ -3538,3 +3538,51 @@ fn manifest_candidate_binary_matches_verify_sh_resolution() {
          binaries."
     );
 }
+
+/// The binary-identity stage runs AFTER the last stage that can rebuild `ee`.
+///
+/// bd-reality-core-convergence-1azkt.5, bullet 5 ("hash"). The check compares
+/// `EE_BINARY_SHA256`, taken once before any stage, against the binary as it
+/// stands at the end of the run. Its entire ability to fail depends on being
+/// ordered after `cargo build --locked --bin ee` in "Write Contention E2E": move
+/// it above that line and it compares the binary to itself, passes always, and
+/// becomes one more control that cannot fail.
+///
+/// Ordering is not expressible in the budget manifest -- that declares which
+/// stages exist, not their sequence -- so it is asserted here against verify.sh
+/// itself, where the order actually lives.
+#[test]
+fn binary_identity_stage_runs_after_the_last_rebuild() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    let line_of = |needle: &str| -> Option<usize> {
+        script
+            .lines()
+            .position(|l| l.contains(needle) && !l.trim_start().starts_with('#'))
+    };
+
+    let rebuild = line_of("cargo build --locked --bin ee && ");
+    let identity = line_of(r#"run_stage "Candidate Binary Identity Stable""#);
+
+    // EMPTY-WORLD GUARD FIRST: if either line is renamed away, both lookups
+    // return None and any ordering comparison below would be vacuous.
+    assert!(
+        rebuild.is_some() && identity.is_some(),
+        "expected verify.sh to contain both a `cargo build --locked --bin ee` \
+         stage and the `Candidate Binary Identity Stable` stage; got \
+         rebuild={rebuild:?} identity={identity:?}. If either was renamed, this \
+         ordering test measures nothing until it is pointed at the new names."
+    );
+
+    let rebuild = rebuild.unwrap();
+    let identity = identity.unwrap();
+    assert!(
+        identity > rebuild,
+        "`Candidate Binary Identity Stable` is at line {} but the rebuild is at \
+         line {}. Ordered before the rebuild, the stage compares the binary to \
+         itself and can never fail -- which is worse than not having it, because \
+         it reads as coverage.",
+        identity + 1,
+        rebuild + 1
+    );
+}

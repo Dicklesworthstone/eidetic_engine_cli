@@ -317,3 +317,61 @@ implicit_log="$(
         ee_resolve_binary 2>&1 >/dev/null
 )"
 assert_silent "$implicit_log" "no explicit profile requested produces no warning"
+
+# 7-10. CANDIDATE BINARY IDENTITY (1azkt.5 bullet 5, "hash"). Four states, four
+#    distinct exit codes. The changed arm is the one that matters: before this
+#    function, verify.sh hashed the binary once and NOTHING compared it, so a
+#    rebuild partway through a run (scripts/verify.sh:1923 runs
+#    `cargo build --locked --bin ee`) silently split the run across two
+#    binaries. Each arm is driven by a real file on disk, not a stub, so the
+#    hashing path itself is exercised.
+identity_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-identity.XXXXXX")"
+identity_bin="$identity_dir/ee"
+printf 'binary-contents-v1\n' >"$identity_bin"
+chmod +x "$identity_bin"
+
+identity_baseline="$(ee_binary_sha256 "$identity_bin")"
+assert_eq "${#identity_baseline}" "64" "ee_binary_sha256 returns a sha256"
+
+# 7. UNCHANGED -> 0.
+set +e
+ee_assert_binary_identity_unchanged "$identity_bin" "$identity_baseline" "selftest" >/dev/null 2>&1
+identity_same_rc=$?
+set -e
+assert_eq "$identity_same_rc" "0" "identical binary reports unchanged"
+
+# 8. CHANGED -> 1, AND THE MESSAGE NAMES BOTH DIGESTS. A code alone would not
+#    tell a reader which two binaries the run straddled.
+printf 'binary-contents-v2-DIFFERENT\n' >"$identity_bin"
+set +e
+identity_changed_log="$(
+    ee_assert_binary_identity_unchanged "$identity_bin" "$identity_baseline" "selftest" 2>&1 >/dev/null
+)"
+identity_changed_rc=$?
+set -e
+assert_eq "$identity_changed_rc" "1" "modified binary reports changed"
+case "$identity_changed_log" in
+    *"$identity_baseline"*) ;;
+    *) printf 'FAIL changed message must quote the baseline digest\n%s\n' "$identity_changed_log" >&2; exit 1 ;;
+esac
+case "$identity_changed_log" in
+    *CANDIDATE\ BINARY\ CHANGED*) ;;
+    *) printf 'FAIL changed message must say so in words\n%s\n' "$identity_changed_log" >&2; exit 1 ;;
+esac
+
+# 9. CANNOT HASH -> 2, NOT 1. A vanished binary is not evidence that it changed.
+rm -f "$identity_bin"
+set +e
+ee_assert_binary_identity_unchanged "$identity_bin" "$identity_baseline" "selftest" >/dev/null 2>&1
+identity_gone_rc=$?
+set -e
+assert_eq "$identity_gone_rc" "2" "unhashable binary is distinct from changed"
+
+# 10. NO BASELINE -> 3, NOT 0. Absent evidence must not read as agreement; this
+#     is the arm that stops the whole check passing vacuously when the caller
+#     never recorded a digest.
+set +e
+ee_assert_binary_identity_unchanged "/nonexistent/ee" "" "selftest" >/dev/null 2>&1
+identity_nobase_rc=$?
+set -e
+assert_eq "$identity_nobase_rc" "3" "absent baseline is distinct from unchanged"

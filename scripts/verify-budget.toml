@@ -93,6 +93,11 @@ target_subpath = "debug/ee"
 resolver = "scripts/lib/ee_binary_resolution.sh"
 
 [[stage]]
+name = "Candidate Binary Identity Stable"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
 name = "Plan Doc Smoke (bd-3usjw.23)"
 expected_seconds_p50 = 2
 regression_factor = 1.5

@@ -320,7 +320,7 @@ fi
 # back to ${REPO_ROOT}/target/debug/ee if cargo cannot be asked. Nothing checked
 # that the file at that path exists, can execute on this host, or was built from
 # this source. Stages from :1266 onward consume CURRENT_SOURCE_EE_BINARY and the
-# only `cargo build --bin ee` in this file is at :1607, so the binary those
+# only `cargo build --bin ee` in this file is at :1923, so the binary those
 # earlier stages run is whatever happened to be on disk.
 #
 # This repo has already been bitten by precisely that: an RCH run can exit 0
@@ -334,11 +334,28 @@ fi
 # and this runner never called it. No new mechanism is added here; the existing
 # one is invoked.
 #
-# WHAT THIS DOES NOT COVER, because bullet 5 names five properties and this
-# verifies three: the binary's HASH is recorded below but not compared against
-# anything, and neither the TARGET TRIPLE nor the FEATURE SET is checked at all.
-# Those remain open on that bullet. Recording the hash now is what lets the
-# proof capsule bind the binary that produced a verdict.
+# WHAT THIS COVERS, KEPT CURRENT -- bullet 5 names five properties and this
+# comment has twice described fewer than are actually checked:
+#   existence / executes here / version   ee_require_current_binary, below.
+#   FEATURE SET                           checked at :391 against Cargo.toml's
+#                                         `default = [...]`, and the invariant
+#                                         that build_features() reports every
+#                                         default feature is held by
+#                                         tests/verification_drift_guard.rs.
+#   HASH                                  recorded below AND compared, by the
+#                                         "Candidate Binary Identity Stable"
+#                                         stage near the end of this file. The
+#                                         comparison is a second OBSERVATION of
+#                                         the same binary, because no declared
+#                                         expected digest exists or can: the
+#                                         binary is built per run.
+#   TARGET TRIPLE                         still NOT checked. The one property
+#                                         of the five left open.
+#
+# The hash check has to sit after the last stage that can rebuild -- "Write
+# Contention E2E" at :1923 runs `cargo build --locked --bin ee` -- or it compares
+# the binary to itself and cannot fail. Recording the hash here is also what lets
+# the proof capsule bind the binary that produced a verdict.
 if ! ee_require_current_binary "${EE_BINARY}" "verify"; then
     printf 'verify: refusing to run stages against an unverified binary.\n' >&2
     printf 'verify: build it first (cargo build --locked --bin ee) or export\n' >&2
@@ -2253,6 +2270,31 @@ run_stage "Eval Regression Contract (bd-bife.18)" "./scripts/eval_regression.sh 
 # directly instead of through a harness script, so the path is the pin;
 # EE_BIN/EE_BINARY are not consulted on this call path.
 run_stage "Ask Eval Quality Gate (bd-169v0.4)" "\"${CURRENT_SOURCE_EE_BINARY}\" eval run ask_v1 --json"
+
+# CANDIDATE BINARY IDENTITY (bd-reality-core-convergence-1azkt.5, bullet 5,
+# "hash"). EE_BINARY_SHA256 is computed once at :348 and, until this stage,
+# NOTHING COMPARED IT -- it was printed into the log and into a proof capsule as
+# the identity of "the binary that produced this verdict", with no check that it
+# still was.
+#
+# It can stop being true mid-run. "Write Contention E2E" runs
+# `cargo build --locked --bin ee`, so if that build replaces the file, the
+# stages before it and the stages after it ran DIFFERENT binaries and the
+# recorded digest describes only the first. That is the "wrong binary / stale
+# source" case bullet 4 requires to make a run non-successful.
+#
+# PLACEMENT IS THE POINT: this must sit AFTER the last stage that can rebuild,
+# or it compares the binary to itself and cannot fail. Keep it last among the
+# non-optional stages.
+#
+# The comparison is a second OBSERVATION, not a declared constant. Nothing in
+# the tree declares an expected ee digest and nothing can -- the binary is built
+# per run -- so a pinned value would be fabricated provenance. Same binary, two
+# points in time, is the only honest second value.
+candidate_binary_identity_stable() {
+    ee_assert_binary_identity_unchanged "${EE_BINARY}" "${EE_BINARY_SHA256:-}" "verify"
+}
+run_stage "Candidate Binary Identity Stable" "candidate_binary_identity_stable"
 
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.

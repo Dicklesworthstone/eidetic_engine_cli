@@ -187,3 +187,76 @@ ee_require_current_binary() {
 
     return 0
 }
+
+# Hash the candidate binary. Prints the sha256 on stdout, or nothing and a
+# non-zero status when neither hashing tool is available or the file is gone.
+# Kept separate from the comparison so "cannot hash" and "hash differs" stay two
+# answers rather than one.
+ee_binary_sha256() {
+    local binary="${1:?ee_binary_sha256: binary path required}"
+    local sum
+
+    [ -f "$binary" ] || return 2
+    sum="$(
+        { shasum -a 256 "$binary" 2>/dev/null || sha256sum "$binary" 2>/dev/null; } \
+            | awk 'NR==1 {print $1}'
+    )"
+    [ -n "$sum" ] || return 2
+    printf '%s\n' "$sum"
+}
+
+# Compare the candidate binary NOW against the hash recorded at the start of a
+# run (bd-reality-core-convergence-1azkt.5, bullet 5, "hash").
+#
+# WHY A SECOND OBSERVATION IS THE ONLY HONEST SECOND VALUE. The bullet wants the
+# binary's hash VERIFIED, not merely recorded. Nothing in the tree declares an
+# expected ee hash and nothing can: the binary is built per run, so a static
+# manifest cannot name its digest, and inventing one would be provenance
+# fabrication. What CAN be compared is the same binary at two points in time.
+#
+# WHY THAT IS NOT A TAUTOLOGY. verify.sh hashes EE_BINARY once, before any
+# stage, and a later stage runs `cargo build --locked --bin ee`
+# (scripts/verify.sh:1923, inside "Write Contention E2E"). If that build
+# replaces the file, stages before it and stages after it ran DIFFERENT
+# binaries, and the identity printed at the top of the log -- the one a proof
+# capsule binds -- does not describe what produced the later verdicts. That is
+# the "wrong binary / stale source" case acceptance bullet 4 requires to make a
+# run non-successful, and until this function existed nothing looked.
+#
+# Exit codes are distinct on purpose, because "unchanged", "changed" and "could
+# not be hashed" are three states and one exit code cannot express two of them:
+#   0  unchanged
+#   1  changed -- prints both digests
+#   2  cannot hash now (missing file or no hashing tool)
+#   3  no baseline was recorded, so there is nothing to compare against
+ee_assert_binary_identity_unchanged() {
+    local binary="${1:?ee_assert_binary_identity_unchanged: binary path required}"
+    local baseline="${2-}"
+    local label="${3:-verify}"
+    local current
+
+    if [ -z "$baseline" ]; then
+        printf '%s: candidate binary identity NOT CHECKED: no baseline digest was recorded.\n' \
+            "$label" >&2
+        return 3
+    fi
+
+    if ! current="$(ee_binary_sha256 "$binary")"; then
+        printf '%s: candidate binary identity NOT CHECKED: %s could not be hashed now.\n' \
+            "$label" "$binary" >&2
+        return 2
+    fi
+
+    if [ "$current" = "$baseline" ]; then
+        printf '%s: candidate binary identity stable: sha256=%s\n' "$label" "$current" >&2
+        return 0
+    fi
+
+    printf '%s: CANDIDATE BINARY CHANGED DURING THE RUN.\n' "$label" >&2
+    printf '%s:   at start: %s\n' "$label" "$baseline" >&2
+    printf '%s:   now:      %s\n' "$label" "$current" >&2
+    printf '%s: stages before and after the rebuild ran DIFFERENT binaries, so the\n' "$label" >&2
+    printf '%s: identity recorded at the top of this log does not describe what\n' "$label" >&2
+    printf '%s: produced the later verdicts.\n' "$label" >&2
+    return 1
+}
