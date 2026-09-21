@@ -64,13 +64,20 @@ pub(super) fn refresh_session(
             return Err(refusal("cass_refresh_scope_mismatch"));
         }
 
-        // Use upstream references only inside the private import transaction.
-        // Never select a version by input order, or let a duplicate reference
-        // silently replace one candidate in the map.
+        // Keep the raw-reference order for the existing checkpoint contract and
+        // stable evidence IDs. The live DB boundary stores BLAKE3(raw reference)
+        // in cass_span_id, so retained-row lookup needs a separate projection.
+        // Hash incoming raw references exactly once, never already-stored keys.
         let mut incoming = BTreeMap::new();
+        let mut by_stored_reference = BTreeMap::new();
         let mut lines = BTreeSet::new();
         for span in spans {
+            let stored_reference = format!(
+                "blake3:{}",
+                blake3::hash(span.cass_span_id.as_bytes()).to_hex()
+            );
             if incoming.insert(span.cass_span_id.as_str(), span).is_some()
+                || by_stored_reference.insert(stored_reference, span).is_some()
                 || !lines.insert(span.start_line)
             {
                 return Err(refusal("cass_refresh_duplicate_span"));
@@ -87,10 +94,13 @@ pub(super) fn refresh_session(
                 // An upstream transcript cannot replace or remove those rows.
                 continue;
             }
-            let Some(span) = incoming.get(row.cass_span_id.as_str()) else {
+            let Some(span) = by_stored_reference.get(row.cass_span_id.as_str()) else {
                 return Err(refusal("cass_refresh_history_missing"));
             };
-            if !retained.insert(row.cass_span_id.as_str())
+            // Retention membership is still in the raw incoming identity space,
+            // just like additions and stable_evidence_id below. No stored row is
+            // rewritten or re-admitted merely because its source is recognized.
+            if !retained.insert(span.cass_span_id.as_str())
                 || row.start_line != span.start_line
                 || row.end_line != span.end_line
                 || row.span_kind != span.span_kind.as_str()
@@ -421,3 +431,155 @@ fn refusal(code: &str) -> DbError {
 #[cfg(test)]
 #[path = "refresh_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod canonical_reference_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::cass::CassAgent;
+    use crate::db::CreateWorkspaceInput;
+    use crate::models::WorkspaceId;
+    use serde_json::json;
+
+    fn span(session: &CassSessionInfo, line: u32) -> CassViewSpanForImport {
+        super::super::super::parse_view_line_value(
+            &json!({"line": line, "content": format!("Build observation {line}. 調査完了")}),
+            &session.source_path,
+        )
+        .unwrap()
+    }
+
+    fn fixture(source: &str, count: u32) -> (DbConnection, String, String, CassSessionInfo) {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(8711)).to_string();
+        db.insert_workspace(
+            &workspace,
+            &CreateWorkspaceInput {
+                path: "/canonical-refresh-workspace".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let session = CassSessionInfo::new(source).with_agent(CassAgent::Codex);
+        let spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
+        let result = super::super::super::persist_session_import_if_absent(
+            &db, &workspace, &session, &spans,
+        )
+        .unwrap();
+        let super::super::super::SessionImportPersistResult::Imported { session_id, .. } = result
+        else {
+            panic!("new fixture must import");
+        };
+        (db, workspace, session_id, session)
+    }
+
+    #[test]
+    fn live_storage_projection_survives_retries_and_repeated_growth() {
+        let (db, workspace, id, session) = fixture("/private/canonical-session.jsonl", 1);
+        let first = span(&session, 1);
+        let first_id = stable_evidence_id(&id, &first.cass_span_id);
+        let before = db.get_evidence_span(&first_id).unwrap().unwrap();
+        let digest = format!("blake3:{}", blake3::hash(first.cass_span_id.as_bytes()).to_hex());
+        assert_eq!(before.cass_span_id, digest);
+        assert_ne!(before.cass_span_id, first.cass_span_id);
+        assert_eq!(before.upstream_ref_hash.as_deref(), Some(digest.as_str()));
+        let original_job = stable_search_index_job_id(&workspace, &id);
+        let retry = refresh_session(&db, &workspace, &id, &session, &[first]).unwrap();
+        assert!(!retry.changed);
+        assert_eq!(retry.index_job_id.as_deref(), Some(original_job.as_str()));
+
+        for count in [2, 12] {
+            let mut spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
+            let report = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+            assert!(report.changed);
+            let first_added = if count == 2 { 2 } else { 3 };
+            assert_eq!(report.added_lines, (first_added..=count).collect::<Vec<_>>());
+            let job = report.index_job_id.unwrap();
+            assert_ne!(job, original_job);
+            let stored = db.get_session(&id).unwrap().unwrap();
+            let metadata: serde_json::Value =
+                serde_json::from_str(stored.metadata_json.as_deref().unwrap()).unwrap();
+            let raw: BTreeMap<_, _> = spans
+                .iter()
+                .map(|span| (span.cass_span_id.as_str(), span))
+                .collect();
+            assert_eq!(
+                metadata[CHECKPOINT_KEY]["snapshotRevision"],
+                snapshot_revision(&workspace, &id, &session_input(&workspace, &session), &raw)
+            );
+            spans.reverse();
+            let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+            assert!(!retry.changed);
+            assert!(retry.added_lines.is_empty());
+            assert_eq!(retry.index_job_id.as_deref(), Some(job.as_str()));
+            assert_eq!(db.get_session(&id).unwrap().unwrap(), stored);
+            assert_eq!(db.get_evidence_span(&first_id).unwrap().unwrap(), before);
+            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), count as usize);
+            for incoming in &spans {
+                let expected_id = stable_evidence_id(&id, &incoming.cass_span_id);
+                let row = db.get_evidence_span(&expected_id).unwrap().unwrap();
+                assert_eq!(row.excerpt, incoming.excerpt);
+            }
+        }
+    }
+
+    #[test]
+    fn backfilled_rows_are_retained_on_the_next_refresh() {
+        let (db, workspace, id, session) = fixture("/private/backfill-session.jsonl", 0);
+        for count in [2, 3] {
+            let spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
+            let report = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+            assert_eq!(report.added_lines, if count == 2 { vec![1, 2] } else { vec![3] });
+            let rows = db.list_evidence_spans_for_session(&id).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+            assert!(!retry.changed);
+            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), rows);
+        }
+    }
+
+    #[test]
+    fn unicode_and_digest_looking_upstream_references_are_hashed_exactly_once() {
+        for source in ["/private/資料:session.jsonl".to_owned(), format!("blake3:{}", "a".repeat(64))] {
+            let (db, workspace, id, session) = fixture(&source, 1);
+            let incoming = span(&session, 1);
+            let expected_id = stable_evidence_id(&id, &incoming.cass_span_id);
+            let before = db.get_evidence_span(&expected_id).unwrap().unwrap();
+            let report = refresh_session(&db, &workspace, &id, &session, &[incoming]).unwrap();
+            assert!(!report.changed);
+            assert_eq!(db.get_evidence_span(&expected_id).unwrap().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn canonical_lookup_preserves_denial_but_refuses_substituted_reference() {
+        let (db, workspace, id, session) = fixture("/private/denied-session.jsonl", 1);
+        let first = span(&session, 1);
+        let first_id = stable_evidence_id(&id, &first.cass_span_id);
+        db.execute_raw("UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'")
+            .unwrap();
+        let denied = db.get_evidence_span(&first_id).unwrap().unwrap();
+        let incoming = vec![first, span(&session, 2)];
+        let grown = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert_eq!(grown.added_lines, vec![2]);
+        assert_eq!(db.get_evidence_span(&first_id).unwrap().unwrap(), denied);
+        assert!(db.get_search_admitted_evidence_span(&first_id, &workspace).unwrap().is_none());
+
+        let substituted = format!("blake3:{}", blake3::hash(b"other source:1").to_hex());
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET cass_span_id = {} WHERE id = {}",
+            sql_text(&substituted), sql_text(&first_id)
+        ))
+        .unwrap();
+        let before = db.get_session(&id).unwrap().unwrap();
+        let mut newer = incoming;
+        newer.push(span(&session, 3));
+        let error = refresh_session(&db, &workspace, &id, &session, &newer).err().unwrap();
+        assert!(error.to_string().contains("cass_refresh_history_missing"));
+        assert!(!error.to_string().contains(&session.source_path));
+        assert_eq!(db.get_session(&id).unwrap().unwrap(), before);
+        assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 2);
+    }
+}
