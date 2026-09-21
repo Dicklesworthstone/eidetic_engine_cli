@@ -132,8 +132,21 @@ for index in "${!paths[@]}"; do
     # reads as a repo-hygiene defect when the truth is that the instrument could
     # not run. A reader chases the wrong thing, and the stage fails in 0s for a
     # reason its own message denies.
-    output="$(printf '%s\n' "$path" | git -C "$REPO_ROOT" check-ignore --no-index -v --stdin 2>&1)"
-    case "$?" in
+    # CAPTURE VIA `if`, NOT A BARE ASSIGNMENT. Under `set -e` (line 2), a simple
+    # assignment from a failing command substitution takes the command's exit
+    # status and ABORTS THE SCRIPT, so the `case` below never runs. That is not
+    # hypothetical: from 7ebb6d557 until this commit the classification was dead
+    # code, and the gate died silently with git's own 128 while this file
+    # carried a comment claiming it distinguished 1 from 128. Measured on a
+    # no-.git tree: exit 128, no output, "ENVIRONMENT error" printed zero times.
+    # Commands in an `if` condition are exempt from `set -e`, so this form both
+    # survives the failure and preserves the exit code for the `case`.
+    if output="$(printf '%s\n' "$path" | git -C "$REPO_ROOT" check-ignore --no-index -v --stdin 2>&1)"; then
+        check_ignore_rc=0
+    else
+        check_ignore_rc=$?
+    fi
+    case "$check_ignore_rc" in
         0) ;;
         1)
             failures+=("$path did not match any gitignore rule; stderr/stdout: $output")
