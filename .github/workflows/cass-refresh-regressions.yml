@@ -26,6 +26,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
       EE_EMBED_DOWNLOAD: 'off'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -34,7 +35,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
-          components: rustfmt
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Record exact source and toolchain
         run: |
           set -euo pipefail
@@ -48,8 +59,15 @@ jobs:
         run: |
           set -euo pipefail
           rustfmt --edition 2024 --config skip_children=true --check \
-            src/cass/refresh.rs src/cass/refresh_tests.rs \
+            src/cass/refresh.rs src/cass/refresh_tests.rs src/cass/backfill_public_tests.rs \
             2>&1 | tee "$RUNNER_TEMP/cass-refresh-format.log"
+      - name: Retain early formatting diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cass-refresh-format-results
+          path: ${{ runner.temp }}/cass-refresh-*.log
+          retention-days: 7
       - name: Exercise all retained-session refresh regressions
         if: ${{ !cancelled() }}
         run: |
@@ -60,9 +78,18 @@ jobs:
           import os, pathlib, re
           log = pathlib.Path(os.environ['RUNNER_TEMP'], 'cass-refresh-tests.log').read_text()
           results = re.findall(r'test result: ok\. (\d+) passed; 0 failed; 0 ignored;', log)
-          if not results or int(results[-1]) < 21:
-              raise SystemExit('Expected at least 21 executed refresh regressions, with none ignored')
+          if not results or int(results[-1]) < 27:
+              raise SystemExit('Expected at least 27 executed refresh regressions, with none ignored')
           PY
+      - name: Verify public growth, migration and publication retries
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            cass::import::tests::reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs \
+            -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cass-refresh-public.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' \
+            "$RUNNER_TEMP/cass-refresh-public.log"
       - name: Exercise the existing public import and subprocess paths
         if: ${{ !cancelled() }}
         run: |
@@ -71,6 +98,23 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' \
             "$RUNNER_TEMP/cass-refresh-import.log"
+      - name: Check all Cargo targets
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/cass-refresh-check.log"
+      - name: Check strict Clippy on all targets
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-targets -- -D warnings \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-clippy.log"
+      - name: Check repository formatting and unchanged source
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/cass-refresh-repository-format.log"
+          git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
         with:
@@ -78,3 +122,10 @@ jobs:
           path: ${{ runner.temp }}/cass-refresh-*.log
           retention-days: 7
           if-no-files-found: warn
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
