@@ -428,9 +428,32 @@ else
         case "${E2E_TMPDIR_SEEN}" in *" ${e2e_candidate} "*) continue ;; esac
         E2E_TMPDIR_SEEN="${E2E_TMPDIR_SEEN}${e2e_candidate} "
         E2E_TMPDIR_TRIED="${E2E_TMPDIR_TRIED}${E2E_TMPDIR_TRIED:+, }${e2e_candidate}"
-        # The repo-local last resort is the only candidate we may create.
+        # The repo-local last resort is the only candidate we may create, and it
+        # gets a FRESH SUBDIRECTORY PER RUN (bd-xykxz).
+        #
+        # WHY, and the correlation is the point: unlike /tmp and TMPDIR this
+        # path persists between runs, and it is reached ONLY when both of those
+        # are unwritable -- which is exactly the wedged-host state measured on
+        # bd-8iwkm, where `mkdir -p /tmp/...` was denied across three workers
+        # and twenty-one dispatches. So a shared base would be reused precisely
+        # on the machines whose brokenness makes this branch necessary.
+        #
+        # A run that is killed or times out seeds the directory; the next run
+        # resolves to the same base and can measure something different without
+        # anything saying the environment was not fresh. That does not corrupt a
+        # run -- it makes two runs LOOK COMPARABLE WHILE THEY ARE NOT, which is
+        # the harder failure to notice.
+        #
+        # Uniqueness rather than cleanup is deliberate: AGENTS.md forbids
+        # removing files without explicit permission, so emptying a shared base
+        # is not available. A fresh mktemp -d needs no deletion at all.
         case "${e2e_candidate}" in
-            "${REPO_ROOT}/target/e2e-tmp") mkdir -p "${e2e_candidate}" 2>/dev/null || true ;;
+            "${REPO_ROOT}/target/e2e-tmp")
+                mkdir -p "${e2e_candidate}" 2>/dev/null || true
+                if e2e_unique="$(mktemp -d "${e2e_candidate}/run.XXXXXX" 2>/dev/null)"; then
+                    e2e_candidate="${e2e_unique}"
+                fi
+                ;;
         esac
         if e2e_tmpdir_writable "${e2e_candidate}"; then
             E2E_TMPDIR_BASE="${e2e_candidate}"
