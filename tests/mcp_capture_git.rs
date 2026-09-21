@@ -12,10 +12,17 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .map_err(|e| e.to_string())?;
+    // bd-w5bza: exit code and stdout belong here beside stderr. This printed
+    // stderr alone, which is the `[code+stdout]` gap -- and for an `ee --json`
+    // invocation it is the worst two to omit, because the ee.error.v2 envelope
+    // goes to STDOUT while stderr stays empty, and exit 130 is
+    // Outcome::Cancelled. Without them a cancellation reads as a rejection.
     ensure(
         output.status.success(),
         format!(
-            "fixture git failed: {}",
+            "fixture git failed: exit: {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),
     )?;
