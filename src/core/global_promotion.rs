@@ -377,6 +377,101 @@ impl PromotionReport {
     }
 }
 
+fn promotion_audit_details(
+    memory: &crate::db::StoredMemory,
+    global_id: &str,
+    already_promoted: bool,
+) -> String {
+    json!({
+        "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
+        "originWorkspaceId": memory.workspace_id,
+        "originMemoryId": memory.id,
+        "globalMemoryId": global_id,
+        "alreadyPromoted": already_promoted,
+    })
+    .to_string()
+}
+
+/// Publish all destination obligations under one transaction. The caller has
+/// already admitted a coherent source snapshot; these are separate databases,
+/// not a distributed transaction. Index reconciliation happens after commit.
+fn persist_global_promotion(
+    connection: &DbConnection,
+    workspace: &str,
+    memory: &crate::db::StoredMemory,
+    actor: Option<&str>,
+    reference: chrono::DateTime<chrono::Utc>,
+) -> crate::db::Result<(String, bool, Option<String>)> {
+    connection.with_transaction(|| {
+        // Select the twin inside the write transaction, not in a snapshot
+        // released before publication. Never trust a stale preview decision.
+        let twin = admission::find_twin(connection, workspace, memory, reference)?;
+        let (id, already_promoted, job) = match twin {
+            Some(id) => (id, true, None),
+            None => {
+                let id = crate::models::MemoryId::now().to_string();
+                let job = promotion_index_job_id();
+                connection.insert_memory(
+                    &id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace.to_owned(),
+                        level: memory.level.clone(),
+                        kind: memory.kind.clone(),
+                        content: memory.content.clone(),
+                        workflow_id: None,
+                        confidence: memory.confidence,
+                        utility: memory.utility,
+                        importance: memory.importance,
+                        provenance_uri: Some(promotion_provenance_uri(
+                            &memory.workspace_id,
+                            &memory.id,
+                        )),
+                        trust_class: memory.trust_class.clone(),
+                        trust_subclass: memory.trust_subclass.clone(),
+                        tags: vec![
+                            "scope:global".to_owned(),
+                            format!("origin:{}", memory.workspace_id),
+                        ],
+                        valid_from: memory.valid_from.clone(),
+                        valid_to: memory.valid_to.clone(),
+                    },
+                )?;
+                // insert_memory(None) defaults to capture time. Restore the
+                // source's genuinely unbounded start before committing. The
+                // interpolated ID is freshly generated, never supplied SQL.
+                if memory.valid_from.is_none() {
+                    connection.execute_raw(&format!(
+                        "UPDATE memories SET valid_from = NULL WHERE id = '{id}'"
+                    ))?;
+                }
+                connection.insert_search_index_job(
+                    &job,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: workspace.to_owned(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(id.clone()),
+                        documents_total: 1,
+                    },
+                )?;
+                (id, false, Some(job))
+            }
+        };
+        connection.insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(workspace.to_owned()),
+                actor: actor.map(str::to_owned),
+                action: "memory.promote_global".to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(id.clone()),
+                details: Some(promotion_audit_details(memory, &id, already_promoted)),
+            },
+        )?;
+        Ok((id, already_promoted, job))
+    })
+}
+
 /// Promote one workspace memory into the user-global store.
 ///
 /// # Errors
@@ -403,99 +498,45 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     let (global_connection, global_workspace_id) =
         super::global_store::open_or_create_global_store(options.global_paths)
             .map_err(|error| format!("open global store: {error}"))?;
-    let snapshot = admission::ReadSnapshot::begin(&global_connection)
-        .map_err(|_| "Could not begin global duplicate snapshot".to_owned())?;
-    let twin = admission::find_twin(&global_connection, &global_workspace_id, &memory, reference)
-        .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
-    snapshot
-        .finish()
-        .map_err(|_| "Could not release global duplicate snapshot".to_owned())?;
-    admission::set_duplicate(&mut plan, twin.as_deref());
+    // Destination state is one durable unit; a preview cannot reserve a twin.
+    let (global_memory_id, already_promoted, index_job_id) = persist_global_promotion(
+        &global_connection,
+        &global_workspace_id,
+        &memory,
+        options.actor,
+        reference,
+    )
+    .map_err(|_| {
+        "Global promotion transaction failed; inspect the destination before retrying".to_owned()
+    })?;
+    if already_promoted {
+        admission::set_duplicate(&mut plan, Some(&global_memory_id));
+    }
 
-    let (global_memory_id, already_promoted, index_job_id) = match &plan.verdict {
-        PromotionVerdict::Allow {
-            action: PromotionAction::MergeInto { global_memory_id },
-        } => (global_memory_id.clone(), true, None),
-        PromotionVerdict::Allow {
-            action: PromotionAction::Insert,
-        } => {
-            let new_id = crate::models::MemoryId::now().to_string();
-            let index_job_id = promotion_index_job_id();
-            let mut tags = vec!["scope:global".to_owned()];
-            tags.push(format!("origin:{}", memory.workspace_id));
-            global_connection
-                .insert_memory(
-                    &new_id,
-                    &CreateMemoryInput {
-                        workspace_id: global_workspace_id.clone(),
-                        level: memory.level.clone(),
-                        kind: memory.kind.clone(),
-                        content: memory.content.clone(),
-                        workflow_id: None,
-                        confidence: memory.confidence,
-                        utility: memory.utility,
-                        importance: memory.importance,
-                        provenance_uri: Some(promotion_provenance_uri(
-                            &memory.workspace_id,
-                            &memory.id,
-                        )),
-                        trust_class: memory.trust_class.clone(),
-                        trust_subclass: memory.trust_subclass.clone(),
-                        tags,
-                        valid_from: memory.valid_from.clone(),
-                        valid_to: memory.valid_to.clone(),
-                    },
-                )
-                .map_err(|error| format!("insert global memory: {error}"))?;
-            global_connection
-                .insert_search_index_job(
-                    &index_job_id,
-                    &CreateSearchIndexJobInput {
-                        workspace_id: global_workspace_id.clone(),
-                        job_type: SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(new_id.clone()),
-                        documents_total: 1,
-                    },
-                )
-                .map_err(|error| format!("queue global index job: {error}"))?;
-            (new_id, false, Some(index_job_id))
-        }
-        PromotionVerdict::Refuse { .. } => unreachable!("allowed() checked above"),
-    };
-
-    // Audit in BOTH stores: the origin workspace records what left, the
-    // global store records what arrived (no silent memory mutation).
-    let details = json!({
-        "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
-        "originWorkspaceId": memory.workspace_id,
-        "originMemoryId": memory.id,
-        "globalMemoryId": global_memory_id,
-        "alreadyPromoted": already_promoted,
-    })
-    .to_string();
-    let workspace_audit = CreateAuditInput {
-        workspace_id: Some(memory.workspace_id.clone()),
-        actor: options.actor.map(str::to_owned),
-        action: plan.audit_action.to_owned(),
-        target_type: Some("memory".to_owned()),
-        target_id: Some(memory.id.clone()),
-        details: Some(details.clone()),
-    };
+    // Separate databases cannot share this transaction. Report committed state
+    // explicitly if the origin audit fails; a compatible retry repairs the
+    // audit without inserting another destination memory or index job.
     workspace_connection
-        .insert_audit(&generate_audit_id(), &workspace_audit)
-        .map_err(|error| format!("workspace audit: {error}"))?;
-    let global_audit = CreateAuditInput {
-        workspace_id: Some(global_workspace_id.clone()),
-        actor: options.actor.map(str::to_owned),
-        action: plan.audit_action.to_owned(),
-        target_type: Some("memory".to_owned()),
-        target_id: Some(global_memory_id.clone()),
-        details: Some(details),
-    };
-    global_connection
-        .insert_audit(&generate_audit_id(), &global_audit)
-        .map_err(|error| format!("global audit: {error}"))?;
+        .insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(memory.workspace_id.clone()),
+                actor: options.actor.map(str::to_owned),
+                action: plan.audit_action.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(memory.id.clone()),
+                details: Some(promotion_audit_details(
+                    &memory,
+                    &global_memory_id,
+                    already_promoted,
+                )),
+            },
+        )
+        .map_err(|_| {
+            format!(
+                "global_promotion_origin_audit_pending: global memory {global_memory_id} is committed; retry promotion to repair the origin audit"
+            )
+        })?;
     let (index_status, index_error) = index_job_id.as_ref().map_or_else(
         || ("not_applicable".to_owned(), None),
         |index_job_id| {
@@ -1320,4 +1361,235 @@ mod tests {
             "refusals must carry an actionable repair"
         );
     }
+    struct PublicationFixture {
+        _temp: tempfile::TempDir,
+        source_path: std::path::PathBuf,
+        memory: crate::db::StoredMemory,
+        paths: super::super::global_store::GlobalStorePaths,
+        destination: DbConnection,
+        workspace: String,
+    }
+
+    impl PublicationFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("publication fixture");
+            let (source_path, id) =
+                seeded_workspace(temp.path(), "human_explicit", "Publication advice.");
+            let source = DbConnection::open_file(&source_path).expect("source");
+            source
+                .execute_raw(&format!(
+                    "UPDATE memories SET valid_from = '2020-01-01T00:00:00Z', valid_to = '2099-01-01T00:00:00Z' WHERE id = '{id}'"
+                ))
+                .expect("authored lifetime");
+            let memory = source
+                .get_memory(&id)
+                .expect("source read")
+                .expect("source row");
+            source.close().expect("close source");
+            let paths = super::super::global_store::GlobalStorePaths::from_root(
+                &temp.path().join("global"),
+            );
+            let (destination, workspace) =
+                super::super::global_store::open_or_create_global_store(&paths)
+                    .expect("destination");
+            Self {
+                _temp: temp,
+                source_path,
+                memory,
+                paths,
+                destination,
+                workspace,
+            }
+        }
+
+        fn publish(&self) -> crate::db::Result<(String, bool, Option<String>)> {
+            persist_global_promotion(
+                &self.destination,
+                &self.workspace,
+                &self.memory,
+                Some("test-actor"),
+                chrono::Utc::now(),
+            )
+        }
+
+        fn count(&self, table: &str) -> u64 {
+            self.destination
+                .count_table_rows(table)
+                .expect("durable count")
+        }
+    }
+
+    #[test]
+    fn global_publication_preserves_lifetime_and_commits_one_repairable_job() {
+        let f = PublicationFixture::new();
+        let before = (
+            f.count("memories"),
+            f.count("search_index_jobs"),
+            f.count("audit_log"),
+        );
+        let (id, already, job) = f.publish().expect("commit");
+        assert!(!already && job.is_some());
+        let copy = f
+            .destination
+            .get_memory(&id)
+            .expect("read")
+            .expect("global copy");
+        assert_eq!(copy.valid_from, f.memory.valid_from);
+        assert_eq!(copy.valid_to, f.memory.valid_to);
+        assert_eq!(copy.content, f.memory.content);
+        assert_eq!(copy.trust_class, f.memory.trust_class);
+        assert_eq!(
+            copy.provenance_uri,
+            Some(promotion_provenance_uri(&f.memory.workspace_id, &f.memory.id))
+        );
+        assert_eq!(
+            (
+                f.count("memories"),
+                f.count("search_index_jobs"),
+                f.count("audit_log"),
+            ),
+            (before.0 + 1, before.1 + 1, before.2 + 1)
+        );
+        let rows = f
+            .destination
+            .query(
+                "SELECT document_id FROM search_index_jobs WHERE id = ?1",
+                &[sqlmodel_core::Value::Text(job.expect("job id"))],
+            )
+            .expect("durable repair job");
+        assert!(matches!(
+            rows[0].get(0),
+            Some(sqlmodel_core::Value::Text(target)) if target == &id
+        ));
+        let (again, already, job) = f.publish().expect("idempotent retry");
+        assert_eq!(again, id);
+        assert!(already && job.is_none());
+        assert_eq!(f.count("memories"), before.0 + 1);
+        assert_eq!(f.count("search_index_jobs"), before.1 + 1);
+    }
+
+    #[test]
+    fn missing_index_queue_rolls_back_the_memory_and_its_tags() {
+        let f = PublicationFixture::new();
+        let before = (
+            f.count("memories"),
+            f.count("memory_tags"),
+            f.count("audit_log"),
+        );
+        f.destination
+            .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_promotion_jobs")
+            .expect("plant queue failure");
+        assert!(f.publish().is_err());
+        assert_eq!(
+            (
+                f.count("memories"),
+                f.count("memory_tags"),
+                f.count("audit_log"),
+            ),
+            before
+        );
+        f.destination
+            .execute_raw("ALTER TABLE unavailable_promotion_jobs RENAME TO search_index_jobs")
+            .expect("repair queue");
+        assert!(f.publish().expect("retry after rollback").2.is_some());
+    }
+
+    #[test]
+    fn missing_destination_audit_rolls_back_memory_tags_and_index_work() {
+        let f = PublicationFixture::new();
+        let before = (
+            f.count("memories"),
+            f.count("memory_tags"),
+            f.count("search_index_jobs"),
+        );
+        f.destination
+            .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_promotion_audit")
+            .expect("plant last-step failure");
+        assert!(f.publish().is_err());
+        assert_eq!(
+            (
+                f.count("memories"),
+                f.count("memory_tags"),
+                f.count("search_index_jobs"),
+            ),
+            before
+        );
+        f.destination
+            .execute_raw("ALTER TABLE unavailable_promotion_audit RENAME TO audit_log")
+            .expect("repair audit");
+        let (id, already, job) = f.publish().expect("retry after rollback");
+        assert!(!already && job.is_some());
+        assert!(
+            f.destination
+                .get_memory(&id)
+                .expect("read committed retry")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn origin_audit_failure_reports_committed_destination_and_retry_does_not_duplicate() {
+        let f = PublicationFixture::new();
+        let source = DbConnection::open_file(&f.source_path).expect("source");
+        source
+            .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_origin_audit")
+            .expect("plant origin failure");
+        let options = PromoteGlobalOptions {
+            workspace_database_path: &f.source_path,
+            memory_id: &f.memory.id,
+            global_paths: &f.paths,
+            global_lane_available: true,
+            actor: None,
+            dry_run: false,
+        };
+        let error = promote_global(&options).expect_err("explicit committed-state error");
+        assert!(error.contains("global_promotion_origin_audit_pending"));
+        let copy = f
+            .destination
+            .find_active_memory_by_content(&f.workspace, &f.memory.content)
+            .expect("read")
+            .expect("committed destination");
+        assert!(error.contains(&copy.id));
+        assert_eq!(f.count("search_index_jobs"), 1);
+        source
+            .execute_raw("ALTER TABLE unavailable_origin_audit RENAME TO audit_log")
+            .expect("repair origin audit");
+        let retry = promote_global(&options).expect("repair through re-promotion");
+        assert!(retry.executed && retry.already_promoted);
+        assert_eq!(retry.global_memory_id.as_deref(), Some(copy.id.as_str()));
+        assert_eq!(f.count("memories"), 1);
+        assert_eq!(f.count("search_index_jobs"), 1);
+        assert_eq!(
+            source
+                .get_memory(&f.memory.id)
+                .expect("source read")
+                .expect("source row"),
+            f.memory
+        );
+    }
+
+    #[test]
+    fn unbounded_authored_start_survives_publication_and_remains_idempotent() {
+        let mut f = PublicationFixture::new();
+        let source = DbConnection::open_file(&f.source_path).expect("source");
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET valid_from = NULL WHERE id = '{}'",
+                f.memory.id
+            ))
+            .expect("unbounded source");
+        f.memory = source
+            .get_memory(&f.memory.id)
+            .expect("read")
+            .expect("source row");
+        let (id, already, _) = f.publish().expect("publish unbounded start");
+        assert!(!already);
+        let copy = f.destination.get_memory(&id).expect("read").expect("copy");
+        assert_eq!(copy.valid_from, None);
+        assert_eq!(copy.valid_to, f.memory.valid_to);
+        let (again, already, job) = f.publish().expect("idempotent unbounded start");
+        assert_eq!(again, id);
+        assert!(already && job.is_none());
+    }
+
 }
