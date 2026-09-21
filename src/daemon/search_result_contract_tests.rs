@@ -97,9 +97,8 @@ fn emitted_method_value(report: &SearchReport, explain: bool, delivery: bool) ->
     let mut session = SearchAdvisorySession::default();
     let trace = SearchPerformanceTrace::default();
     let timing = DaemonSearchTiming::from_trace(Duration::from_millis(7), &trace);
-    let performance = explain.then(|| {
-        report.performance_explain_json_with_trace(SpeedMode::Instant, explain, &trace)
-    });
+    let performance = explain
+        .then(|| report.performance_explain_json_with_trace(SpeedMode::Instant, explain, &trace));
     let method = if delivery {
         let mut reservation = session.reserve_delivery("contract-workspace");
         DaemonSearchResult::from_report_for_delivery(
@@ -184,7 +183,10 @@ fn assert_round_trip(report: &SearchReport, explain: bool, delivery: bool) {
 fn canonical_minimal_reports_round_trip_every_source_and_rendering() {
     for source in SOURCES {
         let report = report(source, false);
-        assert_eq!(report.data_json()["results"][0].get("calibrationId"), Some(&Value::Null));
+        assert_eq!(
+            report.data_json()["results"][0].get("calibrationId"),
+            Some(&Value::Null)
+        );
         for explain in [false, true] {
             for delivery in [false, true] {
                 assert_round_trip(&report, explain, delivery);
@@ -200,9 +202,20 @@ fn canonical_rich_reports_round_trip_every_source_and_rendering() {
         let document = report.data_json()["results"][0].clone();
         assert_eq!(document["calibrationId"], CALIBRATION_ID);
         for field in [
-            "memoryId", "metadata", "fastScore", "qualityScore", "lexicalScore",
-            "rerankScore", "content", "content_truncated", "driftHint", "validFrom",
-            "validTo", "validityStatus", "validityWindowKind", "explanation",
+            "memoryId",
+            "metadata",
+            "fastScore",
+            "qualityScore",
+            "lexicalScore",
+            "rerankScore",
+            "content",
+            "content_truncated",
+            "driftHint",
+            "validFrom",
+            "validTo",
+            "validityStatus",
+            "validityWindowKind",
+            "explanation",
         ] {
             assert!(document.get(field).is_some(), "fixture must emit {field}");
         }
@@ -228,9 +241,16 @@ fn empty_canonical_reports_round_trip_without_a_result_fixture() {
 
 #[test]
 fn calibration_id_accepts_string_null_and_legacy_absence_without_rewriting() {
-    for id in [None, Some(Value::Null), Some(json!(CALIBRATION_ID)), Some(json!(""))] {
+    for id in [
+        None,
+        Some(Value::Null),
+        Some(json!(CALIBRATION_ID)),
+        Some(json!("")),
+    ] {
         let mut wire = emitted_method_value(&report(ScoreSource::Lexical, false), false, true);
-        let document = wire["response"]["data"]["results"][0].as_object_mut().unwrap();
+        let document = wire["response"]["data"]["results"][0]
+            .as_object_mut()
+            .unwrap();
         document.remove("calibrationId");
         if let Some(id) = id {
             document.insert("calibrationId".to_owned(), id);
@@ -246,20 +266,38 @@ fn calibration_id_accepts_string_null_and_legacy_absence_without_rewriting() {
 
 #[test]
 fn calibration_id_rejects_non_string_non_null_types_with_result_location() {
-    for invalid in [json!(true), json!(false), json!(1), json!(0.5), json!([]), json!({})] {
+    for invalid in [
+        json!(true),
+        json!(false),
+        json!(1),
+        json!(0.5),
+        json!([]),
+        json!({}),
+    ] {
         let mut wire = emitted_method_value(&report(ScoreSource::Lexical, false), false, true);
         let mut bad = wire["response"]["data"]["results"][0].clone();
         bad["calibrationId"] = invalid;
-        wire["response"]["data"]["results"].as_array_mut().unwrap().push(bad);
+        wire["response"]["data"]["results"]
+            .as_array_mut()
+            .unwrap()
+            .push(bad);
         wire["response"]["data"]["resultCount"] = json!(2);
         let reason = DaemonSearchResult::from_value(wire).expect_err("invalid ID must fail closed");
-        assert_eq!(reason, "canonical search result[1].calibrationId must be a string or null");
+        assert_eq!(
+            reason,
+            "canonical search result[1].calibrationId must be a string or null"
+        );
     }
 }
 
 #[test]
 fn unexpected_document_fields_still_fail_closed() {
-    for field in ["newCanonicalField", "doc_id", "contentPreview", "calibration_id"] {
+    for field in [
+        "newCanonicalField",
+        "doc_id",
+        "contentPreview",
+        "calibration_id",
+    ] {
         let mut document = emitted_result();
         document[field] = Value::Null;
         let reason = validate_canonical_search_result(&document, 7).unwrap_err();
@@ -281,44 +319,76 @@ fn every_required_document_field_remains_required() {
 #[test]
 fn existing_document_type_score_and_vocabulary_checks_remain_strict() {
     for (field, invalid) in [
-        ("docId", Value::Null), ("why", json!(false)), ("provenance", json!({})),
-        ("calibrated", json!("true")), ("score", Value::Null), ("score", json!("0.5")),
-        ("relevanceScore", json!(-0.1)), ("relevanceScore", json!(1.1)),
-        ("scoreKind", json!("unit_normalized")), ("scoreKind", json!("unknown")),
-        ("source", json!("unknown")), ("scoreInterval", Value::Null),
-        ("scoreInterval", json!([0.0])), ("scoreInterval", json!([0.0, 0.5, 1.0])),
-        ("scoreInterval", json!([0.0, "1"])), ("scoreInterval", json!([0.0, null])),
-        ("coverageGuarantee", json!(-0.1)), ("coverageGuarantee", json!(1.1)),
+        ("docId", Value::Null),
+        ("why", json!(false)),
+        ("provenance", json!({})),
+        ("calibrated", json!("true")),
+        ("score", Value::Null),
+        ("score", json!("0.5")),
+        ("relevanceScore", json!(-0.1)),
+        ("relevanceScore", json!(1.1)),
+        ("scoreKind", json!("unit_normalized")),
+        ("scoreKind", json!("unknown")),
+        ("source", json!("unknown")),
+        ("scoreInterval", Value::Null),
+        ("scoreInterval", json!([0.0])),
+        ("scoreInterval", json!([0.0, 0.5, 1.0])),
+        ("scoreInterval", json!([0.0, "1"])),
+        ("scoreInterval", json!([0.0, null])),
+        ("coverageGuarantee", json!(-0.1)),
+        ("coverageGuarantee", json!(1.1)),
         ("coverageGuarantee", json!("0.95")),
     ] {
         let mut document = emitted_result();
         document[field] = invalid;
-        assert!(validate_canonical_search_result(&document, 0).is_err(), "accepted invalid {field}");
+        assert!(
+            validate_canonical_search_result(&document, 0).is_err(),
+            "accepted invalid {field}"
+        );
     }
 }
 
 fn schemas() -> (Value, Value) {
-    let canonical = serde_json::from_str(include_str!("../../docs/schemas/ee.search.document.v1.json"))
-        .expect("canonical document schema");
-    let daemon: Value = serde_json::from_str(include_str!("../../docs/schemas/ee.daemon.search.response.v3.json"))
-        .expect("daemon response schema");
+    let canonical = serde_json::from_str(include_str!(
+        "../../docs/schemas/ee.search.document.v1.json"
+    ))
+    .expect("canonical document schema");
+    let daemon: Value = serde_json::from_str(include_str!(
+        "../../docs/schemas/ee.daemon.search.response.v3.json"
+    ))
+    .expect("daemon response schema");
     (canonical, daemon["$defs"]["searchDocument"].clone())
 }
 
 fn string_set(value: &Value) -> BTreeSet<&str> {
-    value.as_array().expect("schema array").iter()
-        .map(|value| value.as_str().expect("schema string")).collect()
+    value
+        .as_array()
+        .expect("schema array")
+        .iter()
+        .map(|value| value.as_str().expect("schema string"))
+        .collect()
 }
 
 #[test]
 fn canonical_and_daemon_schema_fields_exactly_match_the_rust_validator() {
     let (canonical, daemon) = schemas();
     let accepted: BTreeSet<_> = REQUIRED.iter().chain(OPTIONAL).copied().collect();
-    assert_eq!(accepted.len(), REQUIRED.len() + OPTIONAL.len(), "duplicate validator fields");
+    assert_eq!(
+        accepted.len(),
+        REQUIRED.len() + OPTIONAL.len(),
+        "duplicate validator fields"
+    );
     for schema in [&canonical, &daemon] {
-        let published: BTreeSet<_> = schema["properties"].as_object().unwrap()
-            .keys().map(String::as_str).collect();
-        assert_eq!(accepted, published, "published and accepted result fields drifted");
+        let published: BTreeSet<_> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            accepted, published,
+            "published and accepted result fields drifted"
+        );
         assert_eq!(schema["additionalProperties"], false);
     }
 }
@@ -329,14 +399,26 @@ fn schema_required_fields_pin_the_only_legacy_compatibility_exception() {
     let required: BTreeSet<_> = REQUIRED.iter().copied().collect();
     assert_eq!(string_set(&daemon["required"]), required);
     let mut canonical_required = string_set(&canonical["required"]);
-    assert!(canonical_required.remove("calibrationId"), "current emitters must carry calibrationId");
-    assert_eq!(canonical_required, required, "new required fields need an explicit compatibility decision");
+    assert!(
+        canonical_required.remove("calibrationId"),
+        "current emitters must carry calibrationId"
+    );
+    assert_eq!(
+        canonical_required, required,
+        "new required fields need an explicit compatibility decision"
+    );
     for schema in [&canonical, &daemon] {
         let properties = schema["properties"].as_object().unwrap();
         for field in string_set(&schema["required"]) {
-            assert!(properties.contains_key(field), "required but undeclared: {field}");
+            assert!(
+                properties.contains_key(field),
+                "required but undeclared: {field}"
+            );
         }
-        assert_eq!(schema["properties"]["calibrationId"]["type"], json!(["string", "null"]));
+        assert_eq!(
+            schema["properties"]["calibrationId"]["type"],
+            json!(["string", "null"])
+        );
     }
 }
 
@@ -344,7 +426,10 @@ fn schema_required_fields_pin_the_only_legacy_compatibility_exception() {
 fn published_score_and_source_vocabularies_are_accepted_without_legacy_aliases() {
     let (canonical, daemon) = schemas();
     for field in ["scoreKind", "source"] {
-        assert_eq!(canonical["properties"][field]["enum"], daemon["properties"][field]["enum"]);
+        assert_eq!(
+            canonical["properties"][field]["enum"],
+            daemon["properties"][field]["enum"]
+        );
         for value in canonical["properties"][field]["enum"].as_array().unwrap() {
             let mut document = emitted_result();
             document[field] = value.clone();

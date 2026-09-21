@@ -116,7 +116,12 @@ mod tests {
             document.insert(*field, Value::Null);
         }
         let value = document.into_json();
-        let emitted: BTreeSet<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let emitted: BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         let accepted: BTreeSet<_> = REQUIRED.iter().chain(OPTIONAL).copied().collect();
         assert_eq!(emitted, accepted);
         assert_eq!(accepted.len(), ALL.len(), "duplicate wire field name");

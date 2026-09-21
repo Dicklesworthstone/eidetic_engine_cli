@@ -121,6 +121,7 @@ pub mod retrieval_affinity;
 pub mod rule;
 pub mod sandbox;
 pub mod search;
+pub(crate) mod search_result_document;
 pub mod sentinel;
 pub mod session_budget;
 pub mod shadow_tuning;

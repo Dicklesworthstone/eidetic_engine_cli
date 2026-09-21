@@ -37,8 +37,15 @@ mod tests {
         let degradation = daemon_search_fallback_degradation(reason);
         assert_eq!(degradation.code, "daemon_search_fallback");
         assert_eq!(degradation.severity, "warning");
-        assert_eq!(degradation.repair.as_deref(), Some("ee daemon status --json"));
-        assert!(degradation.message.contains(&error), "{}", degradation.message);
+        assert_eq!(
+            degradation.repair.as_deref(),
+            Some("ee daemon status --json")
+        );
+        assert!(
+            degradation.message.contains(&error),
+            "{}",
+            degradation.message
+        );
     }
 
     #[test]
@@ -76,6 +83,10 @@ mod tests {
             .map_err(DaemonSearchFallbackReason::search_response_drift)
             .unwrap_err();
         let degradation = daemon_search_fallback_degradation(reason);
-        assert!(degradation.message.contains(&expected), "{}", degradation.message);
+        assert!(
+            degradation.message.contains(&expected),
+            "{}",
+            degradation.message
+        );
     }
 }

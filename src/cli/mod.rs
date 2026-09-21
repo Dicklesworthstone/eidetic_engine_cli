@@ -48734,7 +48734,9 @@ fn daemon_search_attempt_timeout_from_env_value(value: Option<&str>) -> std::tim
         )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+mod daemon_search_diagnostics;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum DaemonSearchFallbackReason {
     UnsupportedCliOption(&'static str),
     CapabilityRoundTripFailed,
@@ -48751,13 +48753,14 @@ enum DaemonSearchFallbackReason {
     SearchMethodError,
     SearchResultMissing,
     SearchResponseDrift,
+    SearchResponseValidationError(String),
     DeadlineExceeded,
     #[cfg(not(unix))]
     PlatformUnsupported,
 }
 
 impl DaemonSearchFallbackReason {
-    const fn as_str(self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
             Self::UnsupportedCliOption(option) => option,
             Self::CapabilityRoundTripFailed => "capability round-trip failed",
@@ -48774,7 +48777,9 @@ impl DaemonSearchFallbackReason {
             Self::SearchRoundTripFailed => "search round-trip failed",
             Self::SearchMethodError => "search method returned an error",
             Self::SearchResultMissing => "search result missing",
-            Self::SearchResponseDrift => "search response drift",
+            Self::SearchResponseDrift | Self::SearchResponseValidationError(_) => {
+                "search response drift"
+            }
             Self::DeadlineExceeded => "capability and search deadline exceeded",
             #[cfg(not(unix))]
             Self::PlatformUnsupported => "daemon search is unsupported on this platform",
@@ -48783,7 +48788,7 @@ impl DaemonSearchFallbackReason {
 }
 
 fn daemon_search_fallback_degradation(reason: DaemonSearchFallbackReason) -> SearchDegradation {
-    SearchDegradation::daemon_fallback(reason.as_str())
+    SearchDegradation::daemon_fallback(&reason.to_string())
 }
 
 fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFallbackReason> {
@@ -48936,7 +48941,7 @@ fn search_via_daemon_before(
     )?;
     let renderings = DaemonSearchResult::from_value(result)
         .and_then(DaemonSearchResult::into_renderings)
-        .map_err(|_| DaemonSearchFallbackReason::SearchResponseDrift)?;
+        .map_err(DaemonSearchFallbackReason::search_response_drift)?;
     if explain_performance && renderings.performance.is_none() {
         return Err(DaemonSearchFallbackReason::SearchResponseDrift);
     }
@@ -49105,7 +49110,7 @@ fn pack_search_via_daemon(
                         .cloned()
                         .ok_or(DaemonSearchFallbackReason::SearchResponseDrift)?;
                     let handoff = crate::core::search::PackSearchHandoff::from_value(handoff)
-                        .map_err(|_| DaemonSearchFallbackReason::SearchResponseDrift)?;
+                        .map_err(DaemonSearchFallbackReason::search_response_drift)?;
                     if !handoff.matches_request(&options) {
                         return Err(DaemonSearchFallbackReason::SearchResponseDrift);
                     }

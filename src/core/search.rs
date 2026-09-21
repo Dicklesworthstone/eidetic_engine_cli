@@ -3552,36 +3552,39 @@ impl SearchReport {
         let results: Vec<serde_json::Value> = visible_results
             .iter()
             .map(|hit| {
+                use crate::core::search_result_document::{
+                    SearchResultDocument, SearchResultField as Field,
+                };
                 let (provenance, provenance_redacted_patterns) =
                     hit.provenance_json(output_redaction_enabled);
-                let mut obj = serde_json::json!({
-                    "docId": hit.doc_id,
-                    "score": hit.score,
-                    "relevanceScore": round_metric_f32(hit.relevance_score()),
-                    "scoreKind": hit.score_kind(),
-                    "calibrationId": search_hit_calibration_id_json(hit),
-                    "scoreInterval": search_hit_score_interval_json(hit),
-                    "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
-                    "calibrated": search_hit_calibrated_json(hit),
-                    "source": hit.source.as_str(),
-                    "why": hit.why(),
-                    "provenance": provenance,
-                });
-                if let Some(obj_map) = obj.as_object_mut() {
+                let mut obj_map = SearchResultDocument::from([
+                    (Field::DocId, serde_json::json!(hit.doc_id)),
+                    (Field::Score, serde_json::json!(hit.score)),
+                    (Field::RelevanceScore, serde_json::json!(round_metric_f32(hit.relevance_score()))),
+                    (Field::ScoreKind, serde_json::json!(hit.score_kind())),
+                    (Field::CalibrationId, serde_json::json!(search_hit_calibration_id_json(hit))),
+                    (Field::ScoreInterval, serde_json::json!(search_hit_score_interval_json(hit))),
+                    (Field::CoverageGuarantee, serde_json::json!(search_hit_coverage_guarantee_json(hit))),
+                    (Field::Calibrated, serde_json::json!(search_hit_calibrated_json(hit))),
+                    (Field::Source, serde_json::json!(hit.source.as_str())),
+                    (Field::Why, serde_json::json!(hit.why())),
+                    (Field::Provenance, serde_json::json!(provenance)),
+                ]);
+                {
                     if let Some(memory_id) = hit.memory_id() {
-                        obj_map.insert("memoryId".to_string(), serde_json::json!(memory_id));
+                        obj_map.insert(Field::MemoryId, serde_json::json!(memory_id));
                     }
                     if let Some(fast) = hit.fast_score {
-                        obj_map.insert("fastScore".to_string(), serde_json::json!(fast));
+                        obj_map.insert(Field::FastScore, serde_json::json!(fast));
                     }
                     if let Some(quality) = hit.quality_score {
-                        obj_map.insert("qualityScore".to_string(), serde_json::json!(quality));
+                        obj_map.insert(Field::QualityScore, serde_json::json!(quality));
                     }
                     if let Some(lexical) = hit.lexical_score {
-                        obj_map.insert("lexicalScore".to_string(), serde_json::json!(lexical));
+                        obj_map.insert(Field::LexicalScore, serde_json::json!(lexical));
                     }
                     if let Some(rerank) = hit.rerank_score {
-                        obj_map.insert("rerankScore".to_string(), serde_json::json!(rerank));
+                        obj_map.insert(Field::RerankScore, serde_json::json!(rerank));
                     }
                     if let Some(ref meta) = hit.metadata {
                         let (metadata, mut redacted_patterns) =
@@ -3599,32 +3602,28 @@ impl SearchReport {
                             // parameter in scope here.
                             let (rendered, truncated) =
                                 search_content_for_preview(&text, preview);
-                            obj_map.insert("content".to_string(), serde_json::json!(rendered));
+                            obj_map.insert(Field::Content, serde_json::json!(rendered));
                             if truncated {
-                                obj_map.insert(
-                                    "content_truncated".to_string(),
+                                obj_map.insert(Field::ContentTruncated,
                                     serde_json::json!(true),
                                 );
                             }
                         }
-                        obj_map.insert("metadata".to_string(), metadata);
+                        obj_map.insert(Field::Metadata, metadata);
                         if let Some(drift_hint) = meta.get("driftHint") {
-                            obj_map.insert("driftHint".to_string(), drift_hint.clone());
+                            obj_map.insert(Field::DriftHint, drift_hint.clone());
                         }
                         if let MeshQueryVisibility::Allowed(provenance) =
                             mesh_query_visibility(Some(meta))
                         {
-                            obj_map.insert("meshProvenance".to_string(), provenance.to_json());
+                            obj_map.insert(Field::MeshProvenance, provenance.to_json());
                             if let Some(adjustment) = meta.get("_ee_mesh_trust_adjustment") {
-                                obj_map
-                                    .insert("meshTrustAdjustment".to_string(), adjustment.clone());
+                                obj_map.insert(Field::MeshTrustAdjustment, adjustment.clone());
                             }
                         }
                         if !redacted_patterns.is_empty() {
-                            obj_map
-                                .insert("contentRedacted".to_string(), serde_json::json!(true));
-                            obj_map.insert(
-                                "redactions".to_string(),
+                            obj_map.insert(Field::ContentRedacted, serde_json::json!(true));
+                            obj_map.insert(Field::Redactions,
                                 serde_json::json!(
                                     redacted_patterns
                                         .iter()
@@ -3637,26 +3636,24 @@ impl SearchReport {
                             );
                         }
                         if metadata_bool(meta, "tombstoned").unwrap_or(false) {
-                            obj_map.insert("tombstoned".to_string(), serde_json::json!(true));
+                            obj_map.insert(Field::Tombstoned, serde_json::json!(true));
                             if let Some(tombstoned_at) = metadata_string(meta, "tombstoned_at") {
-                                obj_map.insert(
-                                    "tombstonedAt".to_string(),
+                                obj_map.insert(Field::TombstonedAt,
                                     serde_json::json!(tombstoned_at),
                                 );
                             }
                         }
                         if let Some(valid_from) = metadata_string(meta, "valid_from") {
-                            obj_map.insert("validFrom".to_string(), serde_json::json!(valid_from));
+                            obj_map.insert(Field::ValidFrom, serde_json::json!(valid_from));
                         }
                         if let Some(valid_to) = metadata_string(meta, "valid_to") {
-                            obj_map.insert("validTo".to_string(), serde_json::json!(valid_to));
+                            obj_map.insert(Field::ValidTo, serde_json::json!(valid_to));
                         }
                         if let Some(status) = metadata_string(meta, "validity_status") {
-                            obj_map.insert("validityStatus".to_string(), serde_json::json!(status));
+                            obj_map.insert(Field::ValidityStatus, serde_json::json!(status));
                         }
                         if let Some(kind) = metadata_string(meta, "validity_window_kind") {
-                            obj_map
-                                .insert("validityWindowKind".to_string(), serde_json::json!(kind));
+                            obj_map.insert(Field::ValidityWindowKind, serde_json::json!(kind));
                         }
                     }
                     if let Some(ref explanation) = hit.explanation {
@@ -3673,8 +3670,7 @@ impl SearchReport {
                                 })
                             })
                             .collect();
-                        obj_map.insert(
-                            "explanation".to_string(),
+                        obj_map.insert(Field::Explanation,
                             serde_json::json!({
                                 "summary": explanation.summary,
                                 "factors": factors,
@@ -3682,7 +3678,7 @@ impl SearchReport {
                         );
                     }
                 }
-                obj
+                obj_map.into_json()
             })
             .collect();
         let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
