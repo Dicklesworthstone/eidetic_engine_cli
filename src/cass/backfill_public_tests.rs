@@ -3,7 +3,8 @@
 #[cfg(unix)]
 #[test]
 fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> TestResult {
-    for (initially_include_spans, migrated_history) in [(false, false), (true, false), (true, true)] {
+    for (initially_include_spans, migrated_history) in [(false, false), (true, false), (true, true)]
+    {
         let root = unique_test_dir("cass-public-backfill")?;
         let bin_dir = root.join("bin");
         let workspace = root.join("workspace");
@@ -117,7 +118,11 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
             &json!("ee.cass.session_checkpoint.v1"),
             "checkpoint schema",
         )?;
-        ensure_equal(&checkpoint["indexJobId"], &json!(new_job), "current snapshot job")?;
+        ensure_equal(
+            &checkpoint["indexJobId"],
+            &json!(new_job),
+            "current snapshot job",
+        )?;
         ensure_equal(
             &checkpoint["previousIndexJobId"],
             &json!(old_job),
@@ -129,16 +134,20 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
                 .and_then(|revision| revision.strip_prefix("blake3:"))
                 .is_some_and(|hash| {
                     hash.len() == 64
-                        && hash.bytes().all(|byte| {
-                            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                        })
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 }),
             "checkpoint must attest a canonical transcript revision",
         )?;
         let original_metadata: JsonValue =
             serde_json::from_str(old_session.metadata_json.as_deref().unwrap_or("{}"))
                 .map_err(|e| e.to_string())?;
-        ensure_equal(&metadata, &original_metadata, "original metadata remains exact")?;
+        ensure_equal(
+            &metadata,
+            &original_metadata,
+            "original metadata remains exact",
+        )?;
         let mut expected_session = old_session;
         expected_session.metadata_json = refreshed_session.metadata_json.clone();
         ensure_equal(
@@ -190,10 +199,18 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
             ))
             .map_err(|e| e.to_string())?;
             let retry = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
-            ensure_equal(&retry.sessions_imported, &0, "unchanged retry does not import")?;
+            ensure_equal(
+                &retry.sessions_imported,
+                &0,
+                "unchanged retry does not import",
+            )?;
             ensure_equal(&retry.sessions_skipped, &1, "unchanged retry skips")?;
             ensure_equal(&retry.spans_imported, &0, "no repeated span accounting")?;
-            ensure_equal(&retry.index_jobs_queued, &1, "unfinished publication remains visible")?;
+            ensure_equal(
+                &retry.index_jobs_queued,
+                &1,
+                "unfinished publication remains visible",
+            )?;
             ensure_equal(
                 &retry.sessions[0].index_job_id.as_ref(),
                 &Some(&new_job),

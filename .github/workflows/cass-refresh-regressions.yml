@@ -15,7 +15,7 @@ permissions:
   contents: read
 concurrency:
   group: cass-refresh-regressions-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   retained-session-import:
     runs-on: ubuntu-latest

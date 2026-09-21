@@ -627,8 +627,13 @@ mod canonical_reference_tests {
     }
 
     fn row_counts(db: &DbConnection) -> [i64; 4] {
-        ["sessions", "evidence_spans", "search_index_jobs", "audit_log"]
-            .map(|table| db.count_table_rows(table).unwrap())
+        [
+            "sessions",
+            "evidence_spans",
+            "search_index_jobs",
+            "audit_log",
+        ]
+        .map(|table| db.count_table_rows(table).unwrap())
     }
 
     fn assert_refresh_refused_without_writes(
@@ -689,7 +694,10 @@ mod canonical_reference_tests {
                 let job = grown.index_job_id.unwrap();
                 assert_ne!(job, old_job);
                 assert_eq!(
-                    db.get_search_index_job(&job).unwrap().unwrap().status_enum(),
+                    db.get_search_index_job(&job)
+                        .unwrap()
+                        .unwrap()
+                        .status_enum(),
                     Some(SearchIndexJobStatus::Pending)
                 );
                 for row in &retained {
@@ -719,8 +727,7 @@ mod canonical_reference_tests {
                 assert_eq!(db.get_session(&id).unwrap(), saved);
                 db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
                     .unwrap();
-                let completed =
-                    refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+                let completed = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
                 assert!(!completed.changed);
                 assert!(completed.index_job_id.is_none());
                 assert_eq!(row_counts(&db), before_retry);
