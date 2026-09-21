@@ -186,6 +186,180 @@ pub fn normalize_pack_slo_measurements(value: &mut Value) -> Result<bool, String
     Ok(true)
 }
 
+/// The degraded codes whose presence is decided by WALL-CLOCK TIME.
+///
+/// One entry, and the product already calls it non-reproducible in its own
+/// words (src/pack/mod.rs, `pack_assembly_elapsed_degradation`): it "reports
+/// wall-clock time, which is not reproducible, and it is therefore kept out of
+/// pack identity". Kept out of IDENTITY, but still emitted into the response
+/// payload — which is how a golden came to assert it.
+const TIMING_DEGRADED_CODES: &[&str] = &[crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+
+/// Opening words of the timing degradation as rendered into markdown.
+///
+/// The markdown body carries severity + message + repair and NOT the `code`, so
+/// the bullet can only be matched on message shape. If that wording changes this
+/// stops matching and a comparison goes RED on a slow host, which is the safe
+/// direction: it can never turn into a silent pass.
+const TIMING_DEGRADED_MESSAGE_PREFIX: &str = "Pack assembly took ";
+
+/// Erase the wall-clock degradation and every value derived from it, so a
+/// response reads identically on a fast and a slow host. Returns how many
+/// entries were dropped, so a caller can tell "bit" from "no-op".
+///
+/// THE OTHER HALF OF [`normalize_pack_slo_measurements`], AND IT LIVES HERE FOR
+/// THAT REASON. That function strips the SLO's own timing fields; this one
+/// strips the degradation DERIVED from the same clock. Splitting the two across
+/// src and tests is exactly what let one be scrubbed while the other was
+/// asserted: tests/fixtures/golden/agent/context_pack.json.golden hard-codes
+/// `degradationCount: 2`, so it reads 2 on an idle worker and 3 on a loaded one
+/// (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
+///
+/// Deterministic degradations are untouched, so a comparison keeps asserting
+/// them. A scrub that simply emptied `degraded[]` would be indistinguishable
+/// from this one on a slow host and would delete real evidence on every host.
+pub fn normalize_pack_timing_degradations(value: &mut Value) -> usize {
+    let dropped = strip_timing_degraded_entries(value);
+    if dropped > 0 {
+        adjust_timing_derived_counts(value, dropped);
+    }
+    dropped
+}
+
+/// Filter timing entries out of every `degraded` array, returning the LARGEST
+/// number taken from any single array.
+///
+/// Largest, not total: one logical list is serialized at BOTH `.degraded` and
+/// `.data.degraded`, so summing double-counts and over-corrects every derived
+/// number. Measured in the context pack golden, which carries both.
+fn strip_timing_degraded_entries(value: &mut Value) -> usize {
+    let mut dropped = 0usize;
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "degraded" {
+                    if let Value::Array(items) = child {
+                        let before = items.len();
+                        items.retain(|item| !is_timing_degradation(item));
+                        dropped = dropped.max(before.saturating_sub(items.len()));
+                    }
+                }
+                dropped = dropped.max(strip_timing_degraded_entries(child));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                dropped = dropped.max(strip_timing_degraded_entries(item));
+            }
+        }
+        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+    dropped
+}
+
+fn is_timing_degradation(item: &Value) -> bool {
+    item.get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
+}
+
+/// Bring every value DERIVED from the degraded list back to its fast-host
+/// reading: the numeric count, the count inside prose, and the markdown bullet.
+fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "degradationCount" {
+                    if let Some(count) = child.as_u64() {
+                        *child = Value::from(count.saturating_sub(dropped as u64));
+                        continue;
+                    }
+                }
+                adjust_timing_derived_counts(child, dropped);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                adjust_timing_derived_counts(item, dropped);
+            }
+        }
+        Value::String(text) => {
+            let without_bullet = strip_timing_degradation_markdown(text);
+            *text = renumber_degraded_signal_prose(&without_bullet, dropped);
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+/// Rewrite "Context includes N degraded signal(s)" down by `dropped`.
+///
+/// The sentence is built from `degraded.len()`, so it counted the timing entry.
+/// The noun is re-pluralized because the renderer pluralizes from the same
+/// count, and 2 -> 1 must read "signal", not "signals".
+fn renumber_degraded_signal_prose(text: &str, dropped: usize) -> String {
+    const PREFIX: &str = "Context includes ";
+    const SUFFIX: &str = " degraded signal";
+    if !text.contains(SUFFIX) {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(PREFIX) {
+        let split = at + PREFIX.len();
+        out.push_str(&rest[..split]);
+        rest = &rest[split..];
+
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let Ok(count) = digits.parse::<usize>() else {
+            continue;
+        };
+        let after_digits = &rest[digits.len()..];
+        if !after_digits.starts_with(SUFFIX) {
+            continue;
+        }
+        let after_noun = &after_digits[SUFFIX.len()..];
+        let tail = after_noun.strip_prefix('s').unwrap_or(after_noun);
+
+        let adjusted = count.saturating_sub(dropped);
+        out.push_str(&adjusted.to_string());
+        out.push_str(SUFFIX);
+        if adjusted != 1 {
+            out.push('s');
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop the rendered markdown bullet for the timing degradation, and the
+/// `- *Repair:*` line that belongs to it.
+fn strip_timing_degradation_markdown(text: &str) -> String {
+    if !text.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+        return text.to_owned();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for line in text.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- **[") && line.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if trimmed.starts_with("- *Repair:*") {
+                continue;
+            }
+            skipping = false;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
 /// Recursively remove volatile fields from a JSON value and emit a structured
 /// test-log event when the J1 log harness is configured.
 pub fn strip_volatile_fields(value: &mut Value) -> VolatileStripReport {
@@ -280,9 +454,201 @@ fn log_volatile_strip(report: &VolatileStripReport) {
 
 #[cfg(test)]
 mod tests {
-    use super::{VOLATILE_FIELD_NAMES, is_volatile_field_name, strip_volatile_fields};
+    use super::{
+        VOLATILE_FIELD_NAMES, is_volatile_field_name, normalize_pack_timing_degradations,
+        strip_volatile_fields,
+    };
 
     type TestResult = Result<(), String>;
+
+    /// Build the two readings the SAME request produces on a fast and a slow
+    /// host, differing only in the wall-clock degradation.
+    ///
+    /// SYNTHETIC ON PURPOSE. This defect is load-sensitive, so a real run on an
+    /// idle worker produces the fast document and proves nothing about the slow
+    /// one. Constructing both is the only way to assert convergence without
+    /// owning the load.
+    fn timing_pair() -> (serde_json::Value, serde_json::Value) {
+        let embed = serde_json::json!({
+            "code": "embed_model_unavailable",
+            "severity": "warning",
+            "message": "Embedding model unavailable; semantic similarity is disabled.",
+        });
+        let freshness = serde_json::json!({
+            "code": "context_evidence_freshness_missing_source",
+            "severity": "low",
+            "message": "Memory evidence freshness is missing_source.",
+        });
+        let timing = serde_json::json!({
+            "code": crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+            "severity": "low",
+            "message": "Pack assembly took 812ms, at or over the standard \
+                        resource-profile elapsed warning threshold of 500ms. \
+                        The pack contents are unaffected.",
+            "repair": "Re-run to see whether the overrun is repeatable.",
+        });
+
+        let deterministic_md = "## Degradations\n\n\
+            - **[warning]** Embedding model unavailable; semantic similarity is disabled.\n  \
+            - *Repair:* `ee index reembed`\n";
+        let slow_md = format!(
+            "{deterministic_md}\
+             - **[low]** Pack assembly took 812ms, at or over the standard \
+             resource-profile elapsed warning threshold of 500ms. The pack \
+             contents are unaffected.\n  \
+             - *Repair:* `Re-run to see whether the overrun is repeatable.`\n"
+        );
+
+        // `degraded` is serialized at BOTH `.degraded` and `.data.degraded`,
+        // which is what the "largest, not total" rule in the stripper exists for.
+        let document = |entries: serde_json::Value, count: u64, md: &str| {
+            let sentence =
+                format!("Context includes {count} degraded signals; semantic embedding is off.");
+            serde_json::json!({
+                "degraded": entries,
+                "data": {
+                    "degraded": entries,
+                    "pack": {
+                        "advisoryBanner": { "degradationCount": count, "summary": sentence },
+                        "text": format!("{sentence}\n\n{md}"),
+                    }
+                }
+            })
+        };
+
+        (
+            document(serde_json::json!([embed, freshness]), 2, deterministic_md),
+            document(serde_json::json!([embed, freshness, timing]), 3, &slow_md),
+        )
+    }
+
+    /// The load-sensitive half of
+    /// bd-context-pack-golden-stale-and-load-sensitive-8ig10: the same request
+    /// must read the same whether the host was busy or idle.
+    #[test]
+    fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
+        let (fast, slow) = timing_pair();
+
+        // NEGATIVE CONTROL: if the fixtures were already equal, every assertion
+        // below would pass against a normalizer that does nothing at all.
+        if fast == slow {
+            return Err(
+                "fixtures are identical before normalization; the test proves nothing".into(),
+            );
+        }
+
+        let mut fast_out = fast.clone();
+        let mut slow_out = slow.clone();
+        let fast_dropped = normalize_pack_timing_degradations(&mut fast_out);
+        let slow_dropped = normalize_pack_timing_degradations(&mut slow_out);
+
+        // It must BITE on the slow document and NO-OP on the fast one. The
+        // returned count is what makes those two distinguishable rather than
+        // inferred from the output.
+        if slow_dropped != 1 {
+            return Err(format!(
+                "slow document must drop exactly 1 entry, dropped {slow_dropped}"
+            ));
+        }
+        if fast_dropped != 0 {
+            return Err(format!(
+                "fast document must drop nothing, dropped {fast_dropped}"
+            ));
+        }
+        if fast_out != fast {
+            return Err(format!(
+                "fast document must be untouched, but changed:\n{fast_out:#}"
+            ));
+        }
+        if fast_out != slow_out {
+            return Err(format!(
+                "host-dependent output: fast and slow normalized differently\n\
+                 fast:\n{fast_out:#}\n\nslow:\n{slow_out:#}"
+            ));
+        }
+
+        // The deterministic degradations must SURVIVE. Emptying `degraded[]`
+        // would satisfy every assertion above and delete real evidence.
+        let codes: Vec<&str> = slow_out
+            .pointer("/data/degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("normalized document lost /data/degraded")?
+            .iter()
+            .filter_map(|e| e.get("code").and_then(serde_json::Value::as_str))
+            .collect();
+        if codes
+            != [
+                "embed_model_unavailable",
+                "context_evidence_freshness_missing_source",
+            ]
+        {
+            return Err(format!(
+                "deterministic degradations must survive, got {codes:?}"
+            ));
+        }
+
+        // And the raw millisecond reading must be gone from the rendered body,
+        // where it rides inside a message rather than in a key.
+        let text = slow_out
+            .pointer("/data/pack/text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("normalized document lost /data/pack/text")?;
+        if text.contains("Pack assembly took ") {
+            return Err(format!(
+                "timing bullet survived in the markdown body:\n{text}"
+            ));
+        }
+
+        println!("surviving codes: {codes:?}");
+        println!("normalized body:\n{text}");
+        Ok(())
+    }
+
+    /// 2 -> 1 must read "signal", not "signals": the renderer pluralizes from
+    /// the same count it prints, so a normalizer that only rewrites the digit
+    /// produces prose the product never emits.
+    #[test]
+    fn dropping_to_one_repluralizes_the_prose() -> TestResult {
+        let mut value = serde_json::json!({
+            "degraded": [
+                {"code": "embed_model_unavailable"},
+                {"code": crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE},
+            ],
+            "summary": "Context includes 2 degraded signals; check the index.",
+        });
+        let dropped = normalize_pack_timing_degradations(&mut value);
+        if dropped != 1 {
+            return Err(format!("expected to drop 1, dropped {dropped}"));
+        }
+        let summary = value["summary"].as_str().unwrap_or_default();
+        if summary != "Context includes 1 degraded signal; check the index." {
+            return Err(format!("prose not re-pluralized: {summary}"));
+        }
+        println!("re-pluralized to: {summary}");
+        Ok(())
+    }
+
+    /// A document with no timing entry must come back byte-identical, so the
+    /// normalizer cannot quietly rewrite deterministic content.
+    #[test]
+    fn a_document_without_a_timing_entry_is_untouched() -> TestResult {
+        let original = serde_json::json!({
+            "degraded": [{"code": "embed_model_unavailable"}],
+            "data": {"pack": {"advisoryBanner": {"degradationCount": 1}}},
+            "summary": "Context includes 1 degraded signal; unrelated.",
+        });
+        let mut value = original.clone();
+        let dropped = normalize_pack_timing_degradations(&mut value);
+        if dropped != 0 {
+            return Err(format!("expected no drop, dropped {dropped}"));
+        }
+        if value != original {
+            return Err(format!(
+                "document was modified with nothing to drop:\n{value:#}"
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn registry_names_are_unique() -> TestResult {

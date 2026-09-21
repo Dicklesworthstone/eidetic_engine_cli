@@ -4506,6 +4506,27 @@ mod tests {
             return Err("pack golden output missing producer SLO measurements".to_owned());
         }
 
+        // ...and the degradation DERIVED from the same clock, which the line
+        // above does not reach (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
+        //
+        // `normalize_pack_slo_measurements` strips the SLO's own timing fields.
+        // It does not touch `degraded[]`, so `pack_assembly_elapsed_over_budget`
+        // was asserted by this golden while the measurement that produces it was
+        // scrubbed -- the volatile channel defined one field short. The golden
+        // hard-codes `degradationCount: 2`, which reads 2 on an idle worker and
+        // 3 on a loaded one, so the test was load-sensitive BY CONSTRUCTION and
+        // would flap independently of any staleness.
+        //
+        // BEFORE the string pass, deliberately: the markdown bullet for this
+        // degradation is matched on its message shape, and it must be removed
+        // while the text is still the renderer's output rather than a scrubbed
+        // derivative of it.
+        //
+        // Regenerating without this would freeze "pack assembly ALWAYS exceeds
+        // its elapsed budget" into the contract -- a property the source
+        // explicitly says is not reproducible.
+        ee::obs::normalize_pack_timing_degradations(&mut value);
+
         normalize_context_pack_json_strings(&mut value);
 
         if let Some(data) = value.get_mut("data") {
