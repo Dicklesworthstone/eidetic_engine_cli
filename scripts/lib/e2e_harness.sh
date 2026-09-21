@@ -296,11 +296,37 @@ log_drop() {
     printf '  [DROP] %s item(s): %s\n' "$count" "$reason" >&2
 }
 
+# e2e_temp_root — THE one place the e2e temp root is resolved (bd-mfqa2).
+#
+# It exists as a function because two call sites need the SAME answer: the
+# workspace creator below, and the cleanup guard in end_temp_workspace. They
+# used to interpolate `${EE_E2E_TMPDIR}` and `${TMPDIR}` independently, and the
+# guard's copy degenerated when they were unset -- `"${EE_E2E_TMPDIR%/}"/*`
+# becomes the pattern `/*`, which matches EVERY absolute path. Measured, with
+# both variables unset (a bare Linux shell, which is the fleet):
+#
+#     /home/user/project   -> MATCH
+#     /etc                 -> MATCH
+#
+# The paths actually passed to that guard are always ones this harness created
+# with `mktemp -d`, so this was defence-in-depth rather than a live deletion
+# bug -- but the defence was absent exactly where the suites run, and it is the
+# only thing standing between a mis-resolved root and a recursive delete of it.
+#
+# The trailing-slash strip and the non-empty floor are both load-bearing: an
+# empty root is what produced the `/*` pattern in the first place.
+e2e_temp_root() {
+    local root="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
+    root="${root%/}"
+    [ -n "$root" ] || root="/tmp"
+    printf '%s' "$root"
+}
+
 # with_temp_workspace <var> — assign an isolated workspace dir (own DB + index)
 # to <var>. Pair with end_temp_workspace. Cleaned up unless EE_E2E_KEEP=1.
 with_temp_workspace() {
     local __var="${1:?with_temp_workspace: variable name required}"
-    local __root="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
+    local __root; __root="$(e2e_temp_root)"
     local __ws; __ws="$(mktemp -d "${__root%/}/ee-wiz-${HARNESS_TEST_NAME}-XXXXXX")"
     mkdir -p "$__ws/db" "$__ws/index"
     export EE_DATABASE_PATH="$__ws/db/ee.db"
@@ -313,9 +339,15 @@ with_temp_workspace() {
 end_temp_workspace() {
     unset EE_DATABASE_PATH EE_INDEX_DIR
     if [ "${EE_E2E_KEEP:-0}" != "1" ]; then
-        local ws
+        # Guard patterns come from e2e_temp_root, which cannot return empty, so
+        # neither arm can collapse to `/*` the way the inline expansions did.
+        local ws root
+        root="$(e2e_temp_root)"
         for ws in "${HARNESS_TMP_WORKSPACES[@]}"; do
-            case "$ws" in /tmp/*|"${TMPDIR%/}"/*|"${EE_E2E_TMPDIR%/}"/*) rm -rf "$ws" 2>/dev/null || true;; esac
+            case "$ws" in
+                "$root"/*|/tmp/*) rm -rf "$ws" 2>/dev/null || true ;;
+                *) printf 'e2e_harness: refusing to clean %s (outside %s)\n' "$ws" "$root" >&2 ;;
+            esac
         done
         HARNESS_TMP_WORKSPACES=()
     fi
