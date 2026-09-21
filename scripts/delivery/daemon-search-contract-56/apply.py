@@ -9,7 +9,9 @@ No downloads, file deletions, branch changes, dependency changes, or force pushe
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import json
+import os
 from pathlib import Path
 import re
 
@@ -35,6 +37,17 @@ ID_CHECK = '''    if result
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def validate_delivery_environment(environment: Mapping[str, str]) -> None:
+    # Actions uses the workflow definition from the triggering commit even
+    # when checkout reads newer main. Older queued definitions stage only the
+    # daemon files: letting them apply this extraction would publish a validator
+    # that imports a core module they never committed. Refuse before any edit.
+    if environment.get("GITHUB_ACTIONS") == "true":
+        require(environment.get("EE_DAEMON_SEARCH_CONTRACT_DELIVERY") == "2",
+                "outdated workflow cannot publish the shared-contract integration; "
+                "use the current Daemon search contract workflow")
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -207,6 +220,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="require every production path to be integrated")
     args = parser.parse_args()
+    validate_delivery_environment(os.environ)
     shared = SHARED.read_text(encoding="utf-8")
     transforms = [(SERVER, lambda text: updated_server(text, CONTRACT.read_text(encoding="utf-8"), shared)),
                   (CORE, updated_core), (SEARCH, lambda text: updated_search(text, shared)),

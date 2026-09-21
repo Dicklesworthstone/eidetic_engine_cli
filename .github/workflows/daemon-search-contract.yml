@@ -27,6 +27,7 @@ jobs:
     permissions:
       contents: write
     env:
+      EE_DAEMON_SEARCH_CONTRACT_DELIVERY: '2'
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'

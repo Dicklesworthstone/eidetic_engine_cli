@@ -60,6 +60,17 @@ fn caller() {
 '''
 
 class DeliveryTests(unittest.TestCase):
+    def test_stale_workflows_cannot_publish_a_partial_integration(self):
+        for version in (None, "1", "unexpected"):
+            environment = {"GITHUB_ACTIONS": "true"}
+            if version is not None:
+                environment["EE_DAEMON_SEARCH_CONTRACT_DELIVERY"] = version
+            with self.assertRaisesRegex(RuntimeError, "outdated workflow"):
+                m.validate_delivery_environment(environment)
+        m.validate_delivery_environment({
+            "GITHUB_ACTIONS": "true", "EE_DAEMON_SEARCH_CONTRACT_DELIVERY": "2",
+        })
+        m.validate_delivery_environment({})
     def test_shared_vocabulary_has_no_duplicate_fields(self):
         r=m.shared_fields(SHARED,'REQUIRED');o=m.shared_fields(SHARED,'OPTIONAL')
         self.assertEqual(len(r),10);self.assertEqual(len(o),21)
