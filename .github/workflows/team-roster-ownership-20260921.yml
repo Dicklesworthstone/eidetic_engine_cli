@@ -1,0 +1,130 @@
+name: Workspace-owned team roster
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/team-roster-ownership-20260921.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: team-roster-ownership-20260921
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Publish reviewed workspace authorization boundary
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo '39ef11549af2315142da911e842476a126ff7cec7f1e5e011c94785a1568600c  scripts/delivery/team-roster-ownership-20260921.patch' | sha256sum --check
+          git apply --check scripts/delivery/team-roster-ownership-20260921.patch
+          git apply scripts/delivery/team-roster-ownership-20260921.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/memory_scope.rs
+          git diff --check
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          assert os.environ['GITHUB_REPOSITORY'] == 'Dicklesworthstone/eidetic_engine_cli'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+          path = 'src/core/memory_scope.rs'
+          assert subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines() == [path]
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+          root = 'https://api.github.com/repos/Dicklesworthstone/eidetic_engine_cli/'
+          def api(method, suffix, data=None):
+              request = urllib.request.Request(root + suffix, method=method,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                      'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json',
+                      'User-Agent': 'ee-roster-ownership'})
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  return json.load(response)
+          original = api('GET', 'git/commits/' + base)
+          blob = api('POST', 'git/blobs', {'encoding': 'utf-8', 'content': pathlib.Path(path).read_text()})
+          assert blob['sha'] == subprocess.check_output(['git', 'hash-object', path]).decode().strip()
+          tree = api('POST', 'git/trees', {'base_tree': original['tree']['sha'], 'tree': [
+              {'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']}]})
+          subprocess.run(['git', 'add', '--', path], check=True)
+          assert tree['sha'] == subprocess.check_output(['git', 'write-tree']).decode().strip()
+          commit = api('POST', 'git/commits', {'tree': tree['sha'], 'parents': [base], 'message':
+              'fix(scope): authorize team producers only through their workspace roster\n\n'
+              'Bind the roster to the addressed workspace before admitting active display\n'
+              'names or origin nodes. Another workspace cannot authorize local producers\n'
+              'or undo local membership removal. Pin binding and roster in one owned read\n'
+              'snapshot; never begin or release a caller-owned snapshot. Preserve the\n'
+              'existing default-roster versus explicit external-store authority boundary.\n'
+              'Missing, broken or unbound stores authorize no team members. No mutations.\n\n'
+              'Add five real-store regressions for cross-workspace grants, active namesakes,\n'
+              'unbound stores, concurrent revocation and failed authority. Upgrade two\n'
+              'existing positive fixtures to real workspace schemas without changing any\n'
+              'assertion. Exact patch/digest, pinned rustfmt and whole-tree checks passed.\n'
+              'Runtime tests follow separately; no runtime success is claimed here.'})
+          api('PATCH', 'git/refs/heads/main', {'sha': commit['sha'], 'force': False})
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'roster-source.log').write_text(json.dumps({
+              'sourceCommit': commit['sha'], 'sourceTree': tree['sha'], 'sourceBlob': blob['sha'],
+              'baseCommit': base}, indent=2))
+          print('Published exact source:', commit['sha'])
+          PY
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: roster-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            roster-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-retrieval-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            eval-diagnostics-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Resolve pinned source dependencies
+        run: |
+          set -euo pipefail
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/roster-build-paths.patch"
+          rustc --version --verbose > "$RUNNER_TEMP/roster-toolchain.log"
+      - name: Execute five authorization and snapshot regressions
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked --lib 'core::memory_scope::tests::roster_ownership_tests::' -- --test-threads=2 > "$RUNNER_TEMP/roster-regressions.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/roster-regressions.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 5 passed; 0 failed;' "$RUNNER_TEMP/roster-regressions.log"
+      - name: Preserve existing scope behavior
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked --lib 'core::memory_scope::tests::' -- --test-threads=2 > "$RUNNER_TEMP/roster-all-scope.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/roster-all-scope.log"
+          test "$status" -eq 0
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/roster-all-scope.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: roster-ownership-verification
+          path: |
+            ${{ runner.temp }}/roster-*.log
+            ${{ runner.temp }}/roster-*.patch
+          retention-days: 7
