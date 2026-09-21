@@ -150,6 +150,34 @@ fn assert_round_trip(report: &SearchReport, explain: bool, delivery: bool) {
         rendered.response["data"].get("resultPath").is_some(),
         explain
     );
+
+    // Also exercise the daemon envelope's custom decoder, not just a bare
+    // serde_json::Value. Its numeric representation differs from direct JSON
+    // decoding, so this reaches the same uint64 normalization as the client.
+    let envelope = crate::daemon::protocol::DaemonResponse::ok(
+        "contract-request",
+        "contract-agent",
+        Some("contract-workspace".to_owned()),
+        emitted_method_value(report, explain, delivery),
+    );
+    let mut frame = Vec::new();
+    crate::daemon::protocol::write_response(&mut frame, &envelope).expect("frame reply");
+    let length = u32::from_be_bytes(frame[..4].try_into().expect("length prefix")) as usize;
+    assert_eq!(length, frame.len() - 4);
+    let decoded: crate::daemon::protocol::DaemonResponse =
+        serde_json::from_slice(&frame[4..]).expect("decode daemon response envelope");
+    let framed = DaemonSearchResult::from_value(decoded.result.expect("successful reply"))
+        .expect("accept canonical documents after daemon envelope decoding")
+        .into_renderings()
+        .expect("render framed reply");
+    let documents = framed.response["data"]["results"].as_array().unwrap();
+    let canonical = report.data_json();
+    let expected = canonical["results"].as_array().unwrap();
+    assert_eq!(documents.len(), expected.len());
+    for (document, original) in documents.iter().zip(expected) {
+        assert_eq!(document.get("docId"), original.get("docId"));
+        assert_eq!(document.get("calibrationId"), original.get("calibrationId"));
+    }
 }
 
 #[test]
