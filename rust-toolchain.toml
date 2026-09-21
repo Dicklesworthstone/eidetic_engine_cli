@@ -13,9 +13,21 @@
 # host that gates a release and the host that builds the artifact can disagree
 # about what `nightly` means.
 #
-# nightly-2026-08-25 is the date standardised across this workspace during the
-# 2026-08 release run. Bump it deliberately, as its own commit, after a green
-# gate -- never by letting it float.
+# nightly-2026-08-31 is the date standardised across this workspace. Bump it
+# deliberately, as its own commit, after a green gate -- never by letting it
+# float.
+#
+# This sentence named nightly-2026-08-25 until 2026-09-21, six days behind the
+# `channel` two lines below it. Every OPERATIONAL value was already coherent --
+# 46 files pin 08-31, including every workflow that installs a toolchain -- so
+# nothing built wrong; only the sentence explaining the pin was stale. A
+# constant that moves while the prose beside it does not is the same defect
+# whichever direction it points, and it is worse in a rationale than in code,
+# because the rationale is what the next person reads to decide whether the
+# constant is still right.
+#
+# CHANGELOG.md:388 still says 08-25 and MUST KEEP SAYING IT: that entry records
+# what was true at that release, which is the one place the old value belongs.
 [toolchain]
 channel = "nightly-2026-08-31"
 components = ["rustfmt", "clippy"]
