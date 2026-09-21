@@ -1,48 +1,11 @@
 //! Strict validation of canonical search documents received from the daemon.
 //!
-//! Keep the field set explicit: accepting arbitrary additions would hide drift
-//! (and legacy spellings). The tests compare it with both published schemas and
-//! round-trip real `SearchReport` emissions through the served response path.
+//! Field names and requiredness come from the canonical emitter's closed-key
+//! builder. Semantic validation remains fail-closed; the served round-trip
+//! tests also pin both published schemas to this shared declaration.
 
 use super::validate_exact_object_fields;
-
-const REQUIRED: &[&str] = &[
-    "docId",
-    "score",
-    "relevanceScore",
-    "scoreKind",
-    "scoreInterval",
-    "coverageGuarantee",
-    "calibrated",
-    "source",
-    "why",
-    "provenance",
-];
-const OPTIONAL: &[&str] = &[
-    // Current emitters always include this field, but older v3 daemons may
-    // omit it. Its absence means unavailable metadata, not response drift.
-    "calibrationId",
-    "memoryId",
-    "fastScore",
-    "qualityScore",
-    "lexicalScore",
-    "rerankScore",
-    "metadata",
-    "driftHint",
-    "meshProvenance",
-    "meshTrustAdjustment",
-    "content",
-    "content_truncated",
-    "contentRedacted",
-    "redactions",
-    "tombstoned",
-    "tombstonedAt",
-    "validFrom",
-    "validTo",
-    "validityStatus",
-    "validityWindowKind",
-    "explanation",
-];
+use crate::core::search_result_document::{OPTIONAL, REQUIRED};
 
 pub(super) fn validate_canonical_search_result(
     result: &serde_json::Value,
