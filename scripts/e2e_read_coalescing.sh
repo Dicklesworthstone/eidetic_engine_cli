@@ -45,8 +45,14 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
 fi
 
 # bd-2vq2z / e2e harness rule: ExFAT TMPDIR breaks DB opens; default to
-# /private/tmp on macOS unless the caller pins EE_E2E_TMPDIR.
-ROOT_BASE="${EE_E2E_TMPDIR:-/private/tmp}"
+# /private/tmp ON MACOS unless the caller pins EE_E2E_TMPDIR. This comment was
+# already correct and the code below it was not: it applied the macOS path on
+# every platform, including the Linux fleet where that path exists but is
+# root-owned (bd-mfqa2). The shared resolver implements what this comment says.
+# shellcheck source=scripts/lib/e2e_tmproot.sh
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e_tmproot.sh"
+ROOT_BASE="$(e2e_temp_root)"
 ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-read-coalescing-e2e.XXXXXX")"
 WORKSPACE="${ROOT}/workspace"
 HOME_DIR="${ROOT}/home"

@@ -42,7 +42,13 @@ set -euo pipefail
 TEST_ID="diag_contention_real_surface"
 SCHEMA="ee.test_event.v1"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARTIFACT_ROOT="${EE_E2E_TMPDIR:-/private/tmp}/ee-e2e-diag-contention-$$"
+# bd-mfqa2: the macOS temp path is a PLATFORM preference, not a default for
+# every host. Resolved centrally; one wrong root here poisons every derived
+# artifact path below it.
+# shellcheck source=scripts/lib/e2e_tmproot.sh
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e_tmproot.sh"
+ARTIFACT_ROOT="$(e2e_temp_root)/ee-e2e-diag-contention-$$"
 WORKSPACE="$ARTIFACT_ROOT/workspace"
 EVENT_LOG="$ARTIFACT_ROOT/diag_contention_events.jsonl"
 PERF_SUMMARY="$ARTIFACT_ROOT/diag_contention_perf_summary.json"

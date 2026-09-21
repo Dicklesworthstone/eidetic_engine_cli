@@ -41,7 +41,12 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     exit 3
 fi
 
-ROOT_BASE="${EE_E2E_TMPDIR:-/private/tmp}"
+# bd-mfqa2: the macOS temp path is a PLATFORM preference, not a default for
+# every host. Resolved centrally so this script does not re-implement it.
+# shellcheck source=scripts/lib/e2e_tmproot.sh
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e_tmproot.sh"
+ROOT_BASE="$(e2e_temp_root)"
 ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-global-lane-e2e.XXXXXX")"
 WS_A="${ROOT}/ws_a"
 WS_B="${ROOT}/ws_b"
