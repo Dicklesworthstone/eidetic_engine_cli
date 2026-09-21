@@ -45,8 +45,7 @@ fn load_projections(
         // Search/context owns this snapshot. Do not nest BEGIN or release it.
         return projections(options, ids, connection, after_rule_rows);
     }
-    let Ok(connection) = DbConnection::open_file_read_only(&options.resolve_database_path())
-    else {
+    let Ok(connection) = DbConnection::open_file_read_only(&options.resolve_database_path()) else {
         return BTreeMap::new();
     };
     let Ok(snapshot) = memory_revisions::RevisionReadSnapshot::begin(&connection) else {
@@ -576,8 +575,14 @@ mod tests {
         let after = revision_values(&load_projections(&options, &ids, None, || {}));
         assert_eq!(after[RULE]["content"], "Revised generation guidance.");
         assert_eq!(after[SECOND]["content"], "Revised second rule.");
-        assert_ne!(after[RULE]["entity_revision"], before[RULE]["entity_revision"]);
-        assert_ne!(after[SECOND]["entity_revision"], before[SECOND]["entity_revision"]);
+        assert_ne!(
+            after[RULE]["entity_revision"],
+            before[RULE]["entity_revision"]
+        );
+        assert_ne!(
+            after[SECOND]["entity_revision"],
+            before[SECOND]["entity_revision"]
+        );
         let mut indexed = hit(RULE);
         indexed.metadata = Some(before[RULE].clone());
         assert!(admit_hits(&options, vec![indexed], &mut Vec::new(), None).is_empty());
@@ -630,7 +635,10 @@ mod tests {
             before,
             "later reads through the caller still see its pinned source view"
         );
-        assert!(reader.begin_read_snapshot().is_err(), "caller still owns BEGIN");
+        assert!(
+            reader.begin_read_snapshot().is_err(),
+            "caller still owns BEGIN"
+        );
         reader.rollback_read_snapshot().map_err(|e| e.to_string())?;
         assert_ne!(
             revision_values(&load_projections(&options, &ids, Some(&reader), || {})),
@@ -712,13 +720,22 @@ mod tests {
         let (_temp, options, db) = fixture()?;
         insert(&db, RULE, WORKSPACE, "validated")?;
         let rule = db.get_procedural_rule(RULE).map_err(|e| e.to_string())?;
-        let audits = db.count_table_rows("audit_log").map_err(|e| e.to_string())?;
+        let audits = db
+            .count_table_rows("audit_log")
+            .map_err(|e| e.to_string())?;
         let ids = BTreeSet::from([RULE]);
         for _ in 0..3 {
             assert_eq!(load_projections(&options, &ids, None, || {}).len(), 1);
         }
-        assert_eq!(db.get_procedural_rule(RULE).map_err(|e| e.to_string())?, rule);
-        assert_eq!(db.count_table_rows("audit_log").map_err(|e| e.to_string())?, audits);
+        assert_eq!(
+            db.get_procedural_rule(RULE).map_err(|e| e.to_string())?,
+            rule
+        );
+        assert_eq!(
+            db.count_table_rows("audit_log")
+                .map_err(|e| e.to_string())?,
+            audits
+        );
         assert!(!options.workspace_path.join("index").exists());
         assert!(!options.workspace_path.join(".ee").exists());
         Ok(())
@@ -744,20 +761,24 @@ mod tests {
         assert_eq!(actual.len(), ids.len());
         for id in &ids {
             let tags = db.get_rule_tags(id).map_err(|e| e.to_string())?;
-            let sources = db.get_rule_source_memory_ids(id).map_err(|e| e.to_string())?;
+            let sources = db
+                .get_rule_source_memory_ids(id)
+                .map_err(|e| e.to_string())?;
             assert_eq!(relations.tags.get(id), Some(&tags));
             assert_eq!(relations.sources.get(id), Some(&sources));
             let rule = db
                 .get_procedural_rule(id)
                 .map_err(|e| e.to_string())?
                 .ok_or("missing fixture rule")?;
-            let expected = RuleIndexProjection::new(
-                rule,
-                &options.workspace_path.to_string_lossy(),
-                tags,
-                sources,
+            // RuleIndexProjection::new takes `impl Into<PathBuf>`.
+            // `&Cow<'_, str>` does not satisfy that -- PathBuf's blanket
+            // `From<&T> for PathBuf` needs `T: AsRef<OsStr>`, which Cow is not.
+            // Pass the path itself, matching the sibling call at :109.
+            let expected = RuleIndexProjection::new(rule, &options.workspace_path, tags, sources);
+            assert_eq!(
+                canonical_metadata(&actual[id]),
+                canonical_metadata(&expected)
             );
-            assert_eq!(canonical_metadata(&actual[id]), canonical_metadata(&expected));
         }
         Ok(())
     }
@@ -836,7 +857,10 @@ mod tests {
         assert!(!degraded[0].message.contains("unavailable_rule_tags"));
         db.execute_raw("ALTER TABLE unavailable_rule_tags RENAME TO rule_tags")
             .map_err(|e| e.to_string())?;
-        assert_eq!(admit_hits(&options, vec![hit(RULE)], &mut Vec::new(), None).len(), 1);
+        assert_eq!(
+            admit_hits(&options, vec![hit(RULE)], &mut Vec::new(), None).len(),
+            1
+        );
         Ok(())
     }
 
