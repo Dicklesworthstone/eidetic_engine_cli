@@ -7161,6 +7161,38 @@ if [ -n "$PROOF_BROKER_LEDGER" ]; then
     esac
 fi
 
+# A BYPASS RECORDED AS AN ABSENCE IS NOT RECORDED (bd-jui80).
+#
+# RCH_VERIFY_PROOF_BROKER_ENABLED=0 makes :295 skip assigning the default
+# ledger, so the block above -- guarded on `[ -n "$PROOF_BROKER_LEDGER" ]` --
+# never executes and PROOF_BROKER_JSON keeps its :121 default of "null".
+# Validation at :6858 accepts 0 explicitly, so this is a supported, silent
+# bypass.
+#
+# The problem is not only that it is permitted; it is that NULL ALREADY MEANS
+# THREE THINGS. proof_broker is also null under --dry-run, and on any lane that
+# never had a broker at all. One value cannot express three states, and this is
+# the artifact whose entire job is to be evidence: "deliberately bypassed" and
+# "not applicable here" were indistinguishable to every reader of the proof.
+#
+# Demonstrated with two real pinned runs, identical command, one variable
+# changed: broker on -> {status: checked, verdict: dispatch_allowed} and it
+# REFUSED that dispatch with proof_broker_source_state_mismatch; broker off ->
+# null and no code of any kind.
+#
+# THIS MAKES THE BYPASS VISIBLE, NOT IMPOSSIBLE. Refusing it outright is the
+# clause's plain reading and it is NOT done here, deliberately: every pinned-lane
+# contract test in tests/rch_verify_contract.rs runs through a helper (:48) that
+# sets this variable to 0, because a real broker writes a ledger and takes
+# reservations and a hermetic test must not. That caller is a requirement, not a
+# bug, so making it fatal would break the suite that proves this lane works.
+# Separating "bypassed for a declared test reason" from "bypassed in production"
+# is a design decision recorded on bd-jui80 rather than taken here.
+if [ -z "$PROOF_BROKER_LEDGER" ] && [ "$PROOF_BROKER_ENABLED" = "0" ]; then
+    PROOF_BROKER_JSON='{"status":"bypassed","enabled":false,"verdict":null,"reason":"RCH_VERIFY_PROOF_BROKER_ENABLED=0","admissionSurface":null}'
+    proof_broker_degraded+=("rch_verify_proof_broker_bypassed")
+fi
+
 if [ "$KNOWN_BLOCKER_ENABLED" = "1" ]; then
     KNOWN_BLOCKER_JSON="$(known_blocker_lookup_json "$SOURCE_STATE_JSON")"
     if [ "$KNOWN_BLOCKER_JSON" != "null" ]; then
