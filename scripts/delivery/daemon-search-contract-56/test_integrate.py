@@ -58,6 +58,12 @@ class CompletionTests(unittest.TestCase):
         self.assertNotIn('.map_err(|_|', result)
         self.assertIn('SearchResponseValidationError(String)', result)
 
+    def test_other_enum_implementations_are_untouched(self):
+        other = "impl OtherReason {\n    const fn as_str(self) -> &'static str { \"other\" }\n}\n"
+        result = m.updated_cli(other + CLI)
+        self.assertTrue(result.startswith(other))
+        self.assertIn("impl DaemonSearchFallbackReason {\n    const fn as_str(&self)", result)
+
     def test_unit_variant_callers_remain_valid(self):
         result = m.updated_cli(CLI)
         self.assertIn('    SearchResponseDrift,', result)

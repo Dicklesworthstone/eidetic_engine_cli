@@ -5,7 +5,7 @@ use super::DaemonSearchFallbackReason;
 impl DaemonSearchFallbackReason {
     // Search validation returns String; pack handoff decoding returns a serde
     // error. Keep both diagnostics instead of discarding either at map_err.
-    fn search_response_drift(error: impl std::fmt::Display) -> Self {
+    pub(super) fn search_response_drift(error: impl std::fmt::Display) -> Self {
         Self::SearchResponseValidationError(error.to_string())
     }
 }

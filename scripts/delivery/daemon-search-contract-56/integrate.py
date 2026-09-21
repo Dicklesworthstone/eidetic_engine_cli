@@ -53,8 +53,9 @@ def updated_cli(text: str) -> str:
                         "    SearchResponseDrift,\n    SearchResponseValidationError(String),",
                         "validation error payload")
     text = text[:start] + enum + text[end:]
-    text = replace_once(text, "const fn as_str(self) -> &'static str {",
-                        "const fn as_str(&self) -> &'static str {", "borrow fallback category")
+    text = replace_once(text, "impl DaemonSearchFallbackReason {\n    const fn as_str(self) -> &'static str {",
+                        "impl DaemonSearchFallbackReason {\n    const fn as_str(&self) -> &'static str {",
+                        "borrow fallback category")
     text = replace_once(text, 'Self::SearchResponseDrift => "search response drift",',
                         'Self::SearchResponseDrift | Self::SearchResponseValidationError(_) => "search response drift",',
                         "stable fallback category")
