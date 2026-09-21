@@ -133,7 +133,7 @@ fn output_with_timeout(command: &mut Command, stdin: Option<Stdio>) -> std::io::
 
 /// The deadline loop, with the cap passed in so it can be tested without
 /// mutating a process-global env var that every other spawn reads.
-fn output_with_deadline(
+pub(super) fn output_with_deadline(
     command: &mut Command,
     timeout: Duration,
     stdin: Option<Stdio>,
@@ -373,81 +373,4 @@ where
         command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
     }
     output_with_timeout(&mut command, stdin)
-}
-
-/// The deadline must actually fire on a child that never exits.
-///
-/// Without this the timeout is an untested guard: the suite would pass whether
-/// or not the deadline works, because no existing test spawns anything that
-/// hangs. That is the shape this whole bead is about -- a mechanism that looks
-/// present and establishes nothing.
-#[cfg(unix)]
-#[test]
-fn the_deadline_kills_a_child_that_never_exits() {
-    let started = Instant::now();
-    let mut command = Command::new("sleep");
-    command.arg("120");
-    let result = output_with_deadline(&mut command, Duration::from_millis(400), None);
-    let error = result.expect_err("a sleeping child must not return output");
-    assert_eq!(
-        error.kind(),
-        std::io::ErrorKind::TimedOut,
-        "a killed child must report TimedOut, got {error:?}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "the deadline did not bound the wait; elapsed {:?}",
-        started.elapsed()
-    );
-}
-
-/// A child that writes more than the pipe buffer must still complete.
-///
-/// This is the regression test for the bug the first version of
-/// `output_with_deadline` had: polling `try_wait` without draining. A child
-/// writing past ~64 KiB blocks on write, so it never exits, so `try_wait` never
-/// reports exit, and the call burns the whole timeout before killing a process
-/// that was only trying to talk. 256 KiB is comfortably past the buffer on
-/// every platform we run on.
-///
-/// It did not fire in production only because the largest contracts spawn is
-/// ~30 KB. A test that used a small payload would have passed against the
-/// broken version, which is why the size is the point of this test.
-#[cfg(unix)]
-#[test]
-fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg("i=0; while [ $i -lt 4096 ]; do printf '%064d' $i; i=$((i+1)); done");
-    let output = output_with_deadline(&mut command, Duration::from_secs(60), None)
-        .expect("a large-output child must not be reported as a timeout");
-    assert!(
-        output.status.success(),
-        "generator should exit 0: {output:?}"
-    );
-    assert_eq!(
-        output.stdout.len(),
-        4096 * 64,
-        "stdout must be captured in full, not truncated at the pipe buffer"
-    );
-}
-
-/// The paired positive: a child that exits normally is NOT reported as a
-/// timeout, and its output still comes back.
-///
-/// A deadline implementation that always killed would satisfy the test above
-/// and be useless. This is what distinguishes a bound from a break.
-#[cfg(unix)]
-#[test]
-fn the_deadline_leaves_a_fast_child_alone() {
-    let mut command = Command::new("echo");
-    command.arg("contracts-spawn-probe");
-    let output = output_with_deadline(&mut command, Duration::from_secs(30), None)
-        .expect("a fast child must return output");
-    assert!(output.status.success(), "echo should succeed: {output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("contracts-spawn-probe"),
-        "stdout must still be captured through the deadline path: {output:?}"
-    );
 }

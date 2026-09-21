@@ -169,3 +169,116 @@ fn inventory_shared_helpers_cannot_hide_root_test_files() -> TestResult {
     );
     Ok(())
 }
+
+/// bd-reality-core-convergence-1azkt.5 bullet 7: a `#[test]`-bearing file that
+/// two declared targets both `#[path]`-include compiles into BOTH binaries, so
+/// its tests run twice under two shard labels.
+///
+/// WHY `every_root_test_file_is_registered_exactly_once` DOES NOT CATCH THIS.
+/// That check reads `tests/*.rs` -- root files -- against the suite
+/// registrations. The duplication here happens one level down: a helper such as
+/// `tests/contracts/common_spawn.rs` is not a root file and is never registered
+/// as a suite module, yet it carried three `#[test]` fns and was included by
+/// `tests/contracts.rs` and `tests/contracts/witness_retention_e2e.rs`, both of
+/// which are declared `[[test]]` targets.
+///
+/// MEASURED BEFORE BEING FIXED, by asking the harness rather than reading
+/// source: `cargo test --test <t> -- --list` joined across all 45 targets gave
+/// 5109 rows and 5106 distinct names. The three duplicates were exactly those
+/// three fns -- 3 names x 2 targets -- so the count and the cause agreed.
+///
+/// This guard is STATIC where the measurement was dynamic, and that is
+/// deliberate: the property is a property of the include graph, which is
+/// statically decidable, and a dynamic check would have to build 45 test
+/// binaries to answer it. The instance that motivated it has already been
+/// confirmed by execution.
+#[test]
+fn no_test_bearing_helper_is_included_by_two_targets() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
+
+    // Declared [[test]] target roots, taken from Cargo.toml rather than guessed.
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for line in manifest.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("path = \"") {
+            if let Some(path) = rest.strip_suffix("\"") {
+                if path.starts_with("tests/") && path.ends_with(".rs") {
+                    targets.push(root.join(path));
+                }
+            }
+        }
+    }
+    assert!(
+        targets.len() >= 20,
+        "expected the declared [[test]] targets to be readable from Cargo.toml; \
+         found {}. A near-zero count means this test parsed nothing, not that \
+         the manifest is clean.",
+        targets.len()
+    );
+
+    // file -> the declared targets whose include graph reaches it
+    let mut reached: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for target in &targets {
+        let label = target
+            .strip_prefix(root)
+            .unwrap_or(target)
+            .to_string_lossy()
+            .into_owned();
+        let mut queue = vec![target.clone()];
+        let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+        while let Some(file) = queue.pop() {
+            if !seen.insert(file.clone()) {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            reached
+                .entry(file.clone())
+                .or_default()
+                .insert(label.clone());
+            let dir = file.parent().unwrap_or(root).to_path_buf();
+            for line in source.lines().map(str::trim) {
+                // `#[path = "..."]` resolves relative to the INCLUDING file's
+                // directory, which is why two includers of one helper spell it
+                // differently ("contracts/common_spawn.rs" vs "common_spawn.rs")
+                // and why a text search for either spelling finds only one.
+                if let Some(rest) = line.strip_prefix("#[path = \"") {
+                    if let Some(rel) = rest.strip_suffix("\"]") {
+                        queue.push(dir.join(rel));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut offenders = Vec::new();
+    for (file, labels) in &reached {
+        if labels.len() < 2 {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let tests = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("#[test]"))
+            .count();
+        if tests > 0 {
+            offenders.push(format!(
+                "{} carries {tests} #[test] fn(s) and is included by {} targets: {:?}",
+                file.strip_prefix(root).unwrap_or(file).display(),
+                labels.len(),
+                labels
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these helpers compile their own tests into more than one [[test]] \
+         binary, so each test runs twice under two shard labels:\n  {}",
+        offenders.join("\n  ")
+    );
+    Ok(())
+}

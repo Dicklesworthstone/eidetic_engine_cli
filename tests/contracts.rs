@@ -163,8 +163,21 @@ mod cass_stdout_decode_fuzz_summary;
 #[path = "contracts/cass_import_report_goldens.rs"]
 mod cass_import_report_goldens;
 
-#[path = "conformance/cass_contracts.rs"]
-mod cass_contracts;
+// tests/conformance/cass_contracts.rs is NOT included here (1azkt.5 bullet 7).
+//
+// It is already a declared [[test]] target of its own (Cargo.toml:514), so
+// including it here compiled its 13 `#[test]` fns into this binary as well and
+// ran every one of them twice, under two shard labels.
+//
+// This one hid from the dynamic measurement that found the common_spawn
+// duplicates. Joining `cargo test --test <t> -- --list` across all 45 targets
+// keys on the FULLY QUALIFIED name, and these tests are `foo` in the
+// cass_contracts target but `cass_contracts::foo` here -- different strings, no
+// collision, 13 duplicates invisible. The static include-graph guard in
+// tests/suites/inventory.rs found them because it asks a different question:
+// which files does more than one target compile?
+//
+// Nothing in this file referenced the module.
 
 #[path = "contracts/integration_foundation.rs"]
 mod integration_foundation;
@@ -627,3 +640,106 @@ mod capabilities_workspace;
 // serialized (256s) and in parallel (123s).
 #[path = "contracts/handoff_export_backup_conformance.rs"]
 mod handoff_export_backup_conformance;
+
+// bd-reality-core-convergence-1azkt.5 bullet 7: these three tests live HERE, in
+// the single target that owns the contracts suite, rather than inside
+// tests/contracts/common_spawn.rs where they were written.
+//
+// WHY THEY MOVED. common_spawn.rs is a shared helper `#[path]`-included by TWO
+// declared [[test]] targets -- tests/contracts.rs:4 and
+// tests/contracts/witness_retention_e2e.rs:15 -- so every `#[test]` inside it
+// compiled into BOTH binaries. Measured by asking the harness rather than
+// reading the source (`cargo test --test <t> -- --list` joined across all 45
+// targets): 5109 test rows, 5106 distinct names, 3 duplicates -- exactly these
+// three, 3 names x 2 targets. The count and the cause agree.
+//
+// A duplicated logical test is not harmless: it runs twice, is attributed to
+// two shards, and any flakiness history is split across both. The acceptance
+// bullet asks that logical tests appear exactly once across shards.
+//
+// witness_retention_e2e.rs uses exactly ONE item from the helper
+// (`serialized_real_ee_with`, at its line 21), so dropping its include was not
+// available; moving the self-tests to the owning target was. The function they
+// exercise is `pub(super)` for this reason.
+//
+// Guarded against recurrence by `no_test_bearing_helper_is_included_by_two_targets`
+// in tests/suites/inventory.rs.
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+/// The deadline must actually fire on a child that never exits.
+///
+/// Without this the timeout is an untested guard: the suite would pass whether
+/// or not the deadline works, because no existing test spawns anything that
+/// hangs. That is the shape this whole bead is about -- a mechanism that looks
+/// present and establishes nothing.
+#[cfg(unix)]
+#[test]
+fn the_deadline_kills_a_child_that_never_exits() {
+    let started = Instant::now();
+    let mut command = Command::new("sleep");
+    command.arg("120");
+    let result = common_spawn::output_with_deadline(&mut command, Duration::from_millis(400), None);
+    let error = result.expect_err("a sleeping child must not return output");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut,
+        "a killed child must report TimedOut, got {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the deadline did not bound the wait; elapsed {:?}",
+        started.elapsed()
+    );
+}
+
+/// A child that writes more than the pipe buffer must still complete.
+///
+/// This is the regression test for the bug the first version of
+/// `output_with_deadline` had: polling `try_wait` without draining. A child
+/// writing past ~64 KiB blocks on write, so it never exits, so `try_wait` never
+/// reports exit, and the call burns the whole timeout before killing a process
+/// that was only trying to talk. 256 KiB is comfortably past the buffer on
+/// every platform we run on.
+///
+/// It did not fire in production only because the largest contracts spawn is
+/// ~30 KB. A test that used a small payload would have passed against the
+/// broken version, which is why the size is the point of this test.
+#[cfg(unix)]
+#[test]
+fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("i=0; while [ $i -lt 4096 ]; do printf '%064d' $i; i=$((i+1)); done");
+    let output = common_spawn::output_with_deadline(&mut command, Duration::from_secs(60), None)
+        .expect("a large-output child must not be reported as a timeout");
+    assert!(
+        output.status.success(),
+        "generator should exit 0: {output:?}"
+    );
+    assert_eq!(
+        output.stdout.len(),
+        4096 * 64,
+        "stdout must be captured in full, not truncated at the pipe buffer"
+    );
+}
+
+/// The paired positive: a child that exits normally is NOT reported as a
+/// timeout, and its output still comes back.
+///
+/// A deadline implementation that always killed would satisfy the test above
+/// and be useless. This is what distinguishes a bound from a break.
+#[cfg(unix)]
+#[test]
+fn the_deadline_leaves_a_fast_child_alone() {
+    let mut command = Command::new("echo");
+    command.arg("contracts-spawn-probe");
+    let output = common_spawn::output_with_deadline(&mut command, Duration::from_secs(30), None)
+        .expect("a fast child must return output");
+    assert!(output.status.success(), "echo should succeed: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("contracts-spawn-probe"),
+        "stdout must still be captured through the deadline path: {output:?}"
+    );
+}
