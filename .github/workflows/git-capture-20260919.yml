@@ -116,12 +116,34 @@ jobs:
       - name: Check all targets and strict Clippy
         if: ${{ !cancelled() }}
         run: |
-          failed=0
-          cargo check --locked --all-targets > "$RUNNER_TEMP/capture-check.log" 2>&1 || failed=1
+          # TWO COMMANDS, TWO EXIT CODES -- 10 check, 11 clippy, 12 both.
+          # These shared one `failed=1` until bd-clippy-gate-has-no-runner-186zj.
+          # Either arm set it, so a red step reported only "something in here
+          # failed", and this step's single failing run in history WAS read that
+          # way: the natural conclusion from the step name was that
+          # --all-targets had broken, when --all-targets was green and a lib
+          # clippy::expect_used was the whole cause. One value cannot carry two
+          # states. Do not collapse these back into one flag.
+          check_rc=0
+          clippy_rc=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/capture-check.log" 2>&1 || check_rc=1
           tail -n 100 "$RUNNER_TEMP/capture-check.log"
-          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/capture-clippy.log" 2>&1 || failed=1
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/capture-clippy.log" 2>&1 || clippy_rc=1
           tail -n 100 "$RUNNER_TEMP/capture-clippy.log"
-          exit "$failed"
+          # The exit code is the attribution; this line is for the reader who
+          # sees the log and never the exit status.
+          echo "ATTRIBUTION: check=$check_rc clippy=$clippy_rc (cargo check --locked --all-targets / cargo clippy --locked --all-targets -- -D warnings)"
+          if [ "$check_rc" -ne 0 ] && [ "$clippy_rc" -ne 0 ]; then
+            echo "FAILED: both arms"
+            exit 12
+          elif [ "$check_rc" -ne 0 ]; then
+            echo "FAILED: cargo check --all-targets only; clippy was green"
+            exit 10
+          elif [ "$clippy_rc" -ne 0 ]; then
+            echo "FAILED: cargo clippy --all-targets -- -D warnings only; check was green"
+            exit 11
+          fi
+          exit 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
