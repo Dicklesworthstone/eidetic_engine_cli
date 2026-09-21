@@ -46,9 +46,69 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRADER="$HERE/lib/grade_test_log.py"
+CAPSULE_EMITTER="$HERE/lib/emit_proof_capsule.py"
 
 warn() { printf '[rch-run] %s\n' "$*" >&2; }
 say() { printf '[rch-run] %s\n' "$*"; }
+
+# Emit an ee.release_candidate_proof.v1 SKELETON beside the log.
+#
+# WHY THIS FUNCTION EXISTS AT ALL: scripts/lib/emit_proof_capsule.py has shipped
+# since c76508495, and its own docstring states "this is called by
+# scripts/rch_run.sh". It was not. This file had zero references to it, and
+# `git log -S emit_proof_capsule -- scripts/rch_run.sh` is empty across all
+# history, so it was never wired rather than un-wired. A 384-line emitter that
+# nothing invokes is the same defect as a byte-comparison contract that no gate
+# runs (bd-byte-compared-contracts-never-executed-feftl); the docstring was
+# describing an intention as if it were a call site.
+#
+# IT CANNOT CHANGE A VERDICT, DELIBERATELY. A capsule is a record OF a run, not
+# a judgement ON one, and a reporting artifact able to turn a red green is a
+# worse defect than a missing one. This returns 0 on every path and never
+# touches run_exit or grade_exit.
+#
+# BEST-EFFORT, BUT NEVER SILENT. A missing python3 or a refusing emitter prints
+# the reason, because "no capsule line at all" is indistinguishable from "never
+# attempted", which is the absence-is-not-evidence failure this repo keeps
+# finding. The emitter's own stderr is surfaced rather than swallowed.
+emit_proof_capsule() {
+    local log="$1" base="$2" host="$3" run_exit="$4" cmd="$5"
+    local out="${log}.capsule.json" dirty emit_out emit_rc
+
+    if [ ! -f "$CAPSULE_EMITTER" ]; then
+        printf 'capsule      : NOT EMITTED (emitter absent at %s)\n' "$CAPSULE_EMITTER"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'capsule      : NOT EMITTED (python3 unavailable)\n'
+        return 0
+    fi
+
+    dirty="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    [ -n "$dirty" ] || dirty=0
+
+    if [ -n "$host" ]; then
+        emit_out="$(python3 "$CAPSULE_EMITTER" --log "$log" --base "$base" \
+            --dirty "$dirty" --host "$host" --run-exit "$run_exit" \
+            --command "$cmd" --out "$out" 2>&1)"
+    else
+        emit_out="$(python3 "$CAPSULE_EMITTER" --log "$log" --base "$base" \
+            --dirty "$dirty" --run-exit "$run_exit" \
+            --command "$cmd" --out "$out" 2>&1)"
+    fi
+    # Captured EXPLICITLY. A bare `$?` after an if/else reads whichever branch
+    # ran last, which is correct here by accident and stops being correct the
+    # moment anyone adds a line between the fi and the test.
+    emit_rc=$?
+
+    if [ "$emit_rc" -eq 0 ]; then
+        printf 'capsule      : %s\n' "$out"
+    else
+        printf 'capsule      : NOT EMITTED (emitter exited non-zero)\n'
+        printf '%s\n' "$emit_out" | sed 's/^/capsule      : /'
+    fi
+    return 0
+}
 
 # Assemble the verdict block and decide the wrapper's exit.
 #   $1 log path   $2 the run's exit code   $3 base label   $4 expect-target ("" for none)
@@ -292,6 +352,12 @@ emit_verdict_block() {
     else
         printf 'verdict      : GREEN\n'
     fi
+    # Emitted INSIDE the block, because the block is what gets pasted into a
+    # bead and a capsule nobody can find is a capsule nobody checks. Only on the
+    # fully-graded path: the nine earlier exit paths return before this, and a
+    # capsule bound to an UNGRADEABLE run would assert identities for a run that
+    # established nothing.
+    emit_proof_capsule "$log" "$base" "$host" "$run_exit" "$cmd"
     printf '===== END VERDICT BLOCK =====\n'
 
     # EXECUTION DOMINATES. A failed run is a failed run whatever the log says,
