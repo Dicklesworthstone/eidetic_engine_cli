@@ -443,7 +443,7 @@ mod canonical_reference_tests {
     use serde_json::json;
 
     fn span(session: &CassSessionInfo, line: u32) -> CassViewSpanForImport {
-        super::super::super::parse_view_line_value(
+        super::super::parse_view_line_value(
             &json!({"line": line, "content": format!("Build observation {line}. 調査完了")}),
             &session.source_path,
         )
@@ -464,12 +464,11 @@ mod canonical_reference_tests {
         .unwrap();
         let session = CassSessionInfo::new(source).with_agent(CassAgent::Codex);
         let spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
-        let result = super::super::super::persist_session_import_if_absent(
+        let result = super::super::persist_session_import_if_absent(
             &db, &workspace, &session, &spans,
         )
         .unwrap();
-        let super::super::super::SessionImportPersistResult::Imported { session_id, .. } = result
-        else {
+        let super::super::SessionImportPersistResult::Imported { session_id, .. } = result else {
             panic!("new fixture must import");
         };
         (db, workspace, session_id, session)
@@ -481,7 +480,10 @@ mod canonical_reference_tests {
         let first = span(&session, 1);
         let first_id = stable_evidence_id(&id, &first.cass_span_id);
         let before = db.get_evidence_span(&first_id).unwrap().unwrap();
-        let digest = format!("blake3:{}", blake3::hash(first.cass_span_id.as_bytes()).to_hex());
+        let digest = format!(
+            "blake3:{}",
+            blake3::hash(first.cass_span_id.as_bytes()).to_hex()
+        );
         assert_eq!(before.cass_span_id, digest);
         assert_ne!(before.cass_span_id, first.cass_span_id);
         assert_eq!(before.upstream_ref_hash.as_deref(), Some(digest.as_str()));
@@ -516,7 +518,10 @@ mod canonical_reference_tests {
             assert_eq!(retry.index_job_id.as_deref(), Some(job.as_str()));
             assert_eq!(db.get_session(&id).unwrap().unwrap(), stored);
             assert_eq!(db.get_evidence_span(&first_id).unwrap().unwrap(), before);
-            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), count as usize);
+            assert_eq!(
+                db.list_evidence_spans_for_session(&id).unwrap().len(),
+                count as usize
+            );
             for incoming in &spans {
                 let expected_id = stable_evidence_id(&id, &incoming.cass_span_id);
                 let row = db.get_evidence_span(&expected_id).unwrap().unwrap();
@@ -531,7 +536,10 @@ mod canonical_reference_tests {
         for count in [2, 3] {
             let spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
             let report = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
-            assert_eq!(report.added_lines, if count == 2 { vec![1, 2] } else { vec![3] });
+            assert_eq!(
+                report.added_lines,
+                if count == 2 { vec![1, 2] } else { vec![3] }
+            );
             let rows = db.list_evidence_spans_for_session(&id).unwrap();
             assert_eq!(rows.len(), count as usize);
             let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
@@ -542,7 +550,10 @@ mod canonical_reference_tests {
 
     #[test]
     fn unicode_and_digest_looking_upstream_references_are_hashed_exactly_once() {
-        for source in ["/private/資料:session.jsonl".to_owned(), format!("blake3:{}", "a".repeat(64))] {
+        for source in [
+            "/private/資料:session.jsonl".to_owned(),
+            format!("blake3:{}", "a".repeat(64)),
+        ] {
             let (db, workspace, id, session) = fixture(&source, 1);
             let incoming = span(&session, 1);
             let expected_id = stable_evidence_id(&id, &incoming.cass_span_id);
@@ -565,18 +576,25 @@ mod canonical_reference_tests {
         let grown = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
         assert_eq!(grown.added_lines, vec![2]);
         assert_eq!(db.get_evidence_span(&first_id).unwrap().unwrap(), denied);
-        assert!(db.get_search_admitted_evidence_span(&first_id, &workspace).unwrap().is_none());
+        assert!(
+            db.get_search_admitted_evidence_span(&first_id, &workspace)
+                .unwrap()
+                .is_none()
+        );
 
         let substituted = format!("blake3:{}", blake3::hash(b"other source:1").to_hex());
         db.execute_raw(&format!(
             "UPDATE evidence_spans SET cass_span_id = {} WHERE id = {}",
-            sql_text(&substituted), sql_text(&first_id)
+            sql_text(&substituted),
+            sql_text(&first_id)
         ))
         .unwrap();
         let before = db.get_session(&id).unwrap().unwrap();
         let mut newer = incoming;
         newer.push(span(&session, 3));
-        let error = refresh_session(&db, &workspace, &id, &session, &newer).err().unwrap();
+        let error = refresh_session(&db, &workspace, &id, &session, &newer)
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("cass_refresh_history_missing"));
         assert!(!error.to_string().contains(&session.source_path));
         assert_eq!(db.get_session(&id).unwrap().unwrap(), before);
