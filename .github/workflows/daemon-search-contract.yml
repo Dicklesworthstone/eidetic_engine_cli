@@ -1,0 +1,97 @@
+name: Daemon search contract
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/search.rs
+      - src/daemon/server.rs
+      - src/daemon/search_result_contract*.rs
+      - docs/schemas/ee.search.document.v1.json
+      - docs/schemas/ee.daemon.search.response.v3.json
+      - scripts/delivery/daemon-search-contract-56/**
+      - .github/workflows/daemon-search-contract.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: daemon-search-contract
+  cancel-in-progress: false
+jobs:
+  verify-and-integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            prefetch-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Verify the real served contract before publishing the repair
+        run: |
+          set -euo pipefail
+          trap 'tail -n 80 "$RUNNER_TEMP"/daemon-search-contract-*.log 2>/dev/null || true' EXIT
+          python3 scripts/delivery/daemon-search-contract-56/apply.py
+          paths=(src/daemon/server.rs src/daemon/search_result_contract.rs src/daemon/search_result_contract_tests.rs docs/schemas/ee.daemon.search.response.v3.json)
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]:0:3}"
+          python3 scripts/delivery/daemon-search-contract-56/apply.py --check
+          git diff --check
+          cargo test --locked --lib daemon::server::search_result_contract::tests -- --test-threads=2 > "$RUNNER_TEMP/daemon-search-contract-tests.log" 2>&1
+          grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-tests.log"
+          cargo test --locked --lib daemon::server::tests::daemon_search_result_rejects_schema_and_field_drift -- --exact > "$RUNNER_TEMP/daemon-search-contract-existing.log" 2>&1
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/daemon-search-contract-existing.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/daemon-search-contract-clippy.log" 2>&1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'fix(daemon): accept canonical calibration metadata without weakening validation' -m 'GH #56: allow optional string/null calibrationId, preserve every existing result validation check, and repair the published v3 document schema. Eleven contract tests cover real report serialization through both builders, all score sources, explain/performance output, schema field parity, backward compatibility, and fail-closed mutations. Existing daemon drift regression and production Clippy also passed before publication.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/daemon-search-contract-source-sha.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: daemon-search-contract-verification
+          path: ${{ runner.temp }}/daemon-search-contract-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
