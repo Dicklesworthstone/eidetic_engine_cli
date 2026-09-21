@@ -1007,6 +1007,48 @@ rustfmt's population — not re-declaring the file — is the tractable directio
 - When a gate reports a caveat on a non-failing line, that caveat is a finding
   with no owner. File it.
 
+### Declare a contract, not a list
+
+The population defects above are the runtime half of one problem. The other half
+is descriptive: prose and config that *enumerate* what is covered.
+
+**A list must be maintained by whoever changes the thing it describes. A contract
+is a property that either holds or does not, and its check can find its own
+population.** That difference decides whether a description can go stale.
+
+The failure mode is counterintuitive, which is why careful people keep producing
+it: **prose describing a set of checks goes stale precisely when someone ADDS a
+check.** The moment of improvement is the moment of drift. Four instances landed
+in this repo on 2026-09-21 alone, every one created by doing the right thing
+somewhere else — a deadline comment, a memory note, a `:1607` line citation that
+had moved to `:1923`, and the property list in `scripts/verify.sh` that said the
+feature set was unchecked one commit *after* the check landed, then said the
+target triple was unchecked one commit after that.
+
+A list is not always wrong. It is wrong **unchecked**. Three workable shapes, in
+order of preference:
+
+1. **A contract the check can evaluate.** `verify-budget.toml`'s
+   `[candidate_binary]` names which binary a run verifies and a test asserts
+   verify.sh's resolution agrees; neither side is a copy of the other. The
+   evidence-outputs clause (`bd-ovsjv`) wants this shape too — "every stage
+   emitting evidence prints an `Artifacts:` line, and here are the roots" is a
+   property; a list of paths is a second copy of something discovered at runtime.
+2. **A list with a derived cross-check**, where the test computes BOTH sides from
+   their real sources and diffs them.
+   `every_default_feature_is_reported_by_build_features` parses `default = [...]`
+   from `Cargo.toml` and `BuildFeature::new(` from `src/core/mod.rs`; it holds
+   because it copies neither. Note what follows: do **not** restate that feature
+   list in a third place, because a third copy is a third seat for drift and the
+   cross-check only guards two.
+3. **A list that states its own invariant**, as a last resort when nothing can
+   check it. Enumerate rather than generalise — an enumeration is falsifiable and
+   a generalisation is not — and say in the text that it must change in the same
+   commit as the thing it describes.
+
+If you find yourself writing "this checks X, Y and Z" in a comment, ask whether a
+test could derive X, Y and Z instead. If it could, the comment is already debt.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
