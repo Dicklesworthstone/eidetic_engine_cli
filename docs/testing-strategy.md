@@ -1049,6 +1049,39 @@ order of preference:
 If you find yourself writing "this checks X, Y and Z" in a comment, ask whether a
 test could derive X, Y and Z instead. If it could, the comment is already debt.
 
+### A constraint you impose on yourself has a population too
+
+The sections above are about distrusting what a gate claims to cover. The same
+scepticism is owed to your own sense of what a tool can do, and it is harder to
+apply there for a structural reason: **a gate's coverage claim is external and
+checkable, while your own belief about a limitation feels like knowledge rather
+than a claim.** Nothing will ever contradict it, because nothing is testing it.
+
+Worked example from 2026-09-21. A `run_stage` defect (`bd-ovsjv`) sat unfixed for
+two hours behind the stated bound "I cannot run `verify.sh` end to end" — RCH was
+hitting its build cap and the clean-overlay lane is cargo-only, both true. The
+bound was true of the FULL SWEEP and false of what the work actually needed:
+`./scripts/verify.sh --plan-doc-smoke` runs exactly one stage through `run_stage`
+and exits with the normal banner, and there are two more narrow modes beside it
+(`--fuzz-target-audit-self-test`, `--ci-smoke`). Every measurement that finally
+closed the bead came from the mode nobody had looked for — including a SECOND
+defect that reading had never revealed, that the artifact index is unreachable on
+a hard-failing run because `run_stage` exits hundreds of lines before the
+end-of-file printer.
+
+**The check, before accepting that something cannot be verified:** write the
+bound down as a sentence, then ask what its population is. "I cannot run X" is
+almost never true of all of X — read `--help`, list the subcommands, look for the
+narrow mode. A capability boundary inferred from one refusal, or from the most
+expensive path, is a measurement with a date like any other
+(`reference_rch_exec_cargo_only_e2e_unrunnable` records the same class costing
+this repo months of e2e beads closed "by inspection" against a limit that had an
+official escape hatch the whole time).
+
+The tell is that the bound is doing work for you: it explains why the hard thing
+can be deferred. That is exactly when it deserves the scrutiny you would give a
+gate reporting green.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
