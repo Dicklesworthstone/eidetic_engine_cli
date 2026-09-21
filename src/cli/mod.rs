@@ -17593,6 +17593,60 @@ fn run_eval_retrieval_queries(
             message: format!("failed to resolve retrieval eval workspace: {error}"),
             repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
         })?;
+    // bd-90yt4. Retrieval eval used to search an index sitting in a workspace
+    // with NO STORE AT ALL, and search reconciles index hits against the store:
+    // a hit whose doc_id is a well-formed memory ID is looked up, is not found,
+    // and is discarded as an orphan (core::search, orphaned_filtered). A hit
+    // whose doc_id is not a well-formed memory ID skips reconciliation and
+    // survives.
+    //
+    // So the outage was exactly shaped like the fixtures' ID conventions. Six
+    // families address their corpora as `mem_` + 26 alphanumerics and retrieved
+    // NOTHING -- 40 queries, every one an empty list. The two that do not use
+    // that form (`memory-1`, `mem_ask_*`) were unaffected and hid the breakage.
+    // Measured: renaming ONLY the IDs, content byte-identical, moved
+    // fx.dangerous_cleanup.v1 from 9/9 empty to mean_precision_at_1 0.667 --
+    // which is exactly its committed golden. The goldens were never stale; this
+    // path regressed underneath them.
+    //
+    // The fix is to give the eval a real store, NOT to let search skip
+    // reconciliation when a store is missing. That check is a live guard
+    // against stale indexes for every caller, and an eval that dodged it would
+    // be exercising a path no user ever hits. Seeding is what the pack-quality
+    // evaluator already does through this same helper, at the fixture clock.
+    let config_dir = workspace_path.join(".ee");
+    std::fs::create_dir_all(&config_dir).map_err(|error| DomainError::Storage {
+        message: format!("failed to create eval workspace config dir: {error}"),
+        repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+    })?;
+    // Keep the fixture corpus closed: ambient global memory joining the store
+    // would make retrieval depend on the developer's machine.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[memory]\nparticipate = false\ninclude_global = false\n",
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("failed to write eval workspace config: {error}"),
+        repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+    })?;
+    let database_path = workspace_path.join("ee.db");
+    // Fixtures that declare a clock are seeded at it, so their stored validity
+    // matches the deterministic window the rest of the evaluator uses. The two
+    // fixtures that declare none are seeded at the wall clock: `valid_from` is
+    // then equal to, not after, the search reference time, so the rows are
+    // visible rather than filtered as future-dated.
+    let fixed_clock = source
+        .fixed_clock
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    seed_pack_quality_workspace(
+        &workspace_path,
+        &database_path,
+        source,
+        &memories,
+        &fixed_clock,
+    )?;
+
     let index_dir = workspace_path.join("index");
     build_eval_search_index(&index_dir, source)?;
 
@@ -17601,7 +17655,11 @@ fn run_eval_retrieval_queries(
     for (query, expected_ids) in query_expectations {
         let options = SearchOptions {
             workspace_path: workspace_path.clone(),
-            database_path: None,
+            // Named explicitly rather than left to the default resolution.
+            // `None` resolved to <workspace>/.ee/ee.db, which nothing created,
+            // and a store that is merely absent produces an empty result set
+            // instead of an error (bd-90yt4).
+            database_path: Some(database_path.clone()),
             index_dir: Some(index_dir.clone()),
             query: query.clone(),
             limit,
