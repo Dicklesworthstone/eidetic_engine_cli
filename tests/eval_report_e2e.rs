@@ -94,6 +94,10 @@ fn ensure_stable_hash(value: &JsonValue, pointer: &str) -> TestResult {
 }
 
 fn normalize_eval_report_response(mut value: JsonValue) -> JsonValue {
+    // Search diagnostics have an independent positive oracle below. Keep this
+    // historical golden focused on the unchanged quality report, not optional
+    // host/model repair prose. Never normalize before that oracle succeeds.
+    value["degraded"] = json!("[search diagnostics independently verified]");
     value["data"]["fixtureDir"] = JsonValue::String("<FIXTURE_DIR>".to_owned());
     if let Some(data_hashes) = value["data"]["dataHashes"].as_array_mut() {
         for hash in data_hashes {
@@ -178,6 +182,30 @@ fn eval_report_summarizes_fixture_hashes_and_first_failure_with_logged_binary_ru
     ensure_stable_hash(&report_json, "/data/firstFailure/dataHash")?;
     ensure_stable_hash(&report_json, "/data/reports/0/data_hash")?;
     ensure(events_path.is_file(), "E2E JSONL log exists")?;
+
+    let degraded = report_json["degraded"]
+        .as_array()
+        .ok_or("missing search diagnostics")?;
+    for query in [
+        "clippy before release",
+        "failing release workflow",
+        "prepare release",
+        "release failure",
+        "unused import",
+    ] {
+        ensure(
+            degraded.iter().any(|entry| {
+                entry["code"] == "embed_model_unavailable"
+                    && entry["severity"] == "warning"
+                    && entry["details"]["fixtureId"] == "fx.release_failure.v1"
+                    && entry["details"]["query"] == query
+                    && entry["details"]["sourceModeRequested"] == "hybrid"
+                    && entry["details"]["sourceModeApplied"] == "lexical_only"
+                    && entry["details"]["sourceModeFallback"] == true
+            }),
+            format!("missing actual search degradation for {query}"),
+        )?;
+    }
 
     let normalized = normalize_eval_report_response(report_json);
     let actual = serde_json::to_string_pretty(&normalized)

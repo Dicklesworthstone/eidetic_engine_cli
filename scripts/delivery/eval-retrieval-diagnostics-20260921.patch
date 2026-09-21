@@ -279,6 +279,7 @@
          } else {
              serde_json::json!({
 @@ -16583,7 +16584,7 @@
+                     "reports": reports,
                      "fixtureCount": reports.len()
                  },
 -                "degraded": [],

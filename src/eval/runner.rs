@@ -624,6 +624,11 @@ pub struct QueryMetrics {
     pub ndcg_at_5: f64,
     pub mrr: f64,
     pub first_relevant_rank: Option<u32>,
+    /// Search execution diagnostics travel with their query until the CLI
+    /// renders the existing response envelope's `degraded` array. They are
+    /// not quality metrics and do not alter the v1 metric payload or its hash.
+    #[serde(skip)]
+    pub retrieval_degradations: Vec<serde_json::Value>,
 }
 
 /// Aggregate metrics for a fixture evaluation.
@@ -2191,7 +2196,83 @@ pub fn compute_query_metrics(
         ndcg_at_5: ndcg_at_k(retrieved_ids, &relevant, 5),
         mrr: mrr(retrieved_ids, &relevant),
         first_relevant_rank: first_relevant_rank(retrieved_ids, &relevant),
+        retrieval_degradations: Vec::new(),
     }
+}
+
+/// Preserve the search outcome as well as its ranked IDs (bd-j09rg).
+/// A degraded empty result is not evidence of a healthy, low-quality search.
+/// Hard errors and cancellation still belong to the caller's error boundary;
+/// these diagnostics do not change the numerical quality or pass thresholds.
+pub fn compute_search_query_metrics(
+    query: &str,
+    expected_ids: &[String],
+    search: &crate::core::search::SearchReport,
+    evaluation_workspace: &Path,
+) -> QueryMetrics {
+    let retrieved_ids = search
+        .results
+        .iter()
+        .map(|hit| hit.doc_id.clone())
+        .collect::<Vec<_>>();
+    let mut metrics = compute_query_metrics(query, expected_ids, &retrieved_ids);
+    for degradation in &search.degraded {
+        // Use search's canonical code, severity, repair and recovery actions.
+        // The evaluator owns a random scratch root, not a user repair target.
+        // Normalize only that root, retaining the actual failure explanation.
+        let mut value = degradation.data_json();
+        for field in ["message", "repair"] {
+            if let Some(text) = value.get(field).and_then(serde_json::Value::as_str) {
+                let root = evaluation_workspace.to_string_lossy();
+                let text = if root.is_empty() {
+                    text.to_owned()
+                } else {
+                    text.replace(root.as_ref(), "<eval-workspace>")
+                };
+                let screened = crate::policy::redact_secret_like_content(&text);
+                value[field] = serde_json::Value::String(screened.content);
+            }
+        }
+        // The response envelope accepts an omitted repair, not JSON null.
+        if value.get("repair").is_some_and(serde_json::Value::is_null) {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("repair");
+            }
+        }
+        if !value["details"].is_object() {
+            value["details"] = serde_json::json!({});
+        }
+        value["details"]["searchStatus"] = search.status.as_str().into();
+        value["details"]["sourceModeRequested"] = search.source_mode_requested.as_str().into();
+        value["details"]["sourceModeApplied"] = search.source_mode_applied.as_str().into();
+        value["details"]["sourceModeFallback"] = search.source_mode_fallback.into();
+        // Raw driver errors can contain source bodies or SQL. Count them while
+        // carrying the search layer's already classified diagnostic instead.
+        value["details"]["searchErrorCount"] = search.errors.len().into();
+        value["sources"] = serde_json::json!(["eval", "search"]);
+        metrics.retrieval_degradations.push(value);
+    }
+    metrics
+}
+
+/// Attribute every search diagnostic to its fixture and query. Do not collapse
+/// equal codes across queries: that would hide which workload was affected.
+/// Existing recovery details are retained, and reports with no degradation do
+/// not acquire an invented capability warning.
+pub fn retrieval_degradations(reports: &[EvalRunReport]) -> Vec<serde_json::Value> {
+    let mut result = Vec::new();
+    for report in reports {
+        for query in &report.metrics.per_query {
+            for degradation in &query.retrieval_degradations {
+                let mut value = degradation.clone();
+                value["details"]["fixtureId"] = report.fixture_id.clone().into();
+                value["details"]["fixtureFamily"] = report.fixture_family.clone().into();
+                value["details"]["query"] = query.query.clone().into();
+                result.push(value);
+            }
+        }
+    }
+    result
 }
 
 /// Compute aggregate metrics from per-query metrics.
@@ -4166,5 +4247,193 @@ mod tests {
             "ee.eval.pack_quality_report.v1",
             "pack quality report schema",
         )
+    }
+}
+
+#[cfg(test)]
+mod retrieval_diagnostic_tests {
+    use super::*;
+    use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
+    use crate::core::search::{SearchDegradation, SearchReport, SearchSourceMode, SearchStatus};
+    use crate::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
+    use serde_json::json;
+
+    fn search(degraded: Vec<SearchDegradation>) -> SearchReport {
+        SearchReport {
+            status: SearchStatus::NoResults,
+            embed_backend: EmbedBackend::HashFallback,
+            query: "release validation".to_owned(),
+            requested_limit: 5,
+            results: Vec::new(),
+            elapsed_ms: 17.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: RuntimeProfileReport::for_profile(OperatingProfile::Portable, "test"),
+            rerank_configured_mode: crate::config::SearchRerankMode::Off,
+            rerank_configured_top_k: 0,
+            rerank_runtime_available: false,
+            relevance_floor_applied: Some(0.1),
+            candidates_below_floor: 0,
+            query_assist: None,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::LexicalOnly,
+            source_mode_fallback: true,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Workspace, false, None, 0),
+            index_freshness: None,
+        }
+    }
+
+    fn diagnostic(code: &str) -> SearchDegradation {
+        SearchDegradation {
+            code: code.to_owned(),
+            severity: "warning".to_owned(),
+            message: "Source-backed admission withheld indexed evidence".to_owned(),
+            repair: None,
+        }
+    }
+
+    fn report(id: &str, metrics: Vec<QueryMetrics>) -> EvalRunReport {
+        let mut report = EvalRunReport::new(id.to_owned(), "retrieval".to_owned());
+        report.metrics = compute_fixture_metrics(id, metrics);
+        report
+    }
+
+    #[test]
+    fn healthy_and_degraded_zero_scores_have_distinct_execution_evidence() {
+        let expected = vec!["mem_expected".to_owned()];
+        let healthy =
+            compute_search_query_metrics("release", &expected, &search(vec![]), Path::new("/eval"));
+        let degraded = compute_search_query_metrics(
+            "release",
+            &expected,
+            &search(vec![diagnostic("orphaned_index_rows_filtered")]),
+            Path::new("/eval"),
+        );
+        assert_eq!(healthy.precision_at_1, 0.0);
+        assert_eq!(degraded.precision_at_1, 0.0);
+        assert!(healthy.retrieved_ids.is_empty() && degraded.retrieved_ids.is_empty());
+        assert!(retrieval_degradations(&[report("healthy", vec![healthy])]).is_empty());
+        let entries = retrieval_degradations(&[report("broken", vec![degraded])]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["code"], "orphaned_index_rows_filtered");
+        assert_eq!(entries[0]["details"]["fixtureId"], "broken");
+        assert_eq!(entries[0]["details"]["query"], "release");
+        assert_eq!(entries[0]["details"]["searchStatus"], "no_results");
+    }
+
+    #[test]
+    fn every_query_and_fixture_keeps_its_own_source_diagnostics() {
+        let search = search(vec![diagnostic("source_mode_fallback")]);
+        let first = compute_search_query_metrics("q2", &[], &search, Path::new("/eval"));
+        let second = compute_search_query_metrics("q1", &[], &search, Path::new("/eval"));
+        let entries = retrieval_degradations(&[
+            report("fixture_a", vec![first.clone(), second]),
+            report("fixture_b", vec![first]),
+        ]);
+        assert_eq!(
+            entries.len(),
+            3,
+            "same code is not a duplicate across workloads"
+        );
+        assert_eq!(entries[0]["details"]["query"], "q1");
+        assert_eq!(entries[1]["details"]["query"], "q2");
+        assert_eq!(entries[2]["details"]["fixtureId"], "fixture_b");
+        assert_eq!(entries[2]["sources"], json!(["eval", "search"]));
+        for entry in entries {
+            assert_eq!(entry["details"]["sourceModeRequested"], "hybrid");
+            assert_eq!(entry["details"]["sourceModeApplied"], "lexical_only");
+            assert_eq!(entry["details"]["sourceModeFallback"], true);
+            assert!(entry.get("repair").is_none());
+        }
+    }
+
+    #[test]
+    fn canonical_recovery_actions_survive_fixture_attribution() {
+        let search = search(vec![diagnostic("embed_model_unavailable")]);
+        let expected_details = search.degraded[0].data_json()["details"].clone();
+        let metrics = compute_search_query_metrics("release", &[], &search, Path::new("/eval"));
+        let entries = retrieval_degradations(&[report("f", vec![metrics])]);
+        assert!(expected_details.is_object());
+        if let Some(expected) = expected_details.as_object() {
+            for (key, value) in expected {
+                assert_eq!(&entries[0]["details"][key], value);
+            }
+        }
+        assert_eq!(entries[0]["details"]["fixtureId"], "f");
+    }
+
+    #[test]
+    fn scratch_paths_and_secrets_are_not_leaked_by_search_diagnostics() {
+        let secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut failure = diagnostic("scope_metadata_unavailable");
+        failure.message = format!("Could not read /scratch/private-eval/ee.db with {secret}");
+        failure.repair = Some(format!("inspect /scratch/private-eval/index with {secret}"));
+        let mut search = search(vec![failure]);
+        search.errors = vec!["PRIVATE-SQL-ERROR-BODY".to_owned()];
+        search.status = SearchStatus::IndexError;
+        let metrics = compute_search_query_metrics(
+            "release",
+            &[],
+            &search,
+            Path::new("/scratch/private-eval"),
+        );
+        let entries = retrieval_degradations(&[report("f", vec![metrics])]);
+        let rendered = json!(entries).to_string();
+        assert!(!rendered.contains("/scratch/private-eval"));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("PRIVATE-SQL-ERROR-BODY"));
+        assert!(rendered.contains("<eval-workspace>"));
+        assert_eq!(entries[0]["details"]["searchErrorCount"], 1);
+        assert_eq!(entries[0]["details"]["searchStatus"], "index_error");
+    }
+
+    #[test]
+    fn query_metrics_wire_and_hash_remain_quality_only() -> Result<(), serde_json::Error> {
+        let expected = vec!["mem_expected".to_owned()];
+        let pure = compute_query_metrics("release", &expected, &[]);
+        let captured = compute_search_query_metrics(
+            "release",
+            &expected,
+            &search(vec![diagnostic("source_mode_fallback")]),
+            Path::new("/eval"),
+        );
+        assert_eq!(
+            serde_json::to_value(&pure)?,
+            serde_json::to_value(&captured)?
+        );
+        assert_eq!(
+            compute_data_hash(&report("f", vec![pure])),
+            compute_data_hash(&report("f", vec![captured]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successful_rankings_and_all_metrics_survive_diagnostic_capture()
+    -> Result<(), serde_json::Error> {
+        let mut search = search(vec![diagnostic("source_mode_fallback")]);
+        search.status = SearchStatus::Success;
+        search.results.push(crate::core::search::SearchHit {
+            doc_id: "mem_expected".to_owned(),
+            score: 0.8,
+            source: crate::core::search::ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.8),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        });
+        let expected = vec!["mem_expected".to_owned()];
+        let actual =
+            compute_search_query_metrics("release", &expected, &search, Path::new("/eval"));
+        let pure = compute_query_metrics("release", &expected, &expected);
+        assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&pure)?);
+        assert_eq!(actual.precision_at_1, 1.0);
+        assert_eq!(actual.retrieval_degradations.len(), 1);
+        Ok(())
     }
 }

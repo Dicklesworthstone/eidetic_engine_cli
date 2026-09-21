@@ -193,13 +193,9 @@ fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult 
         &json!(0.4),
         "two of five release fixture queries have a relevant top result",
     )?;
-    ensure_json_equal(
-        payload
-            .get("degraded")
-            .ok_or("missing response degraded array")?,
-        &json!([]),
-        context,
-    )?;
+    // The fixed hash embedder causes real source-mode degradation. Requiring
+    // [] masked outages; require its positive, query-attributed evidence.
+    crate::eval_science::assert_eval_retrieval_diagnostics(payload)?;
     ensure(
         payload.pointer("/data/scienceMetrics").is_none(),
         format!("{context}: default build must not emit scienceMetrics"),

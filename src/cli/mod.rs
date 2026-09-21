@@ -16562,6 +16562,7 @@ where
     let passed = reports
         .iter()
         .all(|report| report.status == crate::eval::EvalRunStatus::Passed);
+    let retrieval_degraded = crate::eval::runner::retrieval_degradations(&reports);
 
     if cli.wants_json() {
         let json = if reports.len() == 1 {
@@ -16572,7 +16573,7 @@ where
                     "command": "eval run",
                     "report": reports.first()
                 },
-                "degraded": [],
+                "degraded": retrieval_degraded,
             })
         } else {
             serde_json::json!({
@@ -16583,7 +16584,7 @@ where
                     "reports": reports,
                     "fixtureCount": reports.len()
                 },
-                "degraded": [],
+                "degraded": retrieval_degraded,
             })
         };
         let _ = stdout.write_all(json.to_string().as_bytes());
@@ -16619,6 +16620,7 @@ where
             let _ = writeln!(stdout, "  Mean MRR:   {:.3}", report.metrics.mean_mrr);
             let _ = writeln!(stdout, "  Duration:   {:.1}ms", report.duration_ms);
             let _ = writeln!(stdout, "  Data hash:  {}", report.data_hash);
+            write_eval_retrieval_diagnostics(report, stdout);
             let _ = writeln!(stdout);
         }
     }
@@ -16658,6 +16660,7 @@ where
         }
     };
     let summary = eval_report_summary(&reports);
+    let retrieval_degraded = crate::eval::runner::retrieval_degradations(&reports);
     let data_hashes = reports
         .iter()
         .map(|report| {
@@ -16691,7 +16694,7 @@ where
                 "firstFailure": first_failure,
                 "reports": reports,
             },
-            "degraded": [],
+            "degraded": retrieval_degraded,
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -16711,6 +16714,7 @@ where
                 report.status.as_str(),
                 report.data_hash
             );
+            write_eval_retrieval_diagnostics(report, stdout);
         }
         if let Some(first_failure) = first_failure {
             let fixture = first_failure
@@ -16726,6 +16730,22 @@ where
     }
 
     ProcessExitCode::Success
+}
+
+fn write_eval_retrieval_diagnostics<W: Write>(report: &crate::eval::EvalRunReport, stdout: &mut W) {
+    for query in &report.metrics.per_query {
+        for diagnostic in &query.retrieval_degradations {
+            let _ = writeln!(
+                stdout,
+                "  Search [{}] for {:?}: {}",
+                diagnostic["code"].as_str().unwrap_or("unknown"),
+                query.query,
+                diagnostic["message"]
+                    .as_str()
+                    .unwrap_or("Search was degraded")
+            );
+        }
+    }
 }
 
 fn eval_report_summary(reports: &[crate::eval::EvalRunReport]) -> serde_json::Value {
@@ -17688,15 +17708,11 @@ fn run_eval_retrieval_queries(
                 repair: error.repair_hint().map(str::to_owned),
             }),
         })?;
-        let retrieved_ids = report
-            .results
-            .into_iter()
-            .map(|hit| hit.doc_id)
-            .collect::<Vec<_>>();
-        per_query.push(crate::eval::compute_query_metrics(
+        per_query.push(crate::eval::runner::compute_search_query_metrics(
             &query,
             &expected_ids,
-            &retrieved_ids,
+            &report,
+            &workspace_path,
         ));
     }
 

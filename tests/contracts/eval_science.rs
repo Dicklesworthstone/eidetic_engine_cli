@@ -136,3 +136,106 @@ fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
         "scienceMetrics should be omitted without science output",
     )
 }
+
+/// The fixture intentionally uses a deterministic hash embedder. A real hybrid
+/// search must disclose its lexical fallback for EACH query, regardless of the
+/// fixture's quality verdict. This is a positive signal oracle, not an empty
+/// array check that could pass after the evaluator drops the search report.
+pub(crate) fn assert_eval_retrieval_diagnostics(value: &JsonValue) -> TestResult {
+    let diagnostics = value
+        .get("degraded")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "missing eval search diagnostics".to_owned())?;
+    let queries = [
+        "clippy before release",
+        "failing release workflow",
+        "prepare release",
+        "release failure",
+        "unused import",
+    ];
+    for query in queries {
+        let found = diagnostics.iter().any(|entry| {
+            entry["code"] == "embed_model_unavailable"
+                && entry["severity"] == "warning"
+                && entry["details"]["fixtureId"] == "fx.release_failure.v1"
+                && entry["details"]["fixtureFamily"] == "release_failure"
+                && entry["details"]["query"] == query
+                && entry["details"]["sourceModeRequested"] == "hybrid"
+                && entry["details"]["sourceModeApplied"] == "lexical_only"
+                && entry["details"]["sourceModeFallback"] == true
+                && entry["details"]["searchStatus"] == "success"
+                && entry["details"]["lexicalAvailable"] == true
+        });
+        ensure(
+            found,
+            format!("actual hash-fallback search diagnostic absent for {query}: {diagnostics:?}"),
+        )?;
+    }
+    for entry in diagnostics {
+        ensure(
+            entry["sources"] == json!(["eval", "search"]),
+            "diagnostic source attribution",
+        )?;
+        ensure(
+            entry["details"]["fixtureId"] == "fx.release_failure.v1",
+            "diagnostic fixture attribution",
+        )?;
+        ensure(
+            entry["details"]["query"]
+                .as_str()
+                .is_some_and(|query| queries.contains(&query)),
+            "diagnostic query attribution",
+        )?;
+        ensure(
+            entry["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "diagnostic explanation",
+        )?;
+        ensure(
+            !entry.get("repair").is_some_and(JsonValue::is_null),
+            "optional repairs must be omitted, not null",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn eval_retrieval_run_preserves_real_search_degradations_for_each_query() -> TestResult {
+    let output = run_ee(&["--json", "eval", "run", "fx.release_failure.v1"])?;
+    ensure(
+        output.status.code() == Some(ProcessExitCode::EvalFailure as i32),
+        "quality failure exit is unchanged",
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "JSON diagnostics belong on stdout",
+    )?;
+    let value: JsonValue =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        value["data"]["report"]["metrics"]["mean_precision_at_1"] == 0.4,
+        "source diagnostics must not alter quality",
+    )?;
+    assert_eval_retrieval_diagnostics(&value)
+}
+
+#[test]
+fn eval_retrieval_report_preserves_real_search_degradations_for_each_query() -> TestResult {
+    let output = run_ee(&["--json", "eval", "report", "fx.release_failure.v1"])?;
+    ensure(
+        output.status.success(),
+        "report remains an observational command",
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "JSON diagnostics belong on stdout",
+    )?;
+    let value: JsonValue =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        value["data"]["reports"][0]["metrics"]["mean_precision_at_1"] == 0.4,
+        "reported quality is unchanged",
+    )?;
+    assert_eval_retrieval_diagnostics(&value)
+}
