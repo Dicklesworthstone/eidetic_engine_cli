@@ -3586,3 +3586,71 @@ fn binary_identity_stage_runs_after_the_last_rebuild() {
         rebuild + 1
     );
 }
+
+/// The manifest's declared completeness predicate points at a test that exists.
+///
+/// bd-reality-core-convergence-1azkt.5, bullet 1 ("aggregate completeness").
+/// `[completeness].enforced_by` names the function that decides whether the
+/// stage population reconciles. A pointer to a check that was renamed away is
+/// worse than no pointer at all, because it reads as coverage: the manifest
+/// would claim an enforcer, and nothing would enforce.
+///
+/// This is the `enforced_by` half of the contract-not-a-list rule in
+/// docs/testing-strategy.md -- the manifest declares a property and names its
+/// decider, rather than restating the reconciliation logic in prose that rots
+/// the moment the logic changes.
+#[test]
+fn declared_completeness_enforcer_exists() {
+    let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let guard_src = fs::read_to_string(project_root().join("tests/verification_drift_guard.rs"))
+        .expect("read verification_drift_guard.rs");
+
+    let value_of = |key: &str| -> Option<String> {
+        manifest
+            .lines()
+            .skip_while(|l| l.trim() != "[completeness]")
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+            })
+    };
+
+    let predicate = value_of("predicate");
+    let enforced_by = value_of("enforced_by");
+
+    // EMPTY-WORLD GUARD FIRST: absent the table, both lookups are None and every
+    // check below would pass over nothing.
+    assert!(
+        predicate.is_some() && enforced_by.is_some(),
+        "verify-budget.toml must declare [completeness] with predicate and \
+         enforced_by; got predicate={:?} enforced_by={:?}",
+        predicate.as_deref().map(|p| &p[..p.len().min(40)]),
+        enforced_by
+    );
+    let predicate = predicate.unwrap();
+    let enforced_by = enforced_by.unwrap();
+
+    assert!(
+        predicate.len() >= 40,
+        "the declared completeness predicate is {} characters -- too short to \
+         state a property a reader could check: {predicate:?}",
+        predicate.len()
+    );
+
+    // `path::to/file.rs::fn_name` -- both halves must be real.
+    let (file, func) = enforced_by
+        .split_once("::")
+        .unwrap_or_else(|| panic!("enforced_by must be `<file>::<fn>`, got {enforced_by:?}"));
+    assert!(
+        project_root().join(file).is_file(),
+        "[completeness].enforced_by names {file}, which is not a file in the tree."
+    );
+    assert!(
+        guard_src.contains(&format!("fn {func}(")),
+        "[completeness].enforced_by names `{func}`, which does not exist in \
+         {file}. A manifest that names a missing enforcer claims coverage it \
+         does not have."
+    );
+}

@@ -125,6 +125,24 @@ supported_target_os = ["macos", "linux"]
 feature_source = "Cargo.toml#default"
 requires_candidate_binary = true
 
+# AGGREGATE COMPLETENESS (bd-reality-core-convergence-1azkt.5, bullet 1). The
+# reconciliation has been ENFORCED since 6c518cad8, but the manifest never SAID
+# what completeness means -- so the property lived only in a test body, where a
+# reader checking whether this manifest is complete had nothing to read.
+#
+# `predicate` states the property; it is not a second copy of anything, because
+# no other file states it in words. `enforced_by` names the test that decides it,
+# and a drift-guard test asserts that function actually exists -- a pointer to a
+# check that was renamed away would be worse than no pointer, since it reads as
+# coverage.
+#
+# NOT CLAIMED HERE: completeness of the TEST INVENTORY (bullet 1's remaining
+# clause) is a different property about logical tests across shards, and is not
+# what this predicate covers.
+[completeness]
+predicate = "every run_stage call site in verify.sh has exactly one [[stage]] entry here, and every [[stage]] entry has exactly one call site, except names listed MUTUALLY_EXCLUSIVE in the enforcing test whose call sites cannot both execute in one invocation"
+enforced_by = "tests/verification_drift_guard.rs::every_run_stage_call_site_is_accountable_in_the_manifest"
+
 [[stage]]
 name = "Candidate Binary Identity Stable"
 expected_seconds_p50 = 1
