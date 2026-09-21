@@ -5005,6 +5005,35 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
     // quarantine causes from an upstream_ref_hash mismatch instead of one run
     // per hypothesis.
     let mut span_violations: Vec<String> = Vec::new();
+    // Counted so neither half of the expectation can go vacuous: a fixture that
+    // stopped emitting conversational spans, or stopped emitting the envelope
+    // record, would otherwise satisfy an all-spans-match loop trivially.
+    let mut envelope_spans = 0usize;
+    let mut conversational_spans = 0usize;
+    // Envelope detection mirrors the product's INPUT shape, never its verdict.
+    // src/policy/mod.rs:2002 lists the envelope `type` tokens and
+    // `transcript_token` strips '-' and '_' and lowercases before matching, so
+    // the same normalisation is applied here. classify_transcript_record is
+    // pub(crate) and unreachable from an integration target; re-deriving the
+    // verdict would make this test agree with the classifier by construction,
+    // which is precisely what the comment below already warns against.
+    fn excerpt_is_transcript_envelope(excerpt: &str) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(excerpt) else {
+            return false;
+        };
+        let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let normalised: String = kind
+            .chars()
+            .filter(|character| !character.is_whitespace() && !matches!(character, '-' | '_'))
+            .map(|character| character.to_ascii_lowercase())
+            .collect();
+        matches!(
+            normalised.as_str(),
+            "meta" | "metadata" | "sessionmeta" | "turncontext" | "tokencount" | "taskstarted"
+        )
+    }
     for (index, span) in spans.iter().enumerate() {
         if !span.cass_span_id.starts_with("blake3:") {
             span_violations.push(format!(
@@ -5030,7 +5059,40 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
                 span.producer_kind
             ));
         }
-        if span.search_eligibility != "admitted" {
+        // THE FIXTURE WAS WRONG HERE, not the product (bd-tvi3a).
+        //
+        // This demanded `admitted` for EVERY imported span. The product declines
+        // to index transcript ENVELOPE records, and that is a deliberate,
+        // enumerated decision rather than an inherited default:
+        //
+        //   src/db/mod.rs:8062   the column default is 'denied', and the stored
+        //                        value was 'quarantined' -- they differ, so the
+        //                        value was computed and passed, not inherited
+        //   src/db/mod.rs:14055  policy_quarantine, four named predicates; a
+        //                        CassImport span is ADMITTED unless one fires
+        //   src/policy/mod.rs:2002  the firing one is a hand-written list:
+        //                        "meta" | "metadata" | "sessionmeta" |
+        //                        "turncontext" | "tokencount" | "taskstarted"
+        //
+        // The real CASS fixture carries a `{"type":"session_meta",...}` line.
+        // `transcript_token` strips `_`, so it becomes `sessionmeta`, matches
+        // that list, and is quarantined ON PURPOSE. Asserting admission for it
+        // asserted a promise the product explicitly declined to make.
+        //
+        // EXPECTING THE QUARANTINE IS ONLY HALF A TEST. Relaxing this to "some
+        // spans are admitted" would pass on a build that admitted nothing. So
+        // both directions are pinned: envelope records MUST be quarantined,
+        // conversational spans MUST be admitted, and the counts below prove the
+        // fixture actually produced one of each rather than leaving either side
+        // vacuous.
+        let expected_eligibility = if excerpt_is_transcript_envelope(&span.excerpt) {
+            envelope_spans += 1;
+            "quarantined"
+        } else {
+            conversational_spans += 1;
+            "admitted"
+        };
+        if span.search_eligibility != expected_eligibility {
             // RECORD WHAT THE CLASSIFIER SAW, do not re-derive its verdict.
             // The surviving quarantine trigger (src/db/mod.rs:14058) re-derives
             // a transcript class from the span CONTENT, and which of the three
@@ -5063,7 +5125,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             };
             let prefix = span.excerpt.chars().take(160).collect::<String>();
             span_violations.push(format!(
-                "span[{index}] search_eligibility is {} not admitted -- quarantine inputs: \
+                "span[{index}] search_eligibility is {} not {expected_eligibility} -- quarantine inputs: \
                  instruction_risk {}, span_kind {}, role {:?}, secret_redaction_status {}; \
                  excerpt is {} chars, trimmed_starts_with_brace {}, {}; prefix {:?}",
                 span.search_eligibility,
@@ -5086,10 +5148,34 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             span_violations.push(format!("span[{index}] content_hash is empty"));
         }
     }
+    // THE OTHER HALF OF THE TEST. The loop above only says "every span matched
+    // the eligibility its own shape predicts", which an empty span set and a
+    // one-sided span set both satisfy. These two make the population explicit,
+    // so the pair cannot pass while the fixture has quietly stopped producing
+    // either kind.
+    ensure(
+        conversational_spans > 0,
+        format!(
+            "expected at least one conversational span to be admitted, saw {conversational_spans} \
+             across {} span(s); a run with no conversational spans satisfies the eligibility loop \
+             vacuously",
+            spans.len()
+        ),
+    )?;
+    ensure(
+        envelope_spans > 0,
+        format!(
+            "expected at least one transcript ENVELOPE span (a `type` in meta/metadata/sessionmeta/\
+             turncontext/tokencount/taskstarted) to be quarantined, saw {envelope_spans} across {} \
+             span(s); without one, the quarantine half of this assertion is never exercised and a \
+             product that admitted everything would still pass",
+            spans.len()
+        ),
+    )?;
     ensure(
         span_violations.is_empty(),
         format!(
-            "evidence spans must retain only hashed upstream references with admitted CASS posture; {} violation(s) across {} span(s): {}",
+            "evidence spans must retain only hashed upstream references and carry the CASS posture their own record shape predicts (conversational admitted, transcript envelope quarantined); {} violation(s) across {} span(s): {}",
             span_violations.len(),
             spans.len(),
             span_violations.join("; ")
