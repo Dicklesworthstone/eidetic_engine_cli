@@ -6,6 +6,8 @@
 //! includes draft/deprecated rules for inspection; pack admission is stricter.
 //! Memory revisions share this pre-ranking admission point so superseded
 //! candidates cannot affect relevance floors, duplicate suppression or hints.
+//! Rule bodies, tags, lineage and workspace binding must describe one snapshot;
+//! a revision assembled from independently current reads is not a real revision.
 
 #[path = "search_revision_admission.rs"]
 pub(super) mod memory_revisions;
@@ -27,10 +29,43 @@ pub(super) fn is_rule_hit(hit: &SearchHit) -> bool {
             == Some("rule")
 }
 
+/// Borrow the caller's pinned source view or own exactly one read snapshot.
+/// Opening a read-only connection alone does not pin successive SQL statements.
+/// An unavailable snapshot withholds rules, never authorizes indexed metadata.
+fn load_projections(
+    options: &SearchOptions,
+    ids: &BTreeSet<&str>,
+    read_connection: Option<&DbConnection>,
+    after_rule_rows: impl FnOnce(),
+) -> BTreeMap<String, RuleIndexProjection> {
+    if ids.is_empty() {
+        return BTreeMap::new();
+    }
+    if let Some(connection) = read_connection {
+        // Search/context owns this snapshot. Do not nest BEGIN or release it.
+        return projections(options, ids, connection, after_rule_rows);
+    }
+    let Ok(connection) = DbConnection::open_file_read_only(&options.resolve_database_path())
+    else {
+        return BTreeMap::new();
+    };
+    let Ok(snapshot) = memory_revisions::RevisionReadSnapshot::begin(&connection) else {
+        return BTreeMap::new();
+    };
+    let admitted = projections(options, ids, &connection, after_rule_rows);
+    if snapshot.finish().is_err() {
+        return BTreeMap::new();
+    }
+    admitted
+}
+
+// The boundary permits deterministic real-writer interleavings after native
+// bodies and before dependent rows. Production supplies a no-op, not a sleep.
 fn projections(
     options: &SearchOptions,
     ids: &BTreeSet<&str>,
     connection: &DbConnection,
+    after_rule_rows: impl FnOnce(),
 ) -> BTreeMap<String, RuleIndexProjection> {
     let Some(workspace) = crate::core::workspace::addressed_workspace_row(
         connection,
@@ -41,7 +76,8 @@ fn projections(
     .flatten() else {
         return BTreeMap::new();
     };
-    ids.iter()
+    let rules: Vec<_> = ids
+        .iter()
         .filter_map(|id| {
             let canonical = RuleId::from_str(id).ok()?.to_string();
             if canonical != *id {
@@ -52,8 +88,15 @@ fn projections(
             {
                 return None;
             }
-            let tags = connection.get_rule_tags(id).ok()?;
-            let sources = connection.get_rule_source_memory_ids(id).ok()?;
+            Some((canonical, rule))
+        })
+        .collect();
+    after_rule_rows();
+    rules
+        .into_iter()
+        .filter_map(|(canonical, rule)| {
+            let tags = connection.get_rule_tags(&canonical).ok()?;
+            let sources = connection.get_rule_source_memory_ids(&canonical).ok()?;
             // Provenance cannot borrow identities from another workspace either.
             // Source-less rules are legitimate searchable entities, not fake memories.
             if !sources.is_empty() {
@@ -106,12 +149,7 @@ pub(super) fn admit_hits(
     if ids.is_empty() {
         return hits;
     }
-    let admitted = match read_connection {
-        Some(connection) => projections(options, &ids, connection),
-        None => DbConnection::open_file_read_only(&options.resolve_database_path())
-            .map(|connection| projections(options, &ids, &connection))
-            .unwrap_or_default(),
-    };
+    let admitted = load_projections(options, &ids, read_connection, || {});
     let mut filtered = 0usize;
     let hits = hits
         .into_iter()
@@ -386,7 +424,7 @@ mod tests {
         );
         let ids = BTreeSet::from([RULE, SECOND]);
         assert!(
-            projections(&options, &ids, &db)
+            load_projections(&options, &ids, Some(&db), || {})
                 .values()
                 .all(|projection| !projection.is_pack_admissible())
         );
@@ -412,6 +450,207 @@ mod tests {
         assert_eq!(degraded[0].code, "rule_live_admission_filtered");
         assert!(!missing.exists());
         assert!(!degraded[0].message.contains("absent.db"));
+        Ok(())
+    }
+
+    fn revision_values(
+        projections: &BTreeMap<String, RuleIndexProjection>,
+    ) -> BTreeMap<String, serde_json::Value> {
+        projections
+            .iter()
+            .map(|(id, projection)| (id.clone(), canonical_metadata(projection)))
+            .collect()
+    }
+
+    fn commit_sql(db: &DbConnection, statements: &[String]) -> TestResult {
+        db.execute_raw("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        for statement in statements {
+            if let Err(error) = db.execute_raw(statement) {
+                let _ = db.execute_raw("ROLLBACK");
+                return Err(error.to_string());
+            }
+        }
+        db.execute_raw("COMMIT")
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn owned_rule_snapshot_never_synthesizes_a_mixed_body_and_tag_revision() -> TestResult {
+        let (_temp, options, writer) = fixture()?;
+        insert(&writer, RULE, WORKSPACE, "validated")?;
+        insert(&writer, SECOND, WORKSPACE, "candidate")?;
+        let ids = BTreeSet::from([RULE, SECOND]);
+        let before = revision_values(&load_projections(&options, &ids, None, || {}));
+        assert_eq!(before.len(), 2);
+        let mut committed = Ok(());
+        let captured = load_projections(&options, &ids, None, || {
+            committed = commit_sql(
+                &writer,
+                &[
+                    format!(
+                        "UPDATE procedural_rules SET content = 'Revised generation guidance.', confidence = 0.4 WHERE id = '{RULE}'"
+                    ),
+                    format!(
+                        "INSERT INTO rule_tags (rule_id, tag) VALUES ('{RULE}', 'revision-two')"
+                    ),
+                    format!(
+                        "UPDATE procedural_rules SET content = 'Revised second rule.' WHERE id = '{SECOND}'"
+                    ),
+                ],
+            );
+        });
+        committed?;
+        assert_eq!(revision_values(&captured), before);
+        let after = revision_values(&load_projections(&options, &ids, None, || {}));
+        assert_eq!(after[RULE]["content"], "Revised generation guidance.");
+        assert_eq!(after[SECOND]["content"], "Revised second rule.");
+        assert_ne!(after[RULE]["entity_revision"], before[RULE]["entity_revision"]);
+        assert_ne!(after[SECOND]["entity_revision"], before[SECOND]["entity_revision"]);
+        let mut indexed = hit(RULE);
+        indexed.metadata = Some(before[RULE].clone());
+        assert!(admit_hits(&options, vec![indexed], &mut Vec::new(), None).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_rule_retirement_belongs_to_the_next_source_snapshot() -> TestResult {
+        let (_temp, options, writer) = fixture()?;
+        insert(&writer, RULE, WORKSPACE, "validated")?;
+        let ids = BTreeSet::from([RULE]);
+        let mut committed = Ok(());
+        let captured = load_projections(&options, &ids, None, || {
+            committed = commit_sql(
+                &writer,
+                &[format!(
+                    "UPDATE procedural_rules SET tombstoned_at = '2026-09-20T00:00:00Z' WHERE id = '{RULE}'"
+                )],
+            );
+        });
+        committed?;
+        assert!(captured.contains_key(RULE));
+        let next = load_projections(&options, &ids, None, || {});
+        assert!(next.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn supplied_rule_snapshot_is_neither_replaced_nor_released() -> TestResult {
+        let (_temp, options, writer) = fixture()?;
+        insert(&writer, RULE, WORKSPACE, "validated")?;
+        let reader = DbConnection::open_file_read_only(&options.resolve_database_path())
+            .map_err(|e| e.to_string())?;
+        reader.begin_read_snapshot().map_err(|e| e.to_string())?;
+        let ids = BTreeSet::from([RULE]);
+        let before = revision_values(&load_projections(&options, &ids, Some(&reader), || {}));
+        let mut committed = Ok(());
+        let captured = load_projections(&options, &ids, Some(&reader), || {
+            committed = commit_sql(
+                &writer,
+                &[format!(
+                    "INSERT INTO rule_tags (rule_id, tag) VALUES ('{RULE}', 'later-snapshot')"
+                )],
+            );
+        });
+        committed?;
+        assert_eq!(revision_values(&captured), before);
+        assert_eq!(
+            revision_values(&load_projections(&options, &ids, Some(&reader), || {})),
+            before,
+            "later reads through the caller still see its pinned source view"
+        );
+        assert!(reader.begin_read_snapshot().is_err(), "caller still owns BEGIN");
+        reader.rollback_read_snapshot().map_err(|e| e.to_string())?;
+        assert_ne!(
+            revision_values(&load_projections(&options, &ids, Some(&reader), || {})),
+            before
+        );
+        Ok(())
+    }
+
+    fn seed_lineage(db: &DbConnection, memory: &str, workspace: &str) -> TestResult {
+        db.insert_memory(
+            memory,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace.to_owned(),
+                level: "episodic".to_owned(),
+                kind: "note".to_owned(),
+                content: "Source observation, not the rule body.".to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some(format!("ee://memory/{memory}")),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                valid_to: None,
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn insert_sourced(db: &DbConnection, rule: &str, source: &str) -> TestResult {
+        db.insert_procedural_rule(
+            rule,
+            &CreateProceduralRuleInput {
+                workspace_id: WORKSPACE.to_owned(),
+                content: BODY.to_owned(),
+                confidence: 0.6,
+                utility: 0.7,
+                importance: 0.8,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: true,
+                source_memory_ids: vec![source.to_owned()],
+                tags: vec!["generation".to_owned()],
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn source_workspace_authority_is_pinned_with_its_rule() -> TestResult {
+        let (_temp, options, writer) = fixture()?;
+        let source = "mem_00000000000000000000000071";
+        seed_lineage(&writer, source, WORKSPACE)?;
+        insert_sourced(&writer, RULE, source)?;
+        let ids = BTreeSet::from([RULE]);
+        let before = revision_values(&load_projections(&options, &ids, None, || {}));
+        assert_eq!(before.len(), 1);
+        let mut committed = Ok(());
+        let captured = load_projections(&options, &ids, None, || {
+            committed = commit_sql(
+                &writer,
+                &[format!(
+                    "UPDATE memories SET workspace_id = '{OTHER}' WHERE id = '{source}'"
+                )],
+            );
+        });
+        committed?;
+        assert_eq!(revision_values(&captured), before);
+        assert!(load_projections(&options, &ids, None, || {}).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn source_snapshot_reads_do_not_mutate_rules_audits_or_indexes() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        insert(&db, RULE, WORKSPACE, "validated")?;
+        let rule = db.get_procedural_rule(RULE).map_err(|e| e.to_string())?;
+        let audits = db.count_table_rows("audit_log").map_err(|e| e.to_string())?;
+        let ids = BTreeSet::from([RULE]);
+        for _ in 0..3 {
+            assert_eq!(load_projections(&options, &ids, None, || {}).len(), 1);
+        }
+        assert_eq!(db.get_procedural_rule(RULE).map_err(|e| e.to_string())?, rule);
+        assert_eq!(db.count_table_rows("audit_log").map_err(|e| e.to_string())?, audits);
+        assert!(!options.workspace_path.join("index").exists());
+        assert!(!options.workspace_path.join(".ee").exists());
         Ok(())
     }
 }
