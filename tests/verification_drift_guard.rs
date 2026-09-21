@@ -3186,3 +3186,104 @@ fn verify_e2e_temp_root_is_derived_and_not_hardcoded() {
          path cannot report that no writable root exists"
     );
 }
+
+/// bd-reality-core-convergence-1azkt.5 bullet 1, "aggregate completeness":
+/// every run_stage CALL SITE must be accountable in the manifest, not merely
+/// every stage NAME.
+///
+/// `verify_budget_manifest_declares_every_verify_stage` compares SETS, so a
+/// name used by two call sites is indistinguishable from a name used by one.
+/// Measured: 118 run_stage calls, 117 distinct names, 117 manifest entries. The
+/// set check passes and the extra call site is invisible.
+///
+/// THE ONE CURRENT COLLISION IS BENIGN AND IS DECLARED BELOW, but it is not
+/// harmless in the way a duplicate usually is, and that is worth stating:
+/// "Native Reranker E2E (bd-1nl13.14)" names two MUTUALLY EXCLUSIVE branches of
+/// an `if [ "$CI_SMOKE" != "true" ]`, and the two run different commands ---
+/// `EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 DEGRADATION_ONLY=0` versus
+/// `REQUIRE_MODEL=0 DEGRADATION_ONLY=1`. One requires the model and exercises
+/// the full path; the other deliberately does not. They share one manifest
+/// entry and one p50 of 10s, and they emit STAGE_RESULTS lines that are
+/// TEXTUALLY IDENTICAL. So a green for this stage means two different things
+/// depending on the profile, and the evidence does not record which.
+///
+/// It is left as-is rather than split, because splitting needs a second
+/// manifest entry and therefore a second p50 -- and the manifest's own header
+/// forbids inventing one: "A budget file that can only stay green by
+/// falsifying a latency is worse than a loose one." Both variants would have to
+/// be measured first. Recorded on the bead instead of papered over here.
+///
+/// WHAT THIS GUARD IS ACTUALLY FOR: a NEW duplicate name, where both call sites
+/// can run in the SAME invocation. That is a real collision -- two stages, one
+/// budget, one indistinguishable result line -- and nothing currently catches
+/// it.
+#[test]
+fn every_run_stage_call_site_is_accountable_in_the_manifest() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    let mut call_sites: Vec<String> = Vec::new();
+    for line in script.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("run_stage ") {
+            continue;
+        }
+        let marker = "run_stage \"";
+        if let Some(start) = trimmed.find(marker) {
+            let rest = &trimmed[start + marker.len()..];
+            if let Some(end) = rest.find('"') {
+                call_sites.push(rest[..end].to_string());
+            }
+        }
+    }
+
+    // EMPTY-WORLD GUARD: the reconciliation below is satisfied by an empty file.
+    assert!(
+        call_sites.len() >= 50,
+        "expected verify.sh to contain run_stage call sites; found {}. A low \
+         count means this test parsed nothing, not that verify.sh is clean.",
+        call_sites.len()
+    );
+
+    // Names used by more than one call site, with the reason each is allowed.
+    // A name earns a place here only when the call sites are MUTUALLY
+    // EXCLUSIVE, so at most one executes per invocation.
+    const MUTUALLY_EXCLUSIVE: &[(&str, &str)] = &[(
+        "Native Reranker E2E (bd-1nl13.14)",
+        "if/else on CI_SMOKE: full run requires the model, ci-smoke runs \
+         degradation-only. At most one executes per invocation.",
+    )];
+
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for name in &call_sites {
+        *counts.entry(name.as_str()).or_insert(0) += 1;
+    }
+
+    let mut undeclared = Vec::new();
+    for (name, count) in &counts {
+        if *count > 1 && !MUTUALLY_EXCLUSIVE.iter().any(|(known, _)| known == name) {
+            undeclared.push(format!("{name:?} has {count} call sites"));
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "these stage names are used by more than one run_stage call site and are \
+         not declared mutually exclusive. Two stages sharing one name share one \
+         manifest entry, one p50, and one indistinguishable result line, so a \
+         reader cannot tell which failed:\n  {}\n\
+         If the call sites genuinely cannot both run, add the name to \
+         MUTUALLY_EXCLUSIVE with the condition that separates them.",
+        undeclared.join("\n  ")
+    );
+
+    // The declared exceptions must still be real: a stale entry here would let
+    // a genuine collision through under an old excuse.
+    for (name, _) in MUTUALLY_EXCLUSIVE {
+        let seen = counts.get(name).copied().unwrap_or(0);
+        assert!(
+            seen > 1,
+            "{name:?} is declared mutually exclusive but has {seen} call site(s). \
+             Remove the entry: an excuse for a collision that no longer exists \
+             will silently cover the next one."
+        );
+    }
+}
