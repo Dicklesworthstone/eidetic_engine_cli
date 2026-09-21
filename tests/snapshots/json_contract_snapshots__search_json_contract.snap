@@ -1,6 +1,5 @@
 ---
 source: tests/json_contract_snapshots.rs
-assertion_line: 126
 expression: canonical_json_text(value)
 ---
 {
@@ -184,6 +183,7 @@ expression: canonical_json_text(value)
     "results": [
       {
         "calibrated": false,
+        "calibrationId": "[HASH]",
         "content": "Run cargo fmt --check before release.",
         "coverageGuarantee": null,
         "docId": "mem_00000000000000000000000001",
@@ -202,6 +202,7 @@ expression: canonical_json_text(value)
           "provenanceVerificationStatus": "unverified",
           "schema": "ee.search.document.v1",
           "scoreCalibration": {
+            "calibrationId": "[HASH]",
             "corruptLineNumbers": [],
             "corruptRowCount": 0,
             "coverage": 0.95,

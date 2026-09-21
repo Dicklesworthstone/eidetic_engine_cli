@@ -1,6 +1,6 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: status
+expression: canonical_json_text(value)
 ---
 {
   "data": {
@@ -33,7 +33,7 @@ expression: status
       "status": "not_collected"
     },
     "posture": {
-      "overall": "ok",
+      "overall": "degraded_recoverable",
       "subsystems": [
         {
           "checksPassed": 1,
@@ -57,11 +57,11 @@ expression: status
           "status": "ok"
         },
         {
-          "checksPassed": 1,
-          "fallback": null,
+          "checksPassed": 0,
+          "fallback": "ee index rebuild --workspace .",
           "id": "search",
-          "reason": null,
-          "status": "ok"
+          "reason": "lexical_only",
+          "status": "degraded_recoverable"
         },
         {
           "checksPassed": 1,
@@ -78,11 +78,11 @@ expression: status
           "status": "ok"
         },
         {
-          "checksPassed": 1,
-          "fallback": null,
+          "checksPassed": 0,
+          "fallback": "ee index rebuild --workspace .",
           "id": "pack",
-          "reason": null,
-          "status": "ok"
+          "reason": "pack_uses_degraded_search",
+          "status": "degraded_recoverable"
         },
         {
           "checksPassed": 1,
@@ -136,6 +136,7 @@ expression: status
       ],
       "thisOperation": {
         "degradationsApplied": [
+          "search_lexical_only",
           "graph_skyline_disabled"
         ],
         "status": "ok",
@@ -291,7 +292,7 @@ expression: status
       "unknownAgeCount": 0,
       "windowHours": 24
     },
-    "version": "0.14.4",
+    "version": "0.15.2",
     "workspace": {
       "canonicalRoot": "[WORKSPACE]",
       "configDir": "[WORKSPACE]/.ee",
@@ -327,6 +328,16 @@ expression: status
     }
   },
   "degraded": [
+    {
+      "code": "search_lexical_only",
+      "message": "Search index is healthy but semantic retrieval is unavailable; every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content.",
+      "repair": "Run `ee index rebuild --workspace .`.",
+      "repairKind": "unknown",
+      "severity": "medium",
+      "sources": [
+        "status"
+      ]
+    },
     {
       "code": "graph_skyline_disabled",
       "message": "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
