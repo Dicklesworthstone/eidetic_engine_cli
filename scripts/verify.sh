@@ -1994,7 +1994,51 @@ fi
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.
-run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples -- --test-threads=1"
+# GRADED, NOT MERELY EXITED (bd-reality-core-convergence-1azkt.5, bullet 4).
+#
+# Bullet 4 requires that an IGNORED, ZERO or OMITTED test make the run
+# non-success. Cargo's exit code cannot express any of them: `cargo test` over a
+# filter that matches nothing prints `running 0 tests` / `test result: ok.` and
+# EXITS 0, so this stage passed. Nine of the bullet's thirteen states were
+# already gated at the stage level; these sat at the TEST level, below where
+# run_stage can see.
+#
+# scripts/lib/grade_test_log.py decides them, and already grades the RCH lane and
+# the proof capsule. It could not be pointed here until de65434cf, because this
+# invocation reports MANY targets and the grader refused a multi-target log as
+# ambiguous. --all-targets grades every reconciled pair together and fails when
+# any target failed or when the TOTAL announced across all of them is zero.
+#
+# THE STAGE IS MODIFIED, NOT ADDED, AND NOT RENAMED -- deliberately. The budget
+# has one second of headroom (599 of 600), so a new [[stage]] would spend it; and
+# tests/verification_drift_guard.rs pins run_stage labels, so a rename would red
+# a guard that would be right to red. p50 stays 120: grading parses a log that
+# was captured anyway.
+#
+# BOTH EXITS ARE READ. `${PIPESTATUS[0]}` is cargo's; the grader's is its own. A
+# green grade over a failing cargo run, or a green cargo run over an unreadable
+# log, must not become a pass -- one value cannot express two states.
+unit_contract_golden_tests() {
+    local log rc grade
+    log="$(mktemp "${TMPDIR:-/tmp}/ee-unit-contract-golden.XXXXXX")"
+    cargo test --workspace --lib --bins --tests --examples -- --test-threads=1 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets "$log"
+    grade=$?
+    rm -f "$log"
+    if [ "$rc" -ne 0 ]; then
+        printf 'verify: cargo test exited %s.\n' "$rc" >&2
+        return "$rc"
+    fi
+    if [ "$grade" -ne 0 ]; then
+        printf 'verify: cargo test exited 0 but the log does NOT grade green.\n' >&2
+        printf 'verify: an exit code cannot see a zero-test run, an unreconciled\n' >&2
+        printf 'verify: summary, or a target that never reported -- the grader can.\n' >&2
+        return 1
+    fi
+    return 0
+}
+run_stage "Unit, Contract, and Golden Tests" "unit_contract_golden_tests"
 
 # Gate 5.1: mcp lib unit tests (bd-up1hk). The stage above builds with default
 # features, and `mcp` is not among them, so src/mcp.rs is not compiled and its
