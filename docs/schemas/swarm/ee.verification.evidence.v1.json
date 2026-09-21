@@ -24,38 +24,48 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.verification.evidence.v1"},
-    "verificationId": {"type": "string"},
-    "beadId": {"type": ["string", "null"]},
-    "gateName": {"type": "string"},
-    "command": {"type": "string"},
-    "commandHash": {"type": "string"},
-    "status": {"type": "string", "enum": ["passed", "failed", "blocked", "interrupted", "fallback_detected", "unknown"]},
-    "exitCode": {"type": ["integer", "null"]},
-    "startedAt": {"type": ["string", "null"], "format": "date-time"},
-    "finishedAt": {"type": ["string", "null"], "format": "date-time"},
-    "durationMs": {"type": ["integer", "null"], "minimum": 0},
+    "schema": { "type": "string", "const": "ee.verification.evidence.v1" },
+    "verificationId": { "type": "string" },
+    "beadId": { "type": ["string", "null"] },
+    "gateName": { "type": "string" },
+    "command": { "type": "string" },
+    "commandHash": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "blocked", "interrupted", "fallback_detected", "unknown"]
+    },
+    "exitCode": { "type": ["integer", "null"] },
+    "startedAt": { "type": ["string", "null"], "format": "date-time" },
+    "finishedAt": { "type": ["string", "null"], "format": "date-time" },
+    "durationMs": { "type": ["integer", "null"], "minimum": 0 },
     "environment": {
       "type": "object",
       "required": ["workspaceFingerprint", "cwd", "toolchain"],
       "additionalProperties": false,
       "properties": {
-        "workspaceFingerprint": {"type": ["string", "null"]},
-        "cwd": {"type": ["string", "null"]},
-        "toolchain": {"type": ["string", "null"]}
+        "workspaceFingerprint": { "type": ["string", "null"] },
+        "cwd": { "type": ["string", "null"] },
+        "toolchain": { "type": ["string", "null"] }
       }
     },
     "offload": {
       "type": "object",
-      "required": ["requiredRemote", "remoteRequiredEnv", "offloadTool", "worker", "fallbackDetected", "fallbackReason"],
+      "required": [
+        "requiredRemote",
+        "remoteRequiredEnv",
+        "offloadTool",
+        "worker",
+        "fallbackDetected",
+        "fallbackReason"
+      ],
       "additionalProperties": false,
       "properties": {
-        "requiredRemote": {"type": "boolean"},
-        "remoteRequiredEnv": {"type": ["string", "null"]},
-        "offloadTool": {"type": ["string", "null"]},
-        "worker": {"type": ["string", "null"]},
-        "fallbackDetected": {"type": "boolean"},
-        "fallbackReason": {"type": ["string", "null"]}
+        "requiredRemote": { "type": "boolean" },
+        "remoteRequiredEnv": { "type": ["string", "null"] },
+        "offloadTool": { "type": ["string", "null"] },
+        "worker": { "type": ["string", "null"] },
+        "fallbackDetected": { "type": "boolean" },
+        "fallbackReason": { "type": ["string", "null"] }
       }
     },
     "outputSummary": {
@@ -63,9 +73,9 @@
       "required": ["stdoutTail", "stderrTail", "redacted"],
       "additionalProperties": false,
       "properties": {
-        "stdoutTail": {"type": ["string", "null"]},
-        "stderrTail": {"type": ["string", "null"]},
-        "redacted": {"type": "boolean"}
+        "stdoutTail": { "type": ["string", "null"] },
+        "stderrTail": { "type": ["string", "null"] },
+        "redacted": { "type": "boolean" }
       }
     },
     "artifacts": {
@@ -75,13 +85,13 @@
         "required": ["path", "kind", "contentHash"],
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "kind": {"type": "string"},
-          "contentHash": {"type": ["string", "null"]}
+          "path": { "type": "string" },
+          "kind": { "type": "string" },
+          "contentHash": { "type": ["string", "null"] }
         }
       }
     },
-    "producer": {"$ref": "ee.producer.metadata.v1.json"}
+    "producer": { "$ref": "ee.producer.metadata.v1.json" }
   },
   "examples": [
     {
@@ -96,11 +106,32 @@
       "startedAt": "2026-05-13T00:00:00Z",
       "finishedAt": "2026-05-13T00:00:01Z",
       "durationMs": 1000,
-      "environment": {"workspaceFingerprint": "repo:25e38e130474e7f0292de2a3", "cwd": "/repo", "toolchain": "rustc 1.96.0-nightly"},
-      "offload": {"requiredRemote": false, "remoteRequiredEnv": null, "offloadTool": null, "worker": null, "fallbackDetected": false, "fallbackReason": null},
-      "outputSummary": {"stdoutTail": null, "stderrTail": null, "redacted": false},
+      "environment": {
+        "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+        "cwd": "/repo",
+        "toolchain": "rustc 1.96.0-nightly"
+      },
+      "offload": {
+        "requiredRemote": false,
+        "remoteRequiredEnv": null,
+        "offloadTool": null,
+        "worker": null,
+        "fallbackDetected": false,
+        "fallbackReason": null
+      },
+      "outputSummary": { "stdoutTail": null, "stderrTail": null, "redacted": false },
       "artifacts": [],
-      "producer": {"schema": "ee.producer.metadata.v1", "sourceSystem": "verification", "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null}, "run": {"runId": "verify-run-20260513", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"}, "observedAt": "2026-05-13T00:00:00Z"}
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "verification",
+        "identity": { "status": "unknown", "agentName": null, "harness": null, "model": null },
+        "run": {
+          "runId": "verify-run-20260513",
+          "sessionId": null,
+          "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+        },
+        "observedAt": "2026-05-13T00:00:00Z"
+      }
     }
   ],
   "x-ee-status": {

@@ -4,20 +4,34 @@
   "title": "ee.health.structural.v1",
   "description": "Structural health report using graph-derived coherence signals.",
   "type": "object",
-  "required": ["schema", "snapshotVersion", "kTruss", "contradictionClusters", "summary", "degraded"],
+  "required": [
+    "schema",
+    "snapshotVersion",
+    "kTruss",
+    "contradictionClusters",
+    "summary",
+    "degraded"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.health.structural.v1"},
-    "snapshotVersion": {"type": ["integer", "string"]},
-    "kTruss": {"$ref": "#/$defs/jsonObject"},
-    "contradictionClusters": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
-    "summary": {"$ref": "#/$defs/jsonObject"},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+    "schema": { "type": "string", "const": "ee.health.structural.v1" },
+    "snapshotVersion": { "type": ["integer", "string"] },
+    "kTruss": { "$ref": "#/$defs/jsonObject" },
+    "contradictionClusters": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+    "summary": { "$ref": "#/$defs/jsonObject" },
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } }
   },
   "field_presets": {
     "minimal": ["schema", "snapshotVersion"],
     "summary": ["schema", "snapshotVersion", "summary", "degraded"],
-    "standard": ["schema", "snapshotVersion", "kTruss", "contradictionClusters", "summary", "degraded"],
+    "standard": [
+      "schema",
+      "snapshotVersion",
+      "kTruss",
+      "contradictionClusters",
+      "summary",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "examples": [
@@ -45,10 +59,7 @@
           "clusterId": "contradictions.release-readiness",
           "memoryCount": 4,
           "contradictionDensity": 0.33,
-          "exampleMemoryIds": [
-            "mem_old_release_rule",
-            "mem_new_release_rule"
-          ]
+          "exampleMemoryIds": ["mem_old_release_rule", "mem_new_release_rule"]
         }
       ],
       "summary": {
@@ -61,15 +72,15 @@
     }
   ],
   "$defs": {
-    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

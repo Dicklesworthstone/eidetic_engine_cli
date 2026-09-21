@@ -7,16 +7,20 @@
   "additionalProperties": false,
   "required": ["schema", "response", "markdown"],
   "properties": {
-    "schema": {"const": "ee.daemon.memory_read.response.v1"},
-    "markdown": {"type": "string"},
+    "schema": { "const": "ee.daemon.memory_read.response.v1" },
+    "markdown": { "type": "string" },
     "response": {
       "type": "object",
       "required": ["schema", "success", "data", "degraded"],
       "properties": {
-        "schema": {"const": "ee.response.v2"},
-        "success": {"const": true},
-        "data": {"type": "object", "required": ["command"], "properties": {"command": {"enum": ["orient", "recall"]}}},
-        "degraded": {"type": "array", "items": {"type": "object"}}
+        "schema": { "const": "ee.response.v2" },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": ["command"],
+          "properties": { "command": { "enum": ["orient", "recall"] } }
+        },
+        "degraded": { "type": "array", "items": { "type": "object" } }
       }
     }
   }

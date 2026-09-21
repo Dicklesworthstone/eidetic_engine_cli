@@ -141,12 +141,7 @@
     },
     "lastKey": {
       "type": "object",
-      "required": [
-        "keyHash",
-        "workspaceGeneration",
-        "indexGeneration",
-        "graphGeneration"
-      ],
+      "required": ["keyHash", "workspaceGeneration", "indexGeneration", "graphGeneration"],
       "additionalProperties": false,
       "properties": {
         "keyHash": {

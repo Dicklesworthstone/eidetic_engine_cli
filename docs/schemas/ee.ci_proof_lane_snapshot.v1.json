@@ -70,20 +70,20 @@
       "maxLength": 320,
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "github_pat_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "ACTIONS_RUNTIME_TOKEN"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "stdout:"},
-          {"pattern": "stderr:"},
-          {"pattern": "raw_log"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"},
-          {"pattern": "/Volumes/[^\\s]+"},
-          {"pattern": "/private/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "github_pat_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "ACTIONS_RUNTIME_TOKEN" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "stdout:" },
+          { "pattern": "stderr:" },
+          { "pattern": "raw_log" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" },
+          { "pattern": "/Volumes/[^\\s]+" },
+          { "pattern": "/private/[^\\s]+" }
         ]
       }
     },
@@ -100,10 +100,10 @@
       "required": ["owner", "name", "defaultBranch", "headSha"],
       "additionalProperties": false,
       "properties": {
-        "owner": {"$ref": "#/$defs/safeString"},
-        "name": {"$ref": "#/$defs/safeString"},
-        "defaultBranch": {"$ref": "#/$defs/safeString"},
-        "headSha": {"$ref": "#/$defs/sha"},
+        "owner": { "$ref": "#/$defs/safeString" },
+        "name": { "$ref": "#/$defs/safeString" },
+        "defaultBranch": { "$ref": "#/$defs/safeString" },
+        "headSha": { "$ref": "#/$defs/sha" },
         "headShaReachability": {
           "type": "string",
           "enum": ["github_reachable", "github_unreachable", "not_checked", "unknown"],
@@ -128,15 +128,15 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "verdict": {"$ref": "#/$defs/verdict"},
-        "freshArtifactAvailable": {"type": "boolean"},
-        "duplicateDispatchCount": {"type": "integer", "minimum": 0},
-        "activeRunCount": {"type": "integer", "minimum": 0},
-        "cancelledBeforeArtifactCount": {"type": "integer", "minimum": 0},
-        "staleArtifactCount": {"type": "integer", "minimum": 0},
-        "checksumMismatchCount": {"type": "integer", "minimum": 0},
-        "attestationInvalidCount": {"type": "integer", "minimum": 0},
-        "attestationRequiredCount": {"type": "integer", "minimum": 0},
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "freshArtifactAvailable": { "type": "boolean" },
+        "duplicateDispatchCount": { "type": "integer", "minimum": 0 },
+        "activeRunCount": { "type": "integer", "minimum": 0 },
+        "cancelledBeforeArtifactCount": { "type": "integer", "minimum": 0 },
+        "staleArtifactCount": { "type": "integer", "minimum": 0 },
+        "checksumMismatchCount": { "type": "integer", "minimum": 0 },
+        "attestationInvalidCount": { "type": "integer", "minimum": 0 },
+        "attestationRequiredCount": { "type": "integer", "minimum": 0 },
         "localCargoFallbackAllowed": {
           "type": "boolean",
           "const": false
@@ -168,8 +168,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "workflowName": {"$ref": "#/$defs/safeString"},
-        "workflowPath": {"$ref": "#/$defs/safeString"},
+        "workflowName": { "$ref": "#/$defs/safeString" },
+        "workflowPath": { "$ref": "#/$defs/safeString" },
         "proofLaneKind": {
           "type": "string",
           "enum": ["ci", "dedicated_artifact", "release", "external"]
@@ -193,7 +193,7 @@
         },
         "runs": {
           "type": "array",
-          "items": {"$ref": "#/$defs/run"},
+          "items": { "$ref": "#/$defs/run" },
           "maxItems": 32
         }
       }
@@ -218,20 +218,20 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "runId": {"type": "string", "pattern": "^[0-9]+$"},
+        "runId": { "type": "string", "pattern": "^[0-9]+$" },
         "jobIds": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^[0-9]+$"},
+          "items": { "type": "string", "pattern": "^[0-9]+$" },
           "uniqueItems": true
         },
         "jobEvidence": {
           "type": "array",
-          "items": {"$ref": "#/$defs/jobEvidence"},
+          "items": { "$ref": "#/$defs/jobEvidence" },
           "maxItems": 16
         },
-        "event": {"$ref": "#/$defs/safeString"},
-        "headSha": {"$ref": "#/$defs/sha"},
-        "ref": {"$ref": "#/$defs/safeString"},
+        "event": { "$ref": "#/$defs/safeString" },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "ref": { "$ref": "#/$defs/safeString" },
         "status": {
           "type": "string",
           "enum": ["queued", "in_progress", "completed", "unknown"]
@@ -249,22 +249,19 @@
             null
           ]
         },
-        "createdAt": {"type": "string", "format": "date-time"},
-        "updatedAt": {"type": "string", "format": "date-time"},
-        "completedAt": {"type": ["string", "null"], "format": "date-time"},
-        "sourceFreshness": {"$ref": "#/$defs/freshness"},
-        "artifactFreshness": {"$ref": "#/$defs/freshness"},
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": ["string", "null"], "format": "date-time" },
+        "sourceFreshness": { "$ref": "#/$defs/freshness" },
+        "artifactFreshness": { "$ref": "#/$defs/freshness" },
         "artifacts": {
           "type": "array",
-          "items": {"$ref": "#/$defs/artifact"},
+          "items": { "$ref": "#/$defs/artifact" },
           "maxItems": 16
         },
-        "queueDiagnosis": {"$ref": "#/$defs/queueDiagnosis"},
+        "queueDiagnosis": { "$ref": "#/$defs/queueDiagnosis" },
         "firstFailureDiagnosis": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         }
       }
     },
@@ -285,8 +282,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "jobId": {"type": "string", "pattern": "^[0-9]+$"},
-        "name": {"$ref": "#/$defs/safeString"},
+        "jobId": { "type": "string", "pattern": "^[0-9]+$" },
+        "name": { "$ref": "#/$defs/safeString" },
         "status": {
           "type": "string",
           "enum": ["queued", "in_progress", "completed", "unknown"]
@@ -306,25 +303,19 @@
         },
         "labels": {
           "type": "array",
-          "items": {"$ref": "#/$defs/safeString"},
+          "items": { "$ref": "#/$defs/safeString" },
           "uniqueItems": true,
           "maxItems": 16
         },
         "runnerName": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         },
         "runnerGroupName": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         },
-        "startedAt": {"type": ["string", "null"], "format": "date-time"},
-        "completedAt": {"type": ["string", "null"], "format": "date-time"},
-        "queueAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "startedAt": { "type": ["string", "null"], "format": "date-time" },
+        "completedAt": { "type": ["string", "null"], "format": "date-time" },
+        "queueAgeSeconds": { "type": ["integer", "null"], "minimum": 0 },
         "runnerAssignment": {
           "type": "string",
           "enum": ["assigned", "unassigned", "unknown", "not_applicable"]
@@ -354,25 +345,16 @@
             "workflow_execution_stale"
           ]
         },
-        "queueAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
-        "staleAfterSeconds": {"type": "integer", "minimum": 1},
+        "queueAgeSeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "staleAfterSeconds": { "type": "integer", "minimum": 1 },
         "comparablePriorRunId": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "string", "pattern": "^[0-9]+$"}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9]+$" }]
         },
         "comparablePriorRunnerName": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         },
         "comparablePriorRunnerGroupName": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         },
         "nextAction": {
           "type": "string",
@@ -410,97 +392,64 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {"$ref": "#/$defs/safeString"},
+        "name": { "$ref": "#/$defs/safeString" },
         "artifactId": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "string", "pattern": "^[1-9][0-9]*$"}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[1-9][0-9]*$" }]
         },
         "status": {
           "type": "string",
           "enum": ["available", "missing", "expired", "not_checked"]
         },
-        "retentionExpiresAt": {"type": ["string", "null"], "format": "date-time"},
+        "retentionExpiresAt": { "type": ["string", "null"], "format": "date-time" },
         "checksumStatus": {
           "type": "string",
           "enum": ["verified", "missing", "mismatch", "not_checked"]
         },
-        "sourceSha": {"$ref": "#/$defs/sha"},
-        "architecture": {"$ref": "#/$defs/safeString"},
+        "sourceSha": { "$ref": "#/$defs/sha" },
+        "architecture": { "$ref": "#/$defs/safeString" },
         "attestationStatus": {
           "type": "string",
           "enum": ["verified", "rejected", "missing", "not_checked"]
         },
         "attestedSourceCommit": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/sha"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha" }]
         },
         "attestedGitTree": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/sha"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha" }]
         },
         "manifestHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "verificationHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "attestedRunId": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "string", "pattern": "^[1-9][0-9]*$"}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[1-9][0-9]*$" }]
         },
         "binaryHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "archiveHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "buildCommandHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "effectiveInputHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "provenanceHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "attestationRejections": {
           "type": "array",
-          "items": {"$ref": "#/$defs/safeString"},
+          "items": { "$ref": "#/$defs/safeString" },
           "maxItems": 32,
           "uniqueItems": true
         },
         "surfaceProbes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/surfaceProbe"},
+          "items": { "$ref": "#/$defs/surfaceProbe" },
           "maxItems": 16
         }
       }
@@ -520,37 +469,25 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "probeId": {"type": ["string", "null"]},
-        "commandTemplate": {"$ref": "#/$defs/safeString"},
+        "probeId": { "type": ["string", "null"] },
+        "commandTemplate": { "$ref": "#/$defs/safeString" },
         "status": {
           "type": "string",
           "enum": ["passed", "failed", "not_run"]
         },
-        "expectedSurface": {"$ref": "#/$defs/safeString"},
+        "expectedSurface": { "$ref": "#/$defs/safeString" },
         "argvHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
-        "exitCode": {"type": ["integer", "null"]},
+        "exitCode": { "type": ["integer", "null"] },
         "stdoutHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "stderrHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "firstFailureDiagnosis": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         }
       }
     },
@@ -559,18 +496,12 @@
       "required": ["verdict", "workflowName", "runId", "nextAction", "rationale"],
       "additionalProperties": false,
       "properties": {
-        "verdict": {"$ref": "#/$defs/verdict"},
+        "verdict": { "$ref": "#/$defs/verdict" },
         "workflowName": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/safeString"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
         },
         "runId": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "string", "pattern": "^[0-9]+$"}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9]+$" }]
         },
         "nextAction": {
           "type": "string",
@@ -584,7 +515,7 @@
             "file_followup_bead"
           ]
         },
-        "rationale": {"$ref": "#/$defs/safeString"}
+        "rationale": { "$ref": "#/$defs/safeString" }
       }
     },
     "verdict": {
@@ -615,14 +546,22 @@
       "required": ["priority", "kind", "command", "mutatesState", "rationale"],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
+        "priority": { "type": "integer", "minimum": 0 },
         "kind": {
           "type": "string",
-          "enum": ["wait", "download", "reuse", "dispatch", "coordinate", "file_bead", "manual_review"]
+          "enum": [
+            "wait",
+            "download",
+            "reuse",
+            "dispatch",
+            "coordinate",
+            "file_bead",
+            "manual_review"
+          ]
         },
-        "command": {"$ref": "#/$defs/safeString"},
-        "mutatesState": {"type": "boolean"},
-        "rationale": {"$ref": "#/$defs/safeString"}
+        "command": { "$ref": "#/$defs/safeString" },
+        "mutatesState": { "type": "boolean" },
+        "rationale": { "$ref": "#/$defs/safeString" }
       }
     },
     "degradation": {
@@ -651,8 +590,8 @@
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"$ref": "#/$defs/safeString"},
-        "repair": {"$ref": "#/$defs/safeString"}
+        "message": { "$ref": "#/$defs/safeString" },
+        "repair": { "$ref": "#/$defs/safeString" }
       }
     }
   },

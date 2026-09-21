@@ -20,25 +20,25 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.pack.revision_token.v1"},
-    "mode": {"type": "string", "const": "revisable"},
-    "token": {"type": "string", "pattern": "^packrev_[0-9a-f]{32}$"},
-    "tier1Usable": {"type": "boolean"},
-    "revisionAvailable": {"type": "boolean"},
-    "reason": {"type": "string"},
-    "queryHash": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
-    "packHash": {"type": "string", "minLength": 1},
+    "schema": { "type": "string", "const": "ee.pack.revision_token.v1" },
+    "mode": { "type": "string", "const": "revisable" },
+    "token": { "type": "string", "pattern": "^packrev_[0-9a-f]{32}$" },
+    "tier1Usable": { "type": "boolean" },
+    "revisionAvailable": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "queryHash": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+    "packHash": { "type": "string", "minLength": 1 },
     "localMeshTipState": {
       "type": "object",
       "required": ["status", "basis"],
       "additionalProperties": false,
       "properties": {
-        "status": {"type": "string"},
-        "basis": {"type": "string"}
+        "status": { "type": "string" },
+        "basis": { "type": "string" }
       }
     },
-    "selectedMemoryIds": {"type": "array", "items": {"type": "string"}},
-    "rebuildCommand": {"type": "string"},
-    "diffCommand": {"type": "string"}
+    "selectedMemoryIds": { "type": "array", "items": { "type": "string" } },
+    "rebuildCommand": { "type": "string" },
+    "diffCommand": { "type": "string" }
   }
 }

@@ -7,19 +7,26 @@
   "required": ["schema", "profile", "budgetClass"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.resource.profile.v1"},
-    "profile": {"type": "string", "enum": ["lean", "standard", "swarm_heavy"]},
+    "schema": { "type": "string", "const": "ee.resource.profile.v1" },
+    "profile": { "type": "string", "enum": ["lean", "standard", "swarm_heavy"] },
     "budgetClass": {
       "type": "object",
-      "required": ["candidatesScannedMax", "graphTraversalMaxEdges", "elapsedMsTarget", "elapsedMsWarning", "elapsedMsFailure", "concurrentPackMax"],
+      "required": [
+        "candidatesScannedMax",
+        "graphTraversalMaxEdges",
+        "elapsedMsTarget",
+        "elapsedMsWarning",
+        "elapsedMsFailure",
+        "concurrentPackMax"
+      ],
       "additionalProperties": false,
       "properties": {
-        "candidatesScannedMax": {"type": "integer", "minimum": 1},
-        "graphTraversalMaxEdges": {"type": "integer", "minimum": 0},
-        "elapsedMsTarget": {"type": "integer", "minimum": 1},
-        "elapsedMsWarning": {"type": "integer", "minimum": 1},
-        "elapsedMsFailure": {"type": "integer", "minimum": 1},
-        "concurrentPackMax": {"type": "integer", "minimum": 1}
+        "candidatesScannedMax": { "type": "integer", "minimum": 1 },
+        "graphTraversalMaxEdges": { "type": "integer", "minimum": 0 },
+        "elapsedMsTarget": { "type": "integer", "minimum": 1 },
+        "elapsedMsWarning": { "type": "integer", "minimum": 1 },
+        "elapsedMsFailure": { "type": "integer", "minimum": 1 },
+        "concurrentPackMax": { "type": "integer", "minimum": 1 }
       }
     }
   },

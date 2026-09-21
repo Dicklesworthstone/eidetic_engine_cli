@@ -123,14 +123,7 @@
     },
     "materialLane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graphLink",
-        "revisionNotice",
-        "curationSignal"
-      ]
+      "enum": ["metadata", "body", "embedding", "graphLink", "revisionNotice", "curationSignal"]
     },
     "redactionClass": {
       "type": "string",
@@ -138,13 +131,7 @@
     },
     "trustLane": {
       "type": "string",
-      "enum": [
-        "localHuman",
-        "peerHumanViaPeer",
-        "peerAgent",
-        "peerDerived",
-        "untrusted"
-      ]
+      "enum": ["localHuman", "peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"]
     },
     "trustClaim": {
       "type": "object",

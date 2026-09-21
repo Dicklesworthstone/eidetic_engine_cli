@@ -7,17 +7,30 @@
   "required": ["schema", "sourceSystem", "identity", "run", "observedAt"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.producer.metadata.v1"},
-    "sourceSystem": {"type": "string", "enum": ["cli", "cass", "audit", "agent_mail", "recorder", "curation", "verification", "coordination_fallback", "unknown"]},
+    "schema": { "type": "string", "const": "ee.producer.metadata.v1" },
+    "sourceSystem": {
+      "type": "string",
+      "enum": [
+        "cli",
+        "cass",
+        "audit",
+        "agent_mail",
+        "recorder",
+        "curation",
+        "verification",
+        "coordination_fallback",
+        "unknown"
+      ]
+    },
     "identity": {
       "type": "object",
       "required": ["status", "agentName", "harness", "model"],
       "additionalProperties": false,
       "properties": {
-        "status": {"type": "string", "enum": ["known", "unknown", "unobserved"]},
-        "agentName": {"type": ["string", "null"]},
-        "harness": {"type": ["string", "null"]},
-        "model": {"type": ["string", "null"]}
+        "status": { "type": "string", "enum": ["known", "unknown", "unobserved"] },
+        "agentName": { "type": ["string", "null"] },
+        "harness": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] }
       }
     },
     "run": {
@@ -25,26 +38,39 @@
       "required": ["runId", "sessionId", "workspaceFingerprint"],
       "additionalProperties": false,
       "properties": {
-        "runId": {"type": ["string", "null"]},
-        "sessionId": {"type": ["string", "null"]},
-        "workspaceFingerprint": {"type": ["string", "null"]}
+        "runId": { "type": ["string", "null"] },
+        "sessionId": { "type": ["string", "null"] },
+        "workspaceFingerprint": { "type": ["string", "null"] }
       }
     },
-    "observedAt": {"type": ["string", "null"], "format": "date-time"}
+    "observedAt": { "type": ["string", "null"], "format": "date-time" }
   },
   "examples": [
     {
       "schema": "ee.producer.metadata.v1",
       "sourceSystem": "verification",
-      "identity": {"status": "known", "agentName": "BlueLake", "harness": "codex-cli", "model": "gpt-5"},
-      "run": {"runId": "run-20260513-001", "sessionId": "session-001", "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "identity": {
+        "status": "known",
+        "agentName": "BlueLake",
+        "harness": "codex-cli",
+        "model": "gpt-5"
+      },
+      "run": {
+        "runId": "run-20260513-001",
+        "sessionId": "session-001",
+        "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+      },
       "observedAt": "2026-05-13T14:00:00Z"
     },
     {
       "schema": "ee.producer.metadata.v1",
       "sourceSystem": "cli",
-      "identity": {"status": "unobserved", "agentName": null, "harness": null, "model": null},
-      "run": {"runId": null, "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "identity": { "status": "unobserved", "agentName": null, "harness": null, "model": null },
+      "run": {
+        "runId": null,
+        "sessionId": null,
+        "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+      },
       "observedAt": null
     }
   ],

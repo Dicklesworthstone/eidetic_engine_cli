@@ -5,15 +5,7 @@
   "description": "Deterministic extractive distillation report (ADR 0062 Appendix B). Emitted under data by `ee journal distill` and produced by the journal-distill steward job. Proposals are curation candidates only (never direct memories); --dry-run (the default) writes nothing and applied is null.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "scope",
-    "dryRun",
-    "proposals",
-    "abstentions",
-    "applied",
-    "degraded"
-  ],
+  "required": ["schema", "scope", "dryRun", "proposals", "abstentions", "applied", "degraded"],
   "properties": {
     "schema": {
       "const": "ee.journal.distill.v1"
@@ -161,11 +153,7 @@
             "pattern": "^jrn_[0-9a-fA-F-]{36}$"
           },
           "reason": {
-            "enum": [
-              "instruction_risk_excluded",
-              "below_signal_threshold",
-              "already_distilled"
-            ]
+            "enum": ["instruction_risk_excluded", "below_signal_threshold", "already_distilled"]
           }
         }
       }

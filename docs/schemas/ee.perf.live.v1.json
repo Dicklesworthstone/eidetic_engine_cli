@@ -148,13 +148,7 @@
     "hostPressure": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "cpuUserPct",
-        "cpuIowaitPct",
-        "memoryRssMb",
-        "pageCacheMb",
-        "fsyncLatencyP99Ms"
-      ],
+      "required": ["cpuUserPct", "cpuIowaitPct", "memoryRssMb", "pageCacheMb", "fsyncLatencyP99Ms"],
       "properties": {
         "cpuUserPct": { "type": ["number", "null"], "minimum": 0 },
         "cpuIowaitPct": { "type": ["number", "null"], "minimum": 0 },

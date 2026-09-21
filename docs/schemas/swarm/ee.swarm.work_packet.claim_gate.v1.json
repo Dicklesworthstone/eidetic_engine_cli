@@ -30,7 +30,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.swarm.work_packet.claim_gate.v1"},
+    "schema": { "type": "string", "const": "ee.swarm.work_packet.claim_gate.v1" },
     "gateId": {
       "type": "string",
       "pattern": "^swarm_work_packet_claim_gate_[a-f0-9]{24}$",
@@ -53,13 +53,10 @@
       "type": ["string", "null"],
       "description": "The explicitly requested Bead ID when the harness asks about one candidate, otherwise null for the recommended/default candidate."
     },
-    "verdict": {"$ref": "#/definitions/gateVerdict"},
-    "safeToClaim": {"type": "boolean"},
+    "verdict": { "$ref": "#/definitions/gateVerdict" },
+    "safeToClaim": { "type": "boolean" },
     "selectedCandidate": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/definitions/selectedCandidate"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/selectedCandidate" }]
     },
     "recommendedAction": {
       "type": "string",
@@ -70,69 +67,66 @@
       "type": ["boolean", "null"],
       "description": "Whether the selected candidate satisfies candidate-scoped tracker, Agent Mail, actionable-queue, collision, RCH, and install-adjacent safety checks. For the default candidate this also requires the packet recommendation to identify and admit it; an explicit requestedCandidateId is evaluated independently of recommendation rank."
     },
-    "sourceAuthority": {"$ref": "#/definitions/sourceAuthority"},
-    "sourceAuthoritySnapshot": {"$ref": "#/definitions/sourceAuthoritySnapshot"},
-    "actionableQueue": {"$ref": "#/definitions/actionableQueueAuthority"},
-    "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
-    "unsafeReasons": {"$ref": "#/definitions/stringArray"},
-    "staleReasons": {"$ref": "#/definitions/stringArray"},
-    "sourceRefs": {"$ref": "#/definitions/stringArray"},
-    "degradedCodes": {"$ref": "#/definitions/stringArray"},
+    "sourceAuthority": { "$ref": "#/definitions/sourceAuthority" },
+    "sourceAuthoritySnapshot": { "$ref": "#/definitions/sourceAuthoritySnapshot" },
+    "actionableQueue": { "$ref": "#/definitions/actionableQueueAuthority" },
+    "resourceAdmission": { "$ref": "#/definitions/resourceAdmission" },
+    "unsafeReasons": { "$ref": "#/definitions/stringArray" },
+    "staleReasons": { "$ref": "#/definitions/stringArray" },
+    "sourceRefs": { "$ref": "#/definitions/stringArray" },
+    "degradedCodes": { "$ref": "#/definitions/stringArray" },
     "nextCommandActions": {
       "type": "array",
       "description": "Non-mutating inspection actions only. Claim/reopen/update actions are never mixed into this array.",
-      "items": {"$ref": "#/definitions/inspectionCommandAction"}
+      "items": { "$ref": "#/definitions/inspectionCommandAction" }
     },
     "claimCommandAction": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/definitions/commandAction"}
-      ],
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/commandAction" }],
       "description": "Mutating Beads claim guidance. Present only when safeToClaim is true and verdict is safe_to_claim."
     },
     "recoveryActions": {
       "type": "array",
       "description": "Structured recovery guidance for authority blockers. Entries may be read-only commands or human/operator actions; they are not claim permission.",
-      "items": {"$ref": "#/definitions/recoveryAction"}
+      "items": { "$ref": "#/definitions/recoveryAction" }
     }
   },
   "allOf": [
     {
       "if": {
-        "properties": {"safeToClaim": {"const": false}},
+        "properties": { "safeToClaim": { "const": false } },
         "required": ["safeToClaim"]
       },
       "then": {
-        "properties": {"claimCommandAction": {"const": null}}
+        "properties": { "claimCommandAction": { "const": null } }
       }
     },
     {
       "if": {
-        "properties": {"safeToClaim": {"const": true}},
+        "properties": { "safeToClaim": { "const": true } },
         "required": ["safeToClaim"]
       },
       "then": {
         "properties": {
-          "verdict": {"const": "safe_to_claim"},
-          "recommendedSafeToClaim": {"const": true},
+          "verdict": { "const": "safe_to_claim" },
+          "recommendedSafeToClaim": { "const": true },
           "selectedCandidate": {
             "type": "object",
             "required": ["decision", "ownership", "editScope", "collisionRisk"],
             "properties": {
-              "decision": {"const": "safe_to_claim"},
-              "ownership": {"const": "unassigned"},
+              "decision": { "const": "safe_to_claim" },
+              "ownership": { "const": "unassigned" },
               "editScope": {
                 "type": "object",
                 "required": ["state", "paths"],
                 "properties": {
-                  "state": {"const": "known"},
-                  "paths": {"minItems": 1}
+                  "state": { "const": "known" },
+                  "paths": { "minItems": 1 }
                 }
               },
-              "collisionRisk": {"const": "none"}
+              "collisionRisk": { "const": "none" }
             }
           },
-          "claimCommandAction": {"type": "object"},
+          "claimCommandAction": { "type": "object" },
           "actionableQueue": {
             "type": "object",
             "required": ["candidateState", "bvAdvisoryContradiction"],
@@ -140,7 +134,7 @@
               "candidateState": {
                 "enum": ["candidate_present_actionable", "not_evaluated"]
               },
-              "bvAdvisoryContradiction": {"const": false}
+              "bvAdvisoryContradiction": { "const": false }
             }
           }
         }
@@ -150,7 +144,7 @@
   "definitions": {
     "stringArray": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": { "type": "string" }
     },
     "candidateOwnership": {
       "type": "string",
@@ -162,27 +156,27 @@
       "required": ["state", "paths", "sourceRefs"],
       "additionalProperties": false,
       "properties": {
-        "state": {"type": "string", "enum": ["known", "unknown"]},
+        "state": { "type": "string", "enum": ["known", "unknown"] },
         "paths": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         },
         "sourceRefs": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         }
       },
       "allOf": [
         {
-          "if": {"properties": {"state": {"const": "known"}}, "required": ["state"]},
-          "then": {"properties": {"paths": {"minItems": 1}}}
+          "if": { "properties": { "state": { "const": "known" } }, "required": ["state"] },
+          "then": { "properties": { "paths": { "minItems": 1 } } }
         },
         {
-          "if": {"properties": {"state": {"const": "unknown"}}, "required": ["state"]},
-          "then": {"properties": {"paths": {"maxItems": 0}}}
+          "if": { "properties": { "state": { "const": "unknown" } }, "required": ["state"] },
+          "then": { "properties": { "paths": { "maxItems": 0 } } }
         }
       ],
       "description": "Candidate-scoped edit-path evidence. Unknown scope never inherits checkout-global conflicts and cannot authorize a claim."
@@ -192,27 +186,27 @@
       "minLength": 1,
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "From: "},
-          {"pattern": "Subject: "},
-          {"pattern": "Message-ID:"},
-          {"pattern": "body:"},
-          {"pattern": "raw_inbox"},
-          {"pattern": "stdout:"},
-          {"pattern": "stderr:"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "From: " },
+          { "pattern": "Subject: " },
+          { "pattern": "Message-ID:" },
+          { "pattern": "body:" },
+          { "pattern": "raw_inbox" },
+          { "pattern": "stdout:" },
+          { "pattern": "stderr:" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" }
         ]
       }
     },
     "argvArray": {
       "type": "array",
       "minItems": 1,
-      "items": {"$ref": "#/definitions/safeString"}
+      "items": { "$ref": "#/definitions/safeString" }
     },
     "copySafety": {
       "type": "string",
@@ -225,7 +219,18 @@
     },
     "commandSubstrate": {
       "type": "string",
-      "enum": ["agent_mail", "beads", "bv", "ee", "git", "human", "jq", "rch", "static_local", "none"]
+      "enum": [
+        "agent_mail",
+        "beads",
+        "bv",
+        "ee",
+        "git",
+        "human",
+        "jq",
+        "rch",
+        "static_local",
+        "none"
+      ]
     },
     "commandAction": {
       "type": "object",
@@ -242,38 +247,46 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
-        "displayCommand": {"$ref": "#/definitions/safeString"},
-        "argv": {"$ref": "#/definitions/argvArray"},
-        "shellRequired": {"type": "boolean"},
-        "copySafety": {"$ref": "#/definitions/copySafety"},
-        "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
-        "when": {"$ref": "#/definitions/safeString"},
+        "commandId": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]+$" },
+        "displayCommand": { "$ref": "#/definitions/safeString" },
+        "argv": { "$ref": "#/definitions/argvArray" },
+        "shellRequired": { "type": "boolean" },
+        "copySafety": { "$ref": "#/definitions/copySafety" },
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "$ref": "#/definitions/commandSubstrate" },
+        "when": { "$ref": "#/definitions/safeString" },
         "rationale": {
-          "allOf": [{"$ref": "#/definitions/safeString"}],
+          "allOf": [{ "$ref": "#/definitions/safeString" }],
           "maxLength": 240
         }
       },
       "allOf": [
         {
-          "if": {"properties": {"shellRequired": {"const": true}}, "required": ["shellRequired"]},
-          "then": {"properties": {"copySafety": {"enum": ["shell_required_review", "forbidden_until_human_approval"]}}}
+          "if": {
+            "properties": { "shellRequired": { "const": true } },
+            "required": ["shellRequired"]
+          },
+          "then": {
+            "properties": {
+              "copySafety": { "enum": ["shell_required_review", "forbidden_until_human_approval"] }
+            }
+          }
         },
         {
-          "if": {"properties": {"copySafety": {"const": "safe_structured_argv"}}, "required": ["copySafety"]},
-          "then": {"properties": {"shellRequired": {"const": false}}}
+          "if": {
+            "properties": { "copySafety": { "const": "safe_structured_argv" } },
+            "required": ["copySafety"]
+          },
+          "then": { "properties": { "shellRequired": { "const": false } } }
         }
       ]
     },
     "inspectionCommandAction": {
       "description": "Read-only inspection action derived from commandAction. Claim, reopen, update, Cargo, Git staging, and Agent Mail send actions are not valid here.",
-      "allOf": [
-        {"$ref": "#/definitions/commandAction"}
-      ],
+      "allOf": [{ "$ref": "#/definitions/commandAction" }],
       "required": ["mutatesState"],
       "properties": {
-        "mutatesState": {"const": false}
+        "mutatesState": { "const": false }
       }
     },
     "recoveryAction": {
@@ -288,7 +301,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0, "maximum": 255},
+        "priority": { "type": "integer", "minimum": 0, "maximum": 255 },
         "kind": {
           "type": "string",
           "enum": [
@@ -299,15 +312,12 @@
           ]
         },
         "commandAction": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/definitions/commandAction"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/commandAction" }]
         },
-        "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "$ref": "#/definitions/commandSubstrate" },
         "rationale": {
-          "allOf": [{"$ref": "#/definitions/safeString"}],
+          "allOf": [{ "$ref": "#/definitions/safeString" }],
           "maxLength": 240
         }
       }
@@ -350,16 +360,16 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string"},
-        "title": {"type": "string"},
-        "source": {"type": "string"},
-        "status": {"type": "string"},
-        "priority": {"type": ["integer", "null"]},
-        "assignee": {"type": ["string", "null"]},
-        "ownership": {"$ref": "#/definitions/candidateOwnership"},
-        "editScope": {"$ref": "#/definitions/candidateEditScope"},
-        "decision": {"$ref": "#/definitions/gateVerdict"},
-        "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]}
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "source": { "type": "string" },
+        "status": { "type": "string" },
+        "priority": { "type": ["integer", "null"] },
+        "assignee": { "type": ["string", "null"] },
+        "ownership": { "$ref": "#/definitions/candidateOwnership" },
+        "editScope": { "$ref": "#/definitions/candidateEditScope" },
+        "decision": { "$ref": "#/definitions/gateVerdict" },
+        "collisionRisk": { "type": "string", "enum": ["none", "low", "medium", "high", "unknown"] }
       }
     },
     "sourceAuthority": {
@@ -383,7 +393,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "trackerAuthoritative": {"type": "boolean"},
+        "trackerAuthoritative": { "type": "boolean" },
         "trackerHealth": {
           "type": "string",
           "description": "Concrete tracker authority state (bd-3w4pv.6). Live gates emit the split vocabulary clean|doctor_metadata_message_only|dirty_issues|jsonl_newer|db_newer|merge_artifacts|count_mismatch|parse_error; the legacy coarse trackerIntegrity.health vocabulary stays valid for archived payloads. doctor_metadata_message_only means the br doctor sync.metadata message claims pending external changes while every concrete dirty/import signal is clean: trackerAuthoritative stays true and the contradiction surfaces as a warning-severity beads_tracker_metadata_drift degraded code. Every other non-clean state keeps trackerAuthoritative=false (fail closed).",
@@ -403,11 +413,11 @@
             "parse_error"
           ]
         },
-        "agentMailStatus": {"type": "string"},
-        "reservationAuthoritative": {"type": ["boolean", "null"]},
-        "inboxAuthoritative": {"type": ["boolean", "null"]},
-        "rchRemoteOnlyRequired": {"type": "boolean"},
-        "rchSafeToLaunchCargoVerification": {"type": ["boolean", "null"]},
+        "agentMailStatus": { "type": "string" },
+        "reservationAuthoritative": { "type": ["boolean", "null"] },
+        "inboxAuthoritative": { "type": ["boolean", "null"] },
+        "rchRemoteOnlyRequired": { "type": "boolean" },
+        "rchSafeToLaunchCargoVerification": { "type": ["boolean", "null"] },
         "environmentVerdict": {
           "type": "string",
           "enum": [
@@ -435,8 +445,8 @@
             "unknown"
           ]
         },
-        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
-        "localCargoFallbackObserved": {"type": ["boolean", "null"]},
+        "remoteVerificationAdmitted": { "type": ["boolean", "null"] },
+        "localCargoFallbackObserved": { "type": ["boolean", "null"] },
         "installFreshnessVerdict": {
           "type": "string",
           "enum": [
@@ -450,9 +460,9 @@
             "unknown_installed_version"
           ]
         },
-        "installFreshnessAuthoritative": {"type": ["boolean", "null"]},
-        "installFreshnessRepair": {"type": ["string", "null"], "maxLength": 240},
-        "sourceCount": {"type": "integer", "minimum": 0}
+        "installFreshnessAuthoritative": { "type": ["boolean", "null"] },
+        "installFreshnessRepair": { "type": ["string", "null"], "maxLength": 240 },
+        "sourceCount": { "type": "integer", "minimum": 0 }
       }
     },
     "sourceAuthoritySnapshot": {
@@ -471,7 +481,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.source_authority.snapshot.v1"},
+        "schema": { "type": "string", "const": "ee.source_authority.snapshot.v1" },
         "snapshotId": {
           "type": "string",
           "pattern": "^sas-[A-Za-z0-9._-]+$",
@@ -507,21 +517,21 @@
                 "fail_closed_proof_unavailable"
               ]
             },
-            "failClosed": {"type": "boolean"},
-            "authoritativeSourceCount": {"type": "integer", "minimum": 0},
-            "degradedSourceCount": {"type": "integer", "minimum": 0},
-            "unavailableSourceCount": {"type": "integer", "minimum": 0}
+            "failClosed": { "type": "boolean" },
+            "authoritativeSourceCount": { "type": "integer", "minimum": 0 },
+            "degradedSourceCount": { "type": "integer", "minimum": 0 },
+            "unavailableSourceCount": { "type": "integer", "minimum": 0 }
           }
         },
         "candidateEvidence": {
           "oneOf": [
-            {"type": "null"},
+            { "type": "null" },
             {
               "type": "object",
               "required": ["candidateId", "lookupOutcome", "staleFallbackPresent"],
               "additionalProperties": false,
               "properties": {
-                "candidateId": {"type": "string", "minLength": 1, "maxLength": 120},
+                "candidateId": { "type": "string", "minLength": 1, "maxLength": 120 },
                 "lookupOutcome": {
                   "type": "string",
                   "description": "candidate_present: at least one authoritative source confirms the candidate. candidate_absent_confirmed: every authoritative source answered and none contains the candidate. candidate_known_non_actionable: a source such as Beads proves the id exists, but the safe actionable queue excludes it because it is blocked, assigned, deferred, in progress, an epic, dependency-blocked, or otherwise non-actionable. candidate_lookup_unavailable: the sources that could answer were unavailable. candidate_lookup_timed_out: the sources that could answer exhausted their budget; absence is NOT confirmed. candidate_stale_fallback_only: candidate identity may be known, but at least one required claimability source is available only through stale-safe fallback. candidate_contradicted: authoritative sources disagree about the candidate.",
@@ -535,7 +545,7 @@
                     "candidate_contradicted"
                   ]
                 },
-                "staleFallbackPresent": {"type": ["boolean", "null"]}
+                "staleFallbackPresent": { "type": ["boolean", "null"] }
               }
             }
           ]
@@ -555,16 +565,16 @@
             ],
             "additionalProperties": false,
             "properties": {
-              "sourceKind": {"$ref": "#/definitions/sourceAuthoritySourceKind"},
-              "state": {"$ref": "#/definitions/sourceAuthoritySourceState"},
-              "authoritative": {"type": "boolean"},
-              "freshnessState": {"type": "string", "enum": ["fresh", "stale", "unknown"]},
-              "timedOut": {"type": "boolean"},
-              "exitClass": {"$ref": "#/definitions/safeString"}
+              "sourceKind": { "$ref": "#/definitions/sourceAuthoritySourceKind" },
+              "state": { "$ref": "#/definitions/sourceAuthoritySourceState" },
+              "authoritative": { "type": "boolean" },
+              "freshnessState": { "type": "string", "enum": ["fresh", "stale", "unknown"] },
+              "timedOut": { "type": "boolean" },
+              "exitClass": { "$ref": "#/definitions/safeString" }
             }
           }
         },
-        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "degradedCodes": { "$ref": "#/definitions/stringArray" },
         "repairGuidance": {
           "type": "array",
           "maxItems": 16,
@@ -573,22 +583,22 @@
             "required": ["sourceKind", "state", "guidance", "command", "safety"],
             "additionalProperties": false,
             "properties": {
-              "sourceKind": {"$ref": "#/definitions/sourceAuthoritySourceKind"},
-              "state": {"$ref": "#/definitions/sourceAuthoritySourceState"},
+              "sourceKind": { "$ref": "#/definitions/sourceAuthoritySourceKind" },
+              "state": { "$ref": "#/definitions/sourceAuthoritySourceState" },
               "guidance": {
                 "oneOf": [
-                  {"type": "null"},
+                  { "type": "null" },
                   {
-                    "allOf": [{"$ref": "#/definitions/safeString"}],
+                    "allOf": [{ "$ref": "#/definitions/safeString" }],
                     "maxLength": 240
                   }
                 ]
               },
               "command": {
                 "oneOf": [
-                  {"type": "null"},
+                  { "type": "null" },
                   {
-                    "allOf": [{"$ref": "#/definitions/safeString"}],
+                    "allOf": [{ "$ref": "#/definitions/safeString" }],
                     "maxLength": 240
                   }
                 ]
@@ -654,9 +664,9 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string", "const": "beads_actionable_queue"},
-        "displayCommand": {"type": "string", "const": "scripts/br_retry.sh actionable --json"},
-        "mutatesState": {"type": "boolean", "const": false},
+        "commandId": { "type": "string", "const": "beads_actionable_queue" },
+        "displayCommand": { "type": "string", "const": "scripts/br_retry.sh actionable --json" },
+        "mutatesState": { "type": "boolean", "const": false },
         "collectionMode": {
           "type": "string",
           "description": "br_retry_script: the queue command ran with a bounded timeout. brief_ready_filter: the workspace does not ship the script, so the same filter contract was applied in-process to the brief's fresh br ready rows. skipped_by_flag: the Beads source was disabled for this collection. not_evaluated: the packet was built without the collector.",
@@ -675,13 +685,13 @@
           "type": "boolean",
           "description": "True only when queueState=ready and tracker authority is intact. The queue is a br view, so a degraded tracker degrades the queue with it."
         },
-        "rowCount": {"type": ["integer", "null"], "minimum": 0},
+        "rowCount": { "type": ["integer", "null"], "minimum": 0 },
         "candidateIds": {
           "type": "array",
           "maxItems": 32,
-          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
         },
-        "truncatedCandidateCount": {"type": "integer", "minimum": 0},
+        "truncatedCandidateCount": { "type": "integer", "minimum": 0 },
         "filterContract": {
           "type": "object",
           "additionalProperties": false,
@@ -693,11 +703,11 @@
             "excludesInProgress"
           ],
           "properties": {
-            "excludesEpics": {"type": "boolean", "const": true},
-            "excludesAssigned": {"type": "boolean", "const": true},
-            "excludesBlocked": {"type": "boolean", "const": true},
-            "excludesDeferred": {"type": "boolean", "const": true},
-            "excludesInProgress": {"type": "boolean", "const": true}
+            "excludesEpics": { "type": "boolean", "const": true },
+            "excludesAssigned": { "type": "boolean", "const": true },
+            "excludesBlocked": { "type": "boolean", "const": true },
+            "excludesDeferred": { "type": "boolean", "const": true },
+            "excludesInProgress": { "type": "boolean", "const": true }
           }
         },
         "exclusionAccounting": {
@@ -714,13 +724,13 @@
             "excludedOtherCount"
           ],
           "properties": {
-            "rawReadyCount": {"type": ["integer", "null"], "minimum": 0},
-            "excludedEpicCount": {"type": "integer", "minimum": 0},
-            "excludedAssignedCount": {"type": "integer", "minimum": 0},
-            "excludedBlockedCount": {"type": "integer", "minimum": 0},
-            "excludedDeferredCount": {"type": "integer", "minimum": 0},
-            "excludedInProgressCount": {"type": "integer", "minimum": 0},
-            "excludedOtherCount": {"type": "integer", "minimum": 0}
+            "rawReadyCount": { "type": ["integer", "null"], "minimum": 0 },
+            "excludedEpicCount": { "type": "integer", "minimum": 0 },
+            "excludedAssignedCount": { "type": "integer", "minimum": 0 },
+            "excludedBlockedCount": { "type": "integer", "minimum": 0 },
+            "excludedDeferredCount": { "type": "integer", "minimum": 0 },
+            "excludedInProgressCount": { "type": "integer", "minimum": 0 },
+            "excludedOtherCount": { "type": "integer", "minimum": 0 }
           }
         },
         "candidateState": {
@@ -746,7 +756,7 @@
         "contradictionEvidence": {
           "type": "array",
           "maxItems": 8,
-          "items": {"$ref": "#/definitions/safeString"},
+          "items": { "$ref": "#/definitions/safeString" },
           "description": "Bounded packet-wide BV-vs-Beads contradiction entries, e.g. bv_recommends_blocked_id:<id> or bv_recommends_id_absent_from_actionable_queue:<id>. Ids only."
         }
       }
@@ -777,14 +787,14 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.resource_admission.v1"},
-        "policyDomain": {"type": "string", "const": "resource_profile_budget_admission"},
-        "policyId": {"type": "string", "const": "candidate.resource_profile_budget_admission"},
-        "sideEffectFree": {"type": "boolean", "const": true},
-        "advisoryOnly": {"type": "boolean", "const": true},
-        "canAuthorizeClaim": {"type": "boolean", "const": false},
-        "surface": {"type": "string", "enum": ["claim_gate", "work_packet"]},
-        "commandClass": {"type": "string", "enum": ["coordination", "read_only"]},
+        "schema": { "type": "string", "const": "ee.resource_admission.v1" },
+        "policyDomain": { "type": "string", "const": "resource_profile_budget_admission" },
+        "policyId": { "type": "string", "const": "candidate.resource_profile_budget_admission" },
+        "sideEffectFree": { "type": "boolean", "const": true },
+        "advisoryOnly": { "type": "boolean", "const": true },
+        "canAuthorizeClaim": { "type": "boolean", "const": false },
+        "surface": { "type": "string", "enum": ["claim_gate", "work_packet"] },
+        "commandClass": { "type": "string", "enum": ["coordination", "read_only"] },
         "decision": {
           "type": "string",
           "enum": [
@@ -797,18 +807,33 @@
             "abstain"
           ]
         },
-        "requestedProfile": {"type": ["string", "null"], "enum": ["constrained", "portable", "workstation", "swarm", null]},
-        "effectiveProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
-        "recommendedProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
-        "estimatedCostClass": {"type": "string", "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]},
-        "sourcePosture": {"$ref": "#/definitions/resourceAdmissionSourcePosture"},
-        "evidenceFreshness": {"type": "string", "enum": ["fresh", "partial", "degraded", "unsafe"]},
-        "reasonCodes": {"$ref": "#/definitions/stringArray"},
-        "abstentionReasons": {"$ref": "#/definitions/stringArray"},
-        "nextCommands": {"$ref": "#/definitions/stringArray"},
+        "requestedProfile": {
+          "type": ["string", "null"],
+          "enum": ["constrained", "portable", "workstation", "swarm", null]
+        },
+        "effectiveProfile": {
+          "type": "string",
+          "enum": ["constrained", "portable", "workstation", "swarm"]
+        },
+        "recommendedProfile": {
+          "type": "string",
+          "enum": ["constrained", "portable", "workstation", "swarm"]
+        },
+        "estimatedCostClass": {
+          "type": "string",
+          "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]
+        },
+        "sourcePosture": { "$ref": "#/definitions/resourceAdmissionSourcePosture" },
+        "evidenceFreshness": {
+          "type": "string",
+          "enum": ["fresh", "partial", "degraded", "unsafe"]
+        },
+        "reasonCodes": { "$ref": "#/definitions/stringArray" },
+        "abstentionReasons": { "$ref": "#/definitions/stringArray" },
+        "nextCommands": { "$ref": "#/definitions/stringArray" },
         "nextCommandActions": {
           "type": "array",
-          "items": {"$ref": "#/definitions/inspectionCommandAction"}
+          "items": { "$ref": "#/definitions/inspectionCommandAction" }
         }
       }
     },
@@ -828,16 +853,16 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "hostCalibration": {"type": "string"},
-        "resourceBudget": {"type": "string"},
-        "rch": {"type": "string"},
-        "localCargo": {"type": "string"},
-        "lanePressure": {"type": "string"},
-        "workloadPressure": {"type": "string"},
-        "daemon": {"type": "string"},
-        "replay": {"type": "string"},
-        "redactionPostureVerified": {"type": "boolean"},
-        "sourceCount": {"type": "integer", "minimum": 0}
+        "hostCalibration": { "type": "string" },
+        "resourceBudget": { "type": "string" },
+        "rch": { "type": "string" },
+        "localCargo": { "type": "string" },
+        "lanePressure": { "type": "string" },
+        "workloadPressure": { "type": "string" },
+        "daemon": { "type": "string" },
+        "replay": { "type": "string" },
+        "redactionPostureVerified": { "type": "boolean" },
+        "sourceCount": { "type": "integer", "minimum": 0 }
       }
     }
   },
@@ -1073,7 +1098,16 @@
           {
             "commandId": "resource_admission_diag",
             "displayCommand": "ee diag resource-admission --surface claim-gate --command-class coordination --json",
-            "argv": ["ee", "diag", "resource-admission", "--surface", "claim-gate", "--command-class", "coordination", "--json"],
+            "argv": [
+              "ee",
+              "diag",
+              "resource-admission",
+              "--surface",
+              "claim-gate",
+              "--command-class",
+              "coordination",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,

@@ -7,20 +7,20 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
     "data": {
       "type": "object",
       "required": ["command", "report"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "diag plan-cache"},
-        "report": {"$ref": "#/$defs/planCacheReport"}
+        "command": { "type": "string", "const": "diag plan-cache" },
+        "report": { "$ref": "#/$defs/planCacheReport" }
       }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradedEntry"}
+      "items": { "$ref": "#/$defs/degradedEntry" }
     }
   },
   "field_presets": {
@@ -150,7 +150,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schemaTag": {"type": "string", "const": "ee.diag.plan_cache.v1"},
+        "schemaTag": { "type": "string", "const": "ee.diag.plan_cache.v1" },
         "enabled": {
           "type": "boolean",
           "description": "True when capacity > 0. False when EE_QUERY_PLAN_CACHE_ENTRIES is explicitly set to 0."
@@ -208,7 +208,7 @@
         "topKeys": {
           "type": "array",
           "description": "Cached keys in deterministic sorted order (sort by eqlHash, then indexManifestVersion, then searchConfigHash).",
-          "items": {"$ref": "#/$defs/cacheKey"}
+          "items": { "$ref": "#/$defs/cacheKey" }
         }
       }
     },
@@ -217,9 +217,9 @@
       "required": ["eqlHash", "indexManifestVersion", "searchConfigHash"],
       "additionalProperties": false,
       "properties": {
-        "eqlHash": {"type": "integer", "minimum": 0},
-        "indexManifestVersion": {"type": "integer", "minimum": 0},
-        "searchConfigHash": {"type": "integer", "minimum": 0}
+        "eqlHash": { "type": "integer", "minimum": 0 },
+        "indexManifestVersion": { "type": "integer", "minimum": 0 },
+        "searchConfigHash": { "type": "integer", "minimum": 0 }
       }
     },
     "degradedEntry": {
@@ -229,18 +229,14 @@
       "properties": {
         "code": {
           "type": "string",
-          "enum": [
-            "plan_cache_disabled",
-            "plan_cache_not_yet_integrated",
-            "plan_cache_full"
-          ]
+          "enum": ["plan_cache_disabled", "plan_cache_not_yet_integrated", "plan_cache_full"]
         },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": "string"}
+        "message": { "type": "string" },
+        "repair": { "type": "string" }
       }
     }
   }

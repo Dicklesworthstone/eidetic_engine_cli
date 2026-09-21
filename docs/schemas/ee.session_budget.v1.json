@@ -147,13 +147,7 @@
     "command": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "surface",
-        "commandClass",
-        "readOnly",
-        "durableMutation",
-        "normalizedCommand"
-      ],
+      "required": ["surface", "commandClass", "readOnly", "durableMutation", "normalizedCommand"],
       "properties": {
         "surface": {
           "type": "string",
@@ -259,13 +253,7 @@
     "rchCost": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "slotsRequested",
-        "slotsUsed",
-        "blockedMs",
-        "queueDepth",
-        "workersHealthy"
-      ],
+      "required": ["slotsRequested", "slotsUsed", "blockedMs", "queueDepth", "workersHealthy"],
       "properties": {
         "slotsRequested": {
           "type": "integer",
@@ -420,7 +408,14 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["response_envelope", "rch_queue", "agent_mail_snapshot", "beads_row", "timer", "none"]
+          "enum": [
+            "response_envelope",
+            "rch_queue",
+            "agent_mail_snapshot",
+            "beads_row",
+            "timer",
+            "none"
+          ]
         },
         "ref": {
           "type": ["string", "null"],

@@ -4,12 +4,7 @@
   "title": "ee.mesh.hello.error.v1",
   "description": "Hello-handshake decline response. PRIVACY INVARIANT: this payload MUST NOT carry responder-side metadata (`responderEeVersion`, `responderWorkspaceIds`, `responderCapabilities`, `responderAdvertisedTags`) — a 'no' from the responder must not leak who we are. The only fields are the schema marker, the echoed requestId, the decline code, an optional human-readable detail, and a discoveryConsent=false marker for caller-side branching symmetry.",
   "type": "object",
-  "required": [
-    "schema",
-    "requestId",
-    "discoveryConsent",
-    "code"
-  ],
+  "required": ["schema", "requestId", "discoveryConsent", "code"],
   "additionalProperties": false,
   "properties": {
     "schema": {

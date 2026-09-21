@@ -4,14 +4,7 @@
   "title": "ee.mesh.import_ledger.v1",
   "description": "Read-only, redaction-safe inspection of receiver-local mesh replay chain and admission decisions. Raw transported event JSON and body-cache references are deliberately omitted.",
   "type": "object",
-  "required": [
-    "schema",
-    "command",
-    "workspaceId",
-    "eventCount",
-    "events",
-    "degraded"
-  ],
+  "required": ["schema", "command", "workspaceId", "eventCount", "events", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -76,25 +69,12 @@
         "contentHash": { "type": "string", "minLength": 1 },
         "materialLane": {
           "type": "string",
-          "enum": [
-            "metadata",
-            "body",
-            "embedding",
-            "graphLink",
-            "revisionNotice",
-            "curationSignal"
-          ]
+          "enum": ["metadata", "body", "embedding", "graphLink", "revisionNotice", "curationSignal"]
         },
         "redactionClass": { "type": "string", "minLength": 1 },
         "trustLane": {
           "type": "string",
-          "enum": [
-            "localHuman",
-            "peerHumanViaPeer",
-            "peerAgent",
-            "peerDerived",
-            "untrusted"
-          ]
+          "enum": ["localHuman", "peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"]
         },
         "importDecision": {
           "type": "string",
@@ -102,10 +82,7 @@
         },
         "localMemoryId": { "type": ["string", "null"] },
         "policyFailureSurface": {
-          "anyOf": [
-            { "type": "null" },
-            { "$ref": "ee.mesh.policy_failure_surface.v1.json" }
-          ]
+          "anyOf": [{ "type": "null" }, { "$ref": "ee.mesh.policy_failure_surface.v1.json" }]
         },
         "policyDecision": {
           "anyOf": [

@@ -98,21 +98,11 @@
     },
     "decisionPlane": {
       "type": "string",
-      "enum": [
-        "packing",
-        "cache_admission",
-        "verification_admission",
-        "curation"
-      ]
+      "enum": ["packing", "cache_admission", "verification_admission", "curation"]
     },
     "policyDomain": {
       "type": "string",
-      "enum": [
-        "pack_selection",
-        "cache_admission",
-        "verification_admission",
-        "curation_filter"
-      ]
+      "enum": ["pack_selection", "cache_admission", "verification_admission", "curation_filter"]
     },
     "cohort": {
       "type": "object",

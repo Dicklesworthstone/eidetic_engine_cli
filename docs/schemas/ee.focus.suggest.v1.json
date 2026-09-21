@@ -4,13 +4,7 @@
   "title": "ee.focus.suggest.v1",
   "description": "Read-only recommendation surface for `ee focus suggest` (bd-sg5si Phase 1; bd-1idcb Phase 2). Returns the topics, CASS spans, and pre-formatted follow-up queries an agent should pivot attention toward, ranked by `centrality_sum + recency_weight + span_density` over the recent-evidence window. The schema is stable across Phase 1 and Phase 2; the `recommendations` array is populated when the workspace has memories created within `recentHours`. `degraded[]` carries situation-appropriate entries (e.g. `graph_unavailable`, `no_recent_evidence`) only when a real signal is missing — the Phase 1 `focus_suggest_unimplemented` sentinel was retired by Phase 2.",
   "type": "object",
-  "required": [
-    "schema",
-    "recommendations",
-    "fromCass",
-    "limit",
-    "recentHours"
-  ],
+  "required": ["schema", "recommendations", "fromCass", "limit", "recentHours"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -22,13 +16,7 @@
       "description": "Ranked focus recommendations. Empty in Phase 1; populated by the centrality + recent-CASS scoring pipeline in Phase 2.",
       "items": {
         "type": "object",
-        "required": [
-          "topic",
-          "spanIds",
-          "centralityScore",
-          "rationale",
-          "suggestedQuery"
-        ],
+        "required": ["topic", "spanIds", "centralityScore", "rationale", "suggestedQuery"],
         "additionalProperties": false,
         "properties": {
           "topic": {

@@ -16,64 +16,120 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.context.bead_affinity.v1"},
-    "beadId": {"type": "string", "minLength": 1, "description": "The bead ID supplied via --bead-id; verbatim, never hashed."},
-    "beadTitle": {"type": ["string", "null"], "description": "Snapshot of the bead title at retrieval time. Optional; absent if the linter could not load the bead description."},
+    "schema": { "type": "string", "const": "ee.context.bead_affinity.v1" },
+    "beadId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The bead ID supplied via --bead-id; verbatim, never hashed."
+    },
+    "beadTitle": {
+      "type": ["string", "null"],
+      "description": "Snapshot of the bead title at retrieval time. Optional; absent if the linter could not load the bead description."
+    },
     "beadLabels": {
       "type": "array",
-      "items": {"type": "string"},
+      "items": { "type": "string" },
       "uniqueItems": true,
       "description": "Sorted unique label list extracted from the bead at retrieval time."
     },
-    "beadGeneration": {"type": ["integer", "null"], "minimum": 0, "description": "Local .beads/issues.jsonl generation observed when the bias was computed. Pairs with workspaceGeneration in determinismKey for byte-stable replay."},
-    "workspaceId": {"type": ["string", "null"]},
-    "matchedFeatureCount": {"type": "integer", "minimum": 0, "description": "Total count of (memory, feature) match signals that produced a non-zero bias contribution. 0 implies coldStart=true."},
-    "biasMagnitudeMax": {"type": "number", "minimum": 0.0, "maximum": 0.05, "description": "Maximum |bias| applied across all memories in the candidate pool for this query (saturates at maxBiasMagnitude)."},
-    "maxBiasMagnitude": {"type": "number", "const": 0.05, "description": "Hard cap on per-memory bias magnitude. Matches ee.context.agent_profile.v1.maxBiasMagnitude for compositionally consistent behavior."},
-    "memoryBiasApplied": {"type": "integer", "minimum": 0, "description": "Count of memories whose final ranking score was modified by a non-zero bead_affinity_score."},
-    "coldStart": {"type": "boolean", "description": "True when the supplied bead has no matching memories under any of the feature dimensions (tags, title tokens, link graph). When true, no bias is applied and the degraded[] block records bead_affinity_cold_start."},
-    "halfLifeDays": {"type": ["integer", "null"], "minimum": 1, "description": "Optional recency half-life for label-derived signals. null implies no decay (purely structural match)."},
+    "beadGeneration": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Local .beads/issues.jsonl generation observed when the bias was computed. Pairs with workspaceGeneration in determinismKey for byte-stable replay."
+    },
+    "workspaceId": { "type": ["string", "null"] },
+    "matchedFeatureCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total count of (memory, feature) match signals that produced a non-zero bias contribution. 0 implies coldStart=true."
+    },
+    "biasMagnitudeMax": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 0.05,
+      "description": "Maximum |bias| applied across all memories in the candidate pool for this query (saturates at maxBiasMagnitude)."
+    },
+    "maxBiasMagnitude": {
+      "type": "number",
+      "const": 0.05,
+      "description": "Hard cap on per-memory bias magnitude. Matches ee.context.agent_profile.v1.maxBiasMagnitude for compositionally consistent behavior."
+    },
+    "memoryBiasApplied": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of memories whose final ranking score was modified by a non-zero bead_affinity_score."
+    },
+    "coldStart": {
+      "type": "boolean",
+      "description": "True when the supplied bead has no matching memories under any of the feature dimensions (tags, title tokens, link graph). When true, no bias is applied and the degraded[] block records bead_affinity_cold_start."
+    },
+    "halfLifeDays": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Optional recency half-life for label-derived signals. null implies no decay (purely structural match)."
+    },
     "featureWeights": {
       "type": "object",
       "description": "Per-feature relative weights summing to <= 1.0 that combine into the final bead_affinity_score. Exposed for determinism replay and tuning analysis.",
       "additionalProperties": false,
       "properties": {
-        "label": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "titleToken": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "link": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "parentChild": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        "label": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "titleToken": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "link": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "parentChild": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
       }
     },
     "determinismKey": {
       "type": "object",
-      "required": [
-        "workspaceGeneration",
-        "beadGeneration",
-        "beadId",
-        "basePackHash"
-      ],
+      "required": ["workspaceGeneration", "beadGeneration", "beadId", "basePackHash"],
       "additionalProperties": false,
       "properties": {
-        "workspaceGeneration": {"type": "integer", "minimum": 0},
-        "beadGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "beadId": {"type": "string"},
-        "basePackHash": {"type": ["string", "null"], "description": "Pack hash that would have been produced without bead_affinity. Lets callers prove the bias was applied on top of the canonical pack."}
+        "workspaceGeneration": { "type": "integer", "minimum": 0 },
+        "beadGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "beadId": { "type": "string" },
+        "basePackHash": {
+          "type": ["string", "null"],
+          "description": "Pack hash that would have been produced without bead_affinity. Lets callers prove the bias was applied on top of the canonical pack."
+        }
       }
     },
     "topBiases": {
       "type": "array",
       "description": "Top-N highest-|bias| memories for operator inspection. Length-capped to keep response size bounded.",
-      "items": {"$ref": "#/$defs/memoryBias"}
+      "items": { "$ref": "#/$defs/memoryBias" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "field_presets": {
     "minimal": ["schema", "beadId", "memoryBiasApplied", "coldStart"],
-    "summary": ["schema", "beadId", "beadTitle", "matchedFeatureCount", "biasMagnitudeMax", "memoryBiasApplied", "coldStart", "degraded"],
-    "standard": ["schema", "beadId", "beadTitle", "beadLabels", "matchedFeatureCount", "biasMagnitudeMax", "maxBiasMagnitude", "memoryBiasApplied", "coldStart", "featureWeights", "determinismKey", "topBiases", "degraded"],
+    "summary": [
+      "schema",
+      "beadId",
+      "beadTitle",
+      "matchedFeatureCount",
+      "biasMagnitudeMax",
+      "memoryBiasApplied",
+      "coldStart",
+      "degraded"
+    ],
+    "standard": [
+      "schema",
+      "beadId",
+      "beadTitle",
+      "beadLabels",
+      "matchedFeatureCount",
+      "biasMagnitudeMax",
+      "maxBiasMagnitude",
+      "memoryBiasApplied",
+      "coldStart",
+      "featureWeights",
+      "determinismKey",
+      "topBiases",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "examples": [
@@ -138,7 +194,7 @@
           "severity": "info",
           "message": "No bead labels, title tokens, or link relationships matched the candidate memory pool.",
           "repair": "Run without --bead-id or add bead-linked evidence before expecting a ranking bias.",
-          "details": {"beadId": "bd-new"}
+          "details": { "beadId": "bd-new" }
         }
       ]
     }
@@ -146,15 +202,11 @@
   "$defs": {
     "memoryBias": {
       "type": "object",
-      "required": [
-        "memoryId",
-        "bias",
-        "features"
-      ],
+      "required": ["memoryId", "bias", "features"],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"type": "string"},
-        "bias": {"type": "number", "minimum": -0.05, "maximum": 0.05},
+        "memoryId": { "type": "string" },
+        "bias": { "type": "number", "minimum": -0.05, "maximum": 0.05 },
         "features": {
           "type": "array",
           "items": {
@@ -166,12 +218,12 @@
         },
         "matchedLabels": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": { "type": "string" },
           "uniqueItems": true
         },
         "matchedTokens": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": { "type": "string" },
           "uniqueItems": true
         }
       }
@@ -194,19 +246,19 @@
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
-        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

@@ -227,13 +227,7 @@
         },
         "estimatedCostClass": {
           "type": "string",
-          "enum": [
-            "tiny",
-            "small",
-            "standard",
-            "swarm_heavy",
-            "unknown"
-          ]
+          "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]
         }
       }
     },
@@ -350,13 +344,7 @@
     },
     "queuePressureLevel": {
       "type": "string",
-      "enum": [
-        "idle",
-        "low",
-        "moderate",
-        "saturated",
-        "unknown"
-      ]
+      "enum": ["idle", "low", "moderate", "saturated", "unknown"]
     },
     "queuePressureReasonCode": {
       "type": "string",
@@ -393,14 +381,7 @@
     },
     "queuePressureEvidenceState": {
       "type": "string",
-      "enum": [
-        "observed",
-        "missing",
-        "corrupt",
-        "unavailable",
-        "contradictory",
-        "abstained"
-      ]
+      "enum": ["observed", "missing", "corrupt", "unavailable", "contradictory", "abstained"]
     },
     "queuePressureSourceRef": {
       "type": "object",
@@ -419,32 +400,19 @@
           "$ref": "#/$defs/queuePressureSourceKind"
         },
         "sourceSchema": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
         },
         "freshness": {
           "type": "string",
-          "enum": [
-            "fresh",
-            "stale",
-            "missing",
-            "unavailable",
-            "contradictory"
-          ]
+          "enum": ["fresh", "stale", "missing", "unavailable", "contradictory"]
         },
         "evidenceState": {
           "$ref": "#/$defs/queuePressureEvidenceState"
         },
         "confidence": {
           "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ]
+          "enum": ["low", "medium", "high"]
         },
         "hash": {
           "oneOf": [
@@ -457,10 +425,7 @@
           ]
         },
         "boundedPreview": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 160
         }
       }
@@ -502,13 +467,7 @@
     },
     "localCargoPosture": {
       "type": "string",
-      "enum": [
-        "clean",
-        "refused",
-        "unsafe",
-        "unknown",
-        "not_required"
-      ]
+      "enum": ["clean", "refused", "unsafe", "unknown", "not_required"]
     },
     "lanePressurePosture": {
       "type": "string",
@@ -538,33 +497,15 @@
     },
     "daemonPosture": {
       "type": "string",
-      "enum": [
-        "available",
-        "unavailable",
-        "degraded",
-        "not_required",
-        "unknown"
-      ]
+      "enum": ["available", "unavailable", "degraded", "not_required", "unknown"]
     },
     "replayPosture": {
       "type": "string",
-      "enum": [
-        "healthy",
-        "regression",
-        "stale",
-        "missing",
-        "not_required",
-        "unknown"
-      ]
+      "enum": ["healthy", "regression", "stale", "missing", "not_required", "unknown"]
     },
     "operatingProfile": {
       "type": "string",
-      "enum": [
-        "constrained",
-        "portable",
-        "workstation",
-        "swarm"
-      ]
+      "enum": ["constrained", "portable", "workstation", "swarm"]
     },
     "reasonCode": {
       "type": "string",
@@ -630,13 +571,7 @@
     "nextCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "priority",
-        "kind",
-        "command",
-        "destructive",
-        "rationale"
-      ],
+      "required": ["priority", "kind", "command", "destructive", "rationale"],
       "properties": {
         "priority": {
           "type": "integer",
@@ -655,10 +590,7 @@
           ]
         },
         "command": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 240
         },
         "destructive": {
@@ -675,13 +607,7 @@
     "evidenceRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "freshness",
-        "confidence",
-        "hash",
-        "boundedPreview"
-      ],
+      "required": ["kind", "freshness", "confidence", "hash", "boundedPreview"],
       "properties": {
         "kind": {
           "type": "string",
@@ -708,29 +634,16 @@
           ]
         },
         "sourceSchema": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "pattern": "^ee\\.[A-Za-z0-9_.-]+\\.v[0-9]+$"
         },
         "freshness": {
           "type": "string",
-          "enum": [
-            "fresh",
-            "stale",
-            "missing",
-            "unavailable",
-            "contradictory"
-          ]
+          "enum": ["fresh", "stale", "missing", "unavailable", "contradictory"]
         },
         "confidence": {
           "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ]
+          "enum": ["low", "medium", "high"]
         },
         "hash": {
           "oneOf": [
@@ -743,10 +656,7 @@
           ]
         },
         "boundedPreview": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 240
         }
       }
@@ -792,12 +702,7 @@
     "degradedEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "code",
-        "severity",
-        "message",
-        "repair"
-      ],
+      "required": ["code", "severity", "message", "repair"],
       "properties": {
         "code": {
           "type": "string",
@@ -807,14 +712,7 @@
         },
         "severity": {
           "type": "string",
-          "enum": [
-            "info",
-            "low",
-            "warning",
-            "medium",
-            "high",
-            "critical"
-          ]
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
         "message": {
           "type": "string",
@@ -822,10 +720,7 @@
           "maxLength": 400
         },
         "repair": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 240
         }
       }
@@ -864,11 +759,7 @@
       "queuePressure": {
         "level": "saturated",
         "canAuthorizeClaim": false,
-        "reasonCodes": [
-          "rch_lane_busy",
-          "active_build_slot_exhausted",
-          "local_cargo_refused"
-        ],
+        "reasonCodes": ["rch_lane_busy", "active_build_slot_exhausted", "local_cargo_refused"],
         "abstainedSources": [],
         "sourceRefs": [
           {
@@ -1033,9 +924,7 @@
       "queuePressure": {
         "level": "low",
         "canAuthorizeClaim": false,
-        "reasonCodes": [
-          "stale_in_progress_bead"
-        ],
+        "reasonCodes": ["stale_in_progress_bead"],
         "abstainedSources": [],
         "sourceRefs": [
           {
@@ -1118,10 +1007,7 @@
       "queuePressure": {
         "level": "moderate",
         "canAuthorizeClaim": false,
-        "reasonCodes": [
-          "dirty_checkout_saturated",
-          "output_budget_pressure"
-        ],
+        "reasonCodes": ["dirty_checkout_saturated", "output_budget_pressure"],
         "abstainedSources": [],
         "sourceRefs": [
           {
@@ -1282,10 +1168,7 @@
         "missing_required_signal",
         "redaction_posture_unknown"
       ],
-      "abstentionReasons": [
-        "missing_required_signal",
-        "redaction_posture_unknown"
-      ],
+      "abstentionReasons": ["missing_required_signal", "redaction_posture_unknown"],
       "nextCommands": [
         {
           "priority": 10,

@@ -69,11 +69,7 @@
         "required": ["executionSubstrate"],
         "properties": {
           "executionSubstrate": {
-            "enum": [
-              "remote_artifact",
-              "github_actions_artifact",
-              "remote_build_artifact"
-            ]
+            "enum": ["remote_artifact", "github_actions_artifact", "remote_build_artifact"]
           }
         }
       },

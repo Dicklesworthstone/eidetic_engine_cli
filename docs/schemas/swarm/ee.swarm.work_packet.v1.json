@@ -22,7 +22,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.swarm.work_packet.v1"},
+    "schema": { "type": "string", "const": "ee.swarm.work_packet.v1" },
     "packetId": {
       "type": "string",
       "description": "Deterministic content identifier for the redacted packet payload."
@@ -39,30 +39,30 @@
       "type": "string",
       "enum": ["healthy_small_repo", "crowded_checkout", "degraded_mail_rch_topology", "unknown"]
     },
-    "recommendedAction": {"$ref": "#/definitions/recommendedAction"},
+    "recommendedAction": { "$ref": "#/definitions/recommendedAction" },
     "candidates": {
       "type": "array",
-      "items": {"$ref": "#/definitions/candidate"}
+      "items": { "$ref": "#/definitions/candidate" }
     },
-    "coordination": {"$ref": "#/definitions/coordination"},
-    "trackerIntegrity": {"$ref": "#/definitions/trackerIntegrity"},
-    "rchProofPosture": {"$ref": "#/definitions/rchProofPosture"},
-    "verification": {"$ref": "#/definitions/verification"},
+    "coordination": { "$ref": "#/definitions/coordination" },
+    "trackerIntegrity": { "$ref": "#/definitions/trackerIntegrity" },
+    "rchProofPosture": { "$ref": "#/definitions/rchProofPosture" },
+    "verification": { "$ref": "#/definitions/verification" },
     "sourceProvenance": {
       "type": "array",
-      "items": {"$ref": "#/definitions/sourceProvenance"}
+      "items": { "$ref": "#/definitions/sourceProvenance" }
     },
-    "resourceAdmission": {"$ref": "#/definitions/resourceAdmission"},
-    "mutationPolicy": {"$ref": "#/definitions/mutationPolicy"},
+    "resourceAdmission": { "$ref": "#/definitions/resourceAdmission" },
+    "mutationPolicy": { "$ref": "#/definitions/mutationPolicy" },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/definitions/degradation"}
+      "items": { "$ref": "#/definitions/degradation" }
     }
   },
   "definitions": {
     "stringArray": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": { "type": "string" }
     },
     "candidateOwnership": {
       "type": "string",
@@ -74,27 +74,27 @@
       "required": ["state", "paths", "sourceRefs"],
       "additionalProperties": false,
       "properties": {
-        "state": {"type": "string", "enum": ["known", "unknown"]},
+        "state": { "type": "string", "enum": ["known", "unknown"] },
         "paths": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         },
         "sourceRefs": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         }
       },
       "allOf": [
         {
-          "if": {"properties": {"state": {"const": "known"}}, "required": ["state"]},
-          "then": {"properties": {"paths": {"minItems": 1}}}
+          "if": { "properties": { "state": { "const": "known" } }, "required": ["state"] },
+          "then": { "properties": { "paths": { "minItems": 1 } } }
         },
         {
-          "if": {"properties": {"state": {"const": "unknown"}}, "required": ["state"]},
-          "then": {"properties": {"paths": {"maxItems": 0}}}
+          "if": { "properties": { "state": { "const": "unknown" } }, "required": ["state"] },
+          "then": { "properties": { "paths": { "maxItems": 0 } } }
         }
       ],
       "description": "Candidate-scoped, deterministic edit-path evidence. Unknown scope never inherits checkout-global collision evidence and cannot authorize a claim."
@@ -105,20 +105,20 @@
       "description": "Bounded command metadata string. Executable command fields must not embed raw mail bodies, raw command output, raw home paths, secret-looking tokens, or private file contents.",
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "From: "},
-          {"pattern": "Subject: "},
-          {"pattern": "Message-ID:"},
-          {"pattern": "body:"},
-          {"pattern": "raw_inbox"},
-          {"pattern": "stdout:"},
-          {"pattern": "stderr:"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "From: " },
+          { "pattern": "Subject: " },
+          { "pattern": "Message-ID:" },
+          { "pattern": "body:" },
+          { "pattern": "raw_inbox" },
+          { "pattern": "stdout:" },
+          { "pattern": "stderr:" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" }
         ]
       }
     },
@@ -126,7 +126,7 @@
       "type": "array",
       "minItems": 1,
       "description": "Shell-free argv vector for agent execution. Consumers may run this directly only when copySafety is safe_structured_argv and shellRequired is false.",
-      "items": {"$ref": "#/definitions/safeCommandString"}
+      "items": { "$ref": "#/definitions/safeCommandString" }
     },
     "copySafety": {
       "type": "string",
@@ -139,7 +139,18 @@
     },
     "commandSubstrate": {
       "type": "string",
-      "enum": ["agent_mail", "beads", "bv", "ee", "git", "human", "jq", "rch", "static_local", "none"]
+      "enum": [
+        "agent_mail",
+        "beads",
+        "bv",
+        "ee",
+        "git",
+        "human",
+        "jq",
+        "rch",
+        "static_local",
+        "none"
+      ]
     },
     "commandAction": {
       "type": "object",
@@ -157,27 +168,37 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
-        "displayCommand": {"$ref": "#/definitions/safeCommandString"},
-        "argv": {"$ref": "#/definitions/argvArray"},
-        "shellRequired": {"type": "boolean"},
-        "copySafety": {"$ref": "#/definitions/copySafety"},
-        "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
-        "when": {"$ref": "#/definitions/safeCommandString"},
+        "commandId": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]+$" },
+        "displayCommand": { "$ref": "#/definitions/safeCommandString" },
+        "argv": { "$ref": "#/definitions/argvArray" },
+        "shellRequired": { "type": "boolean" },
+        "copySafety": { "$ref": "#/definitions/copySafety" },
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "$ref": "#/definitions/commandSubstrate" },
+        "when": { "$ref": "#/definitions/safeCommandString" },
         "rationale": {
-          "allOf": [{"$ref": "#/definitions/safeCommandString"}],
+          "allOf": [{ "$ref": "#/definitions/safeCommandString" }],
           "maxLength": 240
         }
       },
       "allOf": [
         {
-          "if": {"properties": {"shellRequired": {"const": true}}, "required": ["shellRequired"]},
-          "then": {"properties": {"copySafety": {"enum": ["shell_required_review", "forbidden_until_human_approval"]}}}
+          "if": {
+            "properties": { "shellRequired": { "const": true } },
+            "required": ["shellRequired"]
+          },
+          "then": {
+            "properties": {
+              "copySafety": { "enum": ["shell_required_review", "forbidden_until_human_approval"] }
+            }
+          }
         },
         {
-          "if": {"properties": {"copySafety": {"const": "safe_structured_argv"}}, "required": ["copySafety"]},
-          "then": {"properties": {"shellRequired": {"const": false}}}
+          "if": {
+            "properties": { "copySafety": { "const": "safe_structured_argv" } },
+            "required": ["copySafety"]
+          },
+          "then": { "properties": { "shellRequired": { "const": false } } }
         }
       ]
     },
@@ -212,11 +233,11 @@
             "unavailable_or_manual_only"
           ]
         },
-        "preflightCommand": {"type": ["string", "null"]},
-        "requiresHumanApproval": {"type": "boolean"},
-        "mutatesExternalState": {"type": "boolean"},
-        "mutatesTrackerState": {"type": "boolean"},
-        "privacyClass": {"type": "string"},
+        "preflightCommand": { "type": ["string", "null"] },
+        "requiresHumanApproval": { "type": "boolean" },
+        "mutatesExternalState": { "type": "boolean" },
+        "mutatesTrackerState": { "type": "boolean" },
+        "privacyClass": { "type": "string" },
         "nextAction": {
           "type": "string",
           "enum": [
@@ -227,14 +248,14 @@
             "manual_only"
           ]
         },
-        "ruleId": {"type": "string"},
+        "ruleId": { "type": "string" },
         "source": {
           "type": "string",
           "enum": ["repair_action_safety", "work_packet_manual_fallback"]
         },
-        "reasonCode": {"type": "string"},
-        "evidence": {"$ref": "#/definitions/stringArray"},
-        "preconditions": {"$ref": "#/definitions/stringArray"}
+        "reasonCode": { "type": "string" },
+        "evidence": { "$ref": "#/definitions/stringArray" },
+        "preconditions": { "$ref": "#/definitions/stringArray" }
       }
     },
     "candidateDecision": {
@@ -282,11 +303,11 @@
             "blocked_no_action"
           ]
         },
-        "candidateId": {"type": ["string", "null"]},
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "safeToClaim": {"type": ["boolean", "null"]},
-        "reasons": {"$ref": "#/definitions/stringArray"},
-        "proofObligations": {"$ref": "#/definitions/stringArray"},
+        "candidateId": { "type": ["string", "null"] },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "safeToClaim": { "type": ["boolean", "null"] },
+        "reasons": { "$ref": "#/definitions/stringArray" },
+        "proofObligations": { "$ref": "#/definitions/stringArray" },
         "suggestedCommands": {
           "$ref": "#/definitions/stringArray",
           "description": "Legacy display-only command strings retained during migration. Consumers must prefer suggestedCommandActions.argv when present and must not treat these strings as shell-safe executable commands."
@@ -294,7 +315,7 @@
         "suggestedCommandActions": {
           "type": "array",
           "description": "Structured command actions for normal packet-level inspection and planning. Shell-free argv entries with copySafety=safe_structured_argv are safe to execute without shell evaluation when mutatesState=false. The Beads claim command is emitted only by ee.swarm.work_packet.claim_gate.v1 as claimCommandAction.",
-          "items": {"$ref": "#/definitions/commandAction"}
+          "items": { "$ref": "#/definitions/commandAction" }
         }
       }
     },
@@ -317,24 +338,24 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string"},
-        "title": {"type": "string"},
+        "id": { "type": "string" },
+        "title": { "type": "string" },
         "source": {
           "type": "string",
           "enum": ["bv_top_pick", "beads_ready", "beads_in_progress", "idea_wizard", "manual"]
         },
-        "status": {"type": "string"},
-        "priority": {"type": ["integer", "null"]},
-        "assignee": {"type": ["string", "null"]},
-        "ownership": {"$ref": "#/definitions/candidateOwnership"},
-        "editScope": {"$ref": "#/definitions/candidateEditScope"},
+        "status": { "type": "string" },
+        "priority": { "type": ["integer", "null"] },
+        "assignee": { "type": ["string", "null"] },
+        "ownership": { "$ref": "#/definitions/candidateOwnership" },
+        "editScope": { "$ref": "#/definitions/candidateEditScope" },
         "decision": {
           "$ref": "#/definitions/candidateDecision"
         },
-        "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]},
-        "unsafeReasons": {"$ref": "#/definitions/stringArray"},
-        "staleReasons": {"$ref": "#/definitions/stringArray"},
-        "sourceRefs": {"$ref": "#/definitions/stringArray"}
+        "collisionRisk": { "type": "string", "enum": ["none", "low", "medium", "high", "unknown"] },
+        "unsafeReasons": { "$ref": "#/definitions/stringArray" },
+        "staleReasons": { "$ref": "#/definitions/stringArray" },
+        "sourceRefs": { "$ref": "#/definitions/stringArray" }
       }
     },
     "coordination": {
@@ -349,17 +370,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "activeClaimCount": {"type": "integer", "minimum": 0},
-        "dirtyPathCount": {"type": "integer", "minimum": 0},
-        "fileCollisionCount": {"type": "integer", "minimum": 0},
-        "agentMail": {"$ref": "#/definitions/agentMail"},
+        "activeClaimCount": { "type": "integer", "minimum": 0 },
+        "dirtyPathCount": { "type": "integer", "minimum": 0 },
+        "fileCollisionCount": { "type": "integer", "minimum": 0 },
+        "agentMail": { "$ref": "#/definitions/agentMail" },
         "activeClaims": {
           "type": "array",
-          "items": {"$ref": "#/definitions/activeClaim"}
+          "items": { "$ref": "#/definitions/activeClaim" }
         },
         "fileCollisions": {
           "type": "array",
-          "items": {"$ref": "#/definitions/fileCollision"}
+          "items": { "$ref": "#/definitions/fileCollision" }
         }
       }
     },
@@ -386,13 +407,20 @@
           ],
           "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. bd-2z5ly.8.1: `semantic_readiness_failed` covers the green-transport contradiction where the health endpoint responds with `healthLevel=green` but `semantic_readiness.status=fail` (for example malformed SQLite storage) so reservation/inbox reads cannot be trusted. bd-18jfx: a corrupt `recovery.mode`, non-ok `recovery.status`, or `durabilityState=corrupt` keeps Agent Mail `unavailable` for reservation/inbox authority even when healthLevel is green and semanticReadiness passes. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
         },
-        "healthLevel": {"type": ["string", "null"], "enum": ["green", "yellow", "red", null]},
-        "unreadCount": {"type": ["integer", "null"], "minimum": 0},
-        "ackRequiredCount": {"type": ["integer", "null"], "minimum": 0},
-        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "healthLevel": { "type": ["string", "null"], "enum": ["green", "yellow", "red", null] },
+        "unreadCount": { "type": ["integer", "null"], "minimum": 0 },
+        "ackRequiredCount": { "type": ["integer", "null"], "minimum": 0 },
+        "degradedCodes": { "$ref": "#/definitions/stringArray" },
         "recoveryMode": {
           "type": ["string", "null"],
-          "enum": ["none", "wait_for_repair", "proceed_via_beads", "static_work_only", "manual_coordination", null],
+          "enum": [
+            "none",
+            "wait_for_repair",
+            "proceed_via_beads",
+            "static_work_only",
+            "manual_coordination",
+            null
+          ],
           "description": "bd-2z5ly.8: structured recovery posture for downstream candidate-safety logic. `wait_for_repair` is required when `recovery.mode=corrupt`, `recovery.status` is non-ok, or `durabilityState=corrupt`; those cases must also set reservationAuthoritative=false and inboxAuthoritative=false. `null` when status is fresh/healthy or evidence is insufficient to recommend a specific recovery path."
         },
         "archiveIndexParity": {
@@ -411,7 +439,7 @@
         "fallbackActions": {
           "type": "array",
           "description": "bd-2z5ly.8: ordered, structured recovery actions for an agent operating under degraded Agent Mail. MUST be sorted lexicographically by `kind` so the packet stays deterministic across runs. Empty when status is `fresh`/`healthy`. Replaces prose-only repair strings so harnesses can branch mechanically without parsing natural language.",
-          "items": {"$ref": "#/definitions/agentMailFallbackAction"}
+          "items": { "$ref": "#/definitions/agentMailFallbackAction" }
         },
         "semanticReadiness": {
           "type": ["object", "null"],
@@ -445,7 +473,16 @@
           "properties": {
             "mode": {
               "type": "string",
-              "enum": ["ok", "healthy", "none", "repair", "recover", "restore", "corrupt", "unknown"]
+              "enum": [
+                "ok",
+                "healthy",
+                "none",
+                "repair",
+                "recover",
+                "restore",
+                "corrupt",
+                "unknown"
+              ]
             },
             "status": {
               "type": ["string", "null"],
@@ -453,7 +490,13 @@
             },
             "reason": {
               "type": ["string", "null"],
-              "enum": ["archive_corruption", "storage_recovery_required", "repair_required", "unknown", null],
+              "enum": [
+                "archive_corruption",
+                "storage_recovery_required",
+                "repair_required",
+                "unknown",
+                null
+              ],
               "description": "bd-18jfx: bounded recovery reason. Use `archive_corruption` for corrupt archive/index durability, `storage_recovery_required` when the store needs repair without a narrower class, `repair_required` for explicit repair/recover/restore modes, and `unknown` when classification was not possible."
             }
           }
@@ -482,16 +525,13 @@
             "switch_to_static_work"
           ]
         },
-        "summary": {"type": "string"},
-        "command": {"type": ["string", "null"]},
+        "summary": { "type": "string" },
+        "command": { "type": ["string", "null"] },
         "commandAction": {
-          "anyOf": [
-            {"$ref": "#/definitions/commandAction"},
-            {"type": "null"}
-          ]
+          "anyOf": [{ "$ref": "#/definitions/commandAction" }, { "type": "null" }]
         },
-        "manualStep": {"type": ["string", "null"]},
-        "repairSafety": {"$ref": "#/definitions/repairSafety"}
+        "manualStep": { "type": ["string", "null"] },
+        "repairSafety": { "$ref": "#/definitions/repairSafety" }
       }
     },
     "activeClaim": {
@@ -499,11 +539,11 @@
       "required": ["beadId", "assignee", "status", "updatedAt", "sourceRefs"],
       "additionalProperties": false,
       "properties": {
-        "beadId": {"type": "string"},
-        "assignee": {"type": ["string", "null"]},
-        "status": {"type": "string"},
-        "updatedAt": {"type": ["string", "null"]},
-        "sourceRefs": {"$ref": "#/definitions/stringArray"}
+        "beadId": { "type": "string" },
+        "assignee": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "updatedAt": { "type": ["string", "null"] },
+        "sourceRefs": { "$ref": "#/definitions/stringArray" }
       }
     },
     "fileCollision": {
@@ -511,11 +551,11 @@
       "required": ["pathPattern", "risk", "owners", "relatedBeadIds", "evidence"],
       "additionalProperties": false,
       "properties": {
-        "pathPattern": {"type": "string"},
-        "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-        "owners": {"$ref": "#/definitions/stringArray"},
-        "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
-        "evidence": {"$ref": "#/definitions/stringArray"}
+        "pathPattern": { "type": "string" },
+        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+        "owners": { "$ref": "#/definitions/stringArray" },
+        "relatedBeadIds": { "$ref": "#/definitions/stringArray" },
+        "evidence": { "$ref": "#/definitions/stringArray" }
       }
     },
     "trackerIntegrity": {
@@ -549,23 +589,23 @@
             "jsonl_parse_error"
           ]
         },
-        "jsonlPath": {"type": "string"},
-        "dbPath": {"type": "string"},
-        "jsonlRecordCount": {"type": "integer", "minimum": 0},
+        "jsonlPath": { "type": "string" },
+        "dbPath": { "type": "string" },
+        "jsonlRecordCount": { "type": "integer", "minimum": 0 },
         "jsonlValidRecordCount": {
           "type": "integer",
           "minimum": 0,
           "description": "Parseable JSONL row count when a JSONL parse-error diagnostic needs explicit valid-row evidence."
         },
-        "dbRecordCount": {"type": "integer", "minimum": 0},
-        "pendingImportCount": {"type": "integer", "minimum": 0},
-        "externalChangesPendingImport": {"type": "boolean"},
-        "dirtyIssueCount": {"type": "integer", "minimum": 0},
-        "mergeArtifactPaths": {"$ref": "#/definitions/stringArray"},
-        "mergeArtifactCount": {"type": "integer", "minimum": 0},
+        "dbRecordCount": { "type": "integer", "minimum": 0 },
+        "pendingImportCount": { "type": "integer", "minimum": 0 },
+        "externalChangesPendingImport": { "type": "boolean" },
+        "dirtyIssueCount": { "type": "integer", "minimum": 0 },
+        "mergeArtifactPaths": { "$ref": "#/definitions/stringArray" },
+        "mergeArtifactCount": { "type": "integer", "minimum": 0 },
         "invalidLineNumbers": {
           "type": "array",
-          "items": {"type": "integer", "minimum": 1},
+          "items": { "type": "integer", "minimum": 1 },
           "description": "Bounded list of malformed JSONL line numbers observed by the collector."
         },
         "jsonlParseError": {
@@ -573,8 +613,8 @@
           "additionalProperties": false,
           "required": ["line", "column", "excerpt"],
           "properties": {
-            "line": {"type": "integer", "minimum": 1},
-            "column": {"type": ["integer", "null"], "minimum": 1},
+            "line": { "type": "integer", "minimum": 1 },
+            "column": { "type": ["integer", "null"], "minimum": 1 },
             "excerpt": {
               "type": "string",
               "description": "Redacted and length-capped excerpt of the first malformed JSONL row."
@@ -625,7 +665,7 @@
           "type": "string",
           "description": "Bounded candidate repair command. This is advice only and is omitted unless repair evidence is strong."
         },
-        "recoveryHint": {"type": ["string", "null"]}
+        "recoveryHint": { "type": ["string", "null"] }
       }
     },
     "rchProofPosture": {
@@ -643,26 +683,29 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "sourceEnabled": {"type": "boolean"},
-        "remoteOnlyRequired": {"type": "boolean"},
+        "sourceEnabled": { "type": "boolean" },
+        "remoteOnlyRequired": { "type": "boolean" },
         "posture": {
           "type": "string",
-          "enum": ["remote_ready", "degraded_capacity", "topology_blocked", "unavailable", "unknown"]
+          "enum": [
+            "remote_ready",
+            "degraded_capacity",
+            "topology_blocked",
+            "unavailable",
+            "unknown"
+          ]
         },
-        "healthyWorkerCount": {"type": ["integer", "null"], "minimum": 0},
-        "safeToLaunchCargoVerification": {"type": ["boolean", "null"]},
-        "localFallbackPrevented": {"type": "boolean"},
-        "blockerCodes": {"$ref": "#/definitions/stringArray"},
+        "healthyWorkerCount": { "type": ["integer", "null"], "minimum": 0 },
+        "safeToLaunchCargoVerification": { "type": ["boolean", "null"] },
+        "localFallbackPrevented": { "type": "boolean" },
+        "blockerCodes": { "$ref": "#/definitions/stringArray" },
         "knownBlockers": {
           "type": "array",
-          "items": {"$ref": "#/definitions/knownBlocker"}
+          "items": { "$ref": "#/definitions/knownBlocker" }
         },
-        "retryAfter": {"type": ["string", "null"]},
+        "retryAfter": { "type": ["string", "null"] },
         "selectorAdmissionProbe": {
-          "anyOf": [
-            {"$ref": "#/definitions/rchSelectorAdmissionProbe"},
-            {"type": "null"}
-          ]
+          "anyOf": [{ "$ref": "#/definitions/rchSelectorAdmissionProbe" }, { "type": "null" }]
         }
       }
     },
@@ -687,17 +730,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.rch.selector_admission_probe.v1"},
+        "schema": { "type": "string", "const": "ee.rch.selector_admission_probe.v1" },
         "status": {
           "type": ["string", "null"],
           "enum": ["selected", "selection_failed", "not_applicable", null]
         },
-        "requiredRuntime": {"type": ["string", "null"]},
-        "workersReported": {"$ref": "#/definitions/stringArray"},
-        "daemonWorkersReported": {"$ref": "#/definitions/stringArray"},
-        "workersReportedCount": {"type": "integer", "minimum": 0},
-        "daemonWorkersReportedCount": {"type": "integer", "minimum": 0},
-        "selectedWorker": {"type": ["string", "null"]},
+        "requiredRuntime": { "type": ["string", "null"] },
+        "workersReported": { "$ref": "#/definitions/stringArray" },
+        "daemonWorkersReported": { "$ref": "#/definitions/stringArray" },
+        "workersReportedCount": { "type": "integer", "minimum": 0 },
+        "daemonWorkersReportedCount": { "type": "integer", "minimum": 0 },
+        "selectedWorker": { "type": ["string", "null"] },
         "selectionFailureReason": {
           "type": ["string", "null"],
           "enum": [
@@ -713,15 +756,12 @@
             null
           ]
         },
-        "workersVsSelectionContradiction": {"type": "boolean"},
-        "pathNormalizationWarning": {"type": ["string", "null"]},
-        "remoteRequired": {"type": "boolean"},
-        "localFallbackRefused": {"type": "boolean"},
+        "workersVsSelectionContradiction": { "type": "boolean" },
+        "pathNormalizationWarning": { "type": ["string", "null"] },
+        "remoteRequired": { "type": "boolean" },
+        "localFallbackRefused": { "type": "boolean" },
         "admissionBlocker": {
-          "anyOf": [
-            {"$ref": "#/definitions/rchSelectorAdmissionBlocker"},
-            {"type": "null"}
-          ]
+          "anyOf": [{ "$ref": "#/definitions/rchSelectorAdmissionBlocker" }, { "type": "null" }]
         }
       }
     },
@@ -743,7 +783,7 @@
           "minLength": 1,
           "maxLength": 320
         },
-        "activeBuildId": {"type": "integer", "minimum": 0},
+        "activeBuildId": { "type": "integer", "minimum": 0 },
         "activeCommandPreview": {
           "type": "string",
           "minLength": 1,
@@ -753,19 +793,19 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
-        "workerId": {"type": "string", "minLength": 1},
+        "workerId": { "type": "string", "minLength": 1 },
         "workerPosture": {
           "type": "string",
           "enum": ["active", "progress_stale", "heartbeat_stale", "hook_inactive"]
         },
-        "heartbeatAgeSecs": {"type": "integer", "minimum": 0},
-        "progressAgeSecs": {"type": "integer", "minimum": 0},
-        "buildAgeSecs": {"type": "integer", "minimum": 0},
-        "slotsOwned": {"type": "integer", "minimum": 0},
-        "workersHealthy": {"type": "integer", "minimum": 0},
-        "workersTotal": {"type": "integer", "minimum": 0},
-        "slotsAvailable": {"type": "integer", "minimum": 0},
-        "slotsTotal": {"type": "integer", "minimum": 0},
+        "heartbeatAgeSecs": { "type": "integer", "minimum": 0 },
+        "progressAgeSecs": { "type": "integer", "minimum": 0 },
+        "buildAgeSecs": { "type": "integer", "minimum": 0 },
+        "slotsOwned": { "type": "integer", "minimum": 0 },
+        "workersHealthy": { "type": "integer", "minimum": 0 },
+        "workersTotal": { "type": "integer", "minimum": 0 },
+        "slotsAvailable": { "type": "integer", "minimum": 0 },
+        "slotsTotal": { "type": "integer", "minimum": 0 },
         "retryAfterHint": {
           "type": "string",
           "enum": ["after_active_build_completes"]
@@ -786,7 +826,7 @@
       "required": ["code", "fingerprint", "remoteRequired", "localFallbackRefused"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "fingerprint": {
           "type": "string",
           "description": "sha256-prefixed fingerprint of the blocker (e.g. `sha256:64139c3370a1...`). MUST match the upstream RCH known_blocker fingerprint verbatim so downstream reconciliation can compare without normalization."
@@ -795,15 +835,15 @@
           "type": ["string", "null"],
           "description": "Normalized argv hash of the blocked command if RCH supplied one. Bounded; do not embed raw stdout/stderr."
         },
-        "message": {"type": ["string", "null"]},
+        "message": { "type": ["string", "null"] },
         "remediationBead": {
           "type": ["string", "null"],
           "description": "Beads issue id (e.g. `bd-17c65.10.17.1.2`) tracking the remediation. Null when no canonical remediation bead is registered for this blocker."
         },
-        "retryAfter": {"type": ["string", "null"]},
-        "remoteRequired": {"type": "boolean"},
-        "localFallbackRefused": {"type": "boolean"},
-        "degradedCodes": {"$ref": "#/definitions/stringArray"}
+        "retryAfter": { "type": ["string", "null"] },
+        "remoteRequired": { "type": "boolean" },
+        "localFallbackRefused": { "type": "boolean" },
+        "degradedCodes": { "$ref": "#/definitions/stringArray" }
       }
     },
     "verification": {
@@ -813,13 +853,13 @@
       "properties": {
         "requiredCommands": {
           "type": "array",
-          "items": {"$ref": "#/definitions/verificationCommand"}
+          "items": { "$ref": "#/definitions/verificationCommand" }
         },
         "staticChecks": {
           "type": "array",
-          "items": {"$ref": "#/definitions/verificationCommand"}
+          "items": { "$ref": "#/definitions/verificationCommand" }
         },
-        "closeoutEvidenceRequired": {"type": "boolean"}
+        "closeoutEvidenceRequired": { "type": "boolean" }
       }
     },
     "verificationCommand": {
@@ -827,14 +867,14 @@
       "required": ["commandId", "commandTemplate", "requiredSubstrate", "when", "lastOutcome"],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string"},
+        "commandId": { "type": "string" },
         "commandTemplate": {
           "type": "string",
           "description": "Legacy display-only command text retained during migration. This field MUST NOT be executed directly and is not shell-safe; consumers must prefer commandAction.argv when present."
         },
-        "commandAction": {"$ref": "#/definitions/commandAction"},
-        "requiredSubstrate": {"type": "string", "enum": ["rch", "static_local", "none"]},
-        "when": {"type": "string"},
+        "commandAction": { "$ref": "#/definitions/commandAction" },
+        "requiredSubstrate": { "type": "string", "enum": ["rch", "static_local", "none"] },
+        "when": { "type": "string" },
         "lastOutcome": {
           "type": "string",
           "description": "bd-2z5ly.6: outcome of the most recent attempted run of this command, as recorded by the work-packet generator. Distinguishes pre-Cargo RCH failures (`environment_blocked`) from test failures (`failed_project`) so agents do not retry a command whose blocker is environmental.",
@@ -851,12 +891,15 @@
       "required": ["source", "collector", "status", "freshness", "digest", "redaction"],
       "additionalProperties": false,
       "properties": {
-        "source": {"type": "string"},
-        "collector": {"type": "string"},
-        "status": {"type": "string", "enum": ["fresh", "stale", "degraded", "unavailable", "skipped"]},
-        "freshness": {"type": ["string", "null"]},
-        "digest": {"type": ["string", "null"]},
-        "redaction": {"type": "string"}
+        "source": { "type": "string" },
+        "collector": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["fresh", "stale", "degraded", "unavailable", "skipped"]
+        },
+        "freshness": { "type": ["string", "null"] },
+        "digest": { "type": ["string", "null"] },
+        "redaction": { "type": "string" }
       }
     },
     "resourceAdmission": {
@@ -885,14 +928,14 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.resource_admission.v1"},
-        "policyDomain": {"type": "string", "const": "resource_profile_budget_admission"},
-        "policyId": {"type": "string", "const": "candidate.resource_profile_budget_admission"},
-        "sideEffectFree": {"type": "boolean", "const": true},
-        "advisoryOnly": {"type": "boolean", "const": true},
-        "canAuthorizeClaim": {"type": "boolean", "const": false},
-        "surface": {"type": "string", "enum": ["work_packet", "claim_gate"]},
-        "commandClass": {"type": "string", "enum": ["read_only", "coordination"]},
+        "schema": { "type": "string", "const": "ee.resource_admission.v1" },
+        "policyDomain": { "type": "string", "const": "resource_profile_budget_admission" },
+        "policyId": { "type": "string", "const": "candidate.resource_profile_budget_admission" },
+        "sideEffectFree": { "type": "boolean", "const": true },
+        "advisoryOnly": { "type": "boolean", "const": true },
+        "canAuthorizeClaim": { "type": "boolean", "const": false },
+        "surface": { "type": "string", "enum": ["work_packet", "claim_gate"] },
+        "commandClass": { "type": "string", "enum": ["read_only", "coordination"] },
         "decision": {
           "type": "string",
           "enum": [
@@ -905,18 +948,33 @@
             "abstain"
           ]
         },
-        "requestedProfile": {"type": ["string", "null"], "enum": ["constrained", "portable", "workstation", "swarm", null]},
-        "effectiveProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
-        "recommendedProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
-        "estimatedCostClass": {"type": "string", "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]},
-        "sourcePosture": {"$ref": "#/definitions/resourceAdmissionSourcePosture"},
-        "evidenceFreshness": {"type": "string", "enum": ["fresh", "partial", "degraded", "unsafe"]},
-        "reasonCodes": {"$ref": "#/definitions/stringArray"},
-        "abstentionReasons": {"$ref": "#/definitions/stringArray"},
-        "nextCommands": {"$ref": "#/definitions/stringArray"},
+        "requestedProfile": {
+          "type": ["string", "null"],
+          "enum": ["constrained", "portable", "workstation", "swarm", null]
+        },
+        "effectiveProfile": {
+          "type": "string",
+          "enum": ["constrained", "portable", "workstation", "swarm"]
+        },
+        "recommendedProfile": {
+          "type": "string",
+          "enum": ["constrained", "portable", "workstation", "swarm"]
+        },
+        "estimatedCostClass": {
+          "type": "string",
+          "enum": ["tiny", "small", "standard", "swarm_heavy", "unknown"]
+        },
+        "sourcePosture": { "$ref": "#/definitions/resourceAdmissionSourcePosture" },
+        "evidenceFreshness": {
+          "type": "string",
+          "enum": ["fresh", "partial", "degraded", "unsafe"]
+        },
+        "reasonCodes": { "$ref": "#/definitions/stringArray" },
+        "abstentionReasons": { "$ref": "#/definitions/stringArray" },
+        "nextCommands": { "$ref": "#/definitions/stringArray" },
         "nextCommandActions": {
           "type": "array",
-          "items": {"$ref": "#/definitions/commandAction"}
+          "items": { "$ref": "#/definitions/commandAction" }
         }
       }
     },
@@ -936,16 +994,16 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "hostCalibration": {"type": "string"},
-        "resourceBudget": {"type": "string"},
-        "rch": {"type": "string"},
-        "localCargo": {"type": "string"},
-        "lanePressure": {"type": "string"},
-        "workloadPressure": {"type": "string"},
-        "daemon": {"type": "string"},
-        "replay": {"type": "string"},
-        "redactionPostureVerified": {"type": "boolean"},
-        "sourceCount": {"type": "integer", "minimum": 0}
+        "hostCalibration": { "type": "string" },
+        "resourceBudget": { "type": "string" },
+        "rch": { "type": "string" },
+        "localCargo": { "type": "string" },
+        "lanePressure": { "type": "string" },
+        "workloadPressure": { "type": "string" },
+        "daemon": { "type": "string" },
+        "replay": { "type": "string" },
+        "redactionPostureVerified": { "type": "boolean" },
+        "sourceCount": { "type": "integer", "minimum": 0 }
       }
     },
     "mutationPolicy": {
@@ -961,13 +1019,13 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "sideEffectFree": {"type": "boolean", "const": true},
-        "claimsBeads": {"type": "boolean", "const": false},
-        "reservesFiles": {"type": "boolean", "const": false},
-        "sendsAgentMail": {"type": "boolean", "const": false},
-        "runsCargo": {"type": "boolean", "const": false},
-        "stagesGit": {"type": "boolean", "const": false},
-        "deletesFiles": {"type": "boolean", "const": false}
+        "sideEffectFree": { "type": "boolean", "const": true },
+        "claimsBeads": { "type": "boolean", "const": false },
+        "reservesFiles": { "type": "boolean", "const": false },
+        "sendsAgentMail": { "type": "boolean", "const": false },
+        "runsCargo": { "type": "boolean", "const": false },
+        "stagesGit": { "type": "boolean", "const": false },
+        "deletesFiles": { "type": "boolean", "const": false }
       }
     },
     "degradation": {
@@ -975,11 +1033,14 @@
       "required": ["code", "source", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
-        "source": {"type": "string"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]}
+        "code": { "type": "string" },
+        "source": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
       }
     }
   },
@@ -996,7 +1057,12 @@
         "confidence": "high",
         "safeToClaim": true,
         "reasons": ["bead_ready", "no_dirty_path_overlap", "coordination_sources_fresh"],
-        "proofObligations": ["record_overlap_decision_in_closeout", "reserve_files_before_editing", "run_claim_gate_before_claim", "use_rch_for_cargo_verification"],
+        "proofObligations": [
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "run_claim_gate_before_claim",
+          "use_rch_for_cargo_verification"
+        ],
         "suggestedCommands": ["br show bd-example.1 --json"]
       },
       "candidates": [
@@ -1027,7 +1093,13 @@
         "activeClaimCount": 0,
         "dirtyPathCount": 0,
         "fileCollisionCount": 0,
-        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 0, "ackRequiredCount": 0, "degradedCodes": []},
+        "agentMail": {
+          "status": "fresh",
+          "healthLevel": "green",
+          "unreadCount": 0,
+          "ackRequiredCount": 0,
+          "degradedCodes": []
+        },
         "activeClaims": [],
         "fileCollisions": []
       },
@@ -1060,18 +1132,60 @@
       },
       "verification": {
         "requiredCommands": [
-          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "after_substantive_rust_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+          {
+            "commandId": "cargo_check_all_targets",
+            "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets",
+            "requiredSubstrate": "rch",
+            "when": "after_substantive_rust_changes",
+            "lastOutcome": "not_run",
+            "lastCommandHash": null
+          }
         ],
         "staticChecks": [
-          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null}
+          {
+            "commandId": "json_schema_parse",
+            "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json",
+            "requiredSubstrate": "static_local",
+            "when": "after_schema_edits",
+            "lastOutcome": "passed",
+            "lastCommandHash": null
+          }
         ],
         "closeoutEvidenceRequired": true
       },
       "sourceProvenance": [
-        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
-        {"source": "bv", "collector": "swarm next-action", "status": "fresh", "freshness": "current", "digest": "blake3:bv", "redaction": "ids_scores_reasons"},
-        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"},
-        {"source": "rch", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:rch", "redaction": "counts_worker_labels_no_raw_logs"}
+        {
+          "source": "beads",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:beads",
+          "redaction": "ids_statuses_titles"
+        },
+        {
+          "source": "bv",
+          "collector": "swarm next-action",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:bv",
+          "redaction": "ids_scores_reasons"
+        },
+        {
+          "source": "agent-mail",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:mail",
+          "redaction": "counts_subjects_no_bodies"
+        },
+        {
+          "source": "rch",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:rch",
+          "redaction": "counts_worker_labels_no_raw_logs"
+        }
       ],
       "mutationPolicy": {
         "sideEffectFree": true,
@@ -1096,7 +1210,11 @@
         "confidence": "high",
         "safeToClaim": false,
         "reasons": ["active_claim_overlap", "dirty_path_overlap", "exclusive_reservation_present"],
-        "proofObligations": ["message_owner_before_editing", "record_overlap_decision", "choose_static_non_overlapping_work_if_no_reply"],
+        "proofObligations": [
+          "message_owner_before_editing",
+          "record_overlap_decision",
+          "choose_static_non_overlapping_work_if_no_reply"
+        ],
         "suggestedCommands": ["br show bd-overlap.2 --json", "ee swarm brief --workspace . --json"]
       },
       "candidates": [
@@ -1124,12 +1242,33 @@
         "activeClaimCount": 1,
         "dirtyPathCount": 2,
         "fileCollisionCount": 1,
-        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 1, "ackRequiredCount": 0, "degradedCodes": []},
+        "agentMail": {
+          "status": "fresh",
+          "healthLevel": "green",
+          "unreadCount": 1,
+          "ackRequiredCount": 0,
+          "degradedCodes": []
+        },
         "activeClaims": [
-          {"beadId": "bd-peer.7", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:00:00Z", "sourceRefs": ["br://bd-peer.7"]}
+          {
+            "beadId": "bd-peer.7",
+            "assignee": "OtherAgent",
+            "status": "in_progress",
+            "updatedAt": "2026-05-15T16:00:00Z",
+            "sourceRefs": ["br://bd-peer.7"]
+          }
         ],
         "fileCollisions": [
-          {"pathPattern": "src/core/swarm_*.rs", "risk": "high", "owners": ["OtherAgent"], "relatedBeadIds": ["bd-peer.7"], "evidence": ["git_status:M:src/core/swarm_brief.rs", "reservation:OtherAgent:src/core/swarm_*.rs"]}
+          {
+            "pathPattern": "src/core/swarm_*.rs",
+            "risk": "high",
+            "owners": ["OtherAgent"],
+            "relatedBeadIds": ["bd-peer.7"],
+            "evidence": [
+              "git_status:M:src/core/swarm_brief.rs",
+              "reservation:OtherAgent:src/core/swarm_*.rs"
+            ]
+          }
         ]
       },
       "trackerIntegrity": {
@@ -1161,17 +1300,52 @@
       },
       "verification": {
         "requiredCommands": [
-          {"commandId": "cargo_test_swarm_contract", "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle", "requiredSubstrate": "rch", "when": "after_swarm_runtime_or_test_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+          {
+            "commandId": "cargo_test_swarm_contract",
+            "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle",
+            "requiredSubstrate": "rch",
+            "when": "after_swarm_runtime_or_test_changes",
+            "lastOutcome": "not_run",
+            "lastCommandHash": null
+          }
         ],
         "staticChecks": [
-          {"commandId": "diff_check", "commandTemplate": "git diff --check -- docs/schemas/swarm docs/swarm tests/swarm_schema_lifecycle.rs tests/fixtures/swarm_schemas/all_examples.json", "requiredSubstrate": "static_local", "when": "before_closeout", "lastOutcome": "passed", "lastCommandHash": null}
+          {
+            "commandId": "diff_check",
+            "commandTemplate": "git diff --check -- docs/schemas/swarm docs/swarm tests/swarm_schema_lifecycle.rs tests/fixtures/swarm_schemas/all_examples.json",
+            "requiredSubstrate": "static_local",
+            "when": "before_closeout",
+            "lastOutcome": "passed",
+            "lastCommandHash": null
+          }
         ],
         "closeoutEvidenceRequired": true
       },
       "sourceProvenance": [
-        {"source": "git", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:git", "redaction": "path_patterns_statuses"},
-        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
-        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"}
+        {
+          "source": "git",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:git",
+          "redaction": "path_patterns_statuses"
+        },
+        {
+          "source": "beads",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:beads",
+          "redaction": "ids_statuses_titles"
+        },
+        {
+          "source": "agent-mail",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:mail",
+          "redaction": "counts_subjects_no_bodies"
+        }
       ],
       "mutationPolicy": {
         "sideEffectFree": true,
@@ -1195,9 +1369,23 @@
         "candidateId": "bd-static.4",
         "confidence": "low",
         "safeToClaim": false,
-        "reasons": ["agent_mail_degraded_read_only", "reservation_evidence_not_authoritative", "inbox_evidence_not_authoritative", "rch_remote_verification_blocked", "candidate_visible_for_explainability_only"],
-        "proofObligations": ["do_not_treat_zero_reservation_count_as_no_conflict", "do_not_claim_until_authority_recovers", "do_not_run_local_cargo_fallback", "limit_closeout_to_static_evidence_until_rch_recovers"],
-        "suggestedCommands": ["br show bd-static.4 --json", "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json"]
+        "reasons": [
+          "agent_mail_degraded_read_only",
+          "reservation_evidence_not_authoritative",
+          "inbox_evidence_not_authoritative",
+          "rch_remote_verification_blocked",
+          "candidate_visible_for_explainability_only"
+        ],
+        "proofObligations": [
+          "do_not_treat_zero_reservation_count_as_no_conflict",
+          "do_not_claim_until_authority_recovers",
+          "do_not_run_local_cargo_fallback",
+          "limit_closeout_to_static_evidence_until_rch_recovers"
+        ],
+        "suggestedCommands": [
+          "br show bd-static.4 --json",
+          "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json"
+        ]
       },
       "candidates": [
         {
@@ -1218,9 +1406,17 @@
           },
           "decision": "stale_or_advisory",
           "collisionRisk": "low",
-          "unsafeReasons": ["reservation_evidence_not_authoritative", "inbox_evidence_not_authoritative", "rch_remote_verification_blocked"],
+          "unsafeReasons": [
+            "reservation_evidence_not_authoritative",
+            "inbox_evidence_not_authoritative",
+            "rch_remote_verification_blocked"
+          ],
           "staleReasons": ["agent_mail_degraded_read_only"],
-          "sourceRefs": ["br://bd-static.4", "agent-mail://degraded_read_only", "rch://topology_blocked"]
+          "sourceRefs": [
+            "br://bd-static.4",
+            "agent-mail://degraded_read_only",
+            "rch://topology_blocked"
+          ]
         }
       ],
       "coordination": {
@@ -1301,7 +1497,13 @@
           ]
         },
         "activeClaims": [
-          {"beadId": "bd-cass.3", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:05:00Z", "sourceRefs": ["br://bd-cass.3"]}
+          {
+            "beadId": "bd-cass.3",
+            "assignee": "OtherAgent",
+            "status": "in_progress",
+            "updatedAt": "2026-05-15T16:05:00Z",
+            "sourceRefs": ["br://bd-cass.3"]
+          }
         ],
         "fileCollisions": []
       },
@@ -1346,18 +1548,60 @@
       },
       "verification": {
         "requiredCommands": [
-          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "only_after_rch_remote_workers_recover", "lastOutcome": "environment_blocked", "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"}
+          {
+            "commandId": "cargo_check_all_targets",
+            "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets",
+            "requiredSubstrate": "rch",
+            "when": "only_after_rch_remote_workers_recover",
+            "lastOutcome": "environment_blocked",
+            "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"
+          }
         ],
         "staticChecks": [
-          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null},
-          {"commandId": "markdown_diff_check", "commandTemplate": "git diff --check -- docs/schemas/swarm/ee.swarm.work_packet.v1.json docs/swarm/work_packet.md", "requiredSubstrate": "static_local", "when": "before_closeout", "lastOutcome": "passed", "lastCommandHash": null}
+          {
+            "commandId": "json_schema_parse",
+            "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json",
+            "requiredSubstrate": "static_local",
+            "when": "after_schema_edits",
+            "lastOutcome": "passed",
+            "lastCommandHash": null
+          },
+          {
+            "commandId": "markdown_diff_check",
+            "commandTemplate": "git diff --check -- docs/schemas/swarm/ee.swarm.work_packet.v1.json docs/swarm/work_packet.md",
+            "requiredSubstrate": "static_local",
+            "when": "before_closeout",
+            "lastOutcome": "passed",
+            "lastCommandHash": null
+          }
         ],
         "closeoutEvidenceRequired": true
       },
       "sourceProvenance": [
-        {"source": "agent-mail", "collector": "swarm brief", "status": "degraded", "freshness": null, "digest": null, "redaction": "unavailable_no_bodies"},
-        {"source": "rch", "collector": "swarm brief", "status": "degraded", "freshness": "stale_worker_topology", "digest": "blake3:rch-blocked", "redaction": "counts_worker_labels_no_raw_logs"},
-        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"}
+        {
+          "source": "agent-mail",
+          "collector": "swarm brief",
+          "status": "degraded",
+          "freshness": null,
+          "digest": null,
+          "redaction": "unavailable_no_bodies"
+        },
+        {
+          "source": "rch",
+          "collector": "swarm brief",
+          "status": "degraded",
+          "freshness": "stale_worker_topology",
+          "digest": "blake3:rch-blocked",
+          "redaction": "counts_worker_labels_no_raw_logs"
+        },
+        {
+          "source": "beads",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:beads",
+          "redaction": "ids_statuses_titles"
+        }
       ],
       "mutationPolicy": {
         "sideEffectFree": true,
@@ -1369,8 +1613,20 @@
         "deletesFiles": false
       },
       "degraded": [
-        {"code": "agent_mail_unavailable", "source": "agent-mail", "severity": "warning", "message": "Agent Mail could not provide a fresh indexed inbox snapshot.", "repair": "Use Beads for coordination and retry Agent Mail after repair."},
-        {"code": "rch_remote_required_fallback_prevented", "source": "rch", "severity": "medium", "message": "Remote-required Cargo verification is blocked and local fallback is forbidden.", "repair": "Record the RCH blocker and continue only with static checks."}
+        {
+          "code": "agent_mail_unavailable",
+          "source": "agent-mail",
+          "severity": "warning",
+          "message": "Agent Mail could not provide a fresh indexed inbox snapshot.",
+          "repair": "Use Beads for coordination and retry Agent Mail after repair."
+        },
+        {
+          "code": "rch_remote_required_fallback_prevented",
+          "source": "rch",
+          "severity": "medium",
+          "message": "Remote-required Cargo verification is blocked and local fallback is forbidden.",
+          "repair": "Record the RCH blocker and continue only with static checks."
+        }
       ]
     }
   ],

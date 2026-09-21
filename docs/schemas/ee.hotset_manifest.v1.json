@@ -233,13 +233,7 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "itemCount",
-        "admittedCount",
-        "advisoryCount",
-        "failClosedCount",
-        "classCounts"
-      ],
+      "required": ["itemCount", "admittedCount", "advisoryCount", "failClosedCount", "classCounts"],
       "properties": {
         "itemCount": {
           "type": "integer",
@@ -1037,11 +1031,7 @@
       "failClosed": {
         "status": "fail_closed",
         "blockedExecution": true,
-        "reasons": [
-          "beads_stale",
-          "rch_proof_missing",
-          "unsupported_resource_profile"
-        ]
+        "reasons": ["beads_stale", "rch_proof_missing", "unsupported_resource_profile"]
       },
       "ordering": {
         "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",

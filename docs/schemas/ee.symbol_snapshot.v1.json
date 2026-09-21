@@ -20,10 +20,7 @@
     },
     "workspaceRoot": {
       "description": "Normalized workspace root when the snapshot came from filesystem paths; null for direct source fixtures.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "generatedBy": {
       "description": "Extractor implementation identifier.",
@@ -56,14 +53,7 @@
     "sourceFile": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "path",
-        "language",
-        "parser",
-        "sourceHash",
-        "byteLen",
-        "symbolCount"
-      ],
+      "required": ["path", "language", "parser", "sourceHash", "byteLen", "symbolCount"],
       "properties": {
         "path": {
           "$ref": "#/$defs/normalizedPath"
@@ -141,11 +131,7 @@
         },
         "visibility": {
           "type": "string",
-          "enum": [
-            "public",
-            "restricted",
-            "private"
-          ]
+          "enum": ["public", "restricted", "private"]
         },
         "declarationHash": {
           "$ref": "#/$defs/blake3Hex"
@@ -161,12 +147,7 @@
     "sourceRange": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "startLine",
-        "startColumn",
-        "endLine",
-        "endColumn"
-      ],
+      "required": ["startLine", "startColumn", "endLine", "endColumn"],
       "properties": {
         "startLine": {
           "type": "integer",
@@ -189,12 +170,7 @@
     "degradation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "code",
-        "severity",
-        "path",
-        "message"
-      ],
+      "required": ["code", "severity", "path", "message"],
       "properties": {
         "code": {
           "type": "string",
@@ -209,16 +185,10 @@
         },
         "severity": {
           "type": "string",
-          "enum": [
-            "warning",
-            "medium"
-          ]
+          "enum": ["warning", "medium"]
         },
         "path": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "message": {
           "type": "string",
@@ -228,9 +198,7 @@
     },
     "parser": {
       "type": "string",
-      "enum": [
-        "rust_lexical_scanner"
-      ]
+      "enum": ["rust_lexical_scanner"]
     },
     "normalizedPath": {
       "type": "string",
@@ -245,14 +213,7 @@
     }
   },
   "field_presets": {
-    "compact": [
-      "schema",
-      "files",
-      "symbols",
-      "degraded"
-    ],
-    "full": [
-      "*"
-    ]
+    "compact": ["schema", "files", "symbols", "degraded"],
+    "full": ["*"]
   }
 }

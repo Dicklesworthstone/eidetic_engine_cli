@@ -5,14 +5,7 @@
   "description": "Read-only derived links from memories, CASS evidence, failures, rules, and decisions to stable code symbols. Link metadata stores provenance, confidence, and reasons without source bodies.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "snapshotHash",
-    "generatedBy",
-    "sourceManifestHash",
-    "links",
-    "degraded"
-  ],
+  "required": ["schema", "snapshotHash", "generatedBy", "sourceManifestHash", "links", "degraded"],
   "properties": {
     "schema": {
       "const": "ee.symbol_evidence_links.v1"
@@ -66,13 +59,7 @@
         },
         "sourceKind": {
           "type": "string",
-          "enum": [
-            "memory",
-            "cass_evidence",
-            "failure",
-            "rule",
-            "decision"
-          ]
+          "enum": ["memory", "cass_evidence", "failure", "rule", "decision"]
         },
         "evidenceId": {
           "type": "string",
@@ -100,10 +87,7 @@
           ]
         },
         "canonicalName": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "symbolKind": {
           "oneOf": [
@@ -161,13 +145,7 @@
     "degradation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "code",
-        "severity",
-        "evidenceId",
-        "path",
-        "message"
-      ],
+      "required": ["code", "severity", "evidenceId", "path", "message"],
       "properties": {
         "code": {
           "type": "string",
@@ -181,20 +159,14 @@
         },
         "severity": {
           "type": "string",
-          "enum": [
-            "warning",
-            "medium"
-          ]
+          "enum": ["warning", "medium"]
         },
         "evidenceId": {
           "type": "string",
           "minLength": 1
         },
         "path": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "message": {
           "type": "string",
@@ -205,12 +177,7 @@
     "sourceRange": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "startLine",
-        "startColumn",
-        "endLine",
-        "endColumn"
-      ],
+      "required": ["startLine", "startColumn", "endLine", "endColumn"],
       "properties": {
         "startLine": {
           "type": "integer",
@@ -258,14 +225,7 @@
     }
   },
   "field_presets": {
-    "compact": [
-      "schema",
-      "snapshotHash",
-      "links",
-      "degraded"
-    ],
-    "full": [
-      "*"
-    ]
+    "compact": ["schema", "snapshotHash", "links", "degraded"],
+    "full": ["*"]
   }
 }

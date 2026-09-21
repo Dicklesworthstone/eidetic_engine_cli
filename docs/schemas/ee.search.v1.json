@@ -7,10 +7,10 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
-    "degraded": {"type": "array", "items": {"type": "object"}},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
+    "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
       "required": [
@@ -28,31 +28,50 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "search"},
-        "embed_backend": {"type": "string", "enum": ["neural_local", "remote_api", "hash_fallback"]},
-        "query": {"type": "string"},
-        "status": {"type": "string"},
-        "request": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "scopeStats": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "consensus": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        "conflicts": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        "resultCount": {"type": "integer"},
+        "command": { "type": "string", "const": "search" },
+        "embed_backend": {
+          "type": "string",
+          "enum": ["neural_local", "remote_api", "hash_fallback"]
+        },
+        "query": { "type": "string" },
+        "status": { "type": "string" },
+        "request": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "scopeStats": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "consensus": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        "conflicts": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        "resultCount": { "type": "integer" },
         "results": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["memoryId", "docId", "score", "relevanceScore", "scoreKind", "calibrationId", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
+            "required": [
+              "memoryId",
+              "docId",
+              "score",
+              "relevanceScore",
+              "scoreKind",
+              "calibrationId",
+              "scoreInterval",
+              "coverageGuarantee",
+              "calibrated",
+              "source",
+              "why",
+              "provenance"
+            ],
             "additionalProperties": false,
             "properties": {
-              "memoryId": {"type": "string"},
-              "docId": {"type": "string"},
-              "score": {"type": "number"},
-              "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
-              "scoreKind": {"type": "string", "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"]},
-              "calibrationId": {"type": ["string", "null"], "pattern": "^blake3:[0-9a-f]{64}$"},
+              "memoryId": { "type": "string" },
+              "docId": { "type": "string" },
+              "score": { "type": "number" },
+              "relevanceScore": { "type": "number", "minimum": 0, "maximum": 1 },
+              "scoreKind": {
+                "type": "string",
+                "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"]
+              },
+              "calibrationId": { "type": ["string", "null"], "pattern": "^blake3:[0-9a-f]{64}$" },
               "scoreInterval": {
                 "type": "array",
-                "items": {"type": "number"},
+                "items": { "type": "number" },
                 "minItems": 2,
                 "maxItems": 2,
                 "description": "Closed [lo, hi] uncertainty interval around `relevanceScore`."
@@ -67,81 +86,152 @@
                 "type": "boolean",
                 "description": "True when a conformal residual quantile produced the scoreInterval/coverageGuarantee around relevanceScore. When false, scoreInterval is the trivial [0,1] band and coverageGuarantee is null."
               },
-              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hash_control", "hybrid", "reranked"]},
-              "why": {"type": "string"},
-              "fastScore": {"type": ["number", "null"]},
-              "qualityScore": {"type": ["number", "null"]},
-              "lexicalScore": {"type": ["number", "null"]},
-              "rerankScore": {"type": ["number", "null"]},
-              "content": {"type": "string"},
-              "content_truncated": {"type": "boolean"},
-              "contentRedacted": {"type": "boolean"},
-              "redactions": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-              "driftHint": {"$ref": "#/$defs/jsonValue"},
-              "meshProvenance": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-              "meshTrustAdjustment": {"$ref": "#/$defs/jsonValue"},
-              "tombstoned": {"type": "boolean"},
-              "tombstonedAt": {"type": "string"},
-              "validFrom": {"type": "string"},
-              "validTo": {"type": "string"},
-              "validityStatus": {"type": "string"},
-              "validityWindowKind": {"type": "string"},
-              "metadata": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-              "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-              "explanation": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+              "source": {
+                "type": "string",
+                "enum": [
+                  "lexical",
+                  "semantic_fast",
+                  "semantic_quality",
+                  "hash_control",
+                  "hybrid",
+                  "reranked"
+                ]
+              },
+              "why": { "type": "string" },
+              "fastScore": { "type": ["number", "null"] },
+              "qualityScore": { "type": ["number", "null"] },
+              "lexicalScore": { "type": ["number", "null"] },
+              "rerankScore": { "type": ["number", "null"] },
+              "content": { "type": "string" },
+              "content_truncated": { "type": "boolean" },
+              "contentRedacted": { "type": "boolean" },
+              "redactions": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+              "driftHint": { "$ref": "#/$defs/jsonValue" },
+              "meshProvenance": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+              },
+              "meshTrustAdjustment": { "$ref": "#/$defs/jsonValue" },
+              "tombstoned": { "type": "boolean" },
+              "tombstonedAt": { "type": "string" },
+              "validFrom": { "type": "string" },
+              "validTo": { "type": "string" },
+              "validityStatus": { "type": "string" },
+              "validityWindowKind": { "type": "string" },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+              },
+              "provenance": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                }
+              },
+              "explanation": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+              }
             }
           }
         },
-        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "errors": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "rerank": {"$ref": "#/$defs/rerankPosture"},
-        "queryAssist": {"$ref": "#/$defs/queryAssist"},
+        "degraded": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "metrics": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "rerank": { "$ref": "#/$defs/rerankPosture" },
+        "queryAssist": { "$ref": "#/$defs/queryAssist" },
         "indexFreshness": {
           "type": "object",
           "required": ["stale", "largeGap"],
           "additionalProperties": false,
           "properties": {
-            "stale": {"type": "boolean"},
-            "dbGeneration": {"type": "integer", "minimum": 0},
-            "indexGeneration": {"type": "integer", "minimum": 0},
-            "generationGap": {"type": "integer", "minimum": 0},
-            "largeGap": {"type": "boolean"}
+            "stale": { "type": "boolean" },
+            "dbGeneration": { "type": "integer", "minimum": 0 },
+            "indexGeneration": { "type": "integer", "minimum": 0 },
+            "generationGap": { "type": "integer", "minimum": 0 },
+            "largeGap": { "type": "boolean" }
           }
         },
-        "elapsedMs": {"type": "number"},
-        "profileRuntime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "resultPath": {"type": "string", "const": "data.results"}
+        "elapsedMs": { "type": "number" },
+        "profileRuntime": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "resultPath": { "type": "string", "const": "data.results" }
       }
     }
   },
   "field_presets": {
     "minimal": ["command", "embed_backend", "memoryId", "docId", "score", "source"],
-    "summary": ["command", "query", "status", "embed_backend", "resultCount", "memoryId", "docId", "score", "source"],
-    "standard": ["command", "query", "status", "embed_backend", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "indexFreshness", "degraded", "errors", "metrics", "elapsedMs"],
+    "summary": [
+      "command",
+      "query",
+      "status",
+      "embed_backend",
+      "resultCount",
+      "memoryId",
+      "docId",
+      "score",
+      "source"
+    ],
+    "standard": [
+      "command",
+      "query",
+      "status",
+      "embed_backend",
+      "resultCount",
+      "results",
+      "memoryId",
+      "docId",
+      "score",
+      "source",
+      "why",
+      "provenance",
+      "indexFreshness",
+      "degraded",
+      "errors",
+      "metrics",
+      "elapsedMs"
+    ],
     "full": ["*"]
   },
   "$defs": {
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     },
     "queryAssist": {
       "type": "object",
       "required": ["schema", "weakResultReason", "reformulations", "didYouMean", "captureTemplate"],
-      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" },
       "properties": {
-        "schema": {"type": "string", "const": "ee.query_assist.v1"},
-        "weakResultReason": {"type": "string"},
-        "reformulations": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "didYouMean": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "captureTemplate": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "schema": { "type": "string", "const": "ee.query_assist.v1" },
+        "weakResultReason": { "type": "string" },
+        "reformulations": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "didYouMean": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "captureTemplate": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
       }
     },
     "rerankPosture": {
@@ -160,22 +250,22 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.rerank_posture.v1"},
-        "mode": {"type": "string", "enum": ["reranked", "fusion_only", "fusion_only_degraded"]},
-        "configured": {"type": "string", "enum": ["auto", "off"]},
-        "topK": {"type": "integer", "minimum": 1},
-        "rerankScoreCount": {"type": "integer", "minimum": 0},
-        "scoreKind": {"type": "string", "enum": ["rrf_fused", "reranked"]},
-        "available": {"type": "boolean"},
-        "degradedCode": {"enum": ["rerank_model_unavailable", null]},
+        "schema": { "type": "string", "const": "ee.rerank_posture.v1" },
+        "mode": { "type": "string", "enum": ["reranked", "fusion_only", "fusion_only_degraded"] },
+        "configured": { "type": "string", "enum": ["auto", "off"] },
+        "topK": { "type": "integer", "minimum": 1 },
+        "rerankScoreCount": { "type": "integer", "minimum": 0 },
+        "scoreKind": { "type": "string", "enum": ["rrf_fused", "reranked"] },
+        "available": { "type": "boolean" },
+        "degradedCode": { "enum": ["rerank_model_unavailable", null] },
         "advisory": {
           "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/permanentRerankAdvisory"},
-            {"$ref": "#/$defs/transientRerankAdvisory"}
+            { "type": "null" },
+            { "$ref": "#/$defs/permanentRerankAdvisory" },
+            { "$ref": "#/$defs/transientRerankAdvisory" }
           ]
         },
-        "advisorySummary": {"$ref": "#/$defs/rerankAdvisorySummary"}
+        "advisorySummary": { "$ref": "#/$defs/rerankAdvisorySummary" }
       }
     },
     "permanentRerankAdvisory": {
@@ -183,12 +273,15 @@
       "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "rerank_model_unavailable"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "permanent": {"type": "boolean", "const": true},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": "null"},
-        "resolution": {"type": "string", "const": "automatic_repair_unavailable"}
+        "code": { "type": "string", "const": "rerank_model_unavailable" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "permanent": { "type": "boolean", "const": true },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "null" },
+        "resolution": { "type": "string", "const": "automatic_repair_unavailable" }
       }
     },
     "transientRerankAdvisory": {
@@ -196,12 +289,15 @@
       "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "rerank_model_unavailable"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "permanent": {"type": "boolean", "const": false},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": ["string", "null"]},
-        "resolution": {"type": "string", "const": "retry_or_inspect_local_registry"}
+        "code": { "type": "string", "const": "rerank_model_unavailable" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "permanent": { "type": "boolean", "const": false },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": ["string", "null"] },
+        "resolution": { "type": "string", "const": "retry_or_inspect_local_registry" }
       }
     },
     "rerankAdvisorySummary": {
@@ -217,13 +313,13 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "scope": {"type": "string", "enum": ["invocation", "process", "response"]},
-        "permanent": {"type": ["boolean", "null"]},
-        "distinctCount": {"type": "integer", "minimum": 0},
-        "emittedCount": {"type": "integer", "minimum": 0},
-        "suppressedCount": {"type": "integer", "minimum": 0},
-        "sessionOccurrenceCount": {"type": "integer", "minimum": 0},
-        "sessionSuppressedCount": {"type": "integer", "minimum": 0}
+        "scope": { "type": "string", "enum": ["invocation", "process", "response"] },
+        "permanent": { "type": ["boolean", "null"] },
+        "distinctCount": { "type": "integer", "minimum": 0 },
+        "emittedCount": { "type": "integer", "minimum": 0 },
+        "suppressedCount": { "type": "integer", "minimum": 0 },
+        "sessionOccurrenceCount": { "type": "integer", "minimum": 0 },
+        "sessionSuppressedCount": { "type": "integer", "minimum": 0 }
       }
     }
   }

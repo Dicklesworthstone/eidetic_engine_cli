@@ -4,15 +4,22 @@
   "title": "ee.handoff.memory_set_fingerprint.v1",
   "description": "Planned handoff fingerprint for the exact memory set used to build a capsule or resume context.",
   "type": "object",
-  "required": ["schema", "workspaceFingerprint", "memorySetHash", "memoryIds", "packHash", "createdAt"],
+  "required": [
+    "schema",
+    "workspaceFingerprint",
+    "memorySetHash",
+    "memoryIds",
+    "packHash",
+    "createdAt"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.handoff.memory_set_fingerprint.v1"},
-    "workspaceFingerprint": {"type": "string"},
-    "memorySetHash": {"type": "string"},
-    "memoryIds": {"type": "array", "items": {"type": "string"}},
-    "packHash": {"type": ["string", "null"]},
-    "createdAt": {"type": "string", "format": "date-time"}
+    "schema": { "type": "string", "const": "ee.handoff.memory_set_fingerprint.v1" },
+    "workspaceFingerprint": { "type": "string" },
+    "memorySetHash": { "type": "string" },
+    "memoryIds": { "type": "array", "items": { "type": "string" } },
+    "packHash": { "type": ["string", "null"] },
+    "createdAt": { "type": "string", "format": "date-time" }
   },
   "examples": [
     {

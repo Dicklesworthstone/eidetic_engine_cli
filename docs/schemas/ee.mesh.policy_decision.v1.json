@@ -42,14 +42,7 @@
     },
     "materialLane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graphLink",
-        "revisionNotice",
-        "curationSignal"
-      ]
+      "enum": ["metadata", "body", "embedding", "graphLink", "revisionNotice", "curationSignal"]
     },
     "redaction": {
       "type": "string",
@@ -57,14 +50,7 @@
     },
     "trustLane": {
       "type": ["string", "null"],
-      "enum": [
-        "localHuman",
-        "peerHumanViaPeer",
-        "peerAgent",
-        "peerDerived",
-        "untrusted",
-        null
-      ]
+      "enum": ["localHuman", "peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted", null]
     },
     "importTrustClass": {
       "type": ["string", "null"],
@@ -129,11 +115,7 @@
         }
       },
       "then": {
-        "required": [
-          "payloadExportAllowed",
-          "rawPayloadExportAllowed",
-          "redactedPayloadRequired"
-        ],
+        "required": ["payloadExportAllowed", "rawPayloadExportAllowed", "redactedPayloadRequired"],
         "not": {
           "anyOf": [
             { "required": ["importTrustClass"] },
@@ -404,12 +386,7 @@
         "required": ["trustLane"],
         "properties": {
           "trustLane": {
-            "enum": [
-              "peerHumanViaPeer",
-              "peerAgent",
-              "peerDerived",
-              "untrusted"
-            ]
+            "enum": ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"]
           }
         }
       }
@@ -420,13 +397,7 @@
           "direction": { "const": "inbound" },
           "action": { "const": "allow" },
           "materialLane": {
-            "enum": [
-              "metadata",
-              "embedding",
-              "graphLink",
-              "revisionNotice",
-              "curationSignal"
-            ]
+            "enum": ["metadata", "embedding", "graphLink", "revisionNotice", "curationSignal"]
           }
         },
         "required": ["direction", "action", "materialLane"]
@@ -479,10 +450,7 @@
         "required": ["direction", "action"]
       },
       "then": {
-        "required": [
-          "localTruthSideEffectsAllowed",
-          "searchOrGraphSideEffectsAllowed"
-        ],
+        "required": ["localTruthSideEffectsAllowed", "searchOrGraphSideEffectsAllowed"],
         "properties": {
           "localTruthSideEffectsAllowed": { "const": true },
           "searchOrGraphSideEffectsAllowed": { "const": true }
@@ -564,12 +532,7 @@
         "required": ["trustLane"],
         "properties": {
           "trustLane": {
-            "enum": [
-              "peerHumanViaPeer",
-              "peerAgent",
-              "peerDerived",
-              "untrusted"
-            ]
+            "enum": ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"]
           }
         }
       }

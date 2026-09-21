@@ -24,31 +24,49 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.host_calibration.posture.v1"},
-    "redactionStatus": {"type": "string"},
-    "hostProfileSchema": {"type": "string", "const": "ee.host_profile.v1"},
+    "schema": { "type": "string", "const": "ee.host_calibration.posture.v1" },
+    "redactionStatus": { "type": "string" },
+    "hostProfileSchema": { "type": "string", "const": "ee.host_profile.v1" },
     "hostClass": {
       "type": "string",
-      "enum": ["constrained", "portable", "laptop", "workstation", "local_256gb", "rch_only_topology"]
+      "enum": [
+        "constrained",
+        "portable",
+        "laptop",
+        "workstation",
+        "local_256gb",
+        "rch_only_topology"
+      ]
     },
     "calibrationFreshness": {
       "type": "string",
-      "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
+      "enum": [
+        "fresh",
+        "stale",
+        "partial",
+        "synthetic_only",
+        "contradictory",
+        "missing",
+        "unavailable"
+      ]
     },
-    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-    "profileCeiling": {"$ref": "#/$defs/operatingProfile"},
-    "configuredProfile": {"$ref": "#/$defs/operatingProfile"},
-    "recommendedProfile": {"$ref": "#/$defs/operatingProfile"},
-    "effectiveProfile": {"$ref": "#/$defs/operatingProfile"},
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "profileCeiling": { "$ref": "#/$defs/operatingProfile" },
+    "configuredProfile": { "$ref": "#/$defs/operatingProfile" },
+    "recommendedProfile": { "$ref": "#/$defs/operatingProfile" },
+    "effectiveProfile": { "$ref": "#/$defs/operatingProfile" },
     "targetDirPosture": {
       "type": "string",
       "enum": ["shared", "isolated", "external", "unknown"]
     },
-    "topologyWarnings": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "reasonCodes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "repairActions": {"type": "array", "items": {"$ref": "#/$defs/repairAction"}},
-    "budgetDeltas": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
-    "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+    "topologyWarnings": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "reasonCodes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "repairActions": { "type": "array", "items": { "$ref": "#/$defs/repairAction" } },
+    "budgetDeltas": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "degraded": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
   },
   "$defs": {
     "operatingProfile": {
@@ -60,10 +78,10 @@
       "required": ["priority", "kind", "command", "message"],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
-        "kind": {"type": "string"},
-        "command": {"type": ["string", "null"]},
-        "message": {"type": "string"}
+        "priority": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "command": { "type": ["string", "null"] },
+        "message": { "type": "string" }
       }
     }
   }

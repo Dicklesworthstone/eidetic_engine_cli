@@ -59,11 +59,7 @@
     }
   },
   "field_presets": {
-    "minimal": [
-      "schema",
-      "subject",
-      "hypotheses"
-    ],
+    "minimal": ["schema", "subject", "hypotheses"],
     "summary": [
       "schema",
       "subject",
@@ -83,9 +79,7 @@
       "degraded",
       "nextCommands"
     ],
-    "full": [
-      "*"
-    ]
+    "full": ["*"]
   },
   "examples": [
     {
@@ -104,9 +98,7 @@
         "localDirty": true,
         "remoteSourceMaterialized": null,
         "sourceHash": null,
-        "degradedCodes": [
-          "rch_verify_remote_source_unknown"
-        ]
+        "degradedCodes": ["rch_verify_remote_source_unknown"]
       },
       "evidenceSources": [
         {
@@ -137,9 +129,7 @@
           "confidence": 0.84,
           "severity": "high",
           "summary": "The failing gate cannot yet be used as a source verdict because remote source materialization was not proven.",
-          "evidenceRefs": [
-            "evidence:rch"
-          ],
+          "evidenceRefs": ["evidence:rch"],
           "counterEvidence": [
             {
               "sourceId": "evidence:beads",
@@ -223,31 +213,19 @@
           "description": "Human-readable artifact class such as rch_verify, pack_diff, perf_report, or beads_history."
         },
         "artifactId": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Stable artifact id when available; never a host-private absolute path."
         },
         "commandHash": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Hash of the triggering command or null when the subject was not command-driven."
         },
         "observedAt": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Observation timestamp from the input artifact when already present; generators should avoid inventing wall-clock values."
         },
         "workspaceHash": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Hash or fingerprint of the workspace identity; never an absolute checkout path."
         }
       }
@@ -276,31 +254,19 @@
           ]
         },
         "verificationAttribution": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Compact attribution string from verification evidence, or null when unavailable."
         },
         "localDirty": {
-          "type": [
-            "boolean",
-            "null"
-          ],
+          "type": ["boolean", "null"],
           "description": "Whether the local checkout was dirty according to the source evidence."
         },
         "remoteSourceMaterialized": {
-          "type": [
-            "boolean",
-            "null"
-          ],
+          "type": ["boolean", "null"],
           "description": "True only when the remote worker source tree was proven to match the intended source input."
         },
         "sourceHash": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Commit, tree, dirty-status, or source-package hash when available."
         },
         "degradedCodes": {
@@ -347,10 +313,7 @@
           ]
         },
         "schema": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Input schema id when the artifact is schema-versioned."
         },
         "status": {
@@ -366,10 +329,7 @@
           ]
         },
         "artifactHash": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "description": "Hash of the source artifact or null when unavailable."
         },
         "summary": {
@@ -378,13 +338,7 @@
         },
         "redactionStatus": {
           "type": "string",
-          "enum": [
-            "safe",
-            "redacted",
-            "hash_only",
-            "refused",
-            "unknown"
-          ]
+          "enum": ["safe", "redacted", "hash_only", "refused", "unknown"]
         },
         "authoritative": {
           "type": "boolean",
@@ -471,51 +425,29 @@
     },
     "counterEvidence": {
       "type": "object",
-      "required": [
-        "sourceId",
-        "summary",
-        "effect"
-      ],
+      "required": ["sourceId", "summary", "effect"],
       "additionalProperties": false,
       "properties": {
         "sourceId": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "summary": {
           "type": "string"
         },
         "effect": {
           "type": "string",
-          "enum": [
-            "supports",
-            "weakens",
-            "neutral",
-            "missing_required_source"
-          ]
+          "enum": ["supports", "weakens", "neutral", "missing_required_source"]
         }
       }
     },
     "ownerHint": {
       "type": "object",
-      "required": [
-        "kind",
-        "value",
-        "confidence"
-      ],
+      "required": ["kind", "value", "confidence"],
       "additionalProperties": false,
       "properties": {
         "kind": {
           "type": "string",
-          "enum": [
-            "bead",
-            "agent",
-            "module",
-            "command",
-            "unknown"
-          ]
+          "enum": ["bead", "agent", "module", "command", "unknown"]
         },
         "value": {
           "type": "string"
@@ -529,12 +461,7 @@
     },
     "command": {
       "type": "object",
-      "required": [
-        "command",
-        "rationale",
-        "mutatesWorkspace",
-        "requiresRch"
-      ],
+      "required": ["command", "rationale", "mutatesWorkspace", "requiresRch"],
       "additionalProperties": false,
       "properties": {
         "command": {
@@ -595,12 +522,7 @@
     },
     "degradedEntry": {
       "type": "object",
-      "required": [
-        "code",
-        "severity",
-        "message",
-        "evidenceSourceId"
-      ],
+      "required": ["code", "severity", "message", "evidenceSourceId"],
       "additionalProperties": false,
       "properties": {
         "code": {
@@ -613,23 +535,13 @@
           "type": "string"
         },
         "evidenceSourceId": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       }
     },
     "severity": {
       "type": "string",
-      "enum": [
-        "info",
-        "low",
-        "warning",
-        "medium",
-        "high",
-        "critical"
-      ]
+      "enum": ["info", "low", "warning", "medium", "high", "critical"]
     }
   }
 }

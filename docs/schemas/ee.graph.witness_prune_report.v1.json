@@ -18,19 +18,19 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.graph.witness_prune_report.v1"},
-    "command": {"type": "string", "const": "maintenance graph-witnesses-prune"},
-    "workspace": {"type": "string", "minLength": 1},
-    "workspaceId": {"type": "string", "minLength": 1},
-    "databasePath": {"type": "string", "minLength": 1},
-    "dryRun": {"type": "boolean"},
-    "durableMutation": {"type": "boolean"},
-    "deletedCount": {"type": "integer", "minimum": 0},
-    "report": {"$ref": "#/$defs/witnessPruneReport"},
-    "summary": {"$ref": "#/$defs/witnessPruneSummaryWithDelete"},
+    "schema": { "type": "string", "const": "ee.graph.witness_prune_report.v1" },
+    "command": { "type": "string", "const": "maintenance graph-witnesses-prune" },
+    "workspace": { "type": "string", "minLength": 1 },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "databasePath": { "type": "string", "minLength": 1 },
+    "dryRun": { "type": "boolean" },
+    "durableMutation": { "type": "boolean" },
+    "deletedCount": { "type": "integer", "minimum": 0 },
+    "report": { "$ref": "#/$defs/witnessPruneReport" },
+    "summary": { "$ref": "#/$defs/witnessPruneSummaryWithDelete" },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "field_presets": {
@@ -120,14 +120,14 @@
       "required": ["schema", "now", "policy", "classifications", "summary"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.graph.witness_prune_report.v1"},
-        "now": {"type": "string", "minLength": 1},
-        "policy": {"$ref": "#/$defs/witnessRetentionPolicy"},
+        "schema": { "type": "string", "const": "ee.graph.witness_prune_report.v1" },
+        "now": { "type": "string", "minLength": 1 },
+        "policy": { "$ref": "#/$defs/witnessRetentionPolicy" },
         "classifications": {
           "type": "array",
-          "items": {"$ref": "#/$defs/witnessClassification"}
+          "items": { "$ref": "#/$defs/witnessClassification" }
         },
-        "summary": {"$ref": "#/$defs/witnessPruneSummary"}
+        "summary": { "$ref": "#/$defs/witnessPruneSummary" }
       }
     },
     "witnessRetentionPolicy": {
@@ -135,10 +135,10 @@
       "required": ["defaultTtlDays", "perAlgorithmTtlDays"],
       "additionalProperties": false,
       "properties": {
-        "defaultTtlDays": {"type": "integer", "minimum": 0},
+        "defaultTtlDays": { "type": "integer", "minimum": 0 },
         "perAlgorithmTtlDays": {
           "type": "object",
-          "additionalProperties": {"type": "integer", "minimum": 0}
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         }
       }
     },
@@ -147,27 +147,24 @@
       "required": ["workspaceId", "snapshotId", "algorithm", "recordedAt", "action"],
       "additionalProperties": false,
       "properties": {
-        "workspaceId": {"type": "string", "minLength": 1},
-        "snapshotId": {"type": "string", "minLength": 1},
-        "algorithm": {"type": "string", "minLength": 1},
-        "recordedAt": {"type": "string", "minLength": 1},
-        "action": {"$ref": "#/$defs/witnessAction"}
+        "workspaceId": { "type": "string", "minLength": 1 },
+        "snapshotId": { "type": "string", "minLength": 1 },
+        "algorithm": { "type": "string", "minLength": 1 },
+        "recordedAt": { "type": "string", "minLength": 1 },
+        "action": { "$ref": "#/$defs/witnessAction" }
       }
     },
     "witnessAction": {
-      "oneOf": [
-        {"$ref": "#/$defs/pruneAction"},
-        {"$ref": "#/$defs/keepAction"}
-      ]
+      "oneOf": [{ "$ref": "#/$defs/pruneAction" }, { "$ref": "#/$defs/keepAction" }]
     },
     "pruneAction": {
       "type": "object",
       "required": ["kind", "ageDays", "ttlDays"],
       "additionalProperties": false,
       "properties": {
-        "kind": {"type": "string", "const": "prune"},
-        "ageDays": {"type": "integer", "minimum": 0},
-        "ttlDays": {"type": "integer", "minimum": 0}
+        "kind": { "type": "string", "const": "prune" },
+        "ageDays": { "type": "integer", "minimum": 0 },
+        "ttlDays": { "type": "integer", "minimum": 0 }
       }
     },
     "keepAction": {
@@ -175,15 +172,15 @@
       "required": ["kind", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": {"type": "string", "const": "keep"},
-        "reason": {"$ref": "#/$defs/witnessKeepReason"}
+        "kind": { "type": "string", "const": "keep" },
+        "reason": { "$ref": "#/$defs/witnessKeepReason" }
       }
     },
     "witnessKeepReason": {
       "oneOf": [
-        {"$ref": "#/$defs/activeSnapshotReason"},
-        {"$ref": "#/$defs/withinTtlReason"},
-        {"$ref": "#/$defs/unparseableRecordedAtReason"}
+        { "$ref": "#/$defs/activeSnapshotReason" },
+        { "$ref": "#/$defs/withinTtlReason" },
+        { "$ref": "#/$defs/unparseableRecordedAtReason" }
       ]
     },
     "activeSnapshotReason": {
@@ -191,7 +188,7 @@
       "required": ["code"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "active_snapshot"}
+        "code": { "type": "string", "const": "active_snapshot" }
       }
     },
     "withinTtlReason": {
@@ -199,9 +196,9 @@
       "required": ["code", "ageDays", "ttlDays"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "within_ttl"},
-        "ageDays": {"type": "integer", "minimum": 0},
-        "ttlDays": {"type": "integer", "minimum": 0}
+        "code": { "type": "string", "const": "within_ttl" },
+        "ageDays": { "type": "integer", "minimum": 0 },
+        "ttlDays": { "type": "integer", "minimum": 0 }
       }
     },
     "unparseableRecordedAtReason": {
@@ -209,7 +206,7 @@
       "required": ["code"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "unparseable_recorded_at"}
+        "code": { "type": "string", "const": "unparseable_recorded_at" }
       }
     },
     "witnessPruneSummary": {
@@ -225,13 +222,13 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "totalCount": {"type": "integer", "minimum": 0},
-        "pruneCount": {"type": "integer", "minimum": 0},
-        "keepActiveSnapshotCount": {"type": "integer", "minimum": 0},
-        "keepWithinTtlCount": {"type": "integer", "minimum": 0},
-        "keepUnparseableRecordedAtCount": {"type": "integer", "minimum": 0},
-        "oldestPrunedAgeDays": {"type": ["integer", "null"], "minimum": 0},
-        "oldestKeptAgeDays": {"type": ["integer", "null"], "minimum": 0}
+        "totalCount": { "type": "integer", "minimum": 0 },
+        "pruneCount": { "type": "integer", "minimum": 0 },
+        "keepActiveSnapshotCount": { "type": "integer", "minimum": 0 },
+        "keepWithinTtlCount": { "type": "integer", "minimum": 0 },
+        "keepUnparseableRecordedAtCount": { "type": "integer", "minimum": 0 },
+        "oldestPrunedAgeDays": { "type": ["integer", "null"], "minimum": 0 },
+        "oldestKeptAgeDays": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "witnessPruneSummaryWithDelete": {
@@ -248,14 +245,14 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "totalCount": {"type": "integer", "minimum": 0},
-        "pruneCount": {"type": "integer", "minimum": 0},
-        "keepActiveSnapshotCount": {"type": "integer", "minimum": 0},
-        "keepWithinTtlCount": {"type": "integer", "minimum": 0},
-        "keepUnparseableRecordedAtCount": {"type": "integer", "minimum": 0},
-        "oldestPrunedAgeDays": {"type": ["integer", "null"], "minimum": 0},
-        "oldestKeptAgeDays": {"type": ["integer", "null"], "minimum": 0},
-        "deletedCount": {"type": "integer", "minimum": 0}
+        "totalCount": { "type": "integer", "minimum": 0 },
+        "pruneCount": { "type": "integer", "minimum": 0 },
+        "keepActiveSnapshotCount": { "type": "integer", "minimum": 0 },
+        "keepWithinTtlCount": { "type": "integer", "minimum": 0 },
+        "keepUnparseableRecordedAtCount": { "type": "integer", "minimum": 0 },
+        "oldestPrunedAgeDays": { "type": ["integer", "null"], "minimum": 0 },
+        "oldestKeptAgeDays": { "type": ["integer", "null"], "minimum": 0 },
+        "deletedCount": { "type": "integer", "minimum": 0 }
       }
     },
     "degradation": {
@@ -263,10 +260,13 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": true,
       "properties": {
-        "code": {"type": "string", "minLength": 1},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": "string"}
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "string" }
       }
     }
   }

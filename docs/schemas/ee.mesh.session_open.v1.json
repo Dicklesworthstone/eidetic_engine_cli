@@ -4,7 +4,20 @@
   "title": "ee.mesh.session_open.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "teamId", "tailnetId", "initiatorNodeId", "responderNodeId", "initiatorWorkspaceId", "responderWorkspaceId", "initiatorStableId", "responderStableId", "sessionId", "pairKeyGeneration", "initiatorNonce"],
+  "required": [
+    "schema",
+    "teamId",
+    "tailnetId",
+    "initiatorNodeId",
+    "responderNodeId",
+    "initiatorWorkspaceId",
+    "responderWorkspaceId",
+    "initiatorStableId",
+    "responderStableId",
+    "sessionId",
+    "pairKeyGeneration",
+    "initiatorNonce"
+  ],
   "properties": {
     "schema": { "const": "ee.mesh.session_open.v1" },
     "teamId": { "type": "string", "minLength": 1, "maxLength": 256 },

@@ -21,7 +21,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.pack.compression_manifest.v1"},
+    "schema": { "type": "string", "const": "ee.pack.compression_manifest.v1" },
     "manifestId": {
       "type": "string",
       "pattern": "^packcm_[0-9a-f]{64}$",
@@ -32,7 +32,7 @@
       "format": "date-time",
       "description": "Audit timestamp for this manifest record. It is never part of manifestId, dictionaryId, packHash, or ledgerHash."
     },
-    "codec": {"type": "string", "enum": ["zstd"]},
+    "codec": { "type": "string", "enum": ["zstd"] },
     "codecVersion": {
       "type": ["string", "null"],
       "description": "Optional codec implementation version for diagnostics. Readers must not require it to compute canonical hashes."
@@ -58,12 +58,12 @@
           "pattern": "^zstd_dict_[0-9a-f]{64}$",
           "description": "Content address for the dictionary bytes: zstd_dict_ plus the BLAKE3 hash of the raw dictionary."
         },
-        "dictionaryByteHash": {"$ref": "#/$defs/blake3Hash"},
+        "dictionaryByteHash": { "$ref": "#/$defs/blake3Hash" },
         "dictionarySourceHash": {
           "$ref": "#/$defs/blake3Hash",
           "description": "BLAKE3 hash of the deterministic training-corpus manifest, not of the compressed artifact."
         },
-        "dictionaryBytes": {"type": "integer", "minimum": 0},
+        "dictionaryBytes": { "type": "integer", "minimum": 0 },
         "trainingAlgorithm": {
           "type": "string",
           "description": "Stable algorithm id for dictionary training, for example zstd_train_from_pack_corpus_v1."
@@ -83,11 +83,16 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["pack_json_response", "pack_binary_frame", "pack_replay_ledger", "l2_cache_entry"]
+          "enum": [
+            "pack_json_response",
+            "pack_binary_frame",
+            "pack_replay_ledger",
+            "l2_cache_entry"
+          ]
         },
-        "packId": {"type": ["string", "null"]},
-        "packHash": {"type": ["string", "null"]},
-        "ledgerHash": {"type": ["string", "null"]},
+        "packId": { "type": ["string", "null"] },
+        "packHash": { "type": ["string", "null"] },
+        "ledgerHash": { "type": ["string", "null"] },
         "uncompressedByteHash": {
           "$ref": "#/$defs/blake3Hash",
           "description": "Hash of the exact uncompressed bytes that existing readers consume."
@@ -96,8 +101,8 @@
           "$ref": "#/$defs/blake3Hash",
           "description": "Hash of the compressed byte stream, including any codec frame metadata."
         },
-        "uncompressedBytes": {"type": "integer", "minimum": 0},
-        "compressedBytes": {"type": "integer", "minimum": 0}
+        "uncompressedBytes": { "type": "integer", "minimum": 0 },
+        "compressedBytes": { "type": "integer", "minimum": 0 }
       }
     },
     "canonical": {
@@ -113,21 +118,24 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "hashAlgorithm": {"type": "string", "const": "blake3"},
-        "byteEncoding": {"type": "string", "const": "utf8"},
+        "hashAlgorithm": { "type": "string", "const": "blake3" },
+        "byteEncoding": { "type": "string", "const": "utf8" },
         "manifestIdentity": {
           "type": "string",
           "const": "stable_json_without_manifestId_createdAt_storage_or_operational_notes"
         },
-        "packHashMode": {"type": "string", "const": "uncompressed_pack_content_components"},
-        "ledgerHashMode": {"type": "string", "const": "uncompressed_replay_ledger_json"},
-        "binaryContentHashMode": {"type": "string", "const": "uncompressed_binary_footer_canonical_json"},
+        "packHashMode": { "type": "string", "const": "uncompressed_pack_content_components" },
+        "ledgerHashMode": { "type": "string", "const": "uncompressed_replay_ledger_json" },
+        "binaryContentHashMode": {
+          "type": "string",
+          "const": "uncompressed_binary_footer_canonical_json"
+        },
         "sortOrder": {
           "type": "object",
           "required": ["objectKeys", "arrays"],
           "additionalProperties": false,
           "properties": {
-            "objectKeys": {"type": "string", "const": "lexicographic_utf8"},
+            "objectKeys": { "type": "string", "const": "lexicographic_utf8" },
             "arrays": {
               "type": "string",
               "const": "schema_defined_arrays_preserve_order_other_sets_sort_lexicographically"
@@ -152,16 +160,16 @@
           "type": "string",
           "enum": ["pack_records", "l2_cache_entries", "fixture_corpus", "mixed"]
         },
-        "workspaceId": {"type": ["string", "null"]},
-        "fromGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "toGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "sampleCount": {"type": "integer", "minimum": 0},
+        "workspaceId": { "type": ["string", "null"] },
+        "fromGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "toGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "sampleCount": { "type": "integer", "minimum": 0 },
         "sampleHash": {
           "$ref": "#/$defs/blake3Hash",
           "description": "BLAKE3 hash of the ordered training sample identity list."
         },
-        "redactionLevel": {"type": ["string", "null"]},
-        "notes": {"type": "array", "items": {"type": "string"}}
+        "redactionLevel": { "type": ["string", "null"] },
+        "notes": { "type": "array", "items": { "type": "string" } }
       }
     },
     "compatibility": {
@@ -176,27 +184,21 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "minReaderVersion": {"type": "string"},
-        "featureFlag": {"type": ["string", "null"]},
-        "transparentFallbackRequired": {"type": "boolean", "const": true},
-        "preservesPackHash": {"type": "boolean", "const": true},
-        "preservesLedgerHash": {"type": "boolean", "const": true},
-        "readerMayIgnoreManifest": {"type": "boolean", "const": true},
-        "writerMustKeepUncompressedRecovery": {"type": "boolean", "const": true}
+        "minReaderVersion": { "type": "string" },
+        "featureFlag": { "type": ["string", "null"] },
+        "transparentFallbackRequired": { "type": "boolean", "const": true },
+        "preservesPackHash": { "type": "boolean", "const": true },
+        "preservesLedgerHash": { "type": "boolean", "const": true },
+        "readerMayIgnoreManifest": { "type": "boolean", "const": true },
+        "writerMustKeepUncompressedRecovery": { "type": "boolean", "const": true }
       }
     },
     "storage": {
       "type": "object",
-      "required": [
-        "authority",
-        "sidecarPath",
-        "dbReference",
-        "publish",
-        "rollback"
-      ],
+      "required": ["authority", "sidecarPath", "dbReference", "publish", "rollback"],
       "additionalProperties": false,
       "properties": {
-        "authority": {"type": "string", "const": "sidecar_file"},
+        "authority": { "type": "string", "const": "sidecar_file" },
         "sidecarPath": {
           "type": "string",
           "description": "Workspace-relative path under .ee/derived/pack-compression/manifests/."
@@ -206,12 +208,12 @@
           "required": ["mode", "table", "columns"],
           "additionalProperties": false,
           "properties": {
-            "mode": {"type": "string", "enum": ["none", "nullable_metadata_reference"]},
-            "table": {"type": ["string", "null"]},
-            "columns": {"type": "array", "items": {"type": "string"}}
+            "mode": { "type": "string", "enum": ["none", "nullable_metadata_reference"] },
+            "table": { "type": ["string", "null"] },
+            "columns": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "publish": {"type": "string", "const": "write_temp_fsync_rename_fsync_parent"},
+        "publish": { "type": "string", "const": "write_temp_fsync_rename_fsync_parent" },
         "rollback": {
           "type": "string",
           "const": "ignore_manifest_and_read_uncompressed_source_without_rewriting_pack_record"
@@ -230,12 +232,12 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "missingManifest": {"$ref": "#/$defs/fallbackCase"},
-        "corruptManifest": {"$ref": "#/$defs/fallbackCase"},
-        "missingDictionary": {"$ref": "#/$defs/fallbackCase"},
-        "staleDictionary": {"$ref": "#/$defs/fallbackCase"},
-        "hashMismatch": {"$ref": "#/$defs/fallbackCase"},
-        "unsupportedCodec": {"$ref": "#/$defs/fallbackCase"}
+        "missingManifest": { "$ref": "#/$defs/fallbackCase" },
+        "corruptManifest": { "$ref": "#/$defs/fallbackCase" },
+        "missingDictionary": { "$ref": "#/$defs/fallbackCase" },
+        "staleDictionary": { "$ref": "#/$defs/fallbackCase" },
+        "hashMismatch": { "$ref": "#/$defs/fallbackCase" },
+        "unsupportedCodec": { "$ref": "#/$defs/fallbackCase" }
       }
     },
     "redactionStatus": {
@@ -244,7 +246,7 @@
     },
     "operationalNotes": {
       "type": "array",
-      "items": {"type": "string"},
+      "items": { "type": "string" },
       "description": "Human diagnostics only. This field is excluded from manifestId."
     }
   },
@@ -258,17 +260,21 @@
       "required": ["degradedCode", "severity", "behavior", "selectedItemsUnaffected"],
       "additionalProperties": false,
       "properties": {
-        "degradedCode": {"type": "string"},
+        "degradedCode": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
         "behavior": {
           "type": "string",
-          "enum": ["read_uncompressed_source", "cache_miss_and_reassemble", "reject_compressed_artifact"]
+          "enum": [
+            "read_uncompressed_source",
+            "cache_miss_and_reassemble",
+            "reject_compressed_artifact"
+          ]
         },
-        "selectedItemsUnaffected": {"type": "boolean"},
-        "repair": {"type": ["string", "null"]}
+        "selectedItemsUnaffected": { "type": "boolean" },
+        "repair": { "type": ["string", "null"] }
       }
     }
   },

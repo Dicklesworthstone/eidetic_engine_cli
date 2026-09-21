@@ -6,7 +6,15 @@
   "x-ee-status": "shipped:true",
   "x-ee-bead": "bd-169v0.1",
   "type": "object",
-  "required": ["schema", "question", "abstained", "confidence", "confidenceCalibration", "confidenceComponents", "citations"],
+  "required": [
+    "schema",
+    "question",
+    "abstained",
+    "confidence",
+    "confidenceCalibration",
+    "confidenceComponents",
+    "citations"
+  ],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -124,11 +132,11 @@
       "required": ["id", "srcMemoryId", "dstMemoryId", "confidence", "source"],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string"},
-        "srcMemoryId": {"type": "string"},
-        "dstMemoryId": {"type": "string"},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "source": {"type": "string", "enum": ["human", "agent"]}
+        "id": { "type": "string" },
+        "srcMemoryId": { "type": "string" },
+        "dstMemoryId": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "source": { "type": "string", "enum": ["human", "agent"] }
       }
     },
     "queryAssist": {
@@ -183,17 +191,25 @@
       "oneOf": [
         {
           "required": ["memoryId"],
-          "not": {"anyOf": [{"required": ["entityKind"]}, {"required": ["entityId"]}, {"required": ["entityRevision"]}, {"required": ["ruleId"]}, {"required": ["evidenceId"]}]}
+          "not": {
+            "anyOf": [
+              { "required": ["entityKind"] },
+              { "required": ["entityId"] },
+              { "required": ["entityRevision"] },
+              { "required": ["ruleId"] },
+              { "required": ["evidenceId"] }
+            ]
+          }
         },
         {
           "required": ["entityKind", "entityId", "ruleId", "entityRevision"],
-          "properties": {"entityKind": {"const": "rule"}},
-          "not": {"anyOf": [{"required": ["memoryId"]}, {"required": ["evidenceId"]}]}
+          "properties": { "entityKind": { "const": "rule" } },
+          "not": { "anyOf": [{ "required": ["memoryId"] }, { "required": ["evidenceId"] }] }
         },
         {
           "required": ["entityKind", "entityId", "evidenceId", "entityRevision"],
-          "properties": {"entityKind": {"const": "evidence_span"}},
-          "not": {"anyOf": [{"required": ["memoryId"]}, {"required": ["ruleId"]}]}
+          "properties": { "entityKind": { "const": "evidence_span" } },
+          "not": { "anyOf": [{ "required": ["memoryId"] }, { "required": ["ruleId"] }] }
         }
       ]
     },
@@ -217,7 +233,7 @@
     "citation": {
       "type": "object",
       "required": ["index", "span", "text", "trustClass", "confidence"],
-      "allOf": [{"$ref": "#/$defs/sourceIdentity"}],
+      "allOf": [{ "$ref": "#/$defs/sourceIdentity" }],
       "additionalProperties": false,
       "properties": {
         "index": {
@@ -229,11 +245,11 @@
           "type": "string",
           "description": "ID of the source memory."
         },
-        "entityKind": {"type": "string", "enum": ["rule", "evidence_span"]},
-        "entityId": {"type": "string"},
-        "ruleId": {"type": "string", "pattern": "^rule_"},
-        "evidenceId": {"type": "string", "pattern": "^ev_"},
-        "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
+        "entityKind": { "type": "string", "enum": ["rule", "evidence_span"] },
+        "entityId": { "type": "string" },
+        "ruleId": { "type": "string", "pattern": "^rule_" },
+        "evidenceId": { "type": "string", "pattern": "^ev_" },
+        "entityRevision": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
         "span": {
           "$ref": "#/$defs/span",
           "description": "Byte range in the source memory. text MUST byte-equal content[byteStart:byteEnd]."
@@ -248,7 +264,14 @@
         },
         "trustClass": {
           "type": "string",
-          "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"],
+          "enum": [
+            "human_explicit",
+            "peer_human_attested",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import"
+          ],
           "description": "Trust class of the source memory."
         },
         "confidence": {
@@ -262,12 +285,12 @@
           "description": "Receiver-derived teammate attribution for a peer_human_attested citation. Same ee.team.provenance.v1 block search and pack emit.",
           "additionalProperties": true,
           "properties": {
-            "schema": {"type": "string", "const": "ee.team.provenance.v1"},
-            "memberDisplayName": {"type": "string"},
-            "projectName": {"type": ["string", "null"]},
-            "originTrustClass": {"type": "string"},
-            "producedAt": {"type": "string"},
-            "originTimeAssurance": {"type": "string"}
+            "schema": { "type": "string", "const": "ee.team.provenance.v1" },
+            "memberDisplayName": { "type": "string" },
+            "projectName": { "type": ["string", "null"] },
+            "originTrustClass": { "type": "string" },
+            "producedAt": { "type": "string" },
+            "originTimeAssurance": { "type": "string" }
           }
         }
       }
@@ -279,7 +302,13 @@
       "properties": {
         "label": {
           "type": "string",
-          "enum": ["affirming", "negating", "query_match", "linked_opposition", "numeric_alternative"],
+          "enum": [
+            "affirming",
+            "negating",
+            "query_match",
+            "linked_opposition",
+            "numeric_alternative"
+          ],
           "description": "Which side of the conflict this represents. numeric_alternative is an inferred, supported alternative scalar setting for the query-matched statement, not a stored relation or a claim that one side is true."
         },
         "answerText": {
@@ -297,17 +326,17 @@
     "nearestEvidence": {
       "type": "object",
       "required": ["span", "text", "score"],
-      "allOf": [{"$ref": "#/$defs/sourceIdentity"}],
+      "allOf": [{ "$ref": "#/$defs/sourceIdentity" }],
       "additionalProperties": false,
       "properties": {
         "memoryId": {
           "type": "string"
         },
-        "entityKind": {"type": "string", "enum": ["rule", "evidence_span"]},
-        "entityId": {"type": "string"},
-        "ruleId": {"type": "string", "pattern": "^rule_"},
-        "evidenceId": {"type": "string", "pattern": "^ev_"},
-        "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
+        "entityKind": { "type": "string", "enum": ["rule", "evidence_span"] },
+        "entityId": { "type": "string" },
+        "ruleId": { "type": "string", "pattern": "^rule_" },
+        "evidenceId": { "type": "string", "pattern": "^ev_" },
+        "entityRevision": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
         "span": {
           "$ref": "#/$defs/span"
         },

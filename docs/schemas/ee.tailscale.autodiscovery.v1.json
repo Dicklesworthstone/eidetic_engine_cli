@@ -104,21 +104,14 @@
           "minimum": 0
         },
         "discoveryPolicyDecision": {
-          "enum": [
-            "auto_admit",
-            "service_tag_match",
-            "allowlisted"
-          ]
+          "enum": ["auto_admit", "service_tag_match", "allowlisted"]
         }
       }
     },
     "skippedPeer": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "nodeKey",
-        "reason"
-      ],
+      "required": ["nodeKey", "reason"],
       "properties": {
         "nodeKey": {
           "type": "string",
@@ -139,12 +132,7 @@
     "degradation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "code",
-        "severity",
-        "message",
-        "repair"
-      ],
+      "required": ["code", "severity", "message", "repair"],
       "properties": {
         "code": {
           "enum": [
@@ -156,10 +144,7 @@
           ]
         },
         "severity": {
-          "enum": [
-            "info",
-            "warning"
-          ]
+          "enum": ["info", "warning"]
         },
         "message": {
           "type": "string",

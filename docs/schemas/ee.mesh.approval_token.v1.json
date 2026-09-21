@@ -4,12 +4,7 @@
   "title": "ee.mesh.approval_token.v1",
   "description": "Public projection of an explicitly issued, short-lived mesh lane-approval bearer. The opaque value contains the fresh nonce, nonce-salted keyed snapshot tag, bounded timestamps, and context-bound envelope MAC. Those internals are not separate public fields. This projection deliberately contains no stable store, workspace, or key identifier. Ordinary previews omit the entire object. An opted-in value may remain in a third-party stdout or session recorder until expiry; ee-controlled sinks must redact it.",
   "type": "object",
-  "required": [
-    "schema",
-    "value",
-    "expiresAt",
-    "handling"
-  ],
+  "required": ["schema", "value", "expiresAt", "handling"],
   "additionalProperties": false,
   "properties": {
     "schema": {

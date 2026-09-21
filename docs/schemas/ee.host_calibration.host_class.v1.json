@@ -46,20 +46,28 @@
     },
     "calibrationFreshness": {
       "type": "string",
-      "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
+      "enum": [
+        "fresh",
+        "stale",
+        "partial",
+        "synthetic_only",
+        "contradictory",
+        "missing",
+        "unavailable"
+      ]
     },
     "reasonCodes": {
       "type": "array",
-      "items": {"$ref": "#/$defs/reasonCode"},
+      "items": { "$ref": "#/$defs/reasonCode" },
       "uniqueItems": true
     },
     "repairActions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/repairAction"}
+      "items": { "$ref": "#/$defs/repairAction" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
@@ -124,13 +132,13 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]}
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
       }
     }
   },

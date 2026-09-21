@@ -41,11 +41,11 @@
     },
     "anchors": {
       "type": "array",
-      "items": {"$ref": "#/$defs/anchor"}
+      "items": { "$ref": "#/$defs/anchor" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
@@ -100,17 +100,14 @@
           "pattern": "^blake3:[0-9a-f]+$"
         },
         "sourceWindow": {
-          "anyOf": [
-            {"$ref": "#/$defs/sourceWindow"},
-            {"type": "null"}
-          ]
+          "anyOf": [{ "$ref": "#/$defs/sourceWindow" }, { "type": "null" }]
         },
         "freshness": {
           "$ref": "#/$defs/freshness"
         },
         "metadata": {
           "type": "object",
-          "additionalProperties": {"type": "string"}
+          "additionalProperties": { "type": "string" }
         }
       }
     },
@@ -119,26 +116,21 @@
       "required": ["startByte", "endByte", "byteLen", "truncated"],
       "additionalProperties": false,
       "properties": {
-        "startByte": {"type": "integer", "minimum": 0},
-        "endByte": {"type": "integer", "minimum": 0},
-        "byteLen": {"type": "integer", "minimum": 0},
-        "truncated": {"type": "boolean"}
+        "startByte": { "type": "integer", "minimum": 0 },
+        "endByte": { "type": "integer", "minimum": 0 },
+        "byteLen": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" }
       }
     },
     "freshness": {
       "type": "object",
-      "required": [
-        "observedAt",
-        "sourceModifiedAt",
-        "sourceByteLen",
-        "unavailableReason"
-      ],
+      "required": ["observedAt", "sourceModifiedAt", "sourceByteLen", "unavailableReason"],
       "additionalProperties": false,
       "properties": {
-        "observedAt": {"type": ["string", "null"]},
-        "sourceModifiedAt": {"type": ["string", "null"]},
-        "sourceByteLen": {"type": ["integer", "null"], "minimum": 0},
-        "unavailableReason": {"type": ["string", "null"]}
+        "observedAt": { "type": ["string", "null"] },
+        "sourceModifiedAt": { "type": ["string", "null"] },
+        "sourceByteLen": { "type": ["integer", "null"], "minimum": 0 },
+        "unavailableReason": { "type": ["string", "null"] }
       }
     },
     "degradation": {
@@ -146,12 +138,12 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"}
+        "message": { "type": "string" }
       }
     }
   }

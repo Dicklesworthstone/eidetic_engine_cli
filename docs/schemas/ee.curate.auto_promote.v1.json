@@ -143,13 +143,7 @@
     }
   ],
   "field_presets": {
-    "minimal": [
-      "schema",
-      "command",
-      "scannedMemoryCount",
-      "eligibleCount",
-      "appliedCount"
-    ],
+    "minimal": ["schema", "command", "scannedMemoryCount", "eligibleCount", "appliedCount"],
     "summary": [
       "schema",
       "command",

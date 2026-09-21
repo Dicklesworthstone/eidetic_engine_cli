@@ -38,12 +38,7 @@
     },
     "scoreKind": {
       "type": "string",
-      "enum": [
-        "query_relative_pool_minmax",
-        "cosine_similarity",
-        "rrf_fused",
-        "reranked"
-      ],
+      "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"],
       "description": "Interpretation tag for score, naming WHAT PRODUCED the value rather than asserting a property of it. `query_relative_pool_minmax` is reported for a lexical-only score: min-max normalized over the RETURNED POOL against a synthetic zero-evidence reference, which maps that pool's strongest hit to exactly 1.0 whatever its raw BM25 was. `query_relative` says the value is not comparable across queries; `pool` names the denominator, because min-max over the retrieved pool is a different number from min-max over the corpus. Raw BM25 remains in lexicalScore. Renamed from `unit_normalized` by bd-reality-core-convergence-1azkt.11, which was a claim about the output and could be read as a calibrated unit-interval score. Cosine, RRF, and reranker scores retain their native ranking scale."
     },
     "calibrationId": {
@@ -55,10 +50,7 @@
       "type": "array",
       "minItems": 2,
       "maxItems": 2,
-      "prefixItems": [
-        {"type": "number"},
-        {"type": "number"}
-      ]
+      "prefixItems": [{ "type": "number" }, { "type": "number" }]
     },
     "coverageGuarantee": {
       "type": ["number", "null"],
@@ -70,14 +62,7 @@
     },
     "source": {
       "type": "string",
-      "enum": [
-        "lexical",
-        "semantic_fast",
-        "semantic_quality",
-        "hash_control",
-        "hybrid",
-        "reranked"
-      ]
+      "enum": ["lexical", "semantic_fast", "semantic_quality", "hash_control", "hybrid", "reranked"]
     },
     "why": {
       "type": "string"
@@ -91,8 +76,8 @@
             "required": ["kind", "uri"],
             "additionalProperties": false,
             "properties": {
-              "kind": {"type": "string", "const": "provenance_uri"},
-              "uri": {"type": "string"}
+              "kind": { "type": "string", "const": "provenance_uri" },
+              "uri": { "type": "string" }
             }
           },
           {
@@ -100,17 +85,17 @@
             "required": ["kind", "docId"],
             "additionalProperties": false,
             "properties": {
-              "kind": {"type": "string", "const": "search_document"},
-              "docId": {"type": "string"}
+              "kind": { "type": "string", "const": "search_document" },
+              "docId": { "type": "string" }
             }
           }
         ]
       }
     },
-    "fastScore": {"type": "number"},
-    "qualityScore": {"type": "number"},
-    "lexicalScore": {"type": "number"},
-    "rerankScore": {"type": "number"},
+    "fastScore": { "type": "number" },
+    "qualityScore": { "type": "number" },
+    "lexicalScore": { "type": "number" },
+    "rerankScore": { "type": "number" },
     "metadata": {
       "type": "object",
       "description": "Public, redaction-filtered search metadata copied from the indexed document.",
@@ -134,7 +119,7 @@
       "type": "boolean",
       "description": "True only when content was shortened to the bounded search preview."
     },
-    "contentRedacted": {"type": "boolean"},
+    "contentRedacted": { "type": "boolean" },
     "redactions": {
       "type": "array",
       "items": {
@@ -142,41 +127,35 @@
         "required": ["reason", "placeholder"],
         "additionalProperties": false,
         "properties": {
-          "reason": {"type": "string"},
-          "placeholder": {"type": "string"}
+          "reason": { "type": "string" },
+          "placeholder": { "type": "string" }
         }
       }
     },
-    "tombstoned": {"type": "boolean"},
-    "tombstonedAt": {"type": "string"},
-    "validFrom": {"type": "string"},
-    "validTo": {"type": "string"},
-    "validityStatus": {"type": "string"},
-    "validityWindowKind": {"type": "string"},
+    "tombstoned": { "type": "boolean" },
+    "tombstonedAt": { "type": "string" },
+    "validFrom": { "type": "string" },
+    "validTo": { "type": "string" },
+    "validityStatus": { "type": "string" },
+    "validityWindowKind": { "type": "string" },
     "explanation": {
       "type": "object",
       "required": ["summary", "factors"],
       "additionalProperties": false,
       "properties": {
-        "summary": {"type": "string"},
+        "summary": { "type": "string" },
         "factors": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "name",
-              "value",
-              "contribution",
-              "sourceField",
-              "formula"
-            ],
+            "required": ["name", "value", "contribution", "sourceField", "formula"],
             "additionalProperties": false,
             "properties": {
-              "name": {"type": "string"},
-              "value": {"type": "number"},
-              "contribution": {"type": "string"},
-              "sourceField": {"type": "string"},
-              "formula": {"type": "string"}
+              "name": { "type": "string" },
+              "value": { "type": "number" },
+              "contribution": { "type": "string" },
+              "sourceField": { "type": "string" },
+              "formula": { "type": "string" }
             }
           }
         }

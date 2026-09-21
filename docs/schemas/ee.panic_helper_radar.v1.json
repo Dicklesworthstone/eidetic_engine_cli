@@ -5,14 +5,7 @@
   "description": "Cargo-free report for touched Rust .expect* / .unwrap* panic-helper usage.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "generatedAt",
-    "verdict",
-    "summary",
-    "violations",
-    "skipped"
-  ],
+  "required": ["schema", "generatedAt", "verdict", "summary", "violations", "skipped"],
   "properties": {
     "schema": {
       "const": "ee.panic_helper_radar.v1"
@@ -23,10 +16,7 @@
     },
     "verdict": {
       "type": "string",
-      "enum": [
-        "pass",
-        "fail"
-      ]
+      "enum": ["pass", "fail"]
     },
     "summary": {
       "$ref": "#/$defs/summary"
@@ -48,12 +38,7 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "scannedFileCount",
-        "violationCount",
-        "skippedCount",
-        "scannedPaths"
-      ],
+      "required": ["scannedFileCount", "violationCount", "skippedCount", "scannedPaths"],
       "properties": {
         "scannedFileCount": {
           "type": "integer",
@@ -79,13 +64,7 @@
     "violation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "path",
-        "line",
-        "helper",
-        "lint",
-        "text"
-      ],
+      "required": ["path", "line", "helper", "lint", "text"],
       "properties": {
         "path": {
           "type": "string",
@@ -97,19 +76,11 @@
         },
         "helper": {
           "type": "string",
-          "enum": [
-            "expect",
-            "expect_err",
-            "unwrap",
-            "unwrap_err"
-          ]
+          "enum": ["expect", "expect_err", "unwrap", "unwrap_err"]
         },
         "lint": {
           "type": "string",
-          "enum": [
-            "expect_used",
-            "unwrap_used"
-          ]
+          "enum": ["expect_used", "unwrap_used"]
         },
         "text": {
           "type": "string"
@@ -119,10 +90,7 @@
     "skipped": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "path",
-        "reason"
-      ],
+      "required": ["path", "reason"],
       "properties": {
         "path": {
           "type": "string",
@@ -130,11 +98,7 @@
         },
         "reason": {
           "type": "string",
-          "enum": [
-            "missing",
-            "not_regular_file",
-            "not_rust_file"
-          ]
+          "enum": ["missing", "not_regular_file", "not_rust_file"]
         }
       }
     }

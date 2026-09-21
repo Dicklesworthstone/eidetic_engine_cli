@@ -160,11 +160,7 @@
     "ledgerSummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "rowCount",
-        "totalWallClockMs",
-        "degradedEventCount"
-      ],
+      "required": ["rowCount", "totalWallClockMs", "degradedEventCount"],
       "properties": {
         "rowCount": {
           "type": "integer",

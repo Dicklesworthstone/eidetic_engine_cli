@@ -36,11 +36,7 @@
         "required": ["surface", "maxTokens", "maxPaths"],
         "properties": {
           "surface": {
-            "enum": [
-              "session_start_orient",
-              "pre_edit_recall",
-              "session_end_capture_suggest"
-            ]
+            "enum": ["session_start_orient", "pre_edit_recall", "session_end_capture_suggest"]
           },
           "maxTokens": { "type": "integer", "minimum": 0 },
           "maxPaths": { "type": ["integer", "null"], "minimum": 1 }

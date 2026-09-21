@@ -4,13 +4,7 @@
   "title": "ee.graph.suggest_links.v1",
   "description": "Read-only link-prediction report for ee graph suggest-links (ADR 0066): bounded candidate generation (shared capped neighbor, capped tag, or retrieval-affinity edge), fnx-backed Adamic-Adar and preferential attachment, tag Jaccard, symmetrized PPR, and the retrieval-affinity signal (honestly omitted when cold), blended with per-batch min-max normalization. Suggestions are typed (related|supports|contradicts) and every row carries raw per-signal values plus a human-readable reason. Default is a report; --propose emits curation candidates and never writes links directly.",
   "type": "object",
-  "required": [
-    "schema",
-    "suggestions",
-    "candidateCount",
-    "affinityCold",
-    "proposed"
-  ],
+  "required": ["schema", "suggestions", "candidateCount", "affinityCold", "proposed"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -21,14 +15,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "memoryA",
-          "memoryB",
-          "score",
-          "suggestedRelation",
-          "signals",
-          "reason"
-        ],
+        "required": ["memoryA", "memoryB", "score", "suggestedRelation", "signals", "reason"],
         "additionalProperties": false,
         "properties": {
           "memoryA": {
@@ -48,13 +35,7 @@
           },
           "signals": {
             "type": "object",
-            "required": [
-              "adamicAdar",
-              "jaccardTags",
-              "ppr",
-              "affinity",
-              "preferentialAttachment"
-            ],
+            "required": ["adamicAdar", "jaccardTags", "ppr", "affinity", "preferentialAttachment"],
             "additionalProperties": false,
             "properties": {
               "adamicAdar": {

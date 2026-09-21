@@ -24,10 +24,7 @@
       "type": "boolean"
     },
     "listenAddress": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "acceptedRequests1h": {
       "type": "integer",
@@ -42,17 +39,11 @@
       "minimum": 0
     },
     "lastRequestAt": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "format": "date-time"
     },
     "lastRestartAt": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "format": "date-time"
     },
     "crashCount24h": {
@@ -64,12 +55,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "code",
-          "severity",
-          "message",
-          "repair"
-        ],
+        "required": ["code", "severity", "message", "repair"],
         "properties": {
           "code": {
             "enum": [
@@ -81,11 +67,7 @@
             ]
           },
           "severity": {
-            "enum": [
-              "warning",
-              "medium",
-              "high"
-            ]
+            "enum": ["warning", "medium", "high"]
           },
           "message": {
             "type": "string",

@@ -155,12 +155,7 @@
     "trustLane": {
       "description": "Trust lane assigned to imported peer material. localHuman is reserved for local records and rejected by peer policy config parsing.",
       "type": "string",
-      "enum": [
-        "peerHumanViaPeer",
-        "peerAgent",
-        "peerDerived",
-        "untrusted"
-      ]
+      "enum": ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"]
     },
     "laneDecision": {
       "type": "string",

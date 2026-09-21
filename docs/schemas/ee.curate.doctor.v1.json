@@ -80,10 +80,7 @@
       "items": { "$ref": "#/$defs/degraded" }
     },
     "trend": {
-      "anyOf": [
-        { "type": "null" },
-        { "$ref": "ee.curate.debt_trend.v1.json" }
-      ]
+      "anyOf": [{ "type": "null" }, { "$ref": "ee.curate.debt_trend.v1.json" }]
     },
     "nextActions": {
       "type": "array",

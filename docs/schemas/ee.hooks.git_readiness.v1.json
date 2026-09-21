@@ -117,13 +117,7 @@
           "path": { "type": "string", "minLength": 1 },
           "exists": { "type": "boolean" },
           "status": {
-            "enum": [
-              "not_found",
-              "managed_by_ee",
-              "external",
-              "unreadable",
-              "symlink"
-            ]
+            "enum": ["not_found", "managed_by_ee", "external", "unreadable", "symlink"]
           },
           "executable": { "type": "boolean" },
           "managedByEe": { "type": "boolean" },

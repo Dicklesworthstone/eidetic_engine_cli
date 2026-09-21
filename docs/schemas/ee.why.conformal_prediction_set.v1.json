@@ -81,14 +81,7 @@
   "$defs": {
     "predictionSetEntry": {
       "type": "object",
-      "required": [
-        "memoryId",
-        "rank",
-        "source",
-        "score",
-        "nonconformityScore",
-        "included"
-      ],
+      "required": ["memoryId", "rank", "source", "score", "nonconformityScore", "included"],
       "additionalProperties": false,
       "properties": {
         "memoryId": {

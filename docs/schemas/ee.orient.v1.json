@@ -5,8 +5,32 @@
   "description": "Read-only agent-orientation bundle. The root and orient-owned fast-content and nearby-store fields are strict; independently versioned component payloads remain delegated to their own public contracts.",
   "field_presets": {
     "minimal": ["schema", "command", "mode", "workspace", "task", "nextCommands"],
-    "summary": ["schema", "command", "mode", "workspace", "task", "fastContent", "storeDiscovery", "nextCommands"],
-    "standard": ["schema", "command", "mode", "embed_backend", "workspace", "task", "doctor", "pack", "fastContent", "decisions", "learnGaps", "revivals", "storeDiscovery", "nextCommands"],
+    "summary": [
+      "schema",
+      "command",
+      "mode",
+      "workspace",
+      "task",
+      "fastContent",
+      "storeDiscovery",
+      "nextCommands"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "mode",
+      "embed_backend",
+      "workspace",
+      "task",
+      "doctor",
+      "pack",
+      "fastContent",
+      "decisions",
+      "learnGaps",
+      "revivals",
+      "storeDiscovery",
+      "nextCommands"
+    ],
     "full": ["*"]
   },
   "type": "object",
@@ -69,10 +93,7 @@
     "workspaceHygiene": { "$ref": "#/$defs/component" },
     "pack": { "$ref": "#/$defs/component" },
     "fastContent": {
-      "oneOf": [
-        { "$ref": "#/$defs/fastContent" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "$ref": "#/$defs/fastContent" }, { "type": "null" }]
     },
     "primer": { "$ref": "#/$defs/component" },
     "ambientContext": {

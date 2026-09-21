@@ -22,24 +22,24 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.graph.snapshot_prune.v1"},
-    "command": {"type": "string", "const": "maintenance graph-snapshot-prune"},
-    "workspaceId": {"type": "string", "minLength": 1},
-    "graphType": {"$ref": "#/$defs/graphSnapshotType"},
-    "dryRun": {"type": "boolean"},
-    "retentionDays": {"type": "integer", "minimum": 0},
-    "cutoffTimestamp": {"type": "string", "minLength": 1},
-    "candidateCount": {"type": "integer", "minimum": 0},
-    "prunedCount": {"type": "integer", "minimum": 0},
-    "candidateBytes": {"type": "integer", "minimum": 0},
-    "prunedBytes": {"type": "integer", "minimum": 0},
-    "oldestRetainedAt": {"type": ["string", "null"]},
+    "schema": { "type": "string", "const": "ee.graph.snapshot_prune.v1" },
+    "command": { "type": "string", "const": "maintenance graph-snapshot-prune" },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "graphType": { "$ref": "#/$defs/graphSnapshotType" },
+    "dryRun": { "type": "boolean" },
+    "retentionDays": { "type": "integer", "minimum": 0 },
+    "cutoffTimestamp": { "type": "string", "minLength": 1 },
+    "candidateCount": { "type": "integer", "minimum": 0 },
+    "prunedCount": { "type": "integer", "minimum": 0 },
+    "candidateBytes": { "type": "integer", "minimum": 0 },
+    "prunedBytes": { "type": "integer", "minimum": 0 },
+    "oldestRetainedAt": { "type": ["string", "null"] },
     "candidates": {
       "type": "array",
-      "items": {"$ref": "#/$defs/pruneCandidate"}
+      "items": { "$ref": "#/$defs/pruneCandidate" }
     },
-    "lock": {"$ref": "#/$defs/pruneLock"},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+    "lock": { "$ref": "#/$defs/pruneLock" },
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } }
   },
   "field_presets": {
     "minimal": ["schema", "workspaceId", "graphType", "dryRun", "candidateCount", "prunedCount"],
@@ -117,11 +117,11 @@
       "required": ["snapshotId", "snapshotVersion", "createdAt", "metricsBytes", "contentHash"],
       "additionalProperties": false,
       "properties": {
-        "snapshotId": {"type": "string", "minLength": 1},
-        "snapshotVersion": {"type": "integer", "minimum": 0},
-        "createdAt": {"type": "string", "minLength": 1},
-        "metricsBytes": {"type": "integer", "minimum": 0},
-        "contentHash": {"type": "string", "minLength": 1}
+        "snapshotId": { "type": "string", "minLength": 1 },
+        "snapshotVersion": { "type": "integer", "minimum": 0 },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "metricsBytes": { "type": "integer", "minimum": 0 },
+        "contentHash": { "type": "string", "minLength": 1 }
       }
     },
     "pruneLock": {
@@ -129,11 +129,11 @@
       "required": ["resourceType", "resourceId", "ttlSeconds", "acquired"],
       "additionalProperties": false,
       "properties": {
-        "resourceType": {"type": "string", "const": "graph_snapshot_prune"},
-        "resourceId": {"type": "string", "minLength": 1},
-        "ttlSeconds": {"type": "integer", "minimum": 0},
-        "acquired": {"type": "boolean"},
-        "holderId": {"type": "string"}
+        "resourceType": { "type": "string", "const": "graph_snapshot_prune" },
+        "resourceId": { "type": "string", "minLength": 1 },
+        "ttlSeconds": { "type": "integer", "minimum": 0 },
+        "acquired": { "type": "boolean" },
+        "holderId": { "type": "string" }
       }
     },
     "degradation": {
@@ -141,10 +141,13 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": true,
       "properties": {
-        "code": {"type": "string", "minLength": 1},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": "string"}
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "string" }
       }
     }
   }

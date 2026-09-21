@@ -4,15 +4,7 @@
   "title": "ee.memory_drift.report.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "mode",
-    "generatedAt",
-    "summary",
-    "items",
-    "recoveryActions",
-    "degraded"
-  ],
+  "required": ["schema", "mode", "generatedAt", "summary", "items", "recoveryActions", "degraded"],
   "properties": {
     "schema": {
       "const": "ee.memory_drift.report.v1"

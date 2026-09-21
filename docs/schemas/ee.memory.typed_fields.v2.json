@@ -7,7 +7,7 @@
   "required": ["schema", "kind", "fields"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.memory.typed_fields.v2"},
+    "schema": { "type": "string", "const": "ee.memory.typed_fields.v2" },
     "kind": {
       "type": "string",
       "enum": ["failure", "decision", "command", "rule", "convention", "risk", "anti-pattern"]
@@ -25,28 +25,28 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"kind": {"const": "failure"}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/failureFields"}}}
+      "if": { "properties": { "kind": { "const": "failure" } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/failureFields" } } }
     },
     {
-      "if": {"properties": {"kind": {"const": "decision"}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/decisionFields"}}}
+      "if": { "properties": { "kind": { "const": "decision" } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/decisionFields" } } }
     },
     {
-      "if": {"properties": {"kind": {"const": "command"}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/commandFields"}}}
+      "if": { "properties": { "kind": { "const": "command" } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/commandFields" } } }
     },
     {
-      "if": {"properties": {"kind": {"const": "rule"}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/ruleFields"}}}
+      "if": { "properties": { "kind": { "const": "rule" } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/ruleFields" } } }
     },
     {
-      "if": {"properties": {"kind": {"const": "convention"}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/conventionFields"}}}
+      "if": { "properties": { "kind": { "const": "convention" } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/conventionFields" } } }
     },
     {
-      "if": {"properties": {"kind": {"enum": ["risk", "anti-pattern"]}}},
-      "then": {"properties": {"fields": {"$ref": "#/$defs/riskFields"}}}
+      "if": { "properties": { "kind": { "enum": ["risk", "anti-pattern"] } } },
+      "then": { "properties": { "fields": { "$ref": "#/$defs/riskFields" } } }
     }
   ],
   "$defs": {
@@ -58,26 +58,23 @@
       "x-ee-maxUtf8Bytes": 4096
     },
     "rfc3339": {
-      "allOf": [
-        {"$ref": "#/$defs/text"},
-        {"format": "date-time"}
-      ]
+      "allOf": [{ "$ref": "#/$defs/text" }, { "format": "date-time" }]
     },
     "textList": {
       "type": "array",
       "minItems": 1,
       "maxItems": 8,
-      "items": {"$ref": "#/$defs/text"}
+      "items": { "$ref": "#/$defs/text" }
     },
     "failureFields": {
       "type": "object",
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "cause": {"$ref": "#/$defs/text"},
-        "regression_surface": {"$ref": "#/$defs/text"},
-        "reverted_at_sha": {"$ref": "#/$defs/text"},
-        "family": {"$ref": "#/$defs/text"}
+        "cause": { "$ref": "#/$defs/text" },
+        "regression_surface": { "$ref": "#/$defs/text" },
+        "reverted_at_sha": { "$ref": "#/$defs/text" },
+        "family": { "$ref": "#/$defs/text" }
       }
     },
     "decisionFields": {
@@ -85,11 +82,11 @@
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "options": {"$ref": "#/$defs/textList"},
-        "chosen": {"$ref": "#/$defs/text"},
-        "rationale": {"$ref": "#/$defs/text"},
-        "supersedes": {"$ref": "#/$defs/text"},
-        "revisit_by": {"$ref": "#/$defs/rfc3339"}
+        "options": { "$ref": "#/$defs/textList" },
+        "chosen": { "$ref": "#/$defs/text" },
+        "rationale": { "$ref": "#/$defs/text" },
+        "supersedes": { "$ref": "#/$defs/text" },
+        "revisit_by": { "$ref": "#/$defs/rfc3339" }
       }
     },
     "commandFields": {
@@ -97,9 +94,9 @@
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "command": {"$ref": "#/$defs/text"},
-        "when_to_use": {"$ref": "#/$defs/text"},
-        "exit_meaning": {"$ref": "#/$defs/text"}
+        "command": { "$ref": "#/$defs/text" },
+        "when_to_use": { "$ref": "#/$defs/text" },
+        "exit_meaning": { "$ref": "#/$defs/text" }
       }
     },
     "ruleFields": {
@@ -107,9 +104,9 @@
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "condition": {"$ref": "#/$defs/text"},
-        "action": {"$ref": "#/$defs/text"},
-        "exceptions": {"$ref": "#/$defs/textList"}
+        "condition": { "$ref": "#/$defs/text" },
+        "action": { "$ref": "#/$defs/text" },
+        "exceptions": { "$ref": "#/$defs/textList" }
       }
     },
     "conventionFields": {
@@ -117,8 +114,8 @@
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "scope": {"$ref": "#/$defs/text"},
-        "pattern": {"$ref": "#/$defs/text"}
+        "scope": { "$ref": "#/$defs/text" },
+        "pattern": { "$ref": "#/$defs/text" }
       }
     },
     "riskFields": {
@@ -126,9 +123,9 @@
       "additionalProperties": false,
       "maxProperties": 8,
       "properties": {
-        "trigger": {"$ref": "#/$defs/text"},
-        "blast_radius": {"$ref": "#/$defs/text"},
-        "safer_alternative": {"$ref": "#/$defs/text"}
+        "trigger": { "$ref": "#/$defs/text" },
+        "blast_radius": { "$ref": "#/$defs/text" },
+        "safer_alternative": { "$ref": "#/$defs/text" }
       }
     }
   }

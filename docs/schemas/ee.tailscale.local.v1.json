@@ -75,24 +75,14 @@
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
     },
     "probeMethod": {
-      "enum": [
-        "cli",
-        "socket",
-        "skipped"
-      ]
+      "enum": ["cli", "socket", "skipped"]
     },
     "probeElapsedMs": {
       "type": "integer",
       "minimum": 0
     },
     "platform": {
-      "enum": [
-        "linux",
-        "macos_sandboxed",
-        "macos_open",
-        "windows",
-        "other"
-      ]
+      "enum": ["linux", "macos_sandboxed", "macos_open", "windows", "other"]
     },
     "degraded": {
       "type": "array",
@@ -105,11 +95,7 @@
     "peer": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "peerNodeKey",
-        "peerTailscaleIps",
-        "peerAdvertisedTags"
-      ],
+      "required": ["peerNodeKey", "peerTailscaleIps", "peerAdvertisedTags"],
       "properties": {
         "peerNodeKey": {
           "type": "string",
@@ -141,12 +127,7 @@
     "degradation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "code",
-        "severity",
-        "message",
-        "repair"
-      ],
+      "required": ["code", "severity", "message", "repair"],
       "properties": {
         "code": {
           "enum": [
@@ -160,11 +141,7 @@
           ]
         },
         "severity": {
-          "enum": [
-            "info",
-            "warning",
-            "high"
-          ]
+          "enum": ["info", "warning", "high"]
         },
         "message": {
           "type": "string",

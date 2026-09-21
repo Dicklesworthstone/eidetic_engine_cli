@@ -17,15 +17,18 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "scopeApplied": {"type": "string", "enum": ["self", "team", "workspace", "verified", "swarm"]},
-    "strictScope": {"type": "boolean"},
-    "currentAgent": {"type": ["string", "null"]},
-    "teamSize": {"type": "integer", "minimum": 0},
-    "candidatesTotal": {"type": "integer", "minimum": 0},
-    "candidatesInScope": {"type": "integer", "minimum": 0},
-    "candidatesExcludedByScope": {"type": "integer", "minimum": 0},
-    "strictViolations": {"type": "integer", "minimum": 0},
-    "excludedMemoryIds": {"type": "array", "items": {"type": "string"}}
+    "scopeApplied": {
+      "type": "string",
+      "enum": ["self", "team", "workspace", "verified", "swarm"]
+    },
+    "strictScope": { "type": "boolean" },
+    "currentAgent": { "type": ["string", "null"] },
+    "teamSize": { "type": "integer", "minimum": 0 },
+    "candidatesTotal": { "type": "integer", "minimum": 0 },
+    "candidatesInScope": { "type": "integer", "minimum": 0 },
+    "candidatesExcludedByScope": { "type": "integer", "minimum": 0 },
+    "strictViolations": { "type": "integer", "minimum": 0 },
+    "excludedMemoryIds": { "type": "array", "items": { "type": "string" } }
   },
   "examples": [
     {

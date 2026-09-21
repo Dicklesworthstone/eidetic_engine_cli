@@ -22,8 +22,8 @@
       "type": "object",
       "required": ["label", "kind"],
       "properties": {
-        "label": {"type": "string", "minLength": 1},
-        "kind": {"type": "string", "const": "objective_text"}
+        "label": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "const": "objective_text" }
       },
       "additionalProperties": false
     },
@@ -36,20 +36,20 @@
     },
     "requirements": {
       "type": "array",
-      "items": {"$ref": "#/$defs/requirement"}
+      "items": { "$ref": "#/$defs/requirement" }
     },
     "unknownClauses": {
       "type": "array",
-      "items": {"$ref": "#/$defs/unknownClause"}
+      "items": { "$ref": "#/$defs/unknownClause" }
     },
     "summary": {
       "type": "object",
       "required": ["requirementCount", "unknownCount", "hasUnknowns", "sourceBytes"],
       "properties": {
-        "requirementCount": {"type": "integer", "minimum": 0},
-        "unknownCount": {"type": "integer", "minimum": 0},
-        "hasUnknowns": {"type": "boolean"},
-        "sourceBytes": {"type": "integer", "minimum": 0}
+        "requirementCount": { "type": "integer", "minimum": 0 },
+        "unknownCount": { "type": "integer", "minimum": 0 },
+        "hasUnknowns": { "type": "boolean" },
+        "sourceBytes": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     }
@@ -58,7 +58,15 @@
   "field_presets": {
     "minimal": ["schema", "objectiveHash"],
     "summary": ["schema", "source", "objectiveHash", "summary"],
-    "standard": ["schema", "source", "objectiveHash", "objectiveText", "requirements", "unknownClauses", "summary"],
+    "standard": [
+      "schema",
+      "source",
+      "objectiveHash",
+      "objectiveText",
+      "requirements",
+      "unknownClauses",
+      "summary"
+    ],
     "full": ["*"]
   },
   "$defs": {
@@ -82,10 +90,10 @@
       "type": "object",
       "required": ["label", "start", "end", "text"],
       "properties": {
-        "label": {"type": "string", "minLength": 1},
-        "start": {"type": "integer", "minimum": 0},
-        "end": {"type": "integer", "minimum": 0},
-        "text": {"type": "string"}
+        "label": { "type": "string", "minLength": 1 },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -93,8 +101,8 @@
       "type": "object",
       "required": ["kind", "target", "strength"],
       "properties": {
-        "kind": {"type": "string", "minLength": 1},
-        "target": {"type": "string", "minLength": 1},
+        "kind": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
         "strength": {
           "type": "string",
           "enum": ["direct", "supporting", "weak"]
@@ -106,9 +114,9 @@
       "type": "object",
       "required": ["kind", "target", "required"],
       "properties": {
-        "kind": {"type": "string", "minLength": 1},
-        "target": {"type": "string", "minLength": 1},
-        "required": {"type": "boolean"}
+        "kind": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -123,21 +131,21 @@
         "sourceSpans"
       ],
       "properties": {
-        "id": {"type": "string", "pattern": "^req_[0-9]{3}$"},
-        "kind": {"$ref": "#/$defs/requirementKind"},
-        "summary": {"type": "string", "minLength": 1},
+        "id": { "type": "string", "pattern": "^req_[0-9]{3}$" },
+        "kind": { "$ref": "#/$defs/requirementKind" },
+        "summary": { "type": "string", "minLength": 1 },
         "evidenceExpectations": {
           "type": "array",
-          "items": {"$ref": "#/$defs/evidenceExpectation"}
+          "items": { "$ref": "#/$defs/evidenceExpectation" }
         },
         "verificationExpectations": {
           "type": "array",
-          "items": {"$ref": "#/$defs/verificationExpectation"}
+          "items": { "$ref": "#/$defs/verificationExpectation" }
         },
         "sourceSpans": {
           "type": "array",
           "minItems": 1,
-          "items": {"$ref": "#/$defs/sourceSpan"}
+          "items": { "$ref": "#/$defs/sourceSpan" }
         }
       },
       "additionalProperties": false
@@ -146,9 +154,9 @@
       "type": "object",
       "required": ["id", "reason", "sourceSpan"],
       "properties": {
-        "id": {"type": "string", "pattern": "^unk_[0-9]{3}$"},
-        "reason": {"type": "string", "minLength": 1},
-        "sourceSpan": {"$ref": "#/$defs/sourceSpan"}
+        "id": { "type": "string", "pattern": "^unk_[0-9]{3}$" },
+        "reason": { "type": "string", "minLength": 1 },
+        "sourceSpan": { "$ref": "#/$defs/sourceSpan" }
       },
       "additionalProperties": false
     }

@@ -37,13 +37,7 @@
     "platform": {
       "type": "string",
       "description": "Coarse host classification for the lexical RAM-tier optimization, or not_collected when summary status intentionally skipped host/index inspection.",
-      "enum": [
-        "not_collected",
-        "linux",
-        "macos_limited",
-        "windows_limited",
-        "other_unsupported"
-      ]
+      "enum": ["not_collected", "linux", "macos_limited", "windows_limited", "other_unsupported"]
     },
     "supported": {
       "type": "boolean",
@@ -96,13 +90,7 @@
     "fallbackPath": {
       "type": "string",
       "description": "Coarse strategy the loader took when the optimization could not be fully applied. `none` is reserved for a successful full pin.",
-      "enum": [
-        "none",
-        "heap_warmload",
-        "madvise_willneed",
-        "heap_only",
-        "disabled_by_operator"
-      ]
+      "enum": ["none", "heap_warmload", "madvise_willneed", "heap_only", "disabled_by_operator"]
     },
     "indexPath": {
       "type": ["string", "null"],
@@ -126,50 +114,50 @@
     {
       "if": {
         "properties": {
-          "collectionStatus": {"const": "observed"},
-          "enabled": {"const": false}
+          "collectionStatus": { "const": "observed" },
+          "enabled": { "const": false }
         },
         "required": ["collectionStatus", "enabled"]
       },
       "then": {
         "properties": {
-          "attempted": {"const": false},
-          "succeeded": {"const": false},
-          "fallbackPath": {"const": "disabled_by_operator"}
+          "attempted": { "const": false },
+          "succeeded": { "const": false },
+          "fallbackPath": { "const": "disabled_by_operator" }
         },
         "required": ["attempted", "succeeded", "fallbackPath"]
       }
     },
     {
       "if": {
-        "properties": {"collectionStatus": {"const": "not_collected"}},
+        "properties": { "collectionStatus": { "const": "not_collected" } },
         "required": ["collectionStatus"]
       },
       "then": {
         "properties": {
-          "enabled": {"const": false},
-          "attempted": {"const": false},
-          "succeeded": {"const": false},
-          "platform": {"const": "not_collected"},
-          "hugepagesRequested": {"const": false},
-          "hugepagesGranted": {"const": false},
-          "populateRequested": {"const": false},
-          "bytesMmapped": {"const": 0},
-          "bytesWarmloaded": {"const": 0},
-          "pageFaultsPre": {"const": 0},
-          "pageFaultsPost": {"const": 0},
-          "fallbackPath": {"const": "none"},
-          "indexPath": {"type": "null"},
-          "indexRevision": {"type": "null"},
-          "degradedCodes": {"maxItems": 0}
+          "enabled": { "const": false },
+          "attempted": { "const": false },
+          "succeeded": { "const": false },
+          "platform": { "const": "not_collected" },
+          "hugepagesRequested": { "const": false },
+          "hugepagesGranted": { "const": false },
+          "populateRequested": { "const": false },
+          "bytesMmapped": { "const": 0 },
+          "bytesWarmloaded": { "const": 0 },
+          "pageFaultsPre": { "const": 0 },
+          "pageFaultsPost": { "const": 0 },
+          "fallbackPath": { "const": "none" },
+          "indexPath": { "type": "null" },
+          "indexRevision": { "type": "null" },
+          "degradedCodes": { "maxItems": 0 }
         }
       }
     },
     {
-      "if": {"properties": {"succeeded": {"const": false}}, "required": ["succeeded"]},
+      "if": { "properties": { "succeeded": { "const": false } }, "required": ["succeeded"] },
       "then": {
         "properties": {
-          "hugepagesGranted": {"const": false}
+          "hugepagesGranted": { "const": false }
         },
         "required": ["hugepagesGranted"]
       }

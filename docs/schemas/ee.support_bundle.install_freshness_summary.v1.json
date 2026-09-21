@@ -24,10 +24,10 @@
     "summaryHash"
   ],
   "properties": {
-    "schema": {"const": "ee.support_bundle.install_freshness_summary.v1"},
-    "sourceSchema": {"const": "ee.install.check.v1"},
-    "sourceFreshnessSchema": {"const": "ee.install.freshness.v1"},
-    "status": {"const": "available"},
+    "schema": { "const": "ee.support_bundle.install_freshness_summary.v1" },
+    "sourceSchema": { "const": "ee.install.check.v1" },
+    "sourceFreshnessSchema": { "const": "ee.install.freshness.v1" },
+    "status": { "const": "available" },
     "installStatus": {
       "type": "string",
       "enum": ["ready", "blocked", "degraded", "idempotent"]
@@ -35,20 +35,20 @@
     "redactionStatus": {
       "const": "counts_versions_statuses_codes_hashes_redacted_text_no_raw_paths"
     },
-    "version": {"$ref": "#/$defs/safeString"},
-    "freshness": {"$ref": "#/$defs/freshness"},
-    "pathPosture": {"$ref": "#/$defs/pathPosture"},
-    "target": {"$ref": "#/$defs/target"},
-    "permissions": {"$ref": "#/$defs/permissions"},
-    "updateSource": {"$ref": "#/$defs/updateSource"},
-    "findingCounts": {"$ref": "#/$defs/findingCounts"},
+    "version": { "$ref": "#/$defs/safeString" },
+    "freshness": { "$ref": "#/$defs/freshness" },
+    "pathPosture": { "$ref": "#/$defs/pathPosture" },
+    "target": { "$ref": "#/$defs/target" },
+    "permissions": { "$ref": "#/$defs/permissions" },
+    "updateSource": { "$ref": "#/$defs/updateSource" },
+    "findingCounts": { "$ref": "#/$defs/findingCounts" },
     "findings": {
       "type": "array",
       "maxItems": 16,
-      "items": {"$ref": "#/$defs/finding"}
+      "items": { "$ref": "#/$defs/finding" }
     },
-    "redaction": {"$ref": "#/$defs/redaction"},
-    "summaryHash": {"$ref": "#/$defs/hash"}
+    "redaction": { "$ref": "#/$defs/redaction" },
+    "summaryHash": { "$ref": "#/$defs/hash" }
   },
   "$defs": {
     "hash": {
@@ -60,25 +60,22 @@
       "maxLength": 1024,
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "body_md"},
-          {"pattern": "raw mail body"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"},
-          {"pattern": "/Volumes/[^\\s]+"},
-          {"pattern": "/private/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "body_md" },
+          { "pattern": "raw mail body" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" },
+          { "pattern": "/Volumes/[^\\s]+" },
+          { "pattern": "/private/[^\\s]+" }
         ]
       }
     },
     "nullableSafeString": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/safeString"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeString" }]
     },
     "verdict": {
       "type": "string",
@@ -137,16 +134,13 @@
       "additionalProperties": false,
       "required": ["version", "source", "status", "pathHash", "pathClass"],
       "properties": {
-        "version": {"$ref": "#/$defs/nullableSafeString"},
-        "source": {"$ref": "#/$defs/safeString"},
-        "status": {"$ref": "#/$defs/safeString"},
+        "version": { "$ref": "#/$defs/nullableSafeString" },
+        "source": { "$ref": "#/$defs/safeString" },
+        "status": { "$ref": "#/$defs/safeString" },
         "pathHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
-        "pathClass": {"$ref": "#/$defs/nullableSafeString"}
+        "pathClass": { "$ref": "#/$defs/nullableSafeString" }
       }
     },
     "freshness": {
@@ -165,24 +159,24 @@
         "blockingFindings"
       ],
       "properties": {
-        "verdict": {"$ref": "#/$defs/verdict"},
-        "authoritative": {"type": "boolean"},
-        "comparison": {"$ref": "#/$defs/safeString"},
-        "repair": {"$ref": "#/$defs/safeString"},
-        "sourceVersion": {"$ref": "#/$defs/versionEvidence"},
-        "installedVersion": {"$ref": "#/$defs/versionEvidence"},
-        "pathStatus": {"$ref": "#/$defs/pathStatus"},
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "authoritative": { "type": "boolean" },
+        "comparison": { "$ref": "#/$defs/safeString" },
+        "repair": { "$ref": "#/$defs/safeString" },
+        "sourceVersion": { "$ref": "#/$defs/versionEvidence" },
+        "installedVersion": { "$ref": "#/$defs/versionEvidence" },
+        "pathStatus": { "$ref": "#/$defs/pathStatus" },
         "requiredSurfaces": {
           "type": "array",
-          "items": {"$ref": "#/$defs/safeString"}
+          "items": { "$ref": "#/$defs/safeString" }
         },
         "missingRequiredSurfaces": {
           "type": "array",
-          "items": {"$ref": "#/$defs/safeString"}
+          "items": { "$ref": "#/$defs/safeString" }
         },
         "blockingFindings": {
           "type": "array",
-          "items": {"$ref": "#/$defs/findingCode"}
+          "items": { "$ref": "#/$defs/findingCode" }
         }
       }
     },
@@ -200,51 +194,36 @@
         "binaries"
       ],
       "properties": {
-        "status": {"$ref": "#/$defs/pathStatus"},
-        "pathEntryCount": {"type": "integer", "minimum": 0},
-        "binaryCount": {"type": "integer", "minimum": 0},
-        "duplicateCount": {"type": "integer", "minimum": 0},
-        "currentBinaryOnPath": {"type": "boolean"},
+        "status": { "$ref": "#/$defs/pathStatus" },
+        "pathEntryCount": { "type": "integer", "minimum": 0 },
+        "binaryCount": { "type": "integer", "minimum": 0 },
+        "duplicateCount": { "type": "integer", "minimum": 0 },
+        "currentBinaryOnPath": { "type": "boolean" },
         "firstBinaryHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "currentBinaryPathHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
         "binaries": {
           "type": "array",
           "maxItems": 16,
-          "items": {"$ref": "#/$defs/pathBinary"}
+          "items": { "$ref": "#/$defs/pathBinary" }
         }
       }
     },
     "pathBinary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "ordinal",
-        "pathHash",
-        "isCurrentBinary",
-        "version",
-        "versionStatus"
-      ],
+      "required": ["ordinal", "pathHash", "isCurrentBinary", "version", "versionStatus"],
       "properties": {
-        "ordinal": {"type": "integer", "minimum": 0},
+        "ordinal": { "type": "integer", "minimum": 0 },
         "pathHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         },
-        "isCurrentBinary": {"type": "boolean"},
-        "version": {"$ref": "#/$defs/nullableSafeString"},
-        "versionStatus": {"$ref": "#/$defs/nullableSafeString"}
+        "isCurrentBinary": { "type": "boolean" },
+        "version": { "$ref": "#/$defs/nullableSafeString" },
+        "versionStatus": { "$ref": "#/$defs/nullableSafeString" }
       }
     },
     "target": {
@@ -259,12 +238,12 @@
         "installPathHash"
       ],
       "properties": {
-        "targetTriple": {"$ref": "#/$defs/safeString"},
-        "supported": {"type": "boolean"},
-        "binaryName": {"$ref": "#/$defs/safeString"},
-        "executableName": {"$ref": "#/$defs/safeString"},
-        "installDirHash": {"$ref": "#/$defs/hash"},
-        "installPathHash": {"$ref": "#/$defs/hash"}
+        "targetTriple": { "$ref": "#/$defs/safeString" },
+        "supported": { "type": "boolean" },
+        "binaryName": { "$ref": "#/$defs/safeString" },
+        "executableName": { "$ref": "#/$defs/safeString" },
+        "installDirHash": { "$ref": "#/$defs/hash" },
+        "installPathHash": { "$ref": "#/$defs/hash" }
       }
     },
     "permissions": {
@@ -273,17 +252,12 @@
       "required": ["status", "exists", "writable", "installDirHash", "targetPathHash"],
       "properties": {
         "status": {
-          "enum": [
-            "writable",
-            "missing_parent_writable",
-            "missing_parent_unknown",
-            "not_writable"
-          ]
+          "enum": ["writable", "missing_parent_writable", "missing_parent_unknown", "not_writable"]
         },
-        "exists": {"type": "boolean"},
-        "writable": {"type": "boolean"},
-        "installDirHash": {"$ref": "#/$defs/hash"},
-        "targetPathHash": {"$ref": "#/$defs/hash"}
+        "exists": { "type": "boolean" },
+        "writable": { "type": "boolean" },
+        "installDirHash": { "$ref": "#/$defs/hash" },
+        "targetPathHash": { "$ref": "#/$defs/hash" }
       }
     },
     "updateSource": {
@@ -291,14 +265,11 @@
       "additionalProperties": false,
       "required": ["configured", "offline", "status", "sourceHash"],
       "properties": {
-        "configured": {"type": "boolean"},
-        "offline": {"type": "boolean"},
-        "status": {"$ref": "#/$defs/safeString"},
+        "configured": { "type": "boolean" },
+        "offline": { "type": "boolean" },
+        "status": { "$ref": "#/$defs/safeString" },
         "sourceHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hash"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
         }
       }
     },
@@ -307,14 +278,14 @@
       "additionalProperties": false,
       "required": ["total", "byCode", "bySeverity"],
       "properties": {
-        "total": {"type": "integer", "minimum": 0},
+        "total": { "type": "integer", "minimum": 0 },
         "byCode": {
           "type": "object",
-          "additionalProperties": {"type": "integer", "minimum": 0}
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         },
         "bySeverity": {
           "type": "object",
-          "additionalProperties": {"type": "integer", "minimum": 0}
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         }
       }
     },
@@ -323,10 +294,10 @@
       "additionalProperties": false,
       "required": ["code", "severity", "message", "nextAction"],
       "properties": {
-        "code": {"$ref": "#/$defs/findingCode"},
-        "severity": {"$ref": "#/$defs/severity"},
-        "message": {"$ref": "#/$defs/safeString"},
-        "nextAction": {"$ref": "#/$defs/safeString"}
+        "code": { "$ref": "#/$defs/findingCode" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "message": { "$ref": "#/$defs/safeString" },
+        "nextAction": { "$ref": "#/$defs/safeString" }
       }
     },
     "redaction": {
@@ -340,11 +311,11 @@
         "hostPrivatePathsRedacted"
       ],
       "properties": {
-        "rawPathEntriesIncluded": {"const": false},
-        "rawBinaryPathsIncluded": {"const": false},
-        "rawInstallTargetsIncluded": {"const": false},
-        "rawCommandArgvIncluded": {"const": false},
-        "hostPrivatePathsRedacted": {"const": true}
+        "rawPathEntriesIncluded": { "const": false },
+        "rawBinaryPathsIncluded": { "const": false },
+        "rawInstallTargetsIncluded": { "const": false },
+        "rawCommandArgvIncluded": { "const": false },
+        "hostPrivatePathsRedacted": { "const": true }
       }
     }
   }

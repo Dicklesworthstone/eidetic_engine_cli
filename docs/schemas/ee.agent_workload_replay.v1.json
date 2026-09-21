@@ -332,11 +332,7 @@
     "duplicateWorkCoalescing": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "uniqueWorkItems",
-        "coalescedOperations",
-        "coalescingRatioBasisPoints"
-      ],
+      "required": ["uniqueWorkItems", "coalescedOperations", "coalescingRatioBasisPoints"],
       "properties": {
         "uniqueWorkItems": {
           "type": "integer",

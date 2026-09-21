@@ -7,29 +7,25 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": true,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean", "const": true},
-    "degraded": {"type": "array", "items": {"type": "object"}},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean", "const": true },
+    "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
-      "required": [
-        "schema",
-        "bundle",
-        "bundleHash",
-        "subjectId",
-        "subjectKind",
-        "trustStatement"
-      ],
+      "required": ["schema", "bundle", "bundleHash", "subjectId", "subjectKind", "trustStatement"],
       "additionalProperties": true,
       "properties": {
-        "schema": {"type": "string", "const": "ee.attest.v1"},
+        "schema": { "type": "string", "const": "ee.attest.v1" },
         "bundleHash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$",
           "description": "blake3 hash over the exact public redaction-safe AttestationBundle emitted in data.bundle. Deterministic for a fixed subject + database; this is the single value support-bundle/handoff/why should embed (bd-1n0np.22.3) so all surfaces share one chain-of-custody object."
         },
-        "subjectId": {"type": "string", "description": "Canonical public memory/pack ID or a domain-separated blake3 identity for non-ID subjects. Raw query text is never emitted."},
-        "subjectKind": {"type": "string", "enum": ["memory", "pack", "query"]},
+        "subjectId": {
+          "type": "string",
+          "description": "Canonical public memory/pack ID or a domain-separated blake3 identity for non-ID subjects. Raw query text is never emitted."
+        },
+        "subjectKind": { "type": "string", "enum": ["memory", "pack", "query"] },
         "rawTextIncluded": {
           "type": ["boolean", "null"],
           "description": "Whether raw subject text is embedded. Default false (hash-only / redaction-safe); null for hash-only query subjects that carry no raw text."
@@ -56,21 +52,29 @@
           ],
           "additionalProperties": true,
           "properties": {
-            "schema": {"type": "string", "const": "ee.attestation.bundle.v2"},
-            "subject": {"type": "object"},
-            "evidenceManifest": {"type": "object", "description": "Hash-referenced evidence the bundle covers. IDs are public aliases or domain hashes, provenanceUri is omitted, and noncanonical hashes are omitted explicitly."},
-            "redactionManifest": {"type": "object", "description": "What was redacted and why — redaction is recorded, never silent."},
-            "hashManifest": {"type": "object", "description": "Per-entry blake3 hashes that compose the bundleHash."},
-            "omissions": {"type": "array", "description": "Recorded omissions (no silent loss).", "items": {"type": "object"}},
+            "schema": { "type": "string", "const": "ee.attestation.bundle.v2" },
+            "subject": { "type": "object" },
+            "evidenceManifest": {
+              "type": "object",
+              "description": "Hash-referenced evidence the bundle covers. IDs are public aliases or domain hashes, provenanceUri is omitted, and noncanonical hashes are omitted explicitly."
+            },
+            "redactionManifest": {
+              "type": "object",
+              "description": "What was redacted and why — redaction is recorded, never silent."
+            },
+            "hashManifest": {
+              "type": "object",
+              "description": "Per-entry blake3 hashes that compose the bundleHash."
+            },
+            "omissions": {
+              "type": "array",
+              "description": "Recorded omissions (no silent loss).",
+              "items": { "type": "object" }
+            },
             "seal": {
               "type": "object",
               "description": "Optional commit-reveal proof for a sealed memory. Contains only the commitment and reveal-state timestamps; raw memory content and filesystem paths are forbidden by the closed property set.",
-              "required": [
-                "contentCommitment",
-                "sealedAt",
-                "revealedAt",
-                "revealVerified"
-              ],
+              "required": ["contentCommitment", "sealedAt", "revealedAt", "revealVerified"],
               "additionalProperties": false,
               "properties": {
                 "contentCommitment": {
@@ -99,8 +103,8 @@
               "required": ["scope", "statement"],
               "additionalProperties": false,
               "properties": {
-                "scope": {"type": "string"},
-                "statement": {"type": "string"}
+                "scope": { "type": "string" },
+                "statement": { "type": "string" }
               }
             }
           }

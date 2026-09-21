@@ -212,10 +212,7 @@
       },
       "then": {
         "not": {
-          "anyOf": [
-            { "required": ["health_level"] },
-            { "required": ["semantic_readiness"] }
-          ]
+          "anyOf": [{ "required": ["health_level"] }, { "required": ["semantic_readiness"] }]
         }
       }
     },
@@ -279,10 +276,7 @@
         },
         {
           "not": {
-            "anyOf": [
-              { "required": ["durability_state"] },
-              { "required": ["recovery"] }
-            ]
+            "anyOf": [{ "required": ["durability_state"] }, { "required": ["recovery"] }]
           }
         }
       ]
@@ -319,10 +313,7 @@
         "exit_code": { "type": ["integer", "null"] },
         "timed_out": { "type": "boolean" },
         "error_class": {
-          "oneOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
         }
       },
       "allOf": [
@@ -405,10 +396,7 @@
         "source": { "type": "string", "minLength": 1 },
         "command": { "type": "string", "minLength": 1 },
         "error_class": {
-          "oneOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
         },
         "exit_code": { "type": ["integer", "null"] },
         "timed_out": { "type": "boolean" }
@@ -453,7 +441,12 @@
         },
         "reason": {
           "type": "string",
-          "enum": ["archive_corruption", "storage_recovery_required", "permission_denied", "unknown"]
+          "enum": [
+            "archive_corruption",
+            "storage_recovery_required",
+            "permission_denied",
+            "unknown"
+          ]
         }
       }
     },

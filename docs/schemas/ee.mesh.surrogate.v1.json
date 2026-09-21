@@ -68,13 +68,7 @@
     "surrogateType": {
       "description": "The shape of the surrogate. Each type is treated as an independent lane by mesh peer policy: a peer may allow `lexical_metadata` while denying `embedding`, for example.",
       "type": "string",
-      "enum": [
-        "embedding",
-        "summary",
-        "minhash",
-        "lexical_metadata",
-        "query_fingerprint"
-      ]
+      "enum": ["embedding", "summary", "minhash", "lexical_metadata", "query_fingerprint"]
     },
     "modelFingerprint": {
       "description": "Identifies the producer of the surrogate so the receiver can run a compatibility check. Two surrogates are compatible iff `modelId` and `modelVersion` match exactly; `featureFlags` capture optional model-side configuration (quantization mode, normalization, tokenizer revision) that callers must also match before reusing a remote surrogate without recomputation.",
@@ -107,11 +101,7 @@
       "description": "Surrogate-level privacy and rebuild rules. `exportAllowed=false` is the project-wide default; the field must be present explicitly so that an absent value cannot accidentally widen the export surface. `requiresLocalRecompute=true` instructs the receiver to drop the surrogate payload, fetch the source content (subject to mesh body-fetch policy), and recompute under the local model — emitting `surrogate_recomputed`. `requiresCompatibilityCheck=true` instructs the receiver to compare `modelFingerprint` against its local model; if they differ the receiver must emit `surrogate_incompatible` and fall back to `lexical_fallback_used`. When the policy itself denies the lane, the receiver emits `surrogate_denied`.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "exportAllowed",
-        "requiresLocalRecompute",
-        "requiresCompatibilityCheck"
-      ],
+      "required": ["exportAllowed", "requiresLocalRecompute", "requiresCompatibilityCheck"],
       "properties": {
         "exportAllowed": {
           "type": "boolean"

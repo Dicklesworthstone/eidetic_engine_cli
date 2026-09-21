@@ -7,16 +7,16 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": ["command", "embed_backend", "request", "rerank", "pack", "degraded"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "pack"},
-        "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
+        "command": { "type": "string", "const": "pack" },
+        "embed_backend": { "type": "string", "enum": ["neural_local", "hash_fallback"] },
         "request": {
           "type": "object",
           "required": [
@@ -30,30 +30,30 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "query": {"type": "string"},
-            "profile": {"type": "string"},
-            "maxTokens": {"type": "integer"},
-            "candidatePool": {"type": "integer"},
-            "maxResults": {"type": "integer", "minimum": 0},
-            "memoryScope": {"type": "string"},
-            "strictScope": {"type": "boolean"},
-            "sections": {"type": "array", "items": {"type": "string"}}
+            "query": { "type": "string" },
+            "profile": { "type": "string" },
+            "maxTokens": { "type": "integer" },
+            "candidatePool": { "type": "integer" },
+            "maxResults": { "type": "integer", "minimum": 0 },
+            "memoryScope": { "type": "string" },
+            "strictScope": { "type": "boolean" },
+            "sections": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "scopeStats": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "rerank": {"$ref": "#/$defs/rerankPosture"},
-        "consensus": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        "conflicts": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "scopeStats": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "rerank": { "$ref": "#/$defs/rerankPosture" },
+        "consensus": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        "conflicts": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
         "pagination": {
           "type": "object",
           "required": ["offset", "limit", "total", "hasMore", "nextCursor"],
           "additionalProperties": false,
           "properties": {
-            "offset": {"type": "integer", "minimum": 0},
-            "limit": {"type": "integer", "minimum": 0},
-            "total": {"type": "integer", "minimum": 0},
-            "hasMore": {"type": "boolean"},
-            "nextCursor": {"type": ["string", "null"]}
+            "offset": { "type": "integer", "minimum": 0 },
+            "limit": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 },
+            "hasMore": { "type": "boolean" },
+            "nextCursor": { "type": ["string", "null"] }
           }
         },
         "pack": {
@@ -72,13 +72,13 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "schema": {"type": "string", "const": "ee.pack.v2"},
-            "query": {"type": "string"},
-            "text": {"type": "string"},
-            "meta": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "slo": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "budget": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "hash": {"type": ["string", "null"]},
+            "schema": { "type": "string", "const": "ee.pack.v2" },
+            "query": { "type": "string" },
+            "text": { "type": "string" },
+            "meta": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+            "slo": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+            "budget": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+            "hash": { "type": ["string", "null"] },
             "snapshotIdentity": {
               "type": "object",
               "additionalProperties": false,
@@ -89,10 +89,10 @@
                 "componentDigestsAvailableLocally"
               ],
               "properties": {
-                "version": {"type": "integer", "const": 1},
-                "digest": {"type": "string", "minLength": 1},
-                "numericDomain": {"type": "string", "const": "q20.12"},
-                "componentDigestsAvailableLocally": {"type": "boolean"}
+                "version": { "type": "integer", "const": 1 },
+                "digest": { "type": "string", "minLength": 1 },
+                "numericDomain": { "type": "string", "const": "q20.12" },
+                "componentDigestsAvailableLocally": { "type": "boolean" }
               }
             },
             "items": {
@@ -110,7 +110,7 @@
                   "trust"
                 ],
                 "oneOf": [
-                  {"required": ["memoryId"]},
+                  { "required": ["memoryId"] },
                   {
                     "required": [
                       "entityKind",
@@ -121,70 +121,136 @@
                       "endLine"
                     ],
                     "properties": {
-                      "entityKind": {"const": "evidence_span"}
+                      "entityKind": { "const": "evidence_span" }
                     }
                   }
                 ],
                 "additionalProperties": false,
                 "properties": {
-                  "rank": {"type": "integer"},
-                  "memoryId": {"type": "string"},
-                  "entityKind": {"type": "string", "const": "evidence_span"},
-                  "evidenceSpanId": {"type": "string", "pattern": "^ev_"},
-                  "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
-                  "sessionId": {"type": "string"},
-                  "startLine": {"type": "integer", "minimum": 1},
-                  "endLine": {"type": "integer", "minimum": 1},
-                  "section": {"type": "string"},
-                  "content": {"type": "string"},
-                  "contentRedacted": {"type": "boolean"},
-                  "estimatedTokens": {"type": "integer"},
-                  "scores": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-                  "why": {"type": "string"},
-                  "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-                  "freshnessFacets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-                  "redactions": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-                  "trust": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+                  "rank": { "type": "integer" },
+                  "memoryId": { "type": "string" },
+                  "entityKind": { "type": "string", "const": "evidence_span" },
+                  "evidenceSpanId": { "type": "string", "pattern": "^ev_" },
+                  "entityRevision": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                  "sessionId": { "type": "string" },
+                  "startLine": { "type": "integer", "minimum": 1 },
+                  "endLine": { "type": "integer", "minimum": 1 },
+                  "section": { "type": "string" },
+                  "content": { "type": "string" },
+                  "contentRedacted": { "type": "boolean" },
+                  "estimatedTokens": { "type": "integer" },
+                  "scores": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                  },
+                  "why": { "type": "string" },
+                  "provenance": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                    }
+                  },
+                  "freshnessFacets": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                    }
+                  },
+                  "redactions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                    }
+                  },
+                  "trust": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                  },
                   "selection": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "scoreBreakdown": {"$ref": "#/$defs/pprScoreBreakdown"}
+                      "scoreBreakdown": { "$ref": "#/$defs/pprScoreBreakdown" }
                     }
                   },
-                  "diversityKey": {"type": ["string", "null"]},
-                  "selectedIn": {"type": "string"},
-                  "lifecycle": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-                  "tokenCost": {"type": "integer"},
-                  "feasible": {"type": "boolean"},
-                  "coveredFeatures": {"type": "array", "items": {"type": "string"}},
-                  "sourceIndex": {"type": "integer"}
+                  "diversityKey": { "type": ["string", "null"] },
+                  "selectedIn": { "type": "string" },
+                  "lifecycle": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                  },
+                  "tokenCost": { "type": "integer" },
+                  "feasible": { "type": "boolean" },
+                  "coveredFeatures": { "type": "array", "items": { "type": "string" } },
+                  "sourceIndex": { "type": "integer" }
                 }
               }
             },
-            "skipped": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-            "skippedTotal": {"type": "integer"},
-            "provenanceFooter": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "selectionAudit": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "coordination": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "mesh": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "packDna": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "agentProfile": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "deprecation": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "selectionCertificate": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "quality": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "advisoryBanner": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+            "skipped": {
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+            },
+            "skippedTotal": { "type": "integer" },
+            "provenanceFooter": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "selectionAudit": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "coordination": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "mesh": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+            "packDna": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "agentProfile": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "deprecation": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "selectionCertificate": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "quality": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            },
+            "advisoryBanner": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+            }
           }
         },
-        "redaction": {"$ref": "#/$defs/redaction"},
-        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+        "redaction": { "$ref": "#/$defs/redaction" },
+        "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } }
       }
     },
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } }
   },
   "field_presets": {
     "minimal": ["command", "embed_backend", "query", "hash"],
-    "summary": ["command", "embed_backend", "request", "pack", "budget", "quality", "pagination", "degraded"],
+    "summary": [
+      "command",
+      "embed_backend",
+      "request",
+      "pack",
+      "budget",
+      "quality",
+      "pagination",
+      "degraded"
+    ],
     "standard": ["command", "embed_backend", "request", "pack", "items", "pagination", "degraded"],
     "full": ["*"]
   },
@@ -194,18 +260,21 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
+        "code": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
         "repairKind": {
           "type": "string",
           "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
         },
-        "sources": {"type": "array", "items": {"type": "string"}},
+        "sources": { "type": "array", "items": { "type": "string" } },
         "details": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         }
       }
     },
@@ -214,10 +283,10 @@
       "required": ["level_applied", "level_source", "fields_redacted", "patterns_matched"],
       "additionalProperties": false,
       "properties": {
-        "level_applied": {"type": "string"},
-        "level_source": {"type": "string"},
-        "fields_redacted": {"type": "array", "items": {"type": "string"}},
-        "patterns_matched": {"type": "array", "items": {"type": "string"}}
+        "level_applied": { "type": "string" },
+        "level_source": { "type": "string" },
+        "fields_redacted": { "type": "array", "items": { "type": "string" } },
+        "patterns_matched": { "type": "array", "items": { "type": "string" } }
       }
     },
     "rerankPosture": {
@@ -236,22 +305,22 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.rerank_posture.v1"},
-        "mode": {"type": "string", "enum": ["reranked", "fusion_only", "fusion_only_degraded"]},
-        "configured": {"type": "string", "enum": ["auto", "off"]},
-        "topK": {"type": "integer", "minimum": 1},
-        "rerankScoreCount": {"type": "integer", "minimum": 0},
-        "scoreKind": {"type": "string", "enum": ["rrf_fused", "reranked"]},
-        "available": {"type": "boolean"},
-        "degradedCode": {"enum": ["rerank_model_unavailable", null]},
+        "schema": { "type": "string", "const": "ee.rerank_posture.v1" },
+        "mode": { "type": "string", "enum": ["reranked", "fusion_only", "fusion_only_degraded"] },
+        "configured": { "type": "string", "enum": ["auto", "off"] },
+        "topK": { "type": "integer", "minimum": 1 },
+        "rerankScoreCount": { "type": "integer", "minimum": 0 },
+        "scoreKind": { "type": "string", "enum": ["rrf_fused", "reranked"] },
+        "available": { "type": "boolean" },
+        "degradedCode": { "enum": ["rerank_model_unavailable", null] },
         "advisory": {
           "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/permanentRerankAdvisory"},
-            {"$ref": "#/$defs/transientRerankAdvisory"}
+            { "type": "null" },
+            { "$ref": "#/$defs/permanentRerankAdvisory" },
+            { "$ref": "#/$defs/transientRerankAdvisory" }
           ]
         },
-        "advisorySummary": {"$ref": "#/$defs/rerankAdvisorySummary"}
+        "advisorySummary": { "$ref": "#/$defs/rerankAdvisorySummary" }
       }
     },
     "permanentRerankAdvisory": {
@@ -259,12 +328,15 @@
       "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "rerank_model_unavailable"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "permanent": {"type": "boolean", "const": true},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": "null"},
-        "resolution": {"type": "string", "const": "automatic_repair_unavailable"}
+        "code": { "type": "string", "const": "rerank_model_unavailable" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "permanent": { "type": "boolean", "const": true },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "null" },
+        "resolution": { "type": "string", "const": "automatic_repair_unavailable" }
       }
     },
     "transientRerankAdvisory": {
@@ -272,12 +344,15 @@
       "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "const": "rerank_model_unavailable"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "permanent": {"type": "boolean", "const": false},
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": ["string", "null"]},
-        "resolution": {"type": "string", "const": "retry_or_inspect_local_registry"}
+        "code": { "type": "string", "const": "rerank_model_unavailable" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "permanent": { "type": "boolean", "const": false },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": ["string", "null"] },
+        "resolution": { "type": "string", "const": "retry_or_inspect_local_registry" }
       }
     },
     "rerankAdvisorySummary": {
@@ -293,23 +368,23 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "scope": {"type": "string", "enum": ["invocation", "process", "response"]},
-        "permanent": {"type": ["boolean", "null"]},
-        "distinctCount": {"type": "integer", "minimum": 0},
-        "emittedCount": {"type": "integer", "minimum": 0},
-        "suppressedCount": {"type": "integer", "minimum": 0},
-        "sessionOccurrenceCount": {"type": "integer", "minimum": 0},
-        "sessionSuppressedCount": {"type": "integer", "minimum": 0}
+        "scope": { "type": "string", "enum": ["invocation", "process", "response"] },
+        "permanent": { "type": ["boolean", "null"] },
+        "distinctCount": { "type": "integer", "minimum": 0 },
+        "emittedCount": { "type": "integer", "minimum": 0 },
+        "suppressedCount": { "type": "integer", "minimum": 0 },
+        "sessionOccurrenceCount": { "type": "integer", "minimum": 0 },
+        "sessionSuppressedCount": { "type": "integer", "minimum": 0 }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     },
     "pprScoreBreakdown": {
@@ -317,9 +392,9 @@
       "required": ["textScore", "pprScore", "combinedScore"],
       "additionalProperties": false,
       "properties": {
-        "textScore": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "pprScore": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "combinedScore": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        "textScore": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "pprScore": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "combinedScore": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
       }
     }
   }

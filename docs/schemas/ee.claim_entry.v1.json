@@ -67,7 +67,7 @@
     },
     "tags": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true,
       "default": []
     },
@@ -83,11 +83,11 @@
     "evidence": {
       "description": "One inline evidence predicate, an array of predicates, or null. command-exit defaults expectedExit to 0; rule-status defaults expectedStatus to active.",
       "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/claimEvidence"},
+        { "type": "null" },
+        { "$ref": "#/$defs/claimEvidence" },
         {
           "type": "array",
-          "items": {"$ref": "#/$defs/claimEvidence"}
+          "items": { "$ref": "#/$defs/claimEvidence" }
         }
       ]
     }
@@ -119,21 +119,16 @@
       "allOf": [
         {
           "if": {
-            "properties": {"kind": {"const": "file-hash"}},
+            "properties": { "kind": { "const": "file-hash" } },
             "required": ["kind"]
           },
-          "then": {"required": ["expectedHash"]}
+          "then": { "required": ["expectedHash"] }
         }
       ],
       "properties": {
         "kind": {
           "type": "string",
-          "enum": [
-            "file-hash",
-            "command-exit",
-            "memory-presence",
-            "rule-status"
-          ]
+          "enum": ["file-hash", "command-exit", "memory-presence", "rule-status"]
         },
         "target": {
           "type": "string",

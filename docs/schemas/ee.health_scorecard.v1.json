@@ -22,36 +22,46 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.health_scorecard.v1"},
-    "command": {"type": "string", "const": "health scorecard"},
-    "version": {"type": "string"},
-    "workspaceId": {"type": "string"},
-    "workspacePath": {"type": "string"},
-    "databasePath": {"type": "string"},
-    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "schema": { "type": "string", "const": "ee.health_scorecard.v1" },
+    "command": { "type": "string", "const": "health scorecard" },
+    "version": { "type": "string" },
+    "workspaceId": { "type": "string" },
+    "workspacePath": { "type": "string" },
+    "databasePath": { "type": "string" },
+    "score": { "type": "integer", "minimum": 0, "maximum": 100 },
     "status": {
       "type": "string",
       "enum": ["ok", "degraded_recoverable", "degraded_required", "blocked"]
     },
     "subScores": {
       "type": "array",
-      "items": {"$ref": "#/$defs/subScore"},
+      "items": { "$ref": "#/$defs/subScore" },
       "minItems": 5
     },
-    "trend": {"$ref": "#/$defs/trend"},
+    "trend": { "$ref": "#/$defs/trend" },
     "topActions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/action"},
+      "items": { "$ref": "#/$defs/action" },
       "maxItems": 3
     },
-    "snapshot": {"$ref": "#/$defs/snapshot"},
-    "evidence": {"$ref": "#/$defs/jsonObject"},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "evidence": { "$ref": "#/$defs/jsonObject" },
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } }
   },
   "field_presets": {
     "minimal": ["schema", "score", "status"],
     "summary": ["schema", "score", "status", "trend", "topActions"],
-    "standard": ["schema", "score", "status", "subScores", "trend", "topActions", "snapshot", "evidence", "degraded"],
+    "standard": [
+      "schema",
+      "score",
+      "status",
+      "subScores",
+      "trend",
+      "topActions",
+      "snapshot",
+      "evidence",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "examples": [
@@ -159,17 +169,26 @@
   "$defs": {
     "subScore": {
       "type": "object",
-      "required": ["name", "score", "weight", "status", "current", "target", "rationale", "signals"],
+      "required": [
+        "name",
+        "score",
+        "weight",
+        "status",
+        "current",
+        "target",
+        "rationale",
+        "signals"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string"},
-        "score": {"type": "integer", "minimum": 0, "maximum": 100},
-        "weight": {"type": "number", "minimum": 0},
-        "status": {"type": "string"},
-        "current": {"type": "number"},
-        "target": {"type": "number"},
-        "rationale": {"type": "string"},
-        "signals": {"type": "array", "items": {"type": "string"}}
+        "name": { "type": "string" },
+        "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "weight": { "type": "number", "minimum": 0 },
+        "status": { "type": "string" },
+        "current": { "type": "number" },
+        "target": { "type": "number" },
+        "rationale": { "type": "string" },
+        "signals": { "type": "array", "items": { "type": "string" } }
       }
     },
     "trend": {
@@ -186,14 +205,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "direction": {"type": "string", "enum": ["improving", "declining", "flat", "no_baseline"]},
-        "delta": {"type": "integer"},
-        "currentScore": {"type": "integer", "minimum": 0, "maximum": 100},
-        "previousScore": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
-        "snapshotCount": {"type": "integer", "minimum": 0},
-        "source": {"type": "string"},
-        "latestSnapshotDay": {"type": ["string", "null"]},
-        "latestSnapshotHash": {"type": ["string", "null"]}
+        "direction": {
+          "type": "string",
+          "enum": ["improving", "declining", "flat", "no_baseline"]
+        },
+        "delta": { "type": "integer" },
+        "currentScore": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "previousScore": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+        "snapshotCount": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string" },
+        "latestSnapshotDay": { "type": ["string", "null"] },
+        "latestSnapshotHash": { "type": ["string", "null"] }
       }
     },
     "action": {
@@ -201,13 +223,13 @@
       "required": ["rank", "id", "subScore", "title", "reason", "command", "expectedImpact"],
       "additionalProperties": false,
       "properties": {
-        "rank": {"type": "integer", "minimum": 1, "maximum": 3},
-        "id": {"type": "string"},
-        "subScore": {"type": "string"},
-        "title": {"type": "string"},
-        "reason": {"type": "string"},
-        "command": {"type": "string"},
-        "expectedImpact": {"type": "number", "minimum": 0}
+        "rank": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "id": { "type": "string" },
+        "subScore": { "type": "string" },
+        "title": { "type": "string" },
+        "reason": { "type": "string" },
+        "command": { "type": "string" },
+        "expectedImpact": { "type": "number", "minimum": 0 }
       }
     },
     "snapshot": {
@@ -224,14 +246,14 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "requested": {"type": "boolean"},
-        "recordedThisRun": {"type": "boolean"},
-        "status": {"type": "string"},
-        "snapshotDay": {"type": ["string", "null"]},
-        "reportHash": {"type": ["string", "null"]},
-        "inserted": {"type": ["boolean", "null"]},
-        "historyCount": {"type": "integer", "minimum": 0},
-        "nextCommand": {"type": "string"}
+        "requested": { "type": "boolean" },
+        "recordedThisRun": { "type": "boolean" },
+        "status": { "type": "string" },
+        "snapshotDay": { "type": ["string", "null"] },
+        "reportHash": { "type": ["string", "null"] },
+        "inserted": { "type": ["boolean", "null"] },
+        "historyCount": { "type": "integer", "minimum": 0 },
+        "nextCommand": { "type": "string" }
       }
     },
     "degradation": {
@@ -239,21 +261,21 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
-        "severity": {"type": "string"},
-        "message": {"type": "string"},
-        "repair": {"type": "string"}
+        "code": { "type": "string" },
+        "severity": { "type": "string" },
+        "message": { "type": "string" },
+        "repair": { "type": "string" }
       }
     },
-    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

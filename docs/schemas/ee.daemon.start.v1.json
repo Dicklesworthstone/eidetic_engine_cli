@@ -4,11 +4,7 @@
   "title": "ee.daemon.start.v1",
   "description": "The data object in the ee.response.v2 envelope from ee daemon start. Foreground mode binds the workspace endpoint and waits for termination. Detached mode starts a foreground child and reports success only after its endpoint becomes reachable. Each workspace daemon owns its model memory; no daemon is required for ordinary CLI operation.",
   "type": "object",
-  "required": [
-    "schema",
-    "socketPath",
-    "foreground"
-  ],
+  "required": ["schema", "socketPath", "foreground"],
   "additionalProperties": false,
   "properties": {
     "schema": {

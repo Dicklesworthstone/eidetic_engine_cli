@@ -236,16 +236,10 @@
         "title": { "$ref": "#/definitions/safeString" },
         "safety": { "$ref": "#/definitions/actionSafety" },
         "commandAction": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/definitions/commandAction" }
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/commandAction" }]
         },
         "manualStep": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/definitions/safeString" }
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/safeString" }]
         },
         "sourceRefs": { "$ref": "#/definitions/stringArray" },
         "rationale": { "$ref": "#/definitions/safeString" },
@@ -346,13 +340,13 @@
       "properties": {
         "code": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
-        "severity": { "type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"] },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
         "message": { "$ref": "#/definitions/safeString" },
         "repair": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/definitions/safeString" }
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/safeString" }]
         }
       }
     }
@@ -501,7 +495,16 @@
           "commandAction": {
             "commandId": "agent_mail_snapshot_refresh",
             "displayCommand": "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json",
-            "argv": ["scripts/agent_mail_snapshot.sh", "--project", ".", "--agent", "<AGENT_NAME>", "--json", "--output", "/private/tmp/ee-agent-mail-snapshot.json"],
+            "argv": [
+              "scripts/agent_mail_snapshot.sh",
+              "--project",
+              ".",
+              "--agent",
+              "<AGENT_NAME>",
+              "--json",
+              "--output",
+              "/private/tmp/ee-agent-mail-snapshot.json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
@@ -512,7 +515,10 @@
           "manualStep": null,
           "sourceRefs": ["source:agent_mail"],
           "rationale": "Agent Mail evidence is missing, stale, corrupt, or non-authoritative; regenerate a redacted snapshot before trusting coordination state.",
-          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+          "stopConditionRefs": [
+            "agent_mail_or_tracker_not_authoritative",
+            "source_authority_fail_closed"
+          ]
         },
         {
           "priority": 30,
@@ -562,7 +568,10 @@
           "manualStep": null,
           "sourceRefs": ["source:beads", "source:actionable_queue"],
           "rationale": "Tracker or actionable-queue authority is degraded, contradictory, or absent; inspect tracker health before updating Beads state.",
-          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+          "stopConditionRefs": [
+            "agent_mail_or_tracker_not_authoritative",
+            "source_authority_fail_closed"
+          ]
         },
         {
           "priority": 60,
@@ -581,7 +590,18 @@
           "commandAction": {
             "commandId": "repair_plan_rerun_claim_gate",
             "displayCommand": "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate bd-22po3.1 --json",
-            "argv": ["ee", "swarm", "work-packet", "--workspace", ".", "--include-rch", "--claim-gate", "--candidate", "bd-22po3.1", "--json"],
+            "argv": [
+              "ee",
+              "swarm",
+              "work-packet",
+              "--workspace",
+              ".",
+              "--include-rch",
+              "--claim-gate",
+              "--candidate",
+              "bd-22po3.1",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,

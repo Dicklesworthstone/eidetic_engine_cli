@@ -79,14 +79,7 @@
     },
     "lane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graph_link",
-        "curation_signal",
-        "revision_notice"
-      ],
+      "enum": ["metadata", "body", "embedding", "graph_link", "curation_signal", "revision_notice"],
       "description": "The six trust-lane channels a peer-group binding can grant or deny. Matches the field names on `IntendedLanePolicy` in `src/mesh/auto_enrollment_safety.rs`."
     },
     "laneDecision": {

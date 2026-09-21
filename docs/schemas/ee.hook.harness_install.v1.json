@@ -52,15 +52,34 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["surface", "outcome", "updatedAt", "durationMs", "emittedBytes", "degradedCodes"],
+        "required": [
+          "surface",
+          "outcome",
+          "updatedAt",
+          "durationMs",
+          "emittedBytes",
+          "degradedCodes"
+        ],
         "additionalProperties": false,
         "properties": {
           "surface": { "enum": ["session_start_orient", "pre_edit_recall"] },
-          "outcome": { "enum": ["emitted", "duplicate", "empty", "timeout", "command_error", "invalid_response"] },
+          "outcome": {
+            "enum": [
+              "emitted",
+              "duplicate",
+              "empty",
+              "timeout",
+              "command_error",
+              "invalid_response"
+            ]
+          },
           "updatedAt": { "type": "string", "format": "date-time" },
           "durationMs": { "type": "integer", "minimum": 0 },
           "emittedBytes": { "type": "integer", "minimum": 0 },
-          "degradedCodes": { "type": "array", "items": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_]*$" } }
+          "degradedCodes": {
+            "type": "array",
+            "items": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_]*$" }
+          }
         }
       }
     },
@@ -174,15 +193,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "code",
-              "status",
-              "event",
-              "matcher",
-              "targetPath",
-              "message",
-              "repair"
-            ],
+            "required": ["code", "status", "event", "matcher", "targetPath", "message", "repair"],
             "properties": {
               "code": {
                 "enum": [
@@ -226,10 +237,7 @@
             "required": ["action", "commandDisplay", "argv", "mutatesState", "reason"],
             "properties": {
               "action": {
-                "enum": [
-                  "install_or_refresh_hooks",
-                  "make_config_writable"
-                ]
+                "enum": ["install_or_refresh_hooks", "make_config_writable"]
               },
               "commandDisplay": { "type": ["string", "null"] },
               "argv": {

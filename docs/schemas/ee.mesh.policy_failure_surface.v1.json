@@ -48,14 +48,7 @@
     },
     "materialLane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graphLink",
-        "revisionNotice",
-        "curationSignal"
-      ]
+      "enum": ["metadata", "body", "embedding", "graphLink", "revisionNotice", "curationSignal"]
     },
     "redaction": {
       "type": "string",
@@ -63,14 +56,7 @@
     },
     "trustLane": {
       "type": ["string", "null"],
-      "enum": [
-        "localHuman",
-        "peerHumanViaPeer",
-        "peerAgent",
-        "peerDerived",
-        "untrusted",
-        null
-      ]
+      "enum": ["localHuman", "peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted", null]
     }
   },
   "allOf": [
@@ -78,10 +64,7 @@
       "if": {
         "properties": {
           "code": {
-            "enum": [
-              "mesh_peer_policy_denied",
-              "mesh_outbound_policy_denied"
-            ]
+            "enum": ["mesh_peer_policy_denied", "mesh_outbound_policy_denied"]
           }
         },
         "required": ["code"]
@@ -98,10 +81,7 @@
       "if": {
         "properties": {
           "code": {
-            "enum": [
-              "mesh_peer_policy_quarantined",
-              "mesh_outbound_policy_quarantined"
-            ]
+            "enum": ["mesh_peer_policy_quarantined", "mesh_outbound_policy_quarantined"]
           }
         },
         "required": ["code"]
@@ -118,10 +98,7 @@
       "if": {
         "properties": {
           "code": {
-            "enum": [
-              "mesh_peer_policy_rejected",
-              "mesh_outbound_policy_rejected"
-            ]
+            "enum": ["mesh_peer_policy_rejected", "mesh_outbound_policy_rejected"]
           }
         },
         "required": ["code"]

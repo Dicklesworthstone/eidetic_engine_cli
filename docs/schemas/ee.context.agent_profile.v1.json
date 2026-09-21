@@ -20,63 +20,52 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.context.agent_profile.v1"},
-    "agentName": {"type": ["string", "null"]},
-    "agentNameHash": {"type": ["string", "null"]},
-    "workspaceId": {"type": ["string", "null"]},
-    "observedOutcomes": {"type": "integer", "minimum": 0},
-    "helpfulCount": {"type": "integer", "minimum": 0},
-    "harmfulCount": {"type": "integer", "minimum": 0},
-    "ignoredCount": {"type": "integer", "minimum": 0},
-    "biasMagnitude": {"type": "number", "minimum": 0.0, "maximum": 0.05},
-    "maxBiasMagnitude": {"type": "number", "const": 0.05},
-    "memoryBiasApplied": {"type": "integer", "minimum": 0},
-    "coldStart": {"type": "boolean"},
-    "coldStartThreshold": {"type": "integer", "minimum": 1},
-    "halfLifeDays": {"type": ["integer", "null"], "minimum": 1},
+    "schema": { "type": "string", "const": "ee.context.agent_profile.v1" },
+    "agentName": { "type": ["string", "null"] },
+    "agentNameHash": { "type": ["string", "null"] },
+    "workspaceId": { "type": ["string", "null"] },
+    "observedOutcomes": { "type": "integer", "minimum": 0 },
+    "helpfulCount": { "type": "integer", "minimum": 0 },
+    "harmfulCount": { "type": "integer", "minimum": 0 },
+    "ignoredCount": { "type": "integer", "minimum": 0 },
+    "biasMagnitude": { "type": "number", "minimum": 0.0, "maximum": 0.05 },
+    "maxBiasMagnitude": { "type": "number", "const": 0.05 },
+    "memoryBiasApplied": { "type": "integer", "minimum": 0 },
+    "coldStart": { "type": "boolean" },
+    "coldStartThreshold": { "type": "integer", "minimum": 1 },
+    "halfLifeDays": { "type": ["integer", "null"], "minimum": 1 },
     "determinismKey": {
       "type": "object",
-      "required": [
-        "workspaceGeneration",
-        "profileGeneration",
-        "agentNameHash",
-        "basePackHash"
-      ],
+      "required": ["workspaceGeneration", "profileGeneration", "agentNameHash", "basePackHash"],
       "additionalProperties": false,
       "properties": {
-        "workspaceGeneration": {"type": "integer", "minimum": 0},
-        "profileGeneration": {"type": "integer", "minimum": 0},
-        "agentNameHash": {"type": ["string", "null"]},
-        "basePackHash": {"type": ["string", "null"]}
+        "workspaceGeneration": { "type": "integer", "minimum": 0 },
+        "profileGeneration": { "type": "integer", "minimum": 0 },
+        "agentNameHash": { "type": ["string", "null"] },
+        "basePackHash": { "type": ["string", "null"] }
       }
     },
     "topBiases": {
       "type": "array",
-      "items": {"$ref": "#/$defs/memoryBias"}
+      "items": { "$ref": "#/$defs/memoryBias" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
     "memoryBias": {
       "type": "object",
-      "required": [
-        "memoryId",
-        "bias",
-        "helpfulCount",
-        "harmfulCount",
-        "ignoredCount"
-      ],
+      "required": ["memoryId", "bias", "helpfulCount", "harmfulCount", "ignoredCount"],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"type": "string"},
-        "bias": {"type": "number", "minimum": -0.05, "maximum": 0.05},
-        "helpfulCount": {"type": "integer", "minimum": 0},
-        "harmfulCount": {"type": "integer", "minimum": 0},
-        "ignoredCount": {"type": "integer", "minimum": 0},
-        "lastSeenAt": {"type": ["string", "null"], "format": "date-time"}
+        "memoryId": { "type": "string" },
+        "bias": { "type": "number", "minimum": -0.05, "maximum": 0.05 },
+        "helpfulCount": { "type": "integer", "minimum": 0 },
+        "harmfulCount": { "type": "integer", "minimum": 0 },
+        "ignoredCount": { "type": "integer", "minimum": 0 },
+        "lastSeenAt": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "degradation": {
@@ -84,24 +73,24 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
-        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

@@ -7,9 +7,9 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": ["command", "report"],
@@ -17,12 +17,22 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["db status", "db inspect", "db check", "db check-integrity", "db reindex", "db migrations"]
+          "enum": [
+            "db status",
+            "db inspect",
+            "db check",
+            "db check-integrity",
+            "db reindex",
+            "db migrations"
+          ]
         },
-        "report": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "report": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       }
     },
-    "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+    "degraded": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+    }
   },
   "field_presets": {
     "minimal": ["command"],
@@ -148,12 +158,12 @@
   "$defs": {
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

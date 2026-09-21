@@ -530,13 +530,7 @@
     },
     "sloDimension": {
       "type": "string",
-      "enum": [
-        "latency",
-        "stdout_bytes",
-        "stderr_bytes",
-        "degraded_count",
-        "discoverability"
-      ]
+      "enum": ["latency", "stdout_bytes", "stderr_bytes", "degraded_count", "discoverability"]
     },
     "sloBudget": {
       "type": "object",
@@ -599,10 +593,7 @@
           "description": "Relative fixture path tail or redacted path token. Absolute host paths are not valid artifact references.",
           "type": "string",
           "not": {
-            "anyOf": [
-              { "pattern": "^/" },
-              { "pattern": "^[A-Za-z]:" }
-            ]
+            "anyOf": [{ "pattern": "^/" }, { "pattern": "^[A-Za-z]:" }]
           },
           "pattern": "^[A-Za-z0-9._/-]{1,160}$"
         },
@@ -824,12 +815,7 @@
         },
         "rchStatus": {
           "type": "string",
-          "enum": [
-            "not_required",
-            "passed",
-            "blocked_before_cargo",
-            "failed"
-          ]
+          "enum": ["not_required", "passed", "blocked_before_cargo", "failed"]
         },
         "proofCapsule": {
           "$ref": "#/$defs/verificationCapsule"
@@ -1050,12 +1036,7 @@
     "knownBlocker": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "blockerFingerprint",
-        "blockerKind",
-        "remediationBead",
-        "retryAfter"
-      ],
+      "required": ["blockerFingerprint", "blockerKind", "remediationBead", "retryAfter"],
       "properties": {
         "blockerFingerprint": {
           "type": "string",

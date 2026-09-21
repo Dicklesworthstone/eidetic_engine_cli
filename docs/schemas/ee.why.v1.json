@@ -7,26 +7,20 @@
   "required": ["schema", "memoryId", "graph"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.why.v1"},
-    "memoryId": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.why.v1" },
+    "memoryId": { "type": "string" },
     "graph": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "bayesPosterior": {"$ref": "#/$defs/jsonValue"},
+        "bayesPosterior": { "$ref": "#/$defs/jsonValue" },
         "loadBearing": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/loadBearingWhy"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/loadBearingWhy" }]
         },
         "hits": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/hitsWhy"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hitsWhy" }]
         },
-        "revisionLineage": {"$ref": "#/$defs/jsonValue"}
+        "revisionLineage": { "$ref": "#/$defs/jsonValue" }
       }
     }
   },
@@ -42,8 +36,8 @@
           "authorityRank": 1,
           "citingRuleCount": 2,
           "citingRules": [
-            {"ruleId": "rule_release_safety", "relation": "cites"},
-            {"ruleId": "rule_rch_remote_only", "relation": "cites"}
+            { "ruleId": "rule_release_safety", "relation": "cites" },
+            { "ruleId": "rule_rch_remote_only", "relation": "cites" }
           ],
           "interpretation": "load_bearing",
           "evidence": {
@@ -98,17 +92,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "isLoadBearing": {"type": "boolean"},
-        "loadBearingScore": {"type": ["number", "null"], "minimum": 0},
-        "authorityRank": {"type": ["integer", "null"], "minimum": 1},
-        "citingRuleCount": {"type": "integer", "minimum": 0},
-        "citingRules": {"type": "array", "items": {"$ref": "#/$defs/ruleReference"}},
+        "isLoadBearing": { "type": "boolean" },
+        "loadBearingScore": { "type": ["number", "null"], "minimum": 0 },
+        "authorityRank": { "type": ["integer", "null"], "minimum": 1 },
+        "citingRuleCount": { "type": "integer", "minimum": 0 },
+        "citingRules": { "type": "array", "items": { "$ref": "#/$defs/ruleReference" } },
         "interpretation": {
           "type": "string",
           "enum": ["load_bearing", "not_load_bearing", "unavailable"]
         },
-        "evidence": {"$ref": "#/$defs/loadBearingEvidence"},
-        "rationale": {"type": "string"}
+        "evidence": { "$ref": "#/$defs/loadBearingEvidence" },
+        "rationale": { "type": "string" }
       }
     },
     "ruleReference": {
@@ -116,8 +110,8 @@
       "required": ["ruleId", "relation"],
       "additionalProperties": false,
       "properties": {
-        "ruleId": {"type": "string"},
-        "relation": {"type": "string", "const": "cites"}
+        "ruleId": { "type": "string" },
+        "relation": { "type": "string", "const": "cites" }
       }
     },
     "loadBearingEvidence": {
@@ -125,10 +119,10 @@
       "required": ["schema", "algorithm", "projection", "snapshotVersion"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.graph.hits.v1"},
-        "algorithm": {"type": "string", "const": "bipartite_hits"},
-        "projection": {"type": "string", "const": "rule_provenance_bipartite"},
-        "snapshotVersion": {"type": "integer", "minimum": 0}
+        "schema": { "type": "string", "const": "ee.graph.hits.v1" },
+        "algorithm": { "type": "string", "const": "bipartite_hits" },
+        "projection": { "type": "string", "const": "rule_provenance_bipartite" },
+        "snapshotVersion": { "type": "integer", "minimum": 0 }
       }
     },
     "hitsWhy": {
@@ -145,23 +139,26 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "authorityScore": {"type": ["number", "null"], "minimum": 0},
-        "authorityRank": {"type": ["integer", "null"], "minimum": 1},
-        "hubScore": {"type": ["number", "null"], "minimum": 0},
-        "hubRank": {"type": ["integer", "null"], "minimum": 1},
-        "dominantRole": {"type": "string", "enum": ["authority", "hub", "balanced", "unavailable"]},
+        "authorityScore": { "type": ["number", "null"], "minimum": 0 },
+        "authorityRank": { "type": ["integer", "null"], "minimum": 1 },
+        "hubScore": { "type": ["number", "null"], "minimum": 0 },
+        "hubRank": { "type": ["integer", "null"], "minimum": 1 },
+        "dominantRole": {
+          "type": "string",
+          "enum": ["authority", "hub", "balanced", "unavailable"]
+        },
         "profileInfluence": {
           "type": "object",
           "required": ["groundingBoost", "orientationBoost", "balancedBoost"],
           "additionalProperties": false,
           "properties": {
-            "groundingBoost": {"type": "number", "minimum": 0},
-            "orientationBoost": {"type": "number", "minimum": 0},
-            "balancedBoost": {"type": "number", "minimum": 0}
+            "groundingBoost": { "type": "number", "minimum": 0 },
+            "orientationBoost": { "type": "number", "minimum": 0 },
+            "balancedBoost": { "type": "number", "minimum": 0 }
           }
         },
-        "evidence": {"$ref": "#/$defs/hitsEvidence"},
-        "rationale": {"type": "string"}
+        "evidence": { "$ref": "#/$defs/hitsEvidence" },
+        "rationale": { "type": "string" }
       }
     },
     "hitsEvidence": {
@@ -169,20 +166,20 @@
       "required": ["schema", "algorithm", "graphType", "snapshotVersion"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.graph.hits.v1"},
-        "algorithm": {"type": "string", "const": "hits_centrality_directed"},
-        "graphType": {"type": "string", "const": "memory_links"},
-        "snapshotVersion": {"type": "integer", "minimum": 0}
+        "schema": { "type": "string", "const": "ee.graph.hits.v1" },
+        "algorithm": { "type": "string", "const": "hits_centrality_directed" },
+        "graphType": { "type": "string", "const": "memory_links" },
+        "snapshotVersion": { "type": "integer", "minimum": 0 }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

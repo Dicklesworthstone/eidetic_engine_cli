@@ -39,34 +39,31 @@
     },
     "configuredProfile": {
       "description": "Profile selected in config or by CLI override. Null when no operator override is present.",
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/operatingProfile"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/operatingProfile" }]
     },
-    "recommendedProfile": {"$ref": "#/$defs/operatingProfile"},
-    "effectiveProfile": {"$ref": "#/$defs/operatingProfile"},
+    "recommendedProfile": { "$ref": "#/$defs/operatingProfile" },
+    "effectiveProfile": { "$ref": "#/$defs/operatingProfile" },
     "confidence": {
       "type": "string",
       "enum": ["low", "medium", "high"]
     },
     "budgetDeltas": {
       "type": "array",
-      "items": {"$ref": "#/$defs/budgetDelta"}
+      "items": { "$ref": "#/$defs/budgetDelta" }
     },
     "reasonCodes": {
       "type": "array",
-      "items": {"$ref": "#/$defs/reasonCode"},
+      "items": { "$ref": "#/$defs/reasonCode" },
       "uniqueItems": true
     },
-    "calibrationFreshness": {"$ref": "#/$defs/calibrationFreshness"},
+    "calibrationFreshness": { "$ref": "#/$defs/calibrationFreshness" },
     "topologyWarnings": {
       "type": "array",
-      "items": {"$ref": "#/$defs/topologyWarning"}
+      "items": { "$ref": "#/$defs/topologyWarning" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
@@ -145,17 +142,17 @@
           "type": "string",
           "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*$"
         },
-        "baselineProfile": {"$ref": "#/$defs/operatingProfile"},
-        "recommendedValue": {"$ref": "#/$defs/jsonValue"},
-        "effectiveValue": {"$ref": "#/$defs/jsonValue"},
-        "configuredValue": {"$ref": "#/$defs/jsonValueOrNull"},
+        "baselineProfile": { "$ref": "#/$defs/operatingProfile" },
+        "recommendedValue": { "$ref": "#/$defs/jsonValue" },
+        "effectiveValue": { "$ref": "#/$defs/jsonValue" },
+        "configuredValue": { "$ref": "#/$defs/jsonValueOrNull" },
         "direction": {
           "type": "string",
           "enum": ["increase", "decrease", "unchanged", "override"]
         },
         "reasonCodes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/reasonCode"},
+          "items": { "$ref": "#/$defs/reasonCode" },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -179,16 +176,19 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
+          "enum": [
+            "fresh",
+            "stale",
+            "partial",
+            "synthetic_only",
+            "contradictory",
+            "missing",
+            "unavailable"
+          ]
         },
         "source": {
           "type": "string",
-          "enum": [
-            "host_profile_probe",
-            "synthetic_fixture",
-            "calibration_artifact",
-            "unavailable"
-          ]
+          "enum": ["host_profile_probe", "synthetic_fixture", "calibration_artifact", "unavailable"]
         },
         "generatedAt": {
           "type": ["string", "null"],
@@ -204,7 +204,7 @@
         },
         "reasonCodes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/reasonCode"},
+          "items": { "$ref": "#/$defs/reasonCode" },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -218,7 +218,7 @@
       "required": ["code", "severity", "sourceField", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"$ref": "#/$defs/reasonCode"},
+        "code": { "$ref": "#/$defs/reasonCode" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
@@ -227,8 +227,8 @@
           "type": "string",
           "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*$"
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]}
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
       }
     },
     "degradation": {
@@ -236,29 +236,26 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
-        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       }
     },
     "jsonValueOrNull": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/jsonValue"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/jsonValue" }]
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   },

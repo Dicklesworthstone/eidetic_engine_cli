@@ -7,27 +7,27 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
-    "degraded": {"type": "array", "items": {"type": "object"}},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
+    "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
       "required": ["command", "version", "total_count", "truncated", "filter", "memories"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "memory list"},
-        "version": {"type": "string"},
-        "total_count": {"type": "integer"},
-        "truncated": {"type": "boolean"},
+        "command": { "type": "string", "const": "memory list" },
+        "version": { "type": "string" },
+        "total_count": { "type": "integer" },
+        "truncated": { "type": "boolean" },
         "filter": {
           "type": "object",
           "required": ["include_tombstoned"],
           "additionalProperties": false,
           "properties": {
-            "level": {"type": "string"},
-            "tag": {"type": "string"},
-            "include_tombstoned": {"type": "boolean"}
+            "level": { "type": "string" },
+            "tag": { "type": "string" },
+            "include_tombstoned": { "type": "boolean" }
           }
         },
         "memories": {
@@ -49,24 +49,24 @@
             ],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "level": {"type": "string"},
-              "kind": {"type": "string"},
-              "content": {"type": "string"},
-              "content_truncated": {"type": "boolean"},
-              "confidence": {"type": "number"},
-              "provenance_uri": {"type": "string"},
-              "is_tombstoned": {"type": "boolean"},
-              "valid_from": {"type": ["string", "null"]},
-              "valid_to": {"type": ["string", "null"]},
-              "validity_status": {"type": "string"},
-              "validity_window_kind": {"type": "string"},
-              "tags": {"type": "array", "items": {"type": "string"}},
-              "created_at": {"type": "string"}
+              "id": { "type": "string" },
+              "level": { "type": "string" },
+              "kind": { "type": "string" },
+              "content": { "type": "string" },
+              "content_truncated": { "type": "boolean" },
+              "confidence": { "type": "number" },
+              "provenance_uri": { "type": "string" },
+              "is_tombstoned": { "type": "boolean" },
+              "valid_from": { "type": ["string", "null"] },
+              "valid_to": { "type": ["string", "null"] },
+              "validity_status": { "type": "string" },
+              "validity_window_kind": { "type": "string" },
+              "tags": { "type": "array", "items": { "type": "string" } },
+              "created_at": { "type": "string" }
             }
           }
         },
-        "error": {"type": "string"}
+        "error": { "type": "string" }
       }
     }
   },

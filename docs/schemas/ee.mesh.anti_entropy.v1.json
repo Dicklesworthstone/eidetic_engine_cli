@@ -118,13 +118,7 @@
     },
     "backoffPosture": {
       "type": "object",
-      "required": [
-        "initialMs",
-        "maxMs",
-        "maxAttempts",
-        "currentAttempts",
-        "nextRetryAfter"
-      ],
+      "required": ["initialMs", "maxMs", "maxAttempts", "currentAttempts", "nextRetryAfter"],
       "additionalProperties": false,
       "properties": {
         "initialMs": {
@@ -161,14 +155,7 @@
     },
     "blockedRange": {
       "type": "object",
-      "required": [
-        "peerAlias",
-        "originAlias",
-        "startSeq",
-        "endSeq",
-        "retryAfter",
-        "reason"
-      ],
+      "required": ["peerAlias", "originAlias", "startSeq", "endSeq", "retryAfter", "reason"],
       "additionalProperties": false,
       "properties": {
         "peerAlias": {

@@ -105,7 +105,13 @@
     },
     "intendedPeer": {
       "type": "object",
-      "required": ["nodeKey", "tailscaleIp", "hostname", "eeProtocolVersion", "discoveryPolicyDecision"],
+      "required": [
+        "nodeKey",
+        "tailscaleIp",
+        "hostname",
+        "eeProtocolVersion",
+        "discoveryPolicyDecision"
+      ],
       "additionalProperties": false,
       "properties": {
         "nodeKey": {

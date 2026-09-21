@@ -7,10 +7,10 @@
   "additionalProperties": false,
   "required": ["schema", "task", "max_tokens", "candidate_pool", "include_primer"],
   "properties": {
-    "schema": {"const": "ee.daemon.orient_hook.request.v1"},
-    "task": {"type": "string"},
-    "max_tokens": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-    "candidate_pool": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-    "include_primer": {"type": "boolean"}
+    "schema": { "const": "ee.daemon.orient_hook.request.v1" },
+    "task": { "type": "string" },
+    "max_tokens": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "candidate_pool": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "include_primer": { "type": "boolean" }
   }
 }

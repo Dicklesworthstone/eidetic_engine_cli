@@ -30,13 +30,7 @@
     },
     "kind": {
       "type": "string",
-      "enum": [
-        "created",
-        "updated",
-        "level_transitioned",
-        "expired",
-        "tombstoned"
-      ]
+      "enum": ["created", "updated", "level_transitioned", "expired", "tombstoned"]
     },
     "memoryId": {
       "type": "string",
@@ -46,12 +40,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "enum": [
-          "working",
-          "episodic",
-          "semantic",
-          "procedural"
-        ]
+        "enum": ["working", "episodic", "semantic", "procedural"]
       }
     },
     "kinds": {
@@ -70,16 +59,10 @@
       }
     },
     "workspaceId": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "trustClass": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "enum": [
         "human_explicit",
         "peer_human_attested",
@@ -91,10 +74,7 @@
       ]
     },
     "agentName": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "changedFields": {
       "type": "array",

@@ -16,16 +16,16 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.serve.startup.v1"},
+    "schema": { "type": "string", "const": "ee.serve.startup.v1" },
     "bind": {
       "type": "object",
       "required": ["host", "port", "loopbackOnly", "allowNonLoopback"],
       "additionalProperties": false,
       "properties": {
-        "host": {"type": "string"},
-        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-        "loopbackOnly": {"type": "boolean"},
-        "allowNonLoopback": {"type": "boolean"},
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "loopbackOnly": { "type": "boolean" },
+        "allowNonLoopback": { "type": "boolean" },
         "policy": {
           "type": "string",
           "enum": ["loopback_default", "non_loopback_explicit", "rejected"]
@@ -37,8 +37,8 @@
       "required": ["httpVersion", "sseReadOnly", "forbiddenHttpDeps"],
       "additionalProperties": false,
       "properties": {
-        "httpVersion": {"type": "string", "const": "HTTP/1.1"},
-        "sseReadOnly": {"type": "boolean", "const": true},
+        "httpVersion": { "type": "string", "const": "HTTP/1.1" },
+        "sseReadOnly": { "type": "boolean", "const": true },
         "forbiddenHttpDeps": {
           "type": "array",
           "items": {
@@ -54,14 +54,14 @@
       "required": ["source", "state", "minimumBits", "tokenMaterialExposed"],
       "additionalProperties": false,
       "properties": {
-        "source": {"type": "string", "const": "EE_SERVE_TOKEN"},
+        "source": { "type": "string", "const": "EE_SERVE_TOKEN" },
         "state": {
           "type": "string",
           "enum": ["missing", "weak", "configured", "not_required"]
         },
-        "minimumBits": {"type": "integer", "minimum": 256},
-        "tokenMaterialExposed": {"type": "boolean", "const": false},
-        "repair": {"type": ["string", "null"]}
+        "minimumBits": { "type": "integer", "minimum": 256 },
+        "tokenMaterialExposed": { "type": "boolean", "const": false },
+        "repair": { "type": ["string", "null"] }
       }
     },
     "readiness": {
@@ -73,14 +73,14 @@
           "type": "string",
           "enum": ["ready", "degraded", "policy_denied", "blocked"]
         },
-        "canAcceptConnections": {"type": "boolean"},
-        "mutableEndpointsEnabled": {"type": "boolean"},
-        "reason": {"type": ["string", "null"]}
+        "canAcceptConnections": { "type": "boolean" },
+        "mutableEndpointsEnabled": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] }
       }
     },
     "endpoints": {
       "type": "array",
-      "items": {"$ref": "#/$defs/endpointSummary"}
+      "items": { "$ref": "#/$defs/endpointSummary" }
     },
     "limits": {
       "type": "object",
@@ -94,17 +94,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "maxHeaderBytes": {"type": "integer", "minimum": 1},
-        "maxBodyBytes": {"type": "integer", "minimum": 0},
-        "connectionReadTimeoutMs": {"type": "integer", "minimum": 1},
-        "handlerBudgetMs": {"type": "integer", "minimum": 1},
-        "responseWriteTimeoutMs": {"type": "integer", "minimum": 1},
-        "sseEventBuffer": {"type": "integer", "minimum": 1}
+        "maxHeaderBytes": { "type": "integer", "minimum": 1 },
+        "maxBodyBytes": { "type": "integer", "minimum": 0 },
+        "connectionReadTimeoutMs": { "type": "integer", "minimum": 1 },
+        "handlerBudgetMs": { "type": "integer", "minimum": 1 },
+        "responseWriteTimeoutMs": { "type": "integer", "minimum": 1 },
+        "sseEventBuffer": { "type": "integer", "minimum": 1 }
       }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
@@ -113,8 +113,8 @@
       "required": ["method", "path", "endpoint", "cliEquivalent", "mutable", "authRequired"],
       "additionalProperties": false,
       "properties": {
-        "method": {"type": "string", "enum": ["GET", "POST"]},
-        "path": {"type": "string"},
+        "method": { "type": "string", "enum": ["GET", "POST"] },
+        "path": { "type": "string" },
         "endpoint": {
           "type": "string",
           "enum": [
@@ -128,9 +128,9 @@
             "events"
           ]
         },
-        "cliEquivalent": {"type": ["string", "null"]},
-        "mutable": {"type": "boolean"},
-        "authRequired": {"type": "boolean"}
+        "cliEquivalent": { "type": ["string", "null"] },
+        "mutable": { "type": "boolean" },
+        "authRequired": { "type": "boolean" }
       }
     },
     "degradation": {
@@ -138,29 +138,29 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
         "details": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
         {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         }
       ]
     }

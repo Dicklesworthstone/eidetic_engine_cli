@@ -91,14 +91,7 @@
     },
     "lane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graph_link",
-        "curation_signal",
-        "revision_notice"
-      ]
+      "enum": ["metadata", "body", "embedding", "graph_link", "curation_signal", "revision_notice"]
     }
   }
 }

@@ -4,11 +4,7 @@
   "title": "ee.daemon.stop.v1",
   "description": "The data object in the ee.response.v2 envelope from ee daemon stop. The CLI validates endpoint ownership and the daemon protocol, sends a shutdown request, and waits for the daemon to release its workers and socket. It does not unlink an arbitrary supplied path.",
   "type": "object",
-  "required": [
-    "schema",
-    "socketPath",
-    "removed"
-  ],
+  "required": ["schema", "socketPath", "removed"],
   "additionalProperties": false,
   "properties": {
     "schema": {

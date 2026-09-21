@@ -7,10 +7,10 @@
   "required": ["schema", "request", "response"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.serve.endpoint.v1"},
-    "request": {"$ref": "#/$defs/request"},
-    "response": {"$ref": "#/$defs/response"},
-    "sse": {"$ref": "#/$defs/sse"}
+    "schema": { "type": "string", "const": "ee.serve.endpoint.v1" },
+    "request": { "$ref": "#/$defs/request" },
+    "response": { "$ref": "#/$defs/response" },
+    "sse": { "$ref": "#/$defs/sse" }
   },
   "$defs": {
     "request": {
@@ -27,9 +27,9 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "requestId": {"type": "string"},
-        "method": {"type": "string", "enum": ["GET", "POST"]},
-        "path": {"type": "string"},
+        "requestId": { "type": "string" },
+        "method": { "type": "string", "enum": ["GET", "POST"] },
+        "path": { "type": "string" },
         "endpoint": {
           "type": "string",
           "enum": [
@@ -44,18 +44,18 @@
             "unknown"
           ]
         },
-        "cliEquivalent": {"type": ["string", "null"]},
-        "auth": {"$ref": "#/$defs/authPosture"},
-        "bodyBytes": {"type": "integer", "minimum": 0},
+        "cliEquivalent": { "type": ["string", "null"] },
+        "auth": { "$ref": "#/$defs/authPosture" },
+        "bodyBytes": { "type": "integer", "minimum": 0 },
         "query": {
           "type": "object",
           "additionalProperties": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": { "type": "string" }
           }
         },
-        "contentLengthRequired": {"type": "boolean"},
-        "chunkedUploadAccepted": {"type": "boolean", "const": false}
+        "contentLengthRequired": { "type": "boolean" },
+        "chunkedUploadAccepted": { "type": "boolean", "const": false }
       }
     },
     "authPosture": {
@@ -63,39 +63,33 @@
       "required": ["required", "state", "tokenMaterialExposed"],
       "additionalProperties": false,
       "properties": {
-        "required": {"type": "boolean"},
+        "required": { "type": "boolean" },
         "state": {
           "type": "string",
           "enum": ["not_required", "missing", "weak", "accepted", "rejected"]
         },
-        "tokenMaterialExposed": {"type": "boolean", "const": false}
+        "tokenMaterialExposed": { "type": "boolean", "const": false }
       }
     },
     "response": {
       "type": "object",
-      "required": [
-        "statusCode",
-        "payloadSchema",
-        "payload",
-        "elapsedMs",
-        "degradedCodes"
-      ],
+      "required": ["statusCode", "payloadSchema", "payload", "elapsedMs", "degradedCodes"],
       "additionalProperties": false,
       "properties": {
-        "statusCode": {"type": "integer", "minimum": 100, "maximum": 599},
+        "statusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
         "payloadSchema": {
           "type": "string",
           "enum": ["ee.response.v2", "ee.error.v2"]
         },
-        "payload": {"$ref": "#/$defs/jsonValue"},
-        "elapsedMs": {"type": "integer", "minimum": 0},
+        "payload": { "$ref": "#/$defs/jsonValue" },
+        "elapsedMs": { "type": "integer", "minimum": 0 },
         "degradedCodes": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": { "type": "string" }
         },
         "volatileTransportFields": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": { "type": "string" },
           "description": "Fields excluded from CLI parity comparisons, such as requestId and elapsedMs."
         }
       }
@@ -105,25 +99,25 @@
       "required": ["readOnly", "eventKind", "terminal"],
       "additionalProperties": false,
       "properties": {
-        "readOnly": {"type": "boolean", "const": true},
+        "readOnly": { "type": "boolean", "const": true },
         "eventKind": {
           "type": "string",
           "enum": ["header", "data", "error", "cancelled", "complete"]
         },
-        "terminal": {"type": "boolean"},
-        "eventBufferRemaining": {"type": "integer", "minimum": 0}
+        "terminal": { "type": "boolean" },
+        "eventBufferRemaining": { "type": "integer", "minimum": 0 }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
         {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         }
       ]
     }

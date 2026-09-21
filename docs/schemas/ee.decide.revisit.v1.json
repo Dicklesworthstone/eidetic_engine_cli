@@ -19,18 +19,18 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.decide.revisit.v1"},
-    "version": {"type": "string"},
-    "workspaceId": {"type": "string"},
-    "databasePath": {"type": "string"},
-    "now": {"type": "string", "format": "date-time"},
-    "warningDays": {"type": "integer", "minimum": 0},
-    "windowEnd": {"type": "string", "format": "date-time"},
-    "dueCount": {"type": "integer", "minimum": 0},
-    "returnedCount": {"type": "integer", "minimum": 0},
-    "truncated": {"type": "boolean"},
-    "decisions": {"type": "array", "items": {"$ref": "#/$defs/decisionItem"}},
-    "subscribe": {"$ref": "#/$defs/subscribe"}
+    "schema": { "type": "string", "const": "ee.decide.revisit.v1" },
+    "version": { "type": "string" },
+    "workspaceId": { "type": "string" },
+    "databasePath": { "type": "string" },
+    "now": { "type": "string", "format": "date-time" },
+    "warningDays": { "type": "integer", "minimum": 0 },
+    "windowEnd": { "type": "string", "format": "date-time" },
+    "dueCount": { "type": "integer", "minimum": 0 },
+    "returnedCount": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionItem" } },
+    "subscribe": { "$ref": "#/$defs/subscribe" }
   },
   "field_presets": {
     "minimal": ["schema", "version", "dueCount", "returnedCount", "truncated"],
@@ -81,20 +81,20 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"type": "string"},
-        "topic": {"type": "string"},
-        "normalizedTopic": {"type": "string"},
-        "chosen": {"type": "string"},
-        "alternatives": {"type": "array", "items": {"type": "string"}},
-        "options": {"type": "array", "items": {"type": "string"}},
-        "rationale": {"type": "string"},
-        "supersedes": {"type": ["string", "null"]},
-        "chainDepth": {"type": "integer", "minimum": 0},
-        "revisitBy": {"type": ["string", "null"], "format": "date-time"},
-        "revisitStatus": {"$ref": "#/$defs/revisitStatus"},
-        "superseded": {"type": "boolean"},
-        "validTo": {"type": ["string", "null"], "format": "date-time"},
-        "createdAt": {"type": "string", "format": "date-time"}
+        "memoryId": { "type": "string" },
+        "topic": { "type": "string" },
+        "normalizedTopic": { "type": "string" },
+        "chosen": { "type": "string" },
+        "alternatives": { "type": "array", "items": { "type": "string" } },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "rationale": { "type": "string" },
+        "supersedes": { "type": ["string", "null"] },
+        "chainDepth": { "type": "integer", "minimum": 0 },
+        "revisitBy": { "type": ["string", "null"], "format": "date-time" },
+        "revisitStatus": { "$ref": "#/$defs/revisitStatus" },
+        "superseded": { "type": "boolean" },
+        "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
       }
     },
     "revisitStatus": {
@@ -106,10 +106,10 @@
       "required": ["schema", "filter", "pollCommand", "streamCommand"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.decide.subscribe.v1"},
-        "filter": {"type": "string"},
-        "pollCommand": {"type": "string"},
-        "streamCommand": {"type": "string"}
+        "schema": { "type": "string", "const": "ee.decide.subscribe.v1" },
+        "filter": { "type": "string" },
+        "pollCommand": { "type": "string" },
+        "streamCommand": { "type": "string" }
       }
     }
   }

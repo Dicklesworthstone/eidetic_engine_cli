@@ -4,13 +4,7 @@
   "title": "ee.graph.rule_provenance_ego.v1",
   "description": "Bipartite ego subgraph for a single procedural rule. Produced by `ee::graph::bipartite_provenance::compute_rule_provenance_ego`. The bare payload returned by the helper; the planned `ee rule provenance <rule-id>` CLI surface (tracked by bd-3eymh) will wrap this inside the standard `ee.response.v2` envelope. Collections are deterministically sorted (`citedMemories` by `memoryId`, `coCitingRules` by `ruleId`, `sharedMemoryIds` by memory id) so the JSON serialization is byte-stable across runs against the same projection (J7 contract).",
   "type": "object",
-  "required": [
-    "schema",
-    "ruleId",
-    "status",
-    "citedMemories",
-    "coCitingRules"
-  ],
+  "required": ["schema", "ruleId", "status", "citedMemories", "coCitingRules"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -23,15 +17,15 @@
       "minLength": 1,
       "description": "Center rule the ego subgraph is rooted at. Echoed back from the caller-supplied identifier even when the rule is not present in the bipartite projection."
     },
-    "status": {"$ref": "#/$defs/egoStatus"},
+    "status": { "$ref": "#/$defs/egoStatus" },
     "citedMemories": {
       "type": "array",
-      "items": {"$ref": "#/$defs/citedMemory"},
+      "items": { "$ref": "#/$defs/citedMemory" },
       "description": "Memories the center rule cites (the 1-hop ring on the bipartite projection). Sorted by `memoryId` ascending. Empty when `status` is not `available`."
     },
     "coCitingRules": {
       "type": "array",
-      "items": {"$ref": "#/$defs/coCitingRule"},
+      "items": { "$ref": "#/$defs/coCitingRule" },
       "description": "Peer rules that share at least one memory with the center rule (the 2-hop ring). Sorted by `ruleId` ascending. The center rule itself is never included. Empty when `status` is not `available`."
     }
   },
@@ -76,7 +70,7 @@
         },
         "sharedMemoryIds": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": { "type": "string", "minLength": 1 },
           "minItems": 1,
           "uniqueItems": true,
           "description": "Deterministic intersection of this peer's cited memories with the center's cited memories. Sorted by memory id ascending, deduplicated."
@@ -90,8 +84,8 @@
       "ruleId": "rule_release_format_clippy",
       "status": "available",
       "citedMemories": [
-        {"memoryId": "mem_release_failure_q3", "otherRuleCount": 2},
-        {"memoryId": "mem_format_before_release", "otherRuleCount": 0}
+        { "memoryId": "mem_release_failure_q3", "otherRuleCount": 2 },
+        { "memoryId": "mem_format_before_release", "otherRuleCount": 0 }
       ],
       "coCitingRules": [
         {

@@ -7,11 +7,11 @@
   "required": ["schema", "snapshotVersion", "skyline", "summary", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.status.skyline.v1"},
-    "snapshotVersion": {"type": ["integer", "string"]},
-    "skyline": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
-    "summary": {"$ref": "#/$defs/jsonObject"},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+    "schema": { "type": "string", "const": "ee.status.skyline.v1" },
+    "snapshotVersion": { "type": ["integer", "string"] },
+    "skyline": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+    "summary": { "$ref": "#/$defs/jsonObject" },
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } }
   },
   "field_presets": {
     "minimal": ["schema", "snapshotVersion"],
@@ -57,15 +57,15 @@
     }
   ],
   "$defs": {
-    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

@@ -7,20 +7,20 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
     "data": {
       "type": "object",
       "required": ["command", "report"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "diag contention"},
-        "report": {"$ref": "#/$defs/contentionReport"}
+        "command": { "type": "string", "const": "diag contention" },
+        "report": { "$ref": "#/$defs/contentionReport" }
       }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradedEntry"}
+      "items": { "$ref": "#/$defs/degradedEntry" }
     }
   },
   "field_presets": {
@@ -149,9 +149,7 @@
               "severity": "warm",
               "reasonCode": "singleflight_active_coalescing",
               "detail": "single-flight: 2 active leaders, 1380 followers waiting, 0 timeouts, 0 leader failures",
-              "suggestedCommands": [
-                "informational: read coalescing is absorbing duplicate load"
-              ]
+              "suggestedCommands": ["informational: read coalescing is absorbing duplicate load"]
             },
             {
               "source": "write_lock",
@@ -190,24 +188,24 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schemaTag": {"type": "string", "const": "ee.diag.contention.v1"},
-        "overallPosture": {"$ref": "#/$defs/posture"},
-        "writeLock": {"$ref": "#/$defs/writeLock"},
-        "readPool": {"$ref": "#/$defs/readPool"},
-        "singleflight": {"$ref": "#/$defs/singleflight"},
-        "groupCommit": {"$ref": "#/$defs/groupCommit"},
-        "indexIntake": {"$ref": "#/$defs/indexIntake"},
-        "l2Cache": {"$ref": "#/$defs/l2Cache"},
-        "flockGate": {"$ref": "#/$defs/flockGate"},
+        "schemaTag": { "type": "string", "const": "ee.diag.contention.v1" },
+        "overallPosture": { "$ref": "#/$defs/posture" },
+        "writeLock": { "$ref": "#/$defs/writeLock" },
+        "readPool": { "$ref": "#/$defs/readPool" },
+        "singleflight": { "$ref": "#/$defs/singleflight" },
+        "groupCommit": { "$ref": "#/$defs/groupCommit" },
+        "indexIntake": { "$ref": "#/$defs/indexIntake" },
+        "l2Cache": { "$ref": "#/$defs/l2Cache" },
+        "flockGate": { "$ref": "#/$defs/flockGate" },
         "topContention": {
           "type": "array",
           "description": "Findings with posture >= warm, ranked by severity (desc) then source (asc).",
-          "items": {"$ref": "#/$defs/finding"}
+          "items": { "$ref": "#/$defs/finding" }
         },
         "unavailableSources": {
           "type": "array",
           "description": "Core sources expected but not gathered this run, sorted by source.",
-          "items": {"$ref": "#/$defs/sourceGap"}
+          "items": { "$ref": "#/$defs/sourceGap" }
         }
       }
     },
@@ -216,14 +214,14 @@
       "required": ["running", "queueDepth", "totalProcessed", "avgWaitMs", "maxWaitMs", "posture"],
       "additionalProperties": false,
       "properties": {
-        "running": {"type": "boolean"},
-        "queueDepth": {"type": "integer", "minimum": 0},
-        "totalProcessed": {"type": "integer", "minimum": 0},
-        "avgWaitMs": {"type": "number", "minimum": 0},
-        "maxWaitMs": {"type": "integer", "minimum": 0},
-        "lockWaitMsP50": {"type": "integer", "minimum": 0},
-        "lockWaitMsP99": {"type": "integer", "minimum": 0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "running": { "type": "boolean" },
+        "queueDepth": { "type": "integer", "minimum": 0 },
+        "totalProcessed": { "type": "integer", "minimum": 0 },
+        "avgWaitMs": { "type": "number", "minimum": 0 },
+        "maxWaitMs": { "type": "integer", "minimum": 0 },
+        "lockWaitMsP50": { "type": "integer", "minimum": 0 },
+        "lockWaitMsP99": { "type": "integer", "minimum": 0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "readPool": {
@@ -247,21 +245,21 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "maxSize": {"type": "integer", "minimum": 0},
-        "active": {"type": "integer", "minimum": 0},
-        "idle": {"type": "integer", "minimum": 0},
-        "activePins": {"type": "integer", "minimum": 0},
-        "expiredPins": {"type": "integer", "minimum": 0},
-        "maxSeen": {"type": "integer", "minimum": 0},
-        "drops": {"type": "integer", "minimum": 0},
-        "releaseFailures": {"type": "integer", "minimum": 0},
-        "adHocBypassCount": {"type": "integer", "minimum": 0},
-        "acquireWaitSamples": {"type": "integer", "minimum": 0},
-        "acquireWaitP50Ns": {"type": "integer", "minimum": 0},
-        "acquireWaitP99Ns": {"type": "integer", "minimum": 0},
-        "sizeWasZero": {"type": "boolean"},
-        "underized": {"type": "boolean"},
-        "posture": {"$ref": "#/$defs/posture"}
+        "maxSize": { "type": "integer", "minimum": 0 },
+        "active": { "type": "integer", "minimum": 0 },
+        "idle": { "type": "integer", "minimum": 0 },
+        "activePins": { "type": "integer", "minimum": 0 },
+        "expiredPins": { "type": "integer", "minimum": 0 },
+        "maxSeen": { "type": "integer", "minimum": 0 },
+        "drops": { "type": "integer", "minimum": 0 },
+        "releaseFailures": { "type": "integer", "minimum": 0 },
+        "adHocBypassCount": { "type": "integer", "minimum": 0 },
+        "acquireWaitSamples": { "type": "integer", "minimum": 0 },
+        "acquireWaitP50Ns": { "type": "integer", "minimum": 0 },
+        "acquireWaitP99Ns": { "type": "integer", "minimum": 0 },
+        "sizeWasZero": { "type": "boolean" },
+        "underized": { "type": "boolean" },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "singleflight": {
@@ -279,29 +277,36 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "status": {"type": "string"},
-        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
-        "activeLeaderCount": {"type": "integer", "minimum": 0},
-        "leaderStartCount": {"type": "integer", "minimum": 0},
-        "followerWaitCount": {"type": "integer", "minimum": 0},
-        "followerTimeoutCount": {"type": "integer", "minimum": 0},
-        "leaderFailureCount": {"type": "integer", "minimum": 0},
-        "reusedResultCount": {"type": "integer", "minimum": 0},
-        "coalesceEfficiency": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "status": { "type": "string" },
+        "configuredSurfaceCount": { "type": "integer", "minimum": 0 },
+        "activeLeaderCount": { "type": "integer", "minimum": 0 },
+        "leaderStartCount": { "type": "integer", "minimum": 0 },
+        "followerWaitCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutCount": { "type": "integer", "minimum": 0 },
+        "leaderFailureCount": { "type": "integer", "minimum": 0 },
+        "reusedResultCount": { "type": "integer", "minimum": 0 },
+        "coalesceEfficiency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "groupCommit": {
       "type": "object",
-      "required": ["enabled", "batches", "writesCoalesced", "fsyncSaved", "avgBatchSize", "posture"],
+      "required": [
+        "enabled",
+        "batches",
+        "writesCoalesced",
+        "fsyncSaved",
+        "avgBatchSize",
+        "posture"
+      ],
       "additionalProperties": false,
       "properties": {
-        "enabled": {"type": "boolean"},
-        "batches": {"type": "integer", "minimum": 0},
-        "writesCoalesced": {"type": "integer", "minimum": 0},
-        "fsyncSaved": {"type": "integer", "minimum": 0},
-        "avgBatchSize": {"type": "number", "minimum": 0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "enabled": { "type": "boolean" },
+        "batches": { "type": "integer", "minimum": 0 },
+        "writesCoalesced": { "type": "integer", "minimum": 0 },
+        "fsyncSaved": { "type": "integer", "minimum": 0 },
+        "avgBatchSize": { "type": "number", "minimum": 0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "indexIntake": {
@@ -309,11 +314,11 @@
       "required": ["intakeMode", "rebuilds", "swapStalls", "avgSwapMs", "posture"],
       "additionalProperties": false,
       "properties": {
-        "intakeMode": {"type": "string"},
-        "rebuilds": {"type": "integer", "minimum": 0},
-        "swapStalls": {"type": "integer", "minimum": 0},
-        "avgSwapMs": {"type": "number", "minimum": 0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "intakeMode": { "type": "string" },
+        "rebuilds": { "type": "integer", "minimum": 0 },
+        "swapStalls": { "type": "integer", "minimum": 0 },
+        "avgSwapMs": { "type": "number", "minimum": 0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "l2Cache": {
@@ -321,25 +326,32 @@
       "required": ["hits", "misses", "evictions", "posture"],
       "additionalProperties": false,
       "properties": {
-        "hits": {"type": "integer", "minimum": 0},
-        "misses": {"type": "integer", "minimum": 0},
-        "evictions": {"type": "integer", "minimum": 0},
-        "hitRate": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "thrashRatio": {"type": "number", "minimum": 0.0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "hits": { "type": "integer", "minimum": 0 },
+        "misses": { "type": "integer", "minimum": 0 },
+        "evictions": { "type": "integer", "minimum": 0 },
+        "hitRate": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "thrashRatio": { "type": "number", "minimum": 0.0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "flockGate": {
       "type": "object",
-      "required": ["acquires", "contendedAcquires", "avgWaitMs", "maxWaitMs", "timeouts", "posture"],
+      "required": [
+        "acquires",
+        "contendedAcquires",
+        "avgWaitMs",
+        "maxWaitMs",
+        "timeouts",
+        "posture"
+      ],
       "additionalProperties": false,
       "properties": {
-        "acquires": {"type": "integer", "minimum": 0},
-        "contendedAcquires": {"type": "integer", "minimum": 0},
-        "avgWaitMs": {"type": "number", "minimum": 0.0},
-        "maxWaitMs": {"type": "integer", "minimum": 0},
-        "timeouts": {"type": "integer", "minimum": 0},
-        "posture": {"$ref": "#/$defs/posture"}
+        "acquires": { "type": "integer", "minimum": 0 },
+        "contendedAcquires": { "type": "integer", "minimum": 0 },
+        "avgWaitMs": { "type": "number", "minimum": 0.0 },
+        "maxWaitMs": { "type": "integer", "minimum": 0 },
+        "timeouts": { "type": "integer", "minimum": 0 },
+        "posture": { "$ref": "#/$defs/posture" }
       }
     },
     "finding": {
@@ -347,11 +359,11 @@
       "required": ["source", "severity", "reasonCode", "detail", "suggestedCommands"],
       "additionalProperties": false,
       "properties": {
-        "source": {"type": "string"},
-        "severity": {"$ref": "#/$defs/posture"},
-        "reasonCode": {"type": "string"},
-        "detail": {"type": "string"},
-        "suggestedCommands": {"type": "array", "items": {"type": "string"}}
+        "source": { "type": "string" },
+        "severity": { "$ref": "#/$defs/posture" },
+        "reasonCode": { "type": "string" },
+        "detail": { "type": "string" },
+        "suggestedCommands": { "type": "array", "items": { "type": "string" } }
       }
     },
     "sourceGap": {
@@ -359,8 +371,8 @@
       "required": ["source", "code"],
       "additionalProperties": false,
       "properties": {
-        "source": {"type": "string"},
-        "code": {"type": "string"}
+        "source": { "type": "string" },
+        "code": { "type": "string" }
       }
     },
     "degradedEntry": {
@@ -370,18 +382,14 @@
       "properties": {
         "code": {
           "type": "string",
-          "enum": [
-            "write_owner_unavailable",
-            "read_pool_unavailable",
-            "singleflight_unavailable"
-          ]
+          "enum": ["write_owner_unavailable", "read_pool_unavailable", "singleflight_unavailable"]
         },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": "string"}
+        "message": { "type": "string" },
+        "repair": { "type": "string" }
       }
     }
   }

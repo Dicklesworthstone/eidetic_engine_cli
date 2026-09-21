@@ -151,12 +151,12 @@
           "type": "string",
           "enum": ["tiny", "small", "medium", "large", "swarm_scale", "custom"]
         },
-        "memoryCount": {"type": "integer", "minimum": 0},
-        "linkCount": {"type": "integer", "minimum": 0},
-        "packCount": {"type": "integer", "minimum": 0},
-        "searchDocumentCount": {"type": "integer", "minimum": 0},
-        "dbBytes": {"type": "integer", "minimum": 0},
-        "estimatedContentBytes": {"type": "integer", "minimum": 0},
+        "memoryCount": { "type": "integer", "minimum": 0 },
+        "linkCount": { "type": "integer", "minimum": 0 },
+        "packCount": { "type": "integer", "minimum": 0 },
+        "searchDocumentCount": { "type": "integer", "minimum": 0 },
+        "dbBytes": { "type": "integer", "minimum": 0 },
+        "estimatedContentBytes": { "type": "integer", "minimum": 0 },
         "fixtureProfileId": {
           "type": ["string", "null"],
           "pattern": "^scale_[A-Za-z0-9_.-]{1,80}$"
@@ -180,10 +180,10 @@
           "type": "string",
           "enum": ["healthy", "warming", "degraded", "blocked", "unknown"]
         },
-        "dbBytes": {"type": "integer", "minimum": 0},
-        "pageCount": {"type": "integer", "minimum": 0},
-        "pageSizeBytes": {"type": "integer", "minimum": 0},
-        "freeListPages": {"type": "integer", "minimum": 0},
+        "dbBytes": { "type": "integer", "minimum": 0 },
+        "pageCount": { "type": "integer", "minimum": 0 },
+        "pageSizeBytes": { "type": "integer", "minimum": 0 },
+        "freeListPages": { "type": "integer", "minimum": 0 },
         "readPoolState": {
           "type": "string",
           "enum": ["adequate", "undersized", "saturated", "unknown"]
@@ -215,11 +215,11 @@
           "type": "string",
           "enum": ["clean", "growing", "checkpoint_recommended", "stale_orphaned", "unknown"]
         },
-        "pageCacheBytes": {"type": "integer", "minimum": 0},
-        "walBytes": {"type": "integer", "minimum": 0},
-        "checkpointAgeMs": {"type": ["integer", "null"], "minimum": 0},
-        "readAmplification": {"type": "number", "minimum": 0.0},
-        "writeAmplification": {"type": "number", "minimum": 0.0}
+        "pageCacheBytes": { "type": "integer", "minimum": 0 },
+        "walBytes": { "type": "integer", "minimum": 0 },
+        "checkpointAgeMs": { "type": ["integer", "null"], "minimum": 0 },
+        "readAmplification": { "type": "number", "minimum": 0.0 },
+        "writeAmplification": { "type": "number", "minimum": 0.0 }
       }
     },
     "indexPosture": {
@@ -227,9 +227,9 @@
       "additionalProperties": false,
       "required": ["lexical", "semantic", "graph"],
       "properties": {
-        "lexical": {"$ref": "#/$defs/indexSubsystem"},
-        "semantic": {"$ref": "#/$defs/indexSubsystem"},
-        "graph": {"$ref": "#/$defs/indexSubsystem"}
+        "lexical": { "$ref": "#/$defs/indexSubsystem" },
+        "semantic": { "$ref": "#/$defs/indexSubsystem" },
+        "graph": { "$ref": "#/$defs/indexSubsystem" }
       }
     },
     "indexSubsystem": {
@@ -241,9 +241,9 @@
           "type": "string",
           "enum": ["fresh", "stale", "rebuilding", "unavailable", "unknown"]
         },
-        "generation": {"type": ["integer", "null"], "minimum": 0},
-        "lagRecords": {"type": "integer", "minimum": 0},
-        "lastBuiltAt": {"type": ["string", "null"], "format": "date-time"}
+        "generation": { "type": ["integer", "null"], "minimum": 0 },
+        "lagRecords": { "type": "integer", "minimum": 0 },
+        "lastBuiltAt": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "commandSlo": {
@@ -273,11 +273,11 @@
             "other"
           ]
         },
-        "budgetMs": {"type": "integer", "minimum": 0},
-        "p50Ms": {"type": ["integer", "null"], "minimum": 0},
-        "p95Ms": {"type": ["integer", "null"], "minimum": 0},
-        "p99Ms": {"type": ["integer", "null"], "minimum": 0},
-        "sampleCount": {"type": "integer", "minimum": 0},
+        "budgetMs": { "type": "integer", "minimum": 0 },
+        "p50Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "p95Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "p99Ms": { "type": ["integer", "null"], "minimum": 0 },
+        "sampleCount": { "type": "integer", "minimum": 0 },
         "status": {
           "type": "string",
           "enum": ["ok", "warming", "thrashing", "exceeded", "unknown"]
@@ -312,8 +312,8 @@
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string", "minLength": 1},
-        "repair": {"type": ["string", "null"], "minLength": 1}
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": ["string", "null"], "minLength": 1 }
       }
     },
     "recoveryAction": {
@@ -321,13 +321,20 @@
       "additionalProperties": false,
       "required": ["priority", "kind", "command", "rationale"],
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
+        "priority": { "type": "integer", "minimum": 0 },
         "kind": {
           "type": "string",
-          "enum": ["recapture_fixture", "warm_cache", "checkpoint_wal", "rebuild_index", "reduce_probe_scope", "inspect_support_bundle"]
+          "enum": [
+            "recapture_fixture",
+            "warm_cache",
+            "checkpoint_wal",
+            "rebuild_index",
+            "reduce_probe_scope",
+            "inspect_support_bundle"
+          ]
         },
-        "command": {"type": ["string", "null"], "minLength": 1},
-        "rationale": {"type": "string", "minLength": 1}
+        "command": { "type": ["string", "null"], "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 }
       }
     },
     "provenanceRef": {
@@ -339,7 +346,7 @@
           "type": "string",
           "enum": ["schema", "fixture", "probe", "bead", "adr"]
         },
-        "ref": {"type": "string", "minLength": 1, "maxLength": 240},
+        "ref": { "type": "string", "minLength": 1, "maxLength": 240 },
         "hash": {
           "type": ["string", "null"],
           "pattern": "^blake3:[A-Fa-f0-9]{32,64}$"

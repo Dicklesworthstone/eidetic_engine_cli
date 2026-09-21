@@ -7,22 +7,22 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
-    "degraded": {"type": "array", "items": {"type": "object"}},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
+    "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
       "required": ["command", "version", "found", "is_tombstoned"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "memory show"},
-        "version": {"type": "string"},
-        "found": {"type": "boolean"},
-        "is_tombstoned": {"type": "boolean"},
-        "memoryId": {"type": "string"},
-        "memory": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "error": {"type": "string"}
+        "command": { "type": "string", "const": "memory show" },
+        "version": { "type": "string" },
+        "found": { "type": "boolean" },
+        "is_tombstoned": { "type": "boolean" },
+        "memoryId": { "type": "string" },
+        "memory": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "error": { "type": "string" }
       }
     }
   },
@@ -35,12 +35,12 @@
   "$defs": {
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

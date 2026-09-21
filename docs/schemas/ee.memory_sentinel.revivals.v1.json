@@ -125,7 +125,7 @@
     {
       "if": {
         "properties": {
-          "observationMode": {"const": "explicit"}
+          "observationMode": { "const": "explicit" }
         },
         "required": ["observationMode"]
       },
@@ -134,7 +134,7 @@
           "evaluationPosture": {
             "const": "local_read_only_predicates_plus_allowlisted_command_help_process"
           },
-          "commandHelpProcessExecution": {"const": true}
+          "commandHelpProcessExecution": { "const": true }
         }
       },
       "else": {
@@ -142,25 +142,25 @@
           "evaluationPosture": {
             "const": "local_read_only_predicates_no_process_execution"
           },
-          "commandHelpProcessExecution": {"const": false}
+          "commandHelpProcessExecution": { "const": false }
         }
       }
     },
     {
       "if": {
         "properties": {
-          "truncatedByLimit": {"const": true}
+          "truncatedByLimit": { "const": true }
         },
         "required": ["truncatedByLimit"]
       },
       "then": {
         "properties": {
-          "limitRepair": {"type": "string", "minLength": 1}
+          "limitRepair": { "type": "string", "minLength": 1 }
         }
       },
       "else": {
         "properties": {
-          "limitRepair": {"const": null}
+          "limitRepair": { "const": null }
         }
       }
     }
@@ -170,11 +170,11 @@
       "type": "object",
       "required": ["specCount", "pass", "fail", "unknown", "degraded"],
       "properties": {
-        "specCount": {"type": "integer", "minimum": 0, "maximum": 100},
-        "pass": {"type": "integer", "minimum": 0, "maximum": 100},
-        "fail": {"type": "integer", "minimum": 0, "maximum": 100},
-        "unknown": {"type": "integer", "minimum": 0, "maximum": 100},
-        "degraded": {"type": "integer", "minimum": 0, "maximum": 100}
+        "specCount": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "pass": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "fail": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "unknown": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "degraded": { "type": "integer", "minimum": 0, "maximum": 100 }
       },
       "additionalProperties": false
     },

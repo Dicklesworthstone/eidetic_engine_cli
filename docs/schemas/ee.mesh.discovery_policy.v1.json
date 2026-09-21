@@ -98,7 +98,10 @@
           "type": "string",
           "enum": ["discovery_policy_no_ee_mesh_tag", "discovery_policy_empty_allowlist"]
         },
-        "severity": { "type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"] },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
         "message": { "type": "string", "minLength": 1 },
         "repair": { "type": "string", "minLength": 1 }
       }

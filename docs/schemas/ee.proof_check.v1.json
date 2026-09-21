@@ -16,15 +16,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "artifact",
-          "command",
-          "durationMs",
-          "status",
-          "exitCode",
-          "stdout",
-          "stderr"
-        ],
+        "required": ["artifact", "command", "durationMs", "status", "exitCode", "stdout", "stderr"],
         "properties": {
           "artifact": {
             "type": "object",
@@ -74,10 +66,7 @@
     "degraded": {
       "type": "array",
       "items": {
-        "enum": [
-          "degraded.proof_tool_missing",
-          "degraded.proof_violation_detected"
-        ]
+        "enum": ["degraded.proof_tool_missing", "degraded.proof_violation_detected"]
       },
       "uniqueItems": true
     }

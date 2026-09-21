@@ -7,9 +7,9 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean", "const": true},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean", "const": true },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": [
@@ -35,37 +35,59 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.bootstrap.docs.apply.v1"},
-        "parserVersion": {"type": "string", "const": "docs-bootstrap-v2"},
-        "runId": {"type": "string", "minLength": 1},
-        "workspacePath": {"type": "string", "minLength": 1},
-        "databasePath": {"type": "string", "minLength": 1},
-        "approvedOnly": {"type": "boolean", "const": true},
+        "schema": { "type": "string", "const": "ee.bootstrap.docs.apply.v1" },
+        "parserVersion": { "type": "string", "const": "docs-bootstrap-v2" },
+        "runId": { "type": "string", "minLength": 1 },
+        "workspacePath": { "type": "string", "minLength": 1 },
+        "databasePath": { "type": "string", "minLength": 1 },
+        "approvedOnly": { "type": "boolean", "const": true },
         "includeGlobs": {
           "type": "array",
           "description": "Sorted, deduplicated workspace-relative include globs replayed from the reviewed dry run.",
-          "items": {"type": "string", "minLength": 1},
+          "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
-        "candidateCount": {"type": "integer", "minimum": 0},
-        "materializedCount": {"type": "integer", "minimum": 0},
-        "approvedCandidateCount": {"type": "integer", "minimum": 0},
-        "appliedCount": {"type": "integer", "minimum": 0},
-        "unchangedCount": {"type": "integer", "minimum": 0},
-        "blockedCount": {"type": "integer", "minimum": 0},
-        "skippedCount": {"type": "integer", "minimum": 0},
-        "durableMutation": {"type": "boolean"},
-        "candidates": {"type": "array", "items": {"$ref": "#/$defs/applyCandidate"}},
-        "appliedReports": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
-        "nextAction": {"type": "string"}
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "materializedCount": { "type": "integer", "minimum": 0 },
+        "approvedCandidateCount": { "type": "integer", "minimum": 0 },
+        "appliedCount": { "type": "integer", "minimum": 0 },
+        "unchangedCount": { "type": "integer", "minimum": 0 },
+        "blockedCount": { "type": "integer", "minimum": 0 },
+        "skippedCount": { "type": "integer", "minimum": 0 },
+        "durableMutation": { "type": "boolean" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/applyCandidate" } },
+        "appliedReports": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } },
+        "nextAction": { "type": "string" }
       }
     },
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/degradation" } }
   },
   "field_presets": {
-    "minimal": ["schema", "parserVersion", "runId", "candidateCount", "durableMutation", "nextAction"],
-    "summary": ["schema", "parserVersion", "runId", "candidateCount", "materializedCount", "approvedCandidateCount", "appliedCount", "blockedCount", "skippedCount", "durableMutation", "nextAction"],
+    "minimal": [
+      "schema",
+      "parserVersion",
+      "runId",
+      "candidateCount",
+      "durableMutation",
+      "nextAction"
+    ],
+    "summary": [
+      "schema",
+      "parserVersion",
+      "runId",
+      "candidateCount",
+      "materializedCount",
+      "approvedCandidateCount",
+      "appliedCount",
+      "blockedCount",
+      "skippedCount",
+      "durableMutation",
+      "nextAction"
+    ],
     "standard": ["*"],
     "full": ["*"]
   },
@@ -84,17 +106,25 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "bootstrapCandidateId": {"type": "string", "minLength": 1},
-        "curationCandidateId": {"type": "string", "minLength": 1},
-        "evidenceId": {"type": "string", "minLength": 1},
-        "sourcePath": {"type": "string", "minLength": 1},
-        "sourceHash": {"type": "string", "minLength": 1},
+        "bootstrapCandidateId": { "type": "string", "minLength": 1 },
+        "curationCandidateId": { "type": "string", "minLength": 1 },
+        "evidenceId": { "type": "string", "minLength": 1 },
+        "sourcePath": { "type": "string", "minLength": 1 },
+        "sourceHash": { "type": "string", "minLength": 1 },
         "sourceKind": {
           "type": "string",
-          "enum": ["root_policy", "readme", "adr", "schema", "env_vars", "failure_mode_fixture", "reference_doc"]
+          "enum": [
+            "root_policy",
+            "readme",
+            "adr",
+            "schema",
+            "env_vars",
+            "failure_mode_fixture",
+            "reference_doc"
+          ]
         },
-        "status": {"type": "string"},
-        "action": {"type": "string"}
+        "status": { "type": "string" },
+        "action": { "type": "string" }
       }
     },
     "degradation": {
@@ -102,21 +132,21 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "minLength": 1},
-        "severity": {"type": "string"},
-        "message": {"type": "string"},
-        "repair": {"type": "string"},
-        "path": {"type": "string"}
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string" },
+        "message": { "type": "string" },
+        "repair": { "type": "string" },
+        "path": { "type": "string" }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

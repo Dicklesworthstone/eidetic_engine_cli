@@ -7,10 +7,10 @@
   "required": ["schema", "packDna", "proximityToSeed"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.context.v1"},
-    "packDna": {"$ref": "ee.context.pack_dna.v1.json"},
-    "proximityToSeed": {"type": ["number", "null"]},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+    "schema": { "type": "string", "const": "ee.context.v1" },
+    "packDna": { "$ref": "ee.context.pack_dna.v1.json" },
+    "proximityToSeed": { "type": ["number", "null"] },
+    "degraded": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } }
   },
   "field_presets": {
     "minimal": ["schema"],
@@ -19,15 +19,15 @@
     "full": ["*"]
   },
   "$defs": {
-    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

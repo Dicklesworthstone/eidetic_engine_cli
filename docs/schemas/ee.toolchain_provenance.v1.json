@@ -34,15 +34,15 @@
     },
     "tools": {
       "type": "array",
-      "items": {"$ref": "#/$defs/toolRow"}
+      "items": { "$ref": "#/$defs/toolRow" }
     },
     "scriptHashes": {
       "type": "array",
-      "items": {"$ref": "#/$defs/scriptHashRow"}
+      "items": { "$ref": "#/$defs/scriptHashRow" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradedEntry"}
+      "items": { "$ref": "#/$defs/degradedEntry" }
     }
   },
   "field_presets": {
@@ -84,7 +84,7 @@
       "type": "string",
       "description": "Workspace-relative path, or hashed:<blake3-12> for paths outside the workspace. Absolute paths are forbidden.",
       "pattern": "^(hashed:[0-9a-f]{12}|[^/].*)$",
-      "not": {"pattern": "^/"}
+      "not": { "pattern": "^/" }
     },
     "toolRow": {
       "type": "object",
@@ -111,30 +111,24 @@
           "enum": ["binary", "service", "script_suite"]
         },
         "resolvedPath": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/redactedPath"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/redactedPath" }]
         },
         "version": {
           "type": ["string", "null"],
           "maxLength": 128
         },
         "binaryHash": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" }]
         },
         "sourceHint": {
           "type": "string",
           "enum": ["release_install", "cargo_target", "system_package", "unknown"]
         },
-        "freshness": {"$ref": "#/$defs/freshnessState"},
-        "probe": {"$ref": "#/$defs/probeEvidence"},
+        "freshness": { "$ref": "#/$defs/freshnessState" },
+        "probe": { "$ref": "#/$defs/probeEvidence" },
         "degraded": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradedEntry"}
+          "items": { "$ref": "#/$defs/degradedEntry" }
         },
         "checkedAt": {
           "type": "string",

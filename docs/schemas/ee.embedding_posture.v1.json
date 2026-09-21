@@ -28,7 +28,14 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["neural_local", "neural_local_pending", "deterministic_hash", "neural_remote", "neural_remote_unavailable", "neural_remote_blocked"],
+      "enum": [
+        "neural_local",
+        "neural_local_pending",
+        "deterministic_hash",
+        "neural_remote",
+        "neural_remote_unavailable",
+        "neural_remote_blocked"
+      ],
       "description": "Active retrieval embedding posture."
     },
     "semantic": {
@@ -82,14 +89,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "id",
-            "provider",
-            "model_name",
-            "status",
-            "dimension",
-            "deterministic"
-          ],
+          "required": ["id", "provider", "model_name", "status", "dimension", "deterministic"],
           "properties": {
             "id": {
               "type": "string",

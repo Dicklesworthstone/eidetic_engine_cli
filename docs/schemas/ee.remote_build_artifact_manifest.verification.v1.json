@@ -34,123 +34,117 @@
     "verificationHash"
   ],
   "properties": {
-    "schema": {"const": "ee.remote_build_artifact_manifest.verification.v1"},
-    "status": {"enum": ["verified", "rejected"]},
-    "accepted": {"type": "boolean"},
-    "artifactName": {"type": ["string", "null"]},
+    "schema": { "const": "ee.remote_build_artifact_manifest.verification.v1" },
+    "status": { "enum": ["verified", "rejected"] },
+    "accepted": { "type": "boolean" },
+    "artifactName": { "type": ["string", "null"] },
     "artifactId": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "pattern": "^[1-9][0-9]*$"}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[1-9][0-9]*$" }]
     },
-    "repository": {"type": ["string", "null"]},
-    "workflow": {"type": ["string", "null"]},
+    "repository": { "type": ["string", "null"] },
+    "workflow": { "type": ["string", "null"] },
     "runId": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "pattern": "^[1-9][0-9]*$"}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[1-9][0-9]*$" }]
     },
-    "runAttempt": {"type": ["integer", "null"], "minimum": 1},
-    "sourceCommit": {"$ref": "#/$defs/nullableGitObject"},
-    "gitTree": {"$ref": "#/$defs/nullableGitObject"},
-    "manifestHash": {"$ref": "#/$defs/nullableHash"},
-    "buildCommandHash": {"$ref": "#/$defs/nullableHash"},
-    "effectiveInputHash": {"$ref": "#/$defs/nullableHash"},
-    "provenanceHash": {"$ref": "#/$defs/nullableHash"},
-    "target": {"type": ["string", "null"]},
-    "profile": {"type": ["string", "null"]},
-    "binaryHash": {"$ref": "#/$defs/nullableHash"},
-    "archiveHash": {"$ref": "#/$defs/nullableHash"},
-    "archiveSizeBytes": {"type": ["integer", "null"], "minimum": 1},
-    "checksumStatus": {"enum": ["verified", "missing", "mismatch"]},
-    "probeStatus": {"enum": ["passed", "failed"]},
+    "runAttempt": { "type": ["integer", "null"], "minimum": 1 },
+    "sourceCommit": { "$ref": "#/$defs/nullableGitObject" },
+    "gitTree": { "$ref": "#/$defs/nullableGitObject" },
+    "manifestHash": { "$ref": "#/$defs/nullableHash" },
+    "buildCommandHash": { "$ref": "#/$defs/nullableHash" },
+    "effectiveInputHash": { "$ref": "#/$defs/nullableHash" },
+    "provenanceHash": { "$ref": "#/$defs/nullableHash" },
+    "target": { "type": ["string", "null"] },
+    "profile": { "type": ["string", "null"] },
+    "binaryHash": { "$ref": "#/$defs/nullableHash" },
+    "archiveHash": { "$ref": "#/$defs/nullableHash" },
+    "archiveSizeBytes": { "type": ["integer", "null"], "minimum": 1 },
+    "checksumStatus": { "enum": ["verified", "missing", "mismatch"] },
+    "probeStatus": { "enum": ["passed", "failed"] },
     "probes": {
       "type": "array",
       "maxItems": 16,
-      "items": {"$ref": "#/$defs/probe"}
+      "items": { "$ref": "#/$defs/probe" }
     },
     "rejections": {
       "type": "array",
       "maxItems": 64,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": { "type": "string", "minLength": 1 }
     },
-    "rawOutputIncluded": {"const": false},
-    "verificationHash": {"$ref": "#/$defs/hash"}
+    "rawOutputIncluded": { "const": false },
+    "verificationHash": { "$ref": "#/$defs/hash" }
   },
   "allOf": [
     {
-      "if": {"properties": {"status": {"const": "verified"}}},
+      "if": { "properties": { "status": { "const": "verified" } } },
       "then": {
         "properties": {
-          "accepted": {"const": true},
-          "artifactName": {"type": "string", "minLength": 1},
-          "artifactId": {"type": "string", "pattern": "^[1-9][0-9]*$"},
-          "repository": {"type": "string", "minLength": 1},
-          "workflow": {"type": "string", "minLength": 1},
-          "runId": {"type": "string", "pattern": "^[1-9][0-9]*$"},
-          "runAttempt": {"type": "integer", "minimum": 1},
-          "sourceCommit": {"$ref": "#/$defs/gitObject"},
-          "gitTree": {"$ref": "#/$defs/gitObject"},
-          "manifestHash": {"$ref": "#/$defs/hash"},
-          "buildCommandHash": {"$ref": "#/$defs/hash"},
-          "effectiveInputHash": {"$ref": "#/$defs/hash"},
-          "provenanceHash": {"$ref": "#/$defs/hash"},
-          "target": {"type": "string", "minLength": 1},
-          "profile": {"type": "string", "minLength": 1},
-          "binaryHash": {"$ref": "#/$defs/hash"},
-          "archiveHash": {"$ref": "#/$defs/hash"},
-          "archiveSizeBytes": {"type": "integer", "minimum": 1},
-          "checksumStatus": {"const": "verified"},
-          "probeStatus": {"const": "passed"},
+          "accepted": { "const": true },
+          "artifactName": { "type": "string", "minLength": 1 },
+          "artifactId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+          "repository": { "type": "string", "minLength": 1 },
+          "workflow": { "type": "string", "minLength": 1 },
+          "runId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+          "runAttempt": { "type": "integer", "minimum": 1 },
+          "sourceCommit": { "$ref": "#/$defs/gitObject" },
+          "gitTree": { "$ref": "#/$defs/gitObject" },
+          "manifestHash": { "$ref": "#/$defs/hash" },
+          "buildCommandHash": { "$ref": "#/$defs/hash" },
+          "effectiveInputHash": { "$ref": "#/$defs/hash" },
+          "provenanceHash": { "$ref": "#/$defs/hash" },
+          "target": { "type": "string", "minLength": 1 },
+          "profile": { "type": "string", "minLength": 1 },
+          "binaryHash": { "$ref": "#/$defs/hash" },
+          "archiveHash": { "$ref": "#/$defs/hash" },
+          "archiveSizeBytes": { "type": "integer", "minimum": 1 },
+          "checksumStatus": { "const": "verified" },
+          "probeStatus": { "const": "passed" },
           "probes": {
             "type": "array",
             "minItems": 2,
             "maxItems": 16,
-            "items": {"$ref": "#/$defs/verifiedProbe"},
+            "items": { "$ref": "#/$defs/verifiedProbe" },
             "allOf": [
               {
-                "contains": {"$ref": "#/$defs/versionProbe"},
+                "contains": { "$ref": "#/$defs/versionProbe" },
                 "minContains": 1,
                 "maxContains": 1
               },
               {
-                "contains": {"$ref": "#/$defs/environmentAttestationHelpProbe"},
+                "contains": { "$ref": "#/$defs/environmentAttestationHelpProbe" },
                 "minContains": 1,
                 "maxContains": 1
               }
             ]
           },
-          "rejections": {"maxItems": 0}
+          "rejections": { "maxItems": 0 }
         }
       }
     },
     {
-      "if": {"properties": {"status": {"const": "rejected"}}},
-      "then": {"properties": {"accepted": {"const": false}}}
+      "if": { "properties": { "status": { "const": "rejected" } } },
+      "then": { "properties": { "accepted": { "const": false } } }
     }
   ],
   "$defs": {
-    "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "gitObject": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "nullableGitObject": {
-      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/gitObject"}]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/gitObject" }]
     },
     "nullableHash": {
-      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }]
     },
-    "assertionValue": {"type": ["string", "boolean", "null"]},
+    "assertionValue": { "type": ["string", "boolean", "null"] },
     "semanticAssertion": {
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "expected", "observed", "matched"],
       "properties": {
-        "path": {"type": "string", "pattern": "^/"},
-        "expected": {"$ref": "#/$defs/assertionValue"},
-        "observed": {"$ref": "#/$defs/assertionValue"},
-        "matched": {"type": "boolean"}
+        "path": { "type": "string", "pattern": "^/" },
+        "expected": { "$ref": "#/$defs/assertionValue" },
+        "observed": { "$ref": "#/$defs/assertionValue" },
+        "matched": { "type": "boolean" }
       }
     },
     "probe": {
@@ -166,35 +160,35 @@
         "semanticAssertions"
       ],
       "properties": {
-        "id": {"type": ["string", "null"]},
-        "argvHash": {"$ref": "#/$defs/nullableHash"},
-        "exitCode": {"type": ["integer", "null"]},
-        "stdoutHash": {"$ref": "#/$defs/nullableHash"},
-        "stderrHash": {"$ref": "#/$defs/nullableHash"},
-        "status": {"enum": ["passed", "failed", null]},
+        "id": { "type": ["string", "null"] },
+        "argvHash": { "$ref": "#/$defs/nullableHash" },
+        "exitCode": { "type": ["integer", "null"] },
+        "stdoutHash": { "$ref": "#/$defs/nullableHash" },
+        "stderrHash": { "$ref": "#/$defs/nullableHash" },
+        "status": { "enum": ["passed", "failed", null] },
         "semanticAssertions": {
           "type": "array",
-          "items": {"$ref": "#/$defs/semanticAssertion"}
+          "items": { "$ref": "#/$defs/semanticAssertion" }
         }
       }
     },
     "verifiedProbe": {
       "allOf": [
-        {"$ref": "#/$defs/probe"},
+        { "$ref": "#/$defs/probe" },
         {
           "properties": {
-            "id": {"type": "string", "minLength": 1},
-            "argvHash": {"$ref": "#/$defs/hash"},
-            "exitCode": {"const": 0},
-            "stdoutHash": {"$ref": "#/$defs/hash"},
-            "stderrHash": {"$ref": "#/$defs/hash"},
-            "status": {"const": "passed"},
+            "id": { "type": "string", "minLength": 1 },
+            "argvHash": { "$ref": "#/$defs/hash" },
+            "exitCode": { "const": 0 },
+            "stdoutHash": { "$ref": "#/$defs/hash" },
+            "stderrHash": { "$ref": "#/$defs/hash" },
+            "status": { "const": "passed" },
             "semanticAssertions": {
               "type": "array",
               "items": {
                 "allOf": [
-                  {"$ref": "#/$defs/semanticAssertion"},
-                  {"properties": {"matched": {"const": true}}}
+                  { "$ref": "#/$defs/semanticAssertion" },
+                  { "properties": { "matched": { "const": true } } }
                 ]
               }
             }
@@ -204,28 +198,28 @@
     },
     "versionProbe": {
       "allOf": [
-        {"$ref": "#/$defs/verifiedProbe"},
+        { "$ref": "#/$defs/verifiedProbe" },
         {
           "properties": {
-            "id": {"const": "version_json"},
+            "id": { "const": "version_json" },
             "argvHash": {
               "const": "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48"
             },
-            "semanticAssertions": {"minItems": 10}
+            "semanticAssertions": { "minItems": 10 }
           }
         }
       ]
     },
     "environmentAttestationHelpProbe": {
       "allOf": [
-        {"$ref": "#/$defs/verifiedProbe"},
+        { "$ref": "#/$defs/verifiedProbe" },
         {
           "properties": {
-            "id": {"const": "environment_attestation_help"},
+            "id": { "const": "environment_attestation_help" },
             "argvHash": {
               "const": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558"
             },
-            "semanticAssertions": {"maxItems": 0}
+            "semanticAssertions": { "maxItems": 0 }
           }
         }
       ]

@@ -4,11 +4,7 @@
   "title": "ee.daemon.response.v1",
   "description": "Length-prefixed JSON response envelope returned by the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). The wire framing matches `ee.daemon.request.v1`: 4-byte big-endian unsigned length followed by exactly that many bytes of UTF-8 JSON. `request_id`, `agent_id`, and optional `workspace_id` echo the request. Exactly one of `result` or `error` is populated. `ee.daemon.capabilities` advertises envelope schemas, methods, authorization, and nested `method_schemas`; clients must fall back locally when `ee.daemon.search` or its exact request/response schema ids are absent. A successful search result is the strict `ee.daemon.search.response.v3` wrapper around canonical `ee.response.v2` machine output, optional canonical `ee.explain.performance.v1` output requested through `ee.daemon.search.request.v2`, human output, an honest reuse contract, and nondeterministic daemon/search phase timings. The daemon process and default embedder are process-scoped while the search index is constructed per request.",
   "type": "object",
-  "required": [
-    "schema",
-    "request_id",
-    "agent_id"
-  ],
+  "required": ["schema", "request_id", "agent_id"],
   "oneOf": [
     {
       "required": ["result"]

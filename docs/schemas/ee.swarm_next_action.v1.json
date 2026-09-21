@@ -7,57 +7,91 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean", "const": true},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean", "const": true },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": ["schema", "workspace", "redactionStatus"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.swarm_next_action.v1"},
-        "workspace": {"type": "string"},
-        "redactionStatus": {"type": "string"},
-        "candidateCount": {"type": "integer", "minimum": 0},
-        "dirtyPathCount": {"type": "integer", "minimum": 0},
-        "degradedCount": {"type": "integer", "minimum": 0},
-        "inputs": {"$ref": "#/$defs/inputSummary"},
-        "coordination": {"$ref": "#/$defs/coordinationSummary"},
-        "checkout": {"$ref": "#/$defs/checkoutSummary"},
-        "compileHealth": {"$ref": "#/$defs/compileHealthSummary"},
-        "verification": {"$ref": "#/$defs/verificationSummary"},
-        "environment": {"$ref": "#/$defs/environmentSummary"},
+        "schema": { "type": "string", "const": "ee.swarm_next_action.v1" },
+        "workspace": { "type": "string" },
+        "redactionStatus": { "type": "string" },
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "dirtyPathCount": { "type": "integer", "minimum": 0 },
+        "degradedCount": { "type": "integer", "minimum": 0 },
+        "inputs": { "$ref": "#/$defs/inputSummary" },
+        "coordination": { "$ref": "#/$defs/coordinationSummary" },
+        "checkout": { "$ref": "#/$defs/checkoutSummary" },
+        "compileHealth": { "$ref": "#/$defs/compileHealthSummary" },
+        "verification": { "$ref": "#/$defs/verificationSummary" },
+        "environment": { "$ref": "#/$defs/environmentSummary" },
         "candidates": {
           "type": "array",
-          "items": {"$ref": "#/$defs/candidate"}
+          "items": { "$ref": "#/$defs/candidate" }
         },
         "recommendationCards": {
           "type": "array",
-          "items": {"$ref": "#/$defs/recommendationCard"}
+          "items": { "$ref": "#/$defs/recommendationCard" }
         },
         "staleWorkProposals": {
           "type": "array",
-          "items": {"$ref": "#/$defs/staleWorkProposal"}
+          "items": { "$ref": "#/$defs/staleWorkProposal" }
         },
         "topCandidates": {
           "type": "array",
-          "items": {"$ref": "#/$defs/candidate"}
+          "items": { "$ref": "#/$defs/candidate" }
         },
         "degraded": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradation"}
+          "items": { "$ref": "#/$defs/degradation" }
         }
       }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "field_presets": {
-    "minimal": ["schema", "workspace", "redactionStatus", "candidateCount", "dirtyPathCount", "degradedCount"],
-    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "compileHealth", "verification", "environment", "topCandidates", "staleWorkProposals", "degraded"],
-    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "recommendationCards", "staleWorkProposals", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
+    "minimal": [
+      "schema",
+      "workspace",
+      "redactionStatus",
+      "candidateCount",
+      "dirtyPathCount",
+      "degradedCount"
+    ],
+    "summary": [
+      "schema",
+      "workspace",
+      "redactionStatus",
+      "inputs",
+      "coordination",
+      "checkout",
+      "compileHealth",
+      "verification",
+      "environment",
+      "topCandidates",
+      "staleWorkProposals",
+      "degraded"
+    ],
+    "standard": [
+      "schema",
+      "workspace",
+      "redactionStatus",
+      "inputs",
+      "candidates",
+      "recommendationCards",
+      "staleWorkProposals",
+      "coordination",
+      "checkout",
+      "compileHealth",
+      "verification",
+      "environment",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "examples": [
@@ -98,13 +132,13 @@
             "decision": "blocked_by_owner",
             "confidence": "low",
             "scoreInputs": [
-              {"name": "blocked_by_compile_health", "value": "true"},
-              {"name": "blocked_by_count", "value": "0"},
-              {"name": "bv_score_milli", "value": "900"},
-              {"name": "priority", "value": "2"},
-              {"name": "rank_milli", "value": "525"},
-              {"name": "source_rank", "value": "0"},
-              {"name": "status", "value": "open"}
+              { "name": "blocked_by_compile_health", "value": "true" },
+              { "name": "blocked_by_count", "value": "0" },
+              { "name": "bv_score_milli", "value": "900" },
+              { "name": "priority", "value": "2" },
+              { "name": "rank_milli", "value": "525" },
+              { "name": "source_rank", "value": "0" },
+              { "name": "status", "value": "open" }
             ],
             "suggestedReservations": [],
             "doNotTakeBecause": [
@@ -116,11 +150,7 @@
             ],
             "overlap": {
               "decision": "blocked_by_owner",
-              "queries": [
-                "bead_id:bd-123",
-                "source:bv_top_pick",
-                "title:Add next-action schema"
-              ],
+              "queries": ["bead_id:bd-123", "source:bv_top_pick", "title:Add next-action schema"],
               "matchedExistingBeads": ["bd-123"],
               "rejectedDuplicateReason": null,
               "selectedRelation": "owner_coordination_required"
@@ -196,7 +226,10 @@
               "suggestedNextAction": "message_owner_before_rch"
             }
           ],
-          "recommendedAlternativeWork": ["message_compile_blocker_owner_before_rch", "prefer_static_or_non_cargo_work"]
+          "recommendedAlternativeWork": [
+            "message_compile_blocker_owner_before_rch",
+            "prefer_static_or_non_cargo_work"
+          ]
         },
         "verification": {
           "rchSourceEnabled": true,
@@ -232,81 +265,127 @@
   "$defs": {
     "inputSummary": {
       "type": "object",
-      "required": ["sourceCount", "readyBeadCount", "inProgressBeadCount", "blockedBeadCount", "bvTopPickCount"],
+      "required": [
+        "sourceCount",
+        "readyBeadCount",
+        "inProgressBeadCount",
+        "blockedBeadCount",
+        "bvTopPickCount"
+      ],
       "additionalProperties": false,
       "properties": {
-        "sourceCount": {"type": "integer", "minimum": 0},
-        "readyBeadCount": {"type": "integer", "minimum": 0},
-        "inProgressBeadCount": {"type": "integer", "minimum": 0},
-        "blockedBeadCount": {"type": "integer", "minimum": 0},
-        "bvTopPickCount": {"type": "integer", "minimum": 0}
+        "sourceCount": { "type": "integer", "minimum": 0 },
+        "readyBeadCount": { "type": "integer", "minimum": 0 },
+        "inProgressBeadCount": { "type": "integer", "minimum": 0 },
+        "blockedBeadCount": { "type": "integer", "minimum": 0 },
+        "bvTopPickCount": { "type": "integer", "minimum": 0 }
       }
     },
     "candidate": {
       "type": "object",
-      "required": ["id", "title", "source", "scoreMilli", "status", "priority", "assignee", "blockedBy", "blockedByCompileHealth", "actionHint"],
+      "required": [
+        "id",
+        "title",
+        "source",
+        "scoreMilli",
+        "status",
+        "priority",
+        "assignee",
+        "blockedBy",
+        "blockedByCompileHealth",
+        "actionHint"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string"},
-        "title": {"type": "string"},
-        "source": {"type": "string", "enum": ["bv_top_pick", "beads_ready"]},
-        "scoreMilli": {"type": ["integer", "null"], "minimum": 0},
-        "status": {"type": "string"},
-        "priority": {"type": ["integer", "null"]},
-        "assignee": {"type": ["string", "null"]},
-        "blockedBy": {"type": "array", "items": {"type": "string"}},
-        "blockedByCompileHealth": {"type": "boolean"},
-        "actionHint": {"type": "string"}
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "source": { "type": "string", "enum": ["bv_top_pick", "beads_ready"] },
+        "scoreMilli": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "type": "string" },
+        "priority": { "type": ["integer", "null"] },
+        "assignee": { "type": ["string", "null"] },
+        "blockedBy": { "type": "array", "items": { "type": "string" } },
+        "blockedByCompileHealth": { "type": "boolean" },
+        "actionHint": { "type": "string" }
       }
     },
     "recommendationCard": {
       "type": "object",
-      "required": ["cardId", "candidateId", "candidateSource", "candidateSummary", "decision", "confidence", "scoreInputs", "suggestedReservations", "doNotTakeBecause", "overlap", "proofObligations", "evidenceCaveats", "fallbackDecision"],
+      "required": [
+        "cardId",
+        "candidateId",
+        "candidateSource",
+        "candidateSummary",
+        "decision",
+        "confidence",
+        "scoreInputs",
+        "suggestedReservations",
+        "doNotTakeBecause",
+        "overlap",
+        "proofObligations",
+        "evidenceCaveats",
+        "fallbackDecision"
+      ],
       "additionalProperties": false,
       "properties": {
-        "cardId": {"type": "string"},
-        "candidateId": {"type": ["string", "null"]},
-        "candidateSource": {"type": "string"},
-        "candidateSummary": {"type": "string"},
+        "cardId": { "type": "string" },
+        "candidateId": { "type": ["string", "null"] },
+        "candidateSource": { "type": "string" },
+        "candidateSummary": { "type": "string" },
         "decision": {
           "type": "string",
-          "enum": ["new_bead_recommended", "refine_existing_bead", "duplicate_rejected", "blocked_by_owner", "no_action_recommended"]
+          "enum": [
+            "new_bead_recommended",
+            "refine_existing_bead",
+            "duplicate_rejected",
+            "blocked_by_owner",
+            "no_action_recommended"
+          ]
         },
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
         "scoreInputs": {
           "type": "array",
-          "items": {"$ref": "#/$defs/scoreInput"}
+          "items": { "$ref": "#/$defs/scoreInput" }
         },
         "suggestedReservations": {
           "type": "array",
-          "items": {"$ref": "#/$defs/suggestedReservation"}
+          "items": { "$ref": "#/$defs/suggestedReservation" }
         },
         "doNotTakeBecause": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": { "type": "string" }
         },
-        "overlap": {"$ref": "#/$defs/overlapDecision"},
-        "proofObligations": {"type": "array", "items": {"type": "string"}},
-        "evidenceCaveats": {"type": "array", "items": {"type": "string"}},
-        "fallbackDecision": {"type": ["string", "null"]}
+        "overlap": { "$ref": "#/$defs/overlapDecision" },
+        "proofObligations": { "type": "array", "items": { "type": "string" } },
+        "evidenceCaveats": { "type": "array", "items": { "type": "string" } },
+        "fallbackDecision": { "type": ["string", "null"] }
       }
     },
     "staleWorkProposal": {
       "type": "object",
-      "required": ["beadId", "title", "assignee", "decision", "confidence", "evidence", "caveats", "suggestedCommands"],
+      "required": [
+        "beadId",
+        "title",
+        "assignee",
+        "decision",
+        "confidence",
+        "evidence",
+        "caveats",
+        "suggestedCommands"
+      ],
       "additionalProperties": false,
       "properties": {
-        "beadId": {"type": "string"},
-        "title": {"type": "string"},
-        "assignee": {"type": ["string", "null"]},
+        "beadId": { "type": "string" },
+        "title": { "type": "string" },
+        "assignee": { "type": ["string", "null"] },
         "decision": {
           "type": "string",
           "enum": ["leaveAloneActive", "contactSuggested", "reopenSuggested"]
         },
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "evidence": {"type": "array", "items": {"type": "string"}},
-        "caveats": {"type": "array", "items": {"type": "string"}},
-        "suggestedCommands": {"type": "array", "items": {"type": "string"}}
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "caveats": { "type": "array", "items": { "type": "string" } },
+        "suggestedCommands": { "type": "array", "items": { "type": "string" } }
       }
     },
     "scoreInput": {
@@ -314,8 +393,8 @@
       "required": ["name", "value"],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string"},
-        "value": {"type": "string"}
+        "name": { "type": "string" },
+        "value": { "type": "string" }
       }
     },
     "suggestedReservation": {
@@ -323,23 +402,35 @@
       "required": ["pathPattern", "exclusive", "reason"],
       "additionalProperties": false,
       "properties": {
-        "pathPattern": {"type": "string"},
-        "exclusive": {"type": "boolean"},
-        "reason": {"type": "string"}
+        "pathPattern": { "type": "string" },
+        "exclusive": { "type": "boolean" },
+        "reason": { "type": "string" }
       }
     },
     "overlapDecision": {
       "type": "object",
-      "required": ["decision", "queries", "matchedExistingBeads", "rejectedDuplicateReason", "selectedRelation"],
+      "required": [
+        "decision",
+        "queries",
+        "matchedExistingBeads",
+        "rejectedDuplicateReason",
+        "selectedRelation"
+      ],
       "additionalProperties": false,
       "properties": {
         "decision": {
           "type": "string",
-          "enum": ["new_bead_recommended", "refine_existing_bead", "duplicate_rejected", "blocked_by_owner", "no_action_recommended"]
+          "enum": [
+            "new_bead_recommended",
+            "refine_existing_bead",
+            "duplicate_rejected",
+            "blocked_by_owner",
+            "no_action_recommended"
+          ]
         },
-        "queries": {"type": "array", "items": {"type": "string"}},
-        "matchedExistingBeads": {"type": "array", "items": {"type": "string"}},
-        "rejectedDuplicateReason": {"type": ["string", "null"]},
+        "queries": { "type": "array", "items": { "type": "string" } },
+        "matchedExistingBeads": { "type": "array", "items": { "type": "string" } },
+        "rejectedDuplicateReason": { "type": ["string", "null"] },
         "selectedRelation": {
           "type": "string",
           "enum": ["new_child", "existing_bead", "owner_coordination_required", "none"]
@@ -348,13 +439,18 @@
     },
     "coordinationSummary": {
       "type": "object",
-      "required": ["activeReservationCount", "reservationHolders", "unreadInboxCount", "ackRequiredCount"],
+      "required": [
+        "activeReservationCount",
+        "reservationHolders",
+        "unreadInboxCount",
+        "ackRequiredCount"
+      ],
       "additionalProperties": false,
       "properties": {
-        "activeReservationCount": {"type": "integer", "minimum": 0},
-        "reservationHolders": {"type": "array", "items": {"type": "string"}},
-        "unreadInboxCount": {"type": "integer", "minimum": 0},
-        "ackRequiredCount": {"type": "integer", "minimum": 0}
+        "activeReservationCount": { "type": "integer", "minimum": 0 },
+        "reservationHolders": { "type": "array", "items": { "type": "string" } },
+        "unreadInboxCount": { "type": "integer", "minimum": 0 },
+        "ackRequiredCount": { "type": "integer", "minimum": 0 }
       }
     },
     "checkoutSummary": {
@@ -362,8 +458,8 @@
       "required": ["dirtyPathCount"],
       "additionalProperties": false,
       "properties": {
-        "dirtyPathCount": {"type": "integer", "minimum": 0},
-        "dirtyPaths": {"type": "array", "items": {"type": "string"}}
+        "dirtyPathCount": { "type": "integer", "minimum": 0 },
+        "dirtyPaths": { "type": "array", "items": { "type": "string" } }
       }
     },
     "compileHealthSummary": {
@@ -371,73 +467,117 @@
       "required": ["safeToLaunchRch", "blockerCount", "blockers", "recommendedAlternativeWork"],
       "additionalProperties": false,
       "properties": {
-        "safeToLaunchRch": {"type": ["boolean", "null"]},
-        "blockerCount": {"type": "integer", "minimum": 0},
+        "safeToLaunchRch": { "type": ["boolean", "null"] },
+        "blockerCount": { "type": "integer", "minimum": 0 },
         "blockers": {
           "type": "array",
-          "items": {"$ref": "#/$defs/compileHealthBlocker"}
+          "items": { "$ref": "#/$defs/compileHealthBlocker" }
         },
-        "recommendedAlternativeWork": {"type": "array", "items": {"type": "string"}}
+        "recommendedAlternativeWork": { "type": "array", "items": { "type": "string" } }
       }
     },
     "compileHealthBlocker": {
       "type": "object",
-      "required": ["path", "severity", "reason", "ownerAgent", "ownerPattern", "recentFirstError", "affectedCommandKinds", "suggestedNextAction"],
+      "required": [
+        "path",
+        "severity",
+        "reason",
+        "ownerAgent",
+        "ownerPattern",
+        "recentFirstError",
+        "affectedCommandKinds",
+        "suggestedNextAction"
+      ],
       "additionalProperties": false,
       "properties": {
-        "path": {"type": "string"},
-        "severity": {"type": "string", "enum": ["medium", "high"]},
-        "reason": {"type": "string"},
-        "ownerAgent": {"type": ["string", "null"]},
-        "ownerPattern": {"type": ["string", "null"]},
+        "path": { "type": "string" },
+        "severity": { "type": "string", "enum": ["medium", "high"] },
+        "reason": { "type": "string" },
+        "ownerAgent": { "type": ["string", "null"] },
+        "ownerPattern": { "type": ["string", "null"] },
         "recentFirstError": {
-          "anyOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/recentFirstError"}
-          ]
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/recentFirstError" }]
         },
-        "affectedCommandKinds": {"type": "array", "items": {"type": "string"}},
-        "suggestedNextAction": {"type": "string"}
+        "affectedCommandKinds": { "type": "array", "items": { "type": "string" } },
+        "suggestedNextAction": { "type": "string" }
       }
     },
     "recentFirstError": {
       "type": "object",
-      "required": ["file", "line", "commandKind", "command", "commandHash", "status", "degradedCodes"],
+      "required": [
+        "file",
+        "line",
+        "commandKind",
+        "command",
+        "commandHash",
+        "status",
+        "degradedCodes"
+      ],
       "additionalProperties": false,
       "properties": {
-        "file": {"type": "string"},
-        "line": {"type": ["integer", "null"], "minimum": 0},
-        "commandKind": {"type": ["string", "null"]},
-        "command": {"type": ["string", "null"]},
-        "commandHash": {"type": ["string", "null"]},
-        "status": {"type": ["string", "null"]},
-        "degradedCodes": {"type": "array", "items": {"type": "string"}}
+        "file": { "type": "string" },
+        "line": { "type": ["integer", "null"], "minimum": 0 },
+        "commandKind": { "type": ["string", "null"] },
+        "command": { "type": ["string", "null"] },
+        "commandHash": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "degradedCodes": { "type": "array", "items": { "type": "string" } }
       }
     },
     "verificationSummary": {
       "type": "object",
-      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable", "queueHeadSlotsNeeded", "activeBuildMaxAgeSeconds", "headOfLineBlocked", "queueRecommendation", "queueStatus", "queueEvidence"],
+      "required": [
+        "rchSourceEnabled",
+        "remoteOnlyRequired",
+        "remoteOnlySafe",
+        "healthyWorkerCount",
+        "activeRemoteBuildCount",
+        "queuedRemoteBuildCount",
+        "slotsAvailable",
+        "queueHeadSlotsNeeded",
+        "activeBuildMaxAgeSeconds",
+        "headOfLineBlocked",
+        "queueRecommendation",
+        "queueStatus",
+        "queueEvidence"
+      ],
       "additionalProperties": false,
       "properties": {
-        "rchSourceEnabled": {"type": "boolean"},
-        "remoteOnlyRequired": {"type": "boolean"},
-        "remoteOnlySafe": {"type": ["boolean", "null"]},
-        "healthyWorkerCount": {"type": ["integer", "null"], "minimum": 0},
-        "activeRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
-        "queuedRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
-        "slotsAvailable": {"type": ["integer", "null"], "minimum": 0},
-        "queueHeadSlotsNeeded": {"type": ["integer", "null"], "minimum": 0},
-        "activeBuildMaxAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
-        "headOfLineBlocked": {"type": ["boolean", "null"]},
-        "queueRecommendation": {"type": ["string", "null"]},
-        "queueStatus": {"type": ["string", "null"]},
-        "queueEvidence": {"type": "array", "items": {"type": "string"}},
-        "admissionCertificate": {"$ref": "#/$defs/admissionCertificate"}
+        "rchSourceEnabled": { "type": "boolean" },
+        "remoteOnlyRequired": { "type": "boolean" },
+        "remoteOnlySafe": { "type": ["boolean", "null"] },
+        "healthyWorkerCount": { "type": ["integer", "null"], "minimum": 0 },
+        "activeRemoteBuildCount": { "type": ["integer", "null"], "minimum": 0 },
+        "queuedRemoteBuildCount": { "type": ["integer", "null"], "minimum": 0 },
+        "slotsAvailable": { "type": ["integer", "null"], "minimum": 0 },
+        "queueHeadSlotsNeeded": { "type": ["integer", "null"], "minimum": 0 },
+        "activeBuildMaxAgeSeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "headOfLineBlocked": { "type": ["boolean", "null"] },
+        "queueRecommendation": { "type": ["string", "null"] },
+        "queueStatus": { "type": ["string", "null"] },
+        "queueEvidence": { "type": "array", "items": { "type": "string" } },
+        "admissionCertificate": { "$ref": "#/$defs/admissionCertificate" }
       }
     },
     "admissionCertificate": {
       "type": "object",
-      "required": ["schema", "action", "ruleId", "confidence", "serviceClass", "serviceTimeClass", "serviceTimeIntervalMs", "queueRiskClass", "predictorCoverage", "predictorMode", "conservativeReason", "evidence", "assumptions", "proofObligations", "safetyInvariant"],
+      "required": [
+        "schema",
+        "action",
+        "ruleId",
+        "confidence",
+        "serviceClass",
+        "serviceTimeClass",
+        "serviceTimeIntervalMs",
+        "queueRiskClass",
+        "predictorCoverage",
+        "predictorMode",
+        "conservativeReason",
+        "evidence",
+        "assumptions",
+        "proofObligations",
+        "safetyInvariant"
+      ],
       "additionalProperties": false,
       "properties": {
         "schema": {
@@ -459,8 +599,8 @@
             "rch_admission.insufficient_evidence"
           ]
         },
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "serviceClass": {"type": "string", "enum": ["cargo_verifier", "unknown"]},
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "serviceClass": { "type": "string", "enum": ["cargo_verifier", "unknown"] },
         "serviceTimeClass": {
           "type": "string",
           "enum": ["short", "medium", "long", "long_tail"],
@@ -471,8 +611,8 @@
           "required": ["lower", "upper"],
           "additionalProperties": false,
           "properties": {
-            "lower": {"type": "integer", "minimum": 0},
-            "upper": {"type": "integer", "minimum": 0}
+            "lower": { "type": "integer", "minimum": 0 },
+            "upper": { "type": "integer", "minimum": 0 }
           },
           "description": "Lower and upper duration bounds including queue wait. Fallback bounds are intentionally wide."
         },
@@ -504,9 +644,9 @@
           ],
           "description": "Fallback trigger. Null only when calibrated history is healthy."
         },
-        "evidence": {"type": "array", "items": {"type": "string"}},
-        "assumptions": {"type": "array", "items": {"type": "string"}},
-        "proofObligations": {"type": "array", "items": {"type": "string"}},
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "assumptions": { "type": "array", "items": { "type": "string" } },
+        "proofObligations": { "type": "array", "items": { "type": "string" } },
         "safetyInvariant": {
           "type": "string",
           "const": "monotonic_queue_pressure_never_increases_aggression"
@@ -515,13 +655,18 @@
     },
     "environmentSummary": {
       "type": "object",
-      "required": ["cargoTargetExternalized", "tmpdirExternalized", "externalAgentSpacePresent", "diskPressureHintCount"],
+      "required": [
+        "cargoTargetExternalized",
+        "tmpdirExternalized",
+        "externalAgentSpacePresent",
+        "diskPressureHintCount"
+      ],
       "additionalProperties": false,
       "properties": {
-        "cargoTargetExternalized": {"type": "boolean"},
-        "tmpdirExternalized": {"type": "boolean"},
-        "externalAgentSpacePresent": {"type": "boolean"},
-        "diskPressureHintCount": {"type": "integer", "minimum": 0}
+        "cargoTargetExternalized": { "type": "boolean" },
+        "tmpdirExternalized": { "type": "boolean" },
+        "externalAgentSpacePresent": { "type": "boolean" },
+        "diskPressureHintCount": { "type": "integer", "minimum": 0 }
       }
     },
     "degradation": {
@@ -529,11 +674,14 @@
       "required": ["code", "source", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
-        "source": {"type": "string"},
-        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]}
+        "code": { "type": "string" },
+        "source": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
       }
     }
   }

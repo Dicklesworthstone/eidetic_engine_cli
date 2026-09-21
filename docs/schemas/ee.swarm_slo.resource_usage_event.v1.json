@@ -117,13 +117,7 @@
     "producerAttribution": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "attributionKey",
-        "canonicalHash",
-        "originalHash",
-        "redacted"
-      ],
+      "required": ["kind", "attributionKey", "canonicalHash", "originalHash", "redacted"],
       "properties": {
         "kind": {
           "type": "string",
@@ -154,13 +148,7 @@
     "redactedEvidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "field",
-        "code",
-        "valueHash",
-        "redacted",
-        "redactionReasons"
-      ],
+      "required": ["field", "code", "valueHash", "redacted", "redactionReasons"],
       "properties": {
         "field": {
           "$ref": "#/$defs/safeLabel"

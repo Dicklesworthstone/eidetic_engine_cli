@@ -20,11 +20,11 @@
     "data": {
       "type": "object",
       "description": "Command-specific payload. See the per-command schema files in docs/schemas.",
-      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "field_presets": {
@@ -39,35 +39,35 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": "string"},
+        "message": { "type": "string" },
+        "repair": { "type": "string" },
         "repairKind": {
           "type": "string",
           "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
         },
         "sources": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": { "type": "string" }
         },
         "details": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

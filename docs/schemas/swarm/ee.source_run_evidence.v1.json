@@ -24,9 +24,9 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.source_run_evidence.v1"},
-    "runId": {"type": "string"},
-    "capturedAt": {"type": ["string", "null"], "format": "date-time"},
+    "schema": { "type": "string", "const": "ee.source_run_evidence.v1" },
+    "runId": { "type": "string" },
+    "capturedAt": { "type": ["string", "null"], "format": "date-time" },
     "source": {
       "type": "object",
       "required": ["kind", "sourceId", "operation"],
@@ -34,10 +34,21 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["agent_mail", "beads", "bv", "cass", "rch", "git", "ee", "swarm_collector", "shell", "other"]
+          "enum": [
+            "agent_mail",
+            "beads",
+            "bv",
+            "cass",
+            "rch",
+            "git",
+            "ee",
+            "swarm_collector",
+            "shell",
+            "other"
+          ]
         },
-        "sourceId": {"type": "string"},
-        "operation": {"type": "string"}
+        "sourceId": { "type": "string" },
+        "operation": { "type": "string" }
       }
     },
     "command": {
@@ -45,11 +56,11 @@
       "required": ["display", "argv", "argvRedaction", "commandHash", "normalizedArgvHash"],
       "additionalProperties": false,
       "properties": {
-        "display": {"type": ["string", "null"]},
-        "argv": {"type": "array", "items": {"type": "string"}},
-        "argvRedaction": {"type": "string", "enum": ["literal_safe", "redacted", "hash_only"]},
-        "commandHash": {"type": "string"},
-        "normalizedArgvHash": {"type": "string"}
+        "display": { "type": ["string", "null"] },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "argvRedaction": { "type": "string", "enum": ["literal_safe", "redacted", "hash_only"] },
+        "commandHash": { "type": "string" },
+        "normalizedArgvHash": { "type": "string" }
       }
     },
     "policy": {
@@ -59,10 +70,16 @@
       "properties": {
         "requiredMode": {
           "type": "string",
-          "enum": ["best_effort_coordination", "required_coordination", "remote_verification_required", "mutation_guard", "read_only_evidence"]
+          "enum": [
+            "best_effort_coordination",
+            "required_coordination",
+            "remote_verification_required",
+            "mutation_guard",
+            "read_only_evidence"
+          ]
         },
-        "onFailure": {"type": "string", "enum": ["continue_degraded", "fail_closed"]},
-        "failClosedReason": {"type": ["string", "null"]}
+        "onFailure": { "type": "string", "enum": ["continue_degraded", "fail_closed"] },
+        "failClosedReason": { "type": ["string", "null"] }
       }
     },
     "timing": {
@@ -70,25 +87,34 @@
       "required": ["startedAt", "finishedAt", "timeoutMs", "elapsedMs"],
       "additionalProperties": false,
       "properties": {
-        "startedAt": {"type": ["string", "null"], "format": "date-time"},
-        "finishedAt": {"type": ["string", "null"], "format": "date-time"},
-        "timeoutMs": {"type": "integer", "minimum": 1},
-        "elapsedMs": {"type": ["integer", "null"], "minimum": 0}
+        "startedAt": { "type": ["string", "null"], "format": "date-time" },
+        "finishedAt": { "type": ["string", "null"], "format": "date-time" },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "elapsedMs": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "status": {
       "type": "string",
-      "enum": ["passed", "failed", "timed_out", "spawn_failed", "parse_failed", "stale_source", "malformed_store", "blocked"]
+      "enum": [
+        "passed",
+        "failed",
+        "timed_out",
+        "spawn_failed",
+        "parse_failed",
+        "stale_source",
+        "malformed_store",
+        "blocked"
+      ]
     },
     "exit": {
       "type": "object",
       "required": ["exitCode", "signal", "killedOwnChild", "killedPeerProcesses"],
       "additionalProperties": false,
       "properties": {
-        "exitCode": {"type": ["integer", "null"]},
-        "signal": {"type": ["string", "null"]},
-        "killedOwnChild": {"type": "boolean"},
-        "killedPeerProcesses": {"type": "boolean", "const": false}
+        "exitCode": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"] },
+        "killedOwnChild": { "type": "boolean" },
+        "killedPeerProcesses": { "type": "boolean", "const": false }
       }
     },
     "output": {
@@ -105,14 +131,14 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "stdoutBytes": {"type": "integer", "minimum": 0},
-        "stderrBytes": {"type": "integer", "minimum": 0},
-        "stdoutTail": {"type": ["string", "null"]},
-        "stderrTail": {"type": ["string", "null"]},
-        "tailBytesMax": {"type": "integer", "minimum": 0},
-        "stdoutHash": {"type": ["string", "null"]},
-        "stderrExcerptHash": {"type": ["string", "null"]},
-        "redacted": {"type": "boolean"}
+        "stdoutBytes": { "type": "integer", "minimum": 0 },
+        "stderrBytes": { "type": "integer", "minimum": 0 },
+        "stdoutTail": { "type": ["string", "null"] },
+        "stderrTail": { "type": ["string", "null"] },
+        "tailBytesMax": { "type": "integer", "minimum": 0 },
+        "stdoutHash": { "type": ["string", "null"] },
+        "stderrExcerptHash": { "type": ["string", "null"] },
+        "redacted": { "type": "boolean" }
       }
     },
     "degraded": {
@@ -122,10 +148,13 @@
         "required": ["code", "severity", "message", "repair"],
         "additionalProperties": false,
         "properties": {
-          "code": {"type": "string"},
-          "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
-          "message": {"type": "string"},
-          "repair": {"type": ["string", "null"]}
+          "code": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "low", "warning", "medium", "high", "critical"]
+          },
+          "message": { "type": "string" },
+          "repair": { "type": ["string", "null"] }
         }
       }
     },
@@ -136,13 +165,21 @@
         "required": ["priority", "kind", "command", "message", "repairSafety"],
         "additionalProperties": false,
         "properties": {
-          "priority": {"type": "integer", "minimum": 1},
+          "priority": { "type": "integer", "minimum": 1 },
           "kind": {
             "type": "string",
-            "enum": ["retry", "retry_with_longer_timeout", "use_static_fallback", "repair_substrate_after_approval", "manual_coordination", "fail_closed", "skip_source"]
+            "enum": [
+              "retry",
+              "retry_with_longer_timeout",
+              "use_static_fallback",
+              "repair_substrate_after_approval",
+              "manual_coordination",
+              "fail_closed",
+              "skip_source"
+            ]
           },
-          "command": {"type": ["string", "null"]},
-          "message": {"type": "string"},
+          "command": { "type": ["string", "null"] },
+          "message": { "type": "string" },
           "repairSafety": {
             "type": "object",
             "description": "Repair-action safety metadata for command-like source-run recovery steps. Agents use this block instead of executing the display command directly.",
@@ -174,11 +211,11 @@
                   "unavailable_or_manual_only"
                 ]
               },
-              "preflightCommand": {"type": ["string", "null"]},
-              "requiresHumanApproval": {"type": "boolean"},
-              "mutatesExternalState": {"type": "boolean"},
-              "mutatesTrackerState": {"type": "boolean"},
-              "privacyClass": {"type": "string"},
+              "preflightCommand": { "type": ["string", "null"] },
+              "requiresHumanApproval": { "type": "boolean" },
+              "mutatesExternalState": { "type": "boolean" },
+              "mutatesTrackerState": { "type": "boolean" },
+              "privacyClass": { "type": "string" },
               "nextAction": {
                 "type": "string",
                 "enum": [
@@ -189,11 +226,11 @@
                   "manual_only"
                 ]
               },
-              "ruleId": {"type": "string"},
-              "source": {"type": "string", "enum": ["repair_action_safety"]},
-              "reasonCode": {"type": "string"},
-              "evidence": {"type": "array", "items": {"type": "string"}},
-              "preconditions": {"type": "array", "items": {"type": "string"}}
+              "ruleId": { "type": "string" },
+              "source": { "type": "string", "enum": ["repair_action_safety"] },
+              "reasonCode": { "type": "string" },
+              "evidence": { "type": "array", "items": { "type": "string" } },
+              "preconditions": { "type": "array", "items": { "type": "string" } }
             }
           }
         }
@@ -206,10 +243,16 @@
         "required": ["kind", "reference", "contentHash", "redactionStatus"],
         "additionalProperties": false,
         "properties": {
-          "kind": {"type": "string", "enum": ["bead", "verification", "support_bundle", "log_excerpt", "other"]},
-          "reference": {"type": "string"},
-          "contentHash": {"type": "string"},
-          "redactionStatus": {"type": "string", "enum": ["id_only", "redacted_summary", "hash_only"]}
+          "kind": {
+            "type": "string",
+            "enum": ["bead", "verification", "support_bundle", "log_excerpt", "other"]
+          },
+          "reference": { "type": "string" },
+          "contentHash": { "type": "string" },
+          "redactionStatus": {
+            "type": "string",
+            "enum": ["id_only", "redacted_summary", "hash_only"]
+          }
         }
       }
     },
@@ -218,21 +261,24 @@
       "required": ["rawBodiesIncluded", "rawEnvIncluded", "secretScanApplied", "pathPolicy"],
       "additionalProperties": false,
       "properties": {
-        "rawBodiesIncluded": {"type": "boolean", "const": false},
-        "rawEnvIncluded": {"type": "boolean", "const": false},
-        "secretScanApplied": {"type": "boolean"},
-        "pathPolicy": {"type": "string", "enum": ["none", "redact_home", "hash_paths", "labels_only"]}
+        "rawBodiesIncluded": { "type": "boolean", "const": false },
+        "rawEnvIncluded": { "type": "boolean", "const": false },
+        "secretScanApplied": { "type": "boolean" },
+        "pathPolicy": {
+          "type": "string",
+          "enum": ["none", "redact_home", "hash_paths", "labels_only"]
+        }
       }
     },
-    "provenanceHash": {"type": "string"},
-    "producer": {"$ref": "ee.producer.metadata.v1.json"}
+    "provenanceHash": { "type": "string" },
+    "producer": { "$ref": "ee.producer.metadata.v1.json" }
   },
   "examples": [
     {
       "schema": "ee.source_run_evidence.v1",
       "runId": "source_run_agent_mail_20260524_000001",
       "capturedAt": "2026-05-24T05:04:00Z",
-      "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check"},
+      "source": { "kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check" },
       "command": {
         "display": "agent-mail health_check",
         "argv": ["mcp_agent_mail.health_check"],
@@ -240,10 +286,24 @@
         "commandHash": "blake3:8e01e52e854b3ebaf808a4d9a13b2ad82464b1207612066df00d8355d5f8dca6",
         "normalizedArgvHash": "blake3:ca04f1b794394366028cfad3f5a2b3ce4ff2d195d902f8aa70f4e70c1d903f56"
       },
-      "policy": {"requiredMode": "best_effort_coordination", "onFailure": "continue_degraded", "failClosedReason": null},
-      "timing": {"startedAt": "2026-05-24T05:04:00Z", "finishedAt": "2026-05-24T05:04:01Z", "timeoutMs": 5000, "elapsedMs": 548},
+      "policy": {
+        "requiredMode": "best_effort_coordination",
+        "onFailure": "continue_degraded",
+        "failClosedReason": null
+      },
+      "timing": {
+        "startedAt": "2026-05-24T05:04:00Z",
+        "finishedAt": "2026-05-24T05:04:01Z",
+        "timeoutMs": 5000,
+        "elapsedMs": 548
+      },
       "status": "malformed_store",
-      "exit": {"exitCode": null, "signal": null, "killedOwnChild": false, "killedPeerProcesses": false},
+      "exit": {
+        "exitCode": null,
+        "signal": null,
+        "killedOwnChild": false,
+        "killedPeerProcesses": false
+      },
       "output": {
         "stdoutBytes": 0,
         "stderrBytes": 286,
@@ -312,13 +372,22 @@
           "redactionStatus": "id_only"
         }
       ],
-      "redaction": {"rawBodiesIncluded": false, "rawEnvIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "redaction": {
+        "rawBodiesIncluded": false,
+        "rawEnvIncluded": false,
+        "secretScanApplied": true,
+        "pathPolicy": "labels_only"
+      },
       "provenanceHash": "blake3:0c9cad06f83d37ecf7ff74f206dc65075f2b920098d494f3c29f578c0dce0f15",
       "producer": {
         "schema": "ee.producer.metadata.v1",
         "sourceSystem": "verification",
-        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
-        "run": {"runId": "source-run-watchdog-20260524", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "identity": { "status": "unknown", "agentName": null, "harness": null, "model": null },
+        "run": {
+          "runId": "source-run-watchdog-20260524",
+          "sessionId": null,
+          "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+        },
         "observedAt": "2026-05-24T05:04:01Z"
       }
     }

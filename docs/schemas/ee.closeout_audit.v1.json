@@ -4,15 +4,7 @@
   "title": "ee.closeout_audit.v1",
   "description": "JSON envelope emitted by scripts/closeout_audit.sh (J11.4 / bd-17c65.10.11.4). Run BEFORE marking a bead closed to summarize verification evidence, retained artifacts, dependencies, and known caveats. Reports closure readiness as `ready`, `ready_with_caveats`, or `blocked`, with structured reasons an agent can act on or paste verbatim into a `br close --reason` invocation. Non-destructive contract: the audit never mutates beads, git, files, agent-mail reservations, or the cargo target. Pinned by bd-2vu8m (SRR6.23 final hardening) because the SRR6 closeout matrix routes through this envelope.",
   "type": "object",
-  "required": [
-    "schema",
-    "bead_id",
-    "readiness",
-    "evidence",
-    "blockers",
-    "caveats",
-    "next_actions"
-  ],
+  "required": ["schema", "bead_id", "readiness", "evidence", "blockers", "caveats", "next_actions"],
   "additionalProperties": false,
   "properties": {
     "schema": {

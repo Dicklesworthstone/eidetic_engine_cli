@@ -4,15 +4,7 @@
   "title": "ee.conflict.resolve.v1",
   "description": "Audited conflict-resolution report for ee conflict resolve (ADR 0066). The verb (supersede|reject-one|scope-split|both-valid) is planned against the LIVE conflict surface (stale pairs are refused with conflict_resolve_stale_surface) and mapped onto existing audited atoms only: decide record (which also creates the supersede link and closes the loser's validity window), memory expire, memory link, memory tags. Dry-run is the default; --apply executes the plan fail-fast and reports per-atom audit ids. The rationale is persisted as a kind=decision memory so future packs carry the WHY.",
   "type": "object",
-  "required": [
-    "schema",
-    "status",
-    "dryRun",
-    "persisted",
-    "verb",
-    "reason",
-    "plan"
-  ],
+  "required": ["schema", "status", "dryRun", "persisted", "verb", "reason", "plan"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -38,15 +30,7 @@
     },
     "plan": {
       "type": "object",
-      "required": [
-        "conflictId",
-        "verb",
-        "memoryA",
-        "memoryB",
-        "keep",
-        "lose",
-        "actions"
-      ],
+      "required": ["conflictId", "verb", "memoryA", "memoryB", "keep", "lose", "actions"],
       "additionalProperties": false,
       "properties": {
         "conflictId": {
@@ -77,12 +61,7 @@
             "properties": {
               "action": {
                 "type": "string",
-                "enum": [
-                  "recordDecision",
-                  "expireMemory",
-                  "createLink",
-                  "addTags"
-                ]
+                "enum": ["recordDecision", "expireMemory", "createLink", "addTags"]
               }
             }
           }

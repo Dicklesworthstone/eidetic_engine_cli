@@ -27,16 +27,25 @@
     },
     "query": {
       "type": "object",
-      "required": ["paths", "symbols", "diffRef", "diffStaged", "kinds", "levels", "staleOnly", "budgetTokens"],
+      "required": [
+        "paths",
+        "symbols",
+        "diffRef",
+        "diffStaged",
+        "kinds",
+        "levels",
+        "staleOnly",
+        "budgetTokens"
+      ],
       "properties": {
-        "paths": {"type": "array", "items": {"type": "string"}},
-        "symbols": {"type": "array", "items": {"type": "string"}},
-        "diffRef": {"type": ["string", "null"]},
-        "diffStaged": {"type": "boolean"},
-        "kinds": {"type": "array", "items": {"type": "string"}},
-        "levels": {"type": "array", "items": {"type": "string"}},
-        "staleOnly": {"type": "boolean"},
-        "budgetTokens": {"type": ["integer", "null"], "minimum": 0}
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "symbols": { "type": "array", "items": { "type": "string" } },
+        "diffRef": { "type": ["string", "null"] },
+        "diffStaged": { "type": "boolean" },
+        "kinds": { "type": "array", "items": { "type": "string" } },
+        "levels": { "type": "array", "items": { "type": "string" } },
+        "staleOnly": { "type": "boolean" },
+        "budgetTokens": { "type": ["integer", "null"], "minimum": 0 }
       },
       "additionalProperties": false
     },
@@ -58,57 +67,57 @@
           "repair"
         ],
         "properties": {
-          "memoryId": {"type": "string"},
+          "memoryId": { "type": "string" },
           "anchor": {
             "type": "object",
             "required": ["kind", "path", "symbol"],
             "properties": {
-              "kind": {"type": "string"},
-              "path": {"type": ["string", "null"]},
-              "symbol": {"type": ["string", "null"]}
+              "kind": { "type": "string" },
+              "path": { "type": ["string", "null"] },
+              "symbol": { "type": ["string", "null"] }
             },
             "additionalProperties": false
           },
-          "freshnessState": {"type": "string", "enum": ["current", "suspect", "stale"]},
+          "freshnessState": { "type": "string", "enum": ["current", "suspect", "stale"] },
           "scoreComponents": {
             "type": "object",
             "required": ["freshness", "confidence", "levelTilt", "kindBonus"],
             "properties": {
-              "freshness": {"type": "number", "minimum": 0, "maximum": 1},
-              "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-              "levelTilt": {"type": "number", "minimum": 0, "maximum": 1},
-              "kindBonus": {"type": "number", "minimum": 1}
+              "freshness": { "type": "number", "minimum": 0, "maximum": 1 },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "levelTilt": { "type": "number", "minimum": 0, "maximum": 1 },
+              "kindBonus": { "type": "number", "minimum": 1 }
             },
             "additionalProperties": false
           },
-          "score": {"type": "number", "minimum": 0},
-          "level": {"type": "string"},
-          "kind": {"type": "string"},
-          "contentPreview": {"type": "string", "maxLength": 240},
+          "score": { "type": "number", "minimum": 0 },
+          "level": { "type": "string" },
+          "kind": { "type": "string" },
+          "contentPreview": { "type": "string", "maxLength": 240 },
           "provenance": {
             "type": "array",
             "items": {
               "type": "object",
               "required": ["uri", "sourceType"],
               "properties": {
-                "uri": {"type": "string"},
-                "sourceType": {"type": "string"}
+                "uri": { "type": "string" },
+                "sourceType": { "type": "string" }
               },
               "additionalProperties": false
             }
           },
-          "tags": {"type": "array", "items": {"type": "string"}},
-          "repair": {"type": ["string", "null"]}
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "repair": { "type": ["string", "null"] }
         },
         "additionalProperties": false
       }
     },
-    "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
-    "dbGeneration": {"type": "integer", "minimum": 0},
-    "totalMatched": {"type": "integer", "minimum": 0},
-    "truncated": {"type": "boolean"},
-    "droppedCount": {"type": "integer", "minimum": 0},
-    "continuationCursor": {"type": ["string", "null"]}
+    "indexGeneration": { "type": ["integer", "null"], "minimum": 0 },
+    "dbGeneration": { "type": "integer", "minimum": 0 },
+    "totalMatched": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "droppedCount": { "type": "integer", "minimum": 0 },
+    "continuationCursor": { "type": ["string", "null"] }
   },
   "additionalProperties": false,
   "field_presets": {

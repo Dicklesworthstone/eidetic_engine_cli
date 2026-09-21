@@ -7,20 +7,20 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "ee.pack.replay.v2"},
-    "success": {"const": true},
+    "schema": { "const": "ee.pack.replay.v2" },
+    "success": { "const": true },
     "data": {
       "type": "object",
       "required": ["command", "pack", "replay", "attestationBundle", "degraded"],
       "additionalProperties": false,
       "properties": {
-        "command": {"const": "pack replay"},
-        "pack": {"$ref": "#/$defs/packRecord"},
-        "replay": {"$ref": "#/$defs/replay"},
-        "attestationBundle": {"$ref": "#/$defs/attestationSurfaceManifest"},
+        "command": { "const": "pack replay" },
+        "pack": { "$ref": "#/$defs/packRecord" },
+        "replay": { "$ref": "#/$defs/replay" },
+        "attestationBundle": { "$ref": "#/$defs/attestationSurfaceManifest" },
         "degraded": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradation"}
+          "items": { "$ref": "#/$defs/degradation" }
         }
       }
     }
@@ -47,16 +47,10 @@
       "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
     },
     "nullableBlake3Hash": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/blake3Hash"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/blake3Hash" }]
     },
     "packRecord": {
-      "oneOf": [
-        {"$ref": "#/$defs/verifiedPackRecord"},
-        {"$ref": "#/$defs/untrustedPackRecord"}
-      ]
+      "oneOf": [{ "$ref": "#/$defs/verifiedPackRecord" }, { "$ref": "#/$defs/untrustedPackRecord" }]
     },
     "verifiedPackRecord": {
       "type": "object",
@@ -80,22 +74,22 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "id": {"$ref": "#/$defs/packId"},
-        "workspaceId": {"$ref": "#/$defs/workspaceId"},
-        "query": {"$ref": "#/$defs/textRecord"},
-        "profile": {"$ref": "#/$defs/profile"},
-        "maxTokens": {"type": "integer", "minimum": 1},
-        "usedTokens": {"type": "integer", "minimum": 0},
-        "itemCount": {"type": "integer", "minimum": 0},
-        "omittedCount": {"type": "integer", "minimum": 0},
-        "packHash": {"$ref": "#/$defs/blake3Hash"},
-        "createdAt": {"type": "string", "format": "date-time"},
-        "createdByHash": {"$ref": "#/$defs/nullableBlake3Hash"},
-        "commandSurfaceHash": {"$ref": "#/$defs/blake3Hash"},
-        "ledgerHash": {"$ref": "#/$defs/blake3Hash"},
-        "ledgerHashPresent": {"const": true},
-        "recordMetadataVerified": {"const": true},
-        "ledgerStatus": {"const": "available"}
+        "id": { "$ref": "#/$defs/packId" },
+        "workspaceId": { "$ref": "#/$defs/workspaceId" },
+        "query": { "$ref": "#/$defs/textRecord" },
+        "profile": { "$ref": "#/$defs/profile" },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "usedTokens": { "type": "integer", "minimum": 0 },
+        "itemCount": { "type": "integer", "minimum": 0 },
+        "omittedCount": { "type": "integer", "minimum": 0 },
+        "packHash": { "$ref": "#/$defs/blake3Hash" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdByHash": { "$ref": "#/$defs/nullableBlake3Hash" },
+        "commandSurfaceHash": { "$ref": "#/$defs/blake3Hash" },
+        "ledgerHash": { "$ref": "#/$defs/blake3Hash" },
+        "ledgerHashPresent": { "const": true },
+        "recordMetadataVerified": { "const": true },
+        "ledgerStatus": { "const": "available" }
       }
     },
     "untrustedPackRecord": {
@@ -120,21 +114,21 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "id": {"$ref": "#/$defs/packId"},
-        "workspaceId": {"type": "null"},
-        "query": {"type": "null"},
-        "profile": {"type": "null"},
-        "maxTokens": {"type": "null"},
-        "usedTokens": {"type": "null"},
-        "itemCount": {"type": "null"},
-        "omittedCount": {"type": "null"},
-        "packHash": {"type": "null"},
-        "createdAt": {"type": "null"},
-        "createdByHash": {"type": "null"},
-        "commandSurfaceHash": {"type": "null"},
-        "ledgerHash": {"type": "null"},
-        "ledgerHashPresent": {"type": "boolean"},
-        "recordMetadataVerified": {"const": false},
+        "id": { "$ref": "#/$defs/packId" },
+        "workspaceId": { "type": "null" },
+        "query": { "type": "null" },
+        "profile": { "type": "null" },
+        "maxTokens": { "type": "null" },
+        "usedTokens": { "type": "null" },
+        "itemCount": { "type": "null" },
+        "omittedCount": { "type": "null" },
+        "packHash": { "type": "null" },
+        "createdAt": { "type": "null" },
+        "createdByHash": { "type": "null" },
+        "commandSurfaceHash": { "type": "null" },
+        "ledgerHash": { "type": "null" },
+        "ledgerHashPresent": { "type": "boolean" },
+        "recordMetadataVerified": { "const": false },
         "ledgerStatus": {
           "type": "string",
           "enum": ["missing", "malformed", "hash_mismatch"]
@@ -148,19 +142,19 @@
           "required": ["status", "ledger", "selectedItems", "omittedItems", "degraded"],
           "additionalProperties": false,
           "properties": {
-            "status": {"const": "available"},
-            "ledger": {"$ref": "#/$defs/publicLedgerProjection"},
+            "status": { "const": "available" },
+            "ledger": { "$ref": "#/$defs/publicLedgerProjection" },
             "selectedItems": {
               "type": "array",
-              "items": {"$ref": "#/$defs/selectedItem"}
+              "items": { "$ref": "#/$defs/selectedItem" }
             },
             "omittedItems": {
               "type": "array",
-              "items": {"$ref": "#/$defs/omittedItem"}
+              "items": { "$ref": "#/$defs/omittedItem" }
             },
             "degraded": {
               "type": "array",
-              "items": {"$ref": "#/$defs/degradation"}
+              "items": { "$ref": "#/$defs/degradation" }
             }
           }
         },
@@ -173,12 +167,12 @@
               "type": "string",
               "enum": ["missing", "malformed", "hash_mismatch"]
             },
-            "ledger": {"type": "null"},
-            "selectedItems": {"type": "array", "maxItems": 0},
-            "omittedItems": {"type": "array", "maxItems": 0},
+            "ledger": { "type": "null" },
+            "selectedItems": { "type": "array", "maxItems": 0 },
+            "omittedItems": { "type": "array", "maxItems": 0 },
             "degraded": {
               "type": "array",
-              "items": {"$ref": "#/$defs/degradation"}
+              "items": { "$ref": "#/$defs/degradation" }
             }
           }
         }
@@ -206,33 +200,33 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "ee.pack_replay_ledger.v1"},
-        "packId": {"$ref": "#/$defs/packId"},
-        "packHash": {"$ref": "#/$defs/blake3Hash"},
-        "workspaceId": {"$ref": "#/$defs/workspaceId"},
-        "createdAt": {"type": "string", "format": "date-time"},
-        "createdByHash": {"$ref": "#/$defs/blake3Hash"},
-        "commandSurfaceHash": {"$ref": "#/$defs/blake3Hash"},
-        "taskLens": {"$ref": "#/$defs/taskLens"},
-        "request": {"$ref": "#/$defs/request"},
-        "database": {"$ref": "#/$defs/database"},
-        "derivedAssets": {"$ref": "#/$defs/derivedAssets"},
-        "candidateCounts": {"$ref": "#/$defs/candidateCounts"},
+        "schema": { "const": "ee.pack_replay_ledger.v1" },
+        "packId": { "$ref": "#/$defs/packId" },
+        "packHash": { "$ref": "#/$defs/blake3Hash" },
+        "workspaceId": { "$ref": "#/$defs/workspaceId" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdByHash": { "$ref": "#/$defs/blake3Hash" },
+        "commandSurfaceHash": { "$ref": "#/$defs/blake3Hash" },
+        "taskLens": { "$ref": "#/$defs/taskLens" },
+        "request": { "$ref": "#/$defs/request" },
+        "database": { "$ref": "#/$defs/database" },
+        "derivedAssets": { "$ref": "#/$defs/derivedAssets" },
+        "candidateCounts": { "$ref": "#/$defs/candidateCounts" },
         "selectedItems": {
           "type": "array",
-          "items": {"$ref": "#/$defs/selectedItem"}
+          "items": { "$ref": "#/$defs/selectedItem" }
         },
         "omittedItems": {
           "type": "array",
-          "items": {"$ref": "#/$defs/omittedItem"}
+          "items": { "$ref": "#/$defs/omittedItem" }
         },
         "degraded": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradation"}
+          "items": { "$ref": "#/$defs/degradation" }
         },
-        "sourceLedgerHash": {"$ref": "#/$defs/blake3Hash"},
-        "projectionSchema": {"const": "ee.pack_replay_ledger_projection.v1"},
-        "projectionRedacted": {"const": true}
+        "sourceLedgerHash": { "$ref": "#/$defs/blake3Hash" },
+        "projectionSchema": { "const": "ee.pack_replay_ledger_projection.v1" },
+        "projectionRedacted": { "const": true }
       }
     },
     "taskLens": {
@@ -240,9 +234,9 @@
       "required": ["id", "version", "lensHash"],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "version": {"type": "integer", "minimum": 1},
-        "lensHash": {"$ref": "#/$defs/blake3Hash"}
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "lensHash": { "$ref": "#/$defs/blake3Hash" }
       }
     },
     "request": {
@@ -250,9 +244,9 @@
       "required": ["query", "profile", "maxTokens"],
       "additionalProperties": false,
       "properties": {
-        "query": {"$ref": "#/$defs/textRecord"},
-        "profile": {"$ref": "#/$defs/profile"},
-        "maxTokens": {"type": "integer", "minimum": 1}
+        "query": { "$ref": "#/$defs/textRecord" },
+        "profile": { "$ref": "#/$defs/profile" },
+        "maxTokens": { "type": "integer", "minimum": 1 }
       }
     },
     "textRecord": {
@@ -262,11 +256,11 @@
           "required": ["hash", "redacted", "redactionReasons", "text", "redactedText"],
           "additionalProperties": false,
           "properties": {
-            "hash": {"$ref": "#/$defs/blake3Hash"},
-            "redacted": {"const": false},
-            "redactionReasons": {"type": "array", "maxItems": 0},
-            "text": {"type": "string", "minLength": 1},
-            "redactedText": {"type": "null"}
+            "hash": { "$ref": "#/$defs/blake3Hash" },
+            "redacted": { "const": false },
+            "redactionReasons": { "type": "array", "maxItems": 0 },
+            "text": { "type": "string", "minLength": 1 },
+            "redactedText": { "type": "null" }
           }
         },
         {
@@ -274,16 +268,16 @@
           "required": ["hash", "redacted", "redactionReasons", "redactedText"],
           "additionalProperties": false,
           "properties": {
-            "hash": {"$ref": "#/$defs/blake3Hash"},
-            "redacted": {"const": true},
+            "hash": { "$ref": "#/$defs/blake3Hash" },
+            "redacted": { "const": true },
             "redactionReasons": {
               "type": "array",
               "minItems": 1,
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             },
-            "text": {"type": "null"},
-            "redactedText": {"type": "string", "minLength": 1}
+            "text": { "type": "null" },
+            "redactedText": { "type": "string", "minLength": 1 }
           }
         }
       ]
@@ -293,8 +287,8 @@
       "required": ["schemaVersion", "generation"],
       "additionalProperties": false,
       "properties": {
-        "schemaVersion": {"type": "integer", "minimum": 0},
-        "generation": {"type": "integer", "minimum": 0}
+        "schemaVersion": { "type": "integer", "minimum": 0 },
+        "generation": { "type": "integer", "minimum": 0 }
       }
     },
     "derivedAssets": {
@@ -302,8 +296,8 @@
       "required": ["searchIndex", "graphSnapshot"],
       "additionalProperties": false,
       "properties": {
-        "searchIndex": {"$ref": "#/$defs/derivedAsset"},
-        "graphSnapshot": {"$ref": "#/$defs/derivedAsset"}
+        "searchIndex": { "$ref": "#/$defs/derivedAsset" },
+        "graphSnapshot": { "$ref": "#/$defs/derivedAsset" }
       }
     },
     "derivedAsset": {
@@ -313,8 +307,8 @@
           "required": ["status", "manifestHash"],
           "additionalProperties": false,
           "properties": {
-            "status": {"const": "not_recorded"},
-            "manifestHash": {"type": "null"}
+            "status": { "const": "not_recorded" },
+            "manifestHash": { "type": "null" }
           }
         },
         {
@@ -322,8 +316,8 @@
           "required": ["status", "manifestHash"],
           "additionalProperties": false,
           "properties": {
-            "status": {"type": "string", "enum": ["available", "stale"]},
-            "manifestHash": {"$ref": "#/$defs/blake3Hash"}
+            "status": { "type": "string", "enum": ["available", "stale"] },
+            "manifestHash": { "$ref": "#/$defs/blake3Hash" }
           }
         }
       ]
@@ -333,9 +327,9 @@
       "required": ["selected", "omitted", "candidatePool"],
       "additionalProperties": false,
       "properties": {
-        "selected": {"type": "integer", "minimum": 0},
-        "omitted": {"type": "integer", "minimum": 0},
-        "candidatePool": {"type": "integer", "minimum": 0}
+        "selected": { "type": "integer", "minimum": 0 },
+        "omitted": { "type": "integer", "minimum": 0 },
+        "candidatePool": { "type": "integer", "minimum": 0 }
       }
     },
     "selectedItem": {
@@ -355,29 +349,36 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"$ref": "#/$defs/memoryId"},
-        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": { "$ref": "#/$defs/memoryId" },
+        "rank": { "type": "integer", "minimum": 1 },
         "section": {
           "type": "string",
           "enum": ["procedural_rules", "decisions", "failures", "evidence", "artifacts"]
         },
-        "estimatedTokens": {"type": "integer", "minimum": 1},
-        "scores": {"$ref": "#/$defs/scores"},
-        "attemptFamilyMultiplicity": {"$ref": "#/$defs/attemptFamilyMultiplicity"},
-        "why": {"$ref": "#/$defs/textRecord"},
-        "diversityKeyHash": {"$ref": "#/$defs/blake3Hash"},
+        "estimatedTokens": { "type": "integer", "minimum": 1 },
+        "scores": { "$ref": "#/$defs/scores" },
+        "attemptFamilyMultiplicity": { "$ref": "#/$defs/attemptFamilyMultiplicity" },
+        "why": { "$ref": "#/$defs/textRecord" },
+        "diversityKeyHash": { "$ref": "#/$defs/blake3Hash" },
         "trustClass": {
           "type": "string",
-          "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+          "enum": [
+            "human_explicit",
+            "peer_human_attested",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import"
+          ]
         },
-        "trustSubclass": {"type": ["string", "null"]},
-        "provenance": {"$ref": "#/$defs/provenance"},
+        "trustSubclass": { "type": ["string", "null"] },
+        "provenance": { "$ref": "#/$defs/provenance" },
         "redactionClasses": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         },
-        "freshness": {"const": "unavailable"}
+        "freshness": { "const": "unavailable" }
       }
     },
     "scores": {
@@ -385,9 +386,9 @@
       "required": ["relevance", "utility"],
       "additionalProperties": false,
       "properties": {
-        "relevance": {"type": "number", "minimum": 0, "maximum": 1},
-        "utility": {"type": "number", "minimum": 0, "maximum": 1},
-        "combinedScore": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+        "relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "utility": { "type": "number", "minimum": 0, "maximum": 1 },
+        "combinedScore": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
       }
     },
     "provenance": {
@@ -397,9 +398,9 @@
           "required": ["hash", "redacted", "redactionReasons"],
           "additionalProperties": false,
           "properties": {
-            "hash": {"$ref": "#/$defs/blake3Hash"},
-            "redacted": {"const": false},
-            "redactionReasons": {"type": "array", "maxItems": 0}
+            "hash": { "$ref": "#/$defs/blake3Hash" },
+            "redacted": { "const": false },
+            "redactionReasons": { "type": "array", "maxItems": 0 }
           }
         },
         {
@@ -407,13 +408,13 @@
           "required": ["hash", "redacted", "redactionReasons"],
           "additionalProperties": false,
           "properties": {
-            "hash": {"$ref": "#/$defs/blake3Hash"},
-            "redacted": {"const": true},
+            "hash": { "$ref": "#/$defs/blake3Hash" },
+            "redacted": { "const": true },
             "redactionReasons": {
               "type": "array",
               "minItems": 1,
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             }
           }
         }
@@ -424,9 +425,9 @@
       "required": ["memoryId", "estimatedTokens", "reason"],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"$ref": "#/$defs/memoryId"},
-        "estimatedTokens": {"type": "integer", "minimum": 1},
-        "attemptFamilyMultiplicity": {"$ref": "#/$defs/attemptFamilyMultiplicity"},
+        "memoryId": { "$ref": "#/$defs/memoryId" },
+        "estimatedTokens": { "type": "integer", "minimum": 1 },
+        "attemptFamilyMultiplicity": { "$ref": "#/$defs/attemptFamilyMultiplicity" },
         "reason": {
           "type": "string",
           "enum": [
@@ -442,7 +443,7 @@
     },
     "attemptFamilyMultiplicity": {
       "oneOf": [
-        {"type": "null"},
+        { "type": "null" },
         {
           "type": "object",
           "additionalProperties": false,
@@ -454,14 +455,14 @@
             "memberships"
           ],
           "properties": {
-            "schema": {"const": "ee.pack.attempt_family_multiplicity.v1"},
-            "effectiveDiscountFactor": {"type": "number", "minimum": 0, "maximum": 1},
-            "promotionPosture": {"$ref": "#/$defs/attemptFamilyPromotionPosture"},
-            "promotionReason": {"type": "string", "minLength": 1},
+            "schema": { "const": "ee.pack.attempt_family_multiplicity.v1" },
+            "effectiveDiscountFactor": { "type": "number", "minimum": 0, "maximum": 1 },
+            "promotionPosture": { "$ref": "#/$defs/attemptFamilyPromotionPosture" },
+            "promotionReason": { "type": "string", "minLength": 1 },
             "memberships": {
               "type": "array",
               "minItems": 1,
-              "items": {"$ref": "#/$defs/attemptFamilyMembership"}
+              "items": { "$ref": "#/$defs/attemptFamilyMembership" }
             }
           }
         }
@@ -487,23 +488,23 @@
         "promotionReason"
       ],
       "properties": {
-        "familyAlias": {"type": "string", "pattern": "^afm_[0-9a-f]{32}$"},
+        "familyAlias": { "type": "string", "pattern": "^afm_[0-9a-f]{32}$" },
         "memberDisposition": {
           "type": "string",
           "enum": ["selected", "rejected", "unslotted", "conflicted"]
         },
-        "memberDiscountFactor": {"type": "number", "minimum": 0, "maximum": 1},
-        "declaredSize": {"type": ["integer", "null"], "minimum": 1, "maximum": 1000000},
-        "recordedSlots": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "selectedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "rejectedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "unslottedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "duplicateSlotCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "duplicateMemberCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "outOfRangeSlotCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "unrecordedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
-        "promotionPosture": {"$ref": "#/$defs/attemptFamilyPromotionPosture"},
-        "promotionReason": {"type": "string", "minLength": 1}
+        "memberDiscountFactor": { "type": "number", "minimum": 0, "maximum": 1 },
+        "declaredSize": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000000 },
+        "recordedSlots": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "selectedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "rejectedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "unslottedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "duplicateSlotCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "duplicateMemberCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "outOfRangeSlotCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "unrecordedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "promotionPosture": { "$ref": "#/$defs/attemptFamilyPromotionPosture" },
+        "promotionReason": { "type": "string", "minLength": 1 }
       }
     },
     "attemptFamilyPromotionPosture": {
@@ -526,29 +527,29 @@
       "type": "object",
       "required": ["code", "message", "severity"],
       "properties": {
-        "code": {"type": "string", "minLength": 1},
-        "message": {"type": "string", "minLength": 1},
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "repair": {"type": ["string", "null"]},
+        "repair": { "type": ["string", "null"] },
         "details": {
           "oneOf": [
-            {"type": "null"},
+            { "type": "null" },
             {
               "type": "object",
-              "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" }
             }
           ]
         }
       },
-      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
     },
     "attestationSurfaceManifest": {
       "oneOf": [
-        {"$ref": "#/$defs/availableAttestationSurfaceManifest"},
-        {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"}
+        { "$ref": "#/$defs/availableAttestationSurfaceManifest" },
+        { "$ref": "#/$defs/unavailableAttestationSurfaceManifest" }
       ]
     },
     "availableAttestationSurfaceManifest": {
@@ -567,51 +568,58 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "ee.attestation.surface_manifest.v1"},
-        "status": {"const": "available"},
-        "sourceSchema": {"const": "ee.attestation.bundle.v2"},
-        "bundleHash": {"$ref": "#/$defs/blake3Hash"},
+        "schema": { "const": "ee.attestation.surface_manifest.v1" },
+        "status": { "const": "available" },
+        "sourceSchema": { "const": "ee.attestation.bundle.v2" },
+        "bundleHash": { "$ref": "#/$defs/blake3Hash" },
         "subject": {
           "type": "object",
           "required": ["kind", "id", "contentHashCount", "contentHashLabels"],
           "additionalProperties": false,
           "properties": {
-            "kind": {"const": "pack"},
-            "id": {"$ref": "#/$defs/packId"},
-            "contentHashCount": {"type": "integer", "minimum": 0},
+            "kind": { "const": "pack" },
+            "id": { "$ref": "#/$defs/packId" },
+            "contentHashCount": { "type": "integer", "minimum": 0 },
             "contentHashLabels": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             }
           }
         },
         "evidenceManifest": {
           "type": "object",
-          "required": ["entryCount", "kinds", "schemas", "contentHashes", "chainHashes", "provenanceUriIncluded"],
+          "required": [
+            "entryCount",
+            "kinds",
+            "schemas",
+            "contentHashes",
+            "chainHashes",
+            "provenanceUriIncluded"
+          ],
           "additionalProperties": false,
           "properties": {
-            "entryCount": {"type": "integer", "minimum": 0},
+            "entryCount": { "type": "integer", "minimum": 0 },
             "kinds": {
               "type": "object",
-              "additionalProperties": {"type": "integer", "minimum": 0}
+              "additionalProperties": { "type": "integer", "minimum": 0 }
             },
             "schemas": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             },
             "contentHashes": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"$ref": "#/$defs/blake3Hash"}
+              "items": { "$ref": "#/$defs/blake3Hash" }
             },
             "chainHashes": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"$ref": "#/$defs/blake3Hash"}
+              "items": { "$ref": "#/$defs/blake3Hash" }
             },
-            "provenanceUriIncluded": {"type": "boolean"}
+            "provenanceUriIncluded": { "type": "boolean" }
           }
         },
         "redactionManifest": {
@@ -619,22 +627,22 @@
           "required": ["policy", "entryCount", "fields", "classes", "replacementHashes"],
           "additionalProperties": false,
           "properties": {
-            "policy": {"const": "ee.policy.secret_redaction.v1"},
-            "entryCount": {"type": "integer", "minimum": 0},
+            "policy": { "const": "ee.policy.secret_redaction.v1" },
+            "entryCount": { "type": "integer", "minimum": 0 },
             "fields": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             },
             "classes": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             },
             "replacementHashes": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"$ref": "#/$defs/blake3Hash"}
+              "items": { "$ref": "#/$defs/blake3Hash" }
             }
           }
         },
@@ -643,16 +651,16 @@
           "required": ["entryCount", "labels", "hashes"],
           "additionalProperties": false,
           "properties": {
-            "entryCount": {"type": "integer", "minimum": 0},
+            "entryCount": { "type": "integer", "minimum": 0 },
             "labels": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             },
             "hashes": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"$ref": "#/$defs/blake3Hash"}
+              "items": { "$ref": "#/$defs/blake3Hash" }
             }
           }
         },
@@ -661,11 +669,11 @@
           "required": ["count", "fields"],
           "additionalProperties": false,
           "properties": {
-            "count": {"type": "integer", "minimum": 0},
+            "count": { "type": "integer", "minimum": 0 },
             "fields": {
               "type": "array",
               "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+              "items": { "type": "string", "minLength": 1 }
             }
           }
         },
@@ -674,7 +682,7 @@
           "required": ["scope"],
           "additionalProperties": false,
           "properties": {
-            "scope": {"const": "local_ee_custody"}
+            "scope": { "const": "local_ee_custody" }
           }
         }
       }
@@ -684,23 +692,23 @@
       "required": ["schema", "status", "reason", "bundleHash"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "ee.attestation.surface_manifest.v1"},
-        "status": {"const": "unavailable"},
+        "schema": { "const": "ee.attestation.surface_manifest.v1" },
+        "status": { "const": "unavailable" },
         "reason": {
           "type": "string",
           "enum": ["ledger_unavailable_or_untrusted", "pack_not_found", "attestation_query_failed"]
         },
-        "bundleHash": {"type": "null"}
+        "bundleHash": { "type": "null" }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

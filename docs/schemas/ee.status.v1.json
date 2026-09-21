@@ -7,10 +7,10 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
-    "degraded": {"type": "array", "items": {"type": "object"}},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
+    "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
       "required": [
@@ -42,84 +42,181 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "status"},
-        "version": {"type": "string"},
-        "workspace": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "posture": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "capabilities": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "read_pool": {"$ref": "#/$defs/readPoolStatus"},
-        "wal": {"$ref": "#/$defs/walStatus"},
-        "shardFanout": {"$ref": "#/$defs/shardFanoutStatus"},
-        "packBudgetBuckets": {"$ref": "#/$defs/packBudgetBuckets"},
-        "qos": {"$ref": "#/$defs/qosStatus"},
-        "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
-        "verificationPosture": {"$ref": "#/$defs/verificationPosture"},
-        "verificationLedger": {"$ref": "#/$defs/verificationLedger"},
-        "hostCalibration": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
-        "writeGroupCommit": {"$ref": "#/$defs/writeGroupCommitTelemetry"},
-        "flightRecorder": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "graphCompute": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "graphSnapshotArtifact": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "search": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "derivedAssets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "agentInventory": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+        "command": { "type": "string", "const": "status" },
+        "version": { "type": "string" },
+        "workspace": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "posture": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "runtime": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "read_pool": { "$ref": "#/$defs/readPoolStatus" },
+        "wal": { "$ref": "#/$defs/walStatus" },
+        "shardFanout": { "$ref": "#/$defs/shardFanoutStatus" },
+        "packBudgetBuckets": { "$ref": "#/$defs/packBudgetBuckets" },
+        "qos": { "$ref": "#/$defs/qosStatus" },
+        "rchWorkerPressure": { "$ref": "#/$defs/rchWorkerPressure" },
+        "verificationPosture": { "$ref": "#/$defs/verificationPosture" },
+        "verificationLedger": { "$ref": "#/$defs/verificationLedger" },
+        "hostCalibration": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "memoryHealth": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "curationHealth": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "feedbackHealth": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "singleFlight": { "$ref": "#/$defs/singleFlightPosture" },
+        "writeGroupCommit": { "$ref": "#/$defs/writeGroupCommitTelemetry" },
+        "flightRecorder": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "graphCompute": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "graphSnapshotArtifact": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "search": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "derivedAssets": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "agentInventory": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
+        "degraded": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        }
       }
     }
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "singleFlight", "writeGroupCommit", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "search", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "singleFlight", "writeGroupCommit", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "memoryHealth", "curationHealth", "feedbackHealth", "graphCompute", "graphSnapshotArtifact", "search", "derivedAssets", "agentInventory", "degraded"],
+    "summary": [
+      "command",
+      "version",
+      "workspace",
+      "posture",
+      "singleFlight",
+      "writeGroupCommit",
+      "flightRecorder",
+      "qos",
+      "rchWorkerPressure",
+      "verificationPosture",
+      "verificationLedger",
+      "hostCalibration",
+      "search",
+      "capabilities"
+    ],
+    "standard": [
+      "command",
+      "version",
+      "workspace",
+      "posture",
+      "singleFlight",
+      "writeGroupCommit",
+      "flightRecorder",
+      "qos",
+      "rchWorkerPressure",
+      "verificationPosture",
+      "verificationLedger",
+      "hostCalibration",
+      "capabilities",
+      "runtime",
+      "read_pool",
+      "wal",
+      "shardFanout",
+      "packBudgetBuckets",
+      "memoryHealth",
+      "curationHealth",
+      "feedbackHealth",
+      "graphCompute",
+      "graphSnapshotArtifact",
+      "search",
+      "derivedAssets",
+      "agentInventory",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "$defs": {
     "readPoolStatus": {
       "type": "object",
-      "required": ["active", "idle", "active_pins", "expired_pins", "max_seen", "drops", "release_failures", "ad_hoc_bypass_count", "acquire_wait", "checkpoint_blocked_by"],
+      "required": [
+        "active",
+        "idle",
+        "active_pins",
+        "expired_pins",
+        "max_seen",
+        "drops",
+        "release_failures",
+        "ad_hoc_bypass_count",
+        "acquire_wait",
+        "checkpoint_blocked_by"
+      ],
       "additionalProperties": false,
       "properties": {
-        "active": {"type": "integer", "minimum": 0},
-        "idle": {"type": "integer", "minimum": 0},
-        "active_pins": {"type": "integer", "minimum": 0},
-        "expired_pins": {"type": "integer", "minimum": 0},
-        "max_seen": {"type": "integer", "minimum": 0},
-        "drops": {"type": "integer", "minimum": 0},
-        "release_failures": {"type": "integer", "minimum": 0},
-        "ad_hoc_bypass_count": {"type": "integer", "minimum": 0},
+        "active": { "type": "integer", "minimum": 0 },
+        "idle": { "type": "integer", "minimum": 0 },
+        "active_pins": { "type": "integer", "minimum": 0 },
+        "expired_pins": { "type": "integer", "minimum": 0 },
+        "max_seen": { "type": "integer", "minimum": 0 },
+        "drops": { "type": "integer", "minimum": 0 },
+        "release_failures": { "type": "integer", "minimum": 0 },
+        "ad_hoc_bypass_count": { "type": "integer", "minimum": 0 },
         "acquire_wait": {
           "type": "object",
           "required": ["samples", "p50_ns", "p99_ns"],
           "additionalProperties": false,
           "properties": {
-            "samples": {"type": "integer", "minimum": 0},
-            "p50_ns": {"type": "integer", "minimum": 0},
-            "p99_ns": {"type": "integer", "minimum": 0}
+            "samples": { "type": "integer", "minimum": 0 },
+            "p50_ns": { "type": "integer", "minimum": 0 },
+            "p99_ns": { "type": "integer", "minimum": 0 }
           }
         },
         "checkpoint_blocked_by": {
           "description": "Forward-looking checkpoint blocker attribution: the oldest active SnapshotPin in this process's read pool. If a `wal_checkpoint` were attempted now and returned BUSY, this entry is the most likely blocker. Null when no pins are active. Process-local: a reader pinning the WAL from a different process is not visible here.",
           "oneOf": [
-            {"type": "null"},
+            { "type": "null" },
             {
               "type": "object",
-              "required": ["pin_id", "slot_id", "workflow_id", "request_id", "workspace_id", "age_ms", "max_pin_duration_ms", "poisoned", "release_state"],
+              "required": [
+                "pin_id",
+                "slot_id",
+                "workflow_id",
+                "request_id",
+                "workspace_id",
+                "age_ms",
+                "max_pin_duration_ms",
+                "poisoned",
+                "release_state"
+              ],
               "additionalProperties": false,
               "properties": {
-                "pin_id": {"type": "integer", "minimum": 0},
-                "slot_id": {"type": ["integer", "null"], "minimum": 0},
-                "workflow_id": {"type": ["string", "null"]},
-                "request_id": {"type": ["string", "null"]},
-                "workspace_id": {"type": ["string", "null"]},
-                "age_ms": {"type": "integer", "minimum": 0},
-                "max_pin_duration_ms": {"type": "integer", "minimum": 0},
-                "poisoned": {"type": "boolean"},
-                "release_state": {"type": "string", "enum": ["active", "expired", "poisoned"]}
+                "pin_id": { "type": "integer", "minimum": 0 },
+                "slot_id": { "type": ["integer", "null"], "minimum": 0 },
+                "workflow_id": { "type": ["string", "null"] },
+                "request_id": { "type": ["string", "null"] },
+                "workspace_id": { "type": ["string", "null"] },
+                "age_ms": { "type": "integer", "minimum": 0 },
+                "max_pin_duration_ms": { "type": "integer", "minimum": 0 },
+                "poisoned": { "type": "boolean" },
+                "release_state": { "type": "string", "enum": ["active", "expired", "poisoned"] }
               }
             }
           ]
@@ -131,41 +228,73 @@
       "required": ["bytes", "frames", "page_size", "checkpoint_threshold_bytes"],
       "additionalProperties": false,
       "properties": {
-        "bytes": {"type": "integer", "minimum": 0},
-        "frames": {"type": "integer", "minimum": 0},
-        "page_size": {"type": "integer", "minimum": 0},
-        "checkpoint_threshold_bytes": {"type": "integer", "minimum": 0}
+        "bytes": { "type": "integer", "minimum": 0 },
+        "frames": { "type": "integer", "minimum": 0 },
+        "page_size": { "type": "integer", "minimum": 0 },
+        "checkpoint_threshold_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "shardFanoutStatus": {
       "type": "object",
-      "required": ["schema", "enabled", "posture", "workspaceId", "workspaceRoot", "legacyDatabasePath", "dataRoot", "shardRoot", "catalogPath", "shardPath", "shardId", "catalogExists", "shardExists", "catalogContract", "shardGeneration", "migrationState", "lastVerifiedHashes", "recovery", "degraded"],
+      "required": [
+        "schema",
+        "enabled",
+        "posture",
+        "workspaceId",
+        "workspaceRoot",
+        "legacyDatabasePath",
+        "dataRoot",
+        "shardRoot",
+        "catalogPath",
+        "shardPath",
+        "shardId",
+        "catalogExists",
+        "shardExists",
+        "catalogContract",
+        "shardGeneration",
+        "migrationState",
+        "lastVerifiedHashes",
+        "recovery",
+        "degraded"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.shard_fanout.status.v1"},
-        "enabled": {"type": "boolean"},
-        "posture": {"type": "string", "enum": ["disabled", "enabled", "migration_required", "degraded", "not_inspected"]},
-        "workspaceId": {"type": ["string", "null"]},
-        "workspaceRoot": {"type": ["string", "null"]},
-        "legacyDatabasePath": {"type": ["string", "null"]},
-        "dataRoot": {"type": "string"},
-        "shardRoot": {"type": "string"},
-        "catalogPath": {"type": "string"},
-        "shardPath": {"type": ["string", "null"]},
-        "shardId": {"type": ["string", "null"]},
-        "catalogExists": {"type": "boolean"},
-        "shardExists": {"type": "boolean"},
+        "schema": { "type": "string", "const": "ee.shard_fanout.status.v1" },
+        "enabled": { "type": "boolean" },
+        "posture": {
+          "type": "string",
+          "enum": ["disabled", "enabled", "migration_required", "degraded", "not_inspected"]
+        },
+        "workspaceId": { "type": ["string", "null"] },
+        "workspaceRoot": { "type": ["string", "null"] },
+        "legacyDatabasePath": { "type": ["string", "null"] },
+        "dataRoot": { "type": "string" },
+        "shardRoot": { "type": "string" },
+        "catalogPath": { "type": "string" },
+        "shardPath": { "type": ["string", "null"] },
+        "shardId": { "type": ["string", "null"] },
+        "catalogExists": { "type": "boolean" },
+        "shardExists": { "type": "boolean" },
         "catalogContract": {
           "type": "object",
           "required": ["schemaVersion", "requiredFields"],
           "additionalProperties": false,
           "properties": {
-            "schemaVersion": {"type": "integer", "minimum": 1},
-            "requiredFields": {"type": "array", "items": {"type": "string"}}
+            "schemaVersion": { "type": "integer", "minimum": 1 },
+            "requiredFields": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "shardGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "migrationState": {"type": "string", "enum": ["legacy_active", "authoritative", "migration_required", "blocked", "not_inspected"]},
+        "shardGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "migrationState": {
+          "type": "string",
+          "enum": [
+            "legacy_active",
+            "authoritative",
+            "migration_required",
+            "blocked",
+            "not_inspected"
+          ]
+        },
         "lastVerifiedHashes": {
           "type": "array",
           "items": {
@@ -173,8 +302,8 @@
             "required": ["name", "value"],
             "additionalProperties": false,
             "properties": {
-              "name": {"type": "string"},
-              "value": {"type": ["string", "null"]}
+              "name": { "type": "string" },
+              "value": { "type": ["string", "null"] }
             }
           }
         },
@@ -185,35 +314,45 @@
             "required": ["priority", "kind", "command"],
             "additionalProperties": false,
             "properties": {
-              "priority": {"type": "integer", "minimum": 0},
-              "kind": {"type": "string"},
-              "command": {"type": "string"}
+              "priority": { "type": "integer", "minimum": 0 },
+              "kind": { "type": "string" },
+              "command": { "type": "string" }
             }
           }
         },
-        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+        "degraded": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        }
       }
     },
     "packBudgetBuckets": {
       "type": "object",
-      "required": ["schema", "windowHours", "totalInvocations", "adaptiveInvocations", "nonAdaptiveInvocations", "buckets"],
+      "required": [
+        "schema",
+        "windowHours",
+        "totalInvocations",
+        "adaptiveInvocations",
+        "nonAdaptiveInvocations",
+        "buckets"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.status.pack_budget_buckets.v1"},
-        "windowHours": {"type": "integer", "minimum": 0},
-        "totalInvocations": {"type": "integer", "minimum": 0},
-        "adaptiveInvocations": {"type": "integer", "minimum": 0},
-        "nonAdaptiveInvocations": {"type": "integer", "minimum": 0},
+        "schema": { "type": "string", "const": "ee.status.pack_budget_buckets.v1" },
+        "windowHours": { "type": "integer", "minimum": 0 },
+        "totalInvocations": { "type": "integer", "minimum": 0 },
+        "adaptiveInvocations": { "type": "integer", "minimum": 0 },
+        "nonAdaptiveInvocations": { "type": "integer", "minimum": 0 },
         "buckets": {
           "type": "object",
           "required": ["below1k", "oneTo2k", "twoTo4k", "fourTo8k", "eightKPlus"],
           "additionalProperties": false,
           "properties": {
-            "below1k": {"type": "integer", "minimum": 0},
-            "oneTo2k": {"type": "integer", "minimum": 0},
-            "twoTo4k": {"type": "integer", "minimum": 0},
-            "fourTo8k": {"type": "integer", "minimum": 0},
-            "eightKPlus": {"type": "integer", "minimum": 0}
+            "below1k": { "type": "integer", "minimum": 0 },
+            "oneTo2k": { "type": "integer", "minimum": 0 },
+            "twoTo4k": { "type": "integer", "minimum": 0 },
+            "fourTo8k": { "type": "integer", "minimum": 0 },
+            "eightKPlus": { "type": "integer", "minimum": 0 }
           }
         }
       }
@@ -235,23 +374,23 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.qos.active_lane_summary.v1"},
-        "workspaceHash": {"type": "string", "minLength": 8},
-        "foregroundActiveCount": {"type": "integer", "minimum": 0},
-        "backgroundActiveCount": {"type": "integer", "minimum": 0},
-        "verificationActiveCount": {"type": "integer", "minimum": 0},
-        "maintenanceActiveCount": {"type": "integer", "minimum": 0},
-        "staleIgnoredCount": {"type": "integer", "minimum": 0},
-        "foregroundPressure": {"type": "boolean"},
-        "backgroundWorkActive": {"type": "boolean"},
-        "registryHealthy": {"type": "boolean"},
+        "schema": { "type": "string", "const": "ee.qos.active_lane_summary.v1" },
+        "workspaceHash": { "type": "string", "minLength": 8 },
+        "foregroundActiveCount": { "type": "integer", "minimum": 0 },
+        "backgroundActiveCount": { "type": "integer", "minimum": 0 },
+        "verificationActiveCount": { "type": "integer", "minimum": 0 },
+        "maintenanceActiveCount": { "type": "integer", "minimum": 0 },
+        "staleIgnoredCount": { "type": "integer", "minimum": 0 },
+        "foregroundPressure": { "type": "boolean" },
+        "backgroundWorkActive": { "type": "boolean" },
+        "registryHealthy": { "type": "boolean" },
         "activeRecords": {
           "type": "array",
-          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         },
         "degraded": {
           "type": "array",
-          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         }
       }
     },
@@ -278,27 +417,27 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.write_group_commit.v1"},
-        "generatedAt": {"type": "string", "format": "date-time"},
-        "enabled": {"type": "boolean"},
-        "redactionStatus": {"type": "string", "const": "counts_latencies_no_content"},
-        "batches": {"type": "integer", "minimum": 0},
-        "writesCoalesced": {"type": "integer", "minimum": 0},
-        "avgBatchSize": {"type": "number", "minimum": 0},
-        "fsyncCount": {"type": "integer", "minimum": 0},
-        "fsyncSaved": {"type": "integer", "minimum": 0},
-        "commitLatencyP50Us": {"type": "integer", "minimum": 0},
-        "commitLatencyP99Us": {"type": "integer", "minimum": 0},
-        "fallbackCount": {"type": "integer", "minimum": 0},
+        "schema": { "type": "string", "const": "ee.write_group_commit.v1" },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "enabled": { "type": "boolean" },
+        "redactionStatus": { "type": "string", "const": "counts_latencies_no_content" },
+        "batches": { "type": "integer", "minimum": 0 },
+        "writesCoalesced": { "type": "integer", "minimum": 0 },
+        "avgBatchSize": { "type": "number", "minimum": 0 },
+        "fsyncCount": { "type": "integer", "minimum": 0 },
+        "fsyncSaved": { "type": "integer", "minimum": 0 },
+        "commitLatencyP50Us": { "type": "integer", "minimum": 0 },
+        "commitLatencyP99Us": { "type": "integer", "minimum": 0 },
+        "fallbackCount": { "type": "integer", "minimum": 0 },
         "fallbackReasons": {
           "type": "object",
           "required": ["disabled", "degraded", "oversized", "single_writer"],
           "additionalProperties": false,
           "properties": {
-            "disabled": {"type": "integer", "minimum": 0},
-            "degraded": {"type": "integer", "minimum": 0},
-            "oversized": {"type": "integer", "minimum": 0},
-            "single_writer": {"type": "integer", "minimum": 0}
+            "disabled": { "type": "integer", "minimum": 0 },
+            "degraded": { "type": "integer", "minimum": 0 },
+            "oversized": { "type": "integer", "minimum": 0 },
+            "single_writer": { "type": "integer", "minimum": 0 }
           }
         }
       }
@@ -319,18 +458,18 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.singleflight.posture.v1"},
-        "status": {"$ref": "#/$defs/singleFlightStatus"},
-        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
-        "activeLeaderCount": {"type": "integer", "minimum": 0},
-        "leaderStartCount": {"type": "integer", "minimum": 0},
-        "followerWaitCount": {"type": "integer", "minimum": 0},
-        "followerTimeoutCount": {"type": "integer", "minimum": 0},
-        "leaderFailureCount": {"type": "integer", "minimum": 0},
-        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "schema": { "type": "string", "const": "ee.singleflight.posture.v1" },
+        "status": { "$ref": "#/$defs/singleFlightStatus" },
+        "configuredSurfaceCount": { "type": "integer", "minimum": 0 },
+        "activeLeaderCount": { "type": "integer", "minimum": 0 },
+        "leaderStartCount": { "type": "integer", "minimum": 0 },
+        "followerWaitCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutCount": { "type": "integer", "minimum": 0 },
+        "leaderFailureCount": { "type": "integer", "minimum": 0 },
+        "reusedResultCount": { "type": "integer", "minimum": 0 },
         "surfaces": {
           "type": "array",
-          "items": {"$ref": "#/$defs/singleFlightSurfacePosture"}
+          "items": { "$ref": "#/$defs/singleFlightSurfacePosture" }
         }
       }
     },
@@ -358,21 +497,21 @@
           "type": "string",
           "enum": ["context", "search", "graph_snapshot", "graph_feature_enrichment"]
         },
-        "status": {"$ref": "#/$defs/singleFlightStatus"},
-        "configured": {"type": "boolean"},
-        "activeLeaderCount": {"type": "integer", "minimum": 0},
-        "leaderStartCount": {"type": "integer", "minimum": 0},
-        "completedLeaderCount": {"type": "integer", "minimum": 0},
-        "followerJoinCount": {"type": "integer", "minimum": 0},
-        "followerTimeoutCount": {"type": "integer", "minimum": 0},
-        "leaderFailureCount": {"type": "integer", "minimum": 0},
-        "reusedResultCount": {"type": "integer", "minimum": 0},
-        "statePoisonedCount": {"type": "integer", "minimum": 0},
-        "followerTimeoutMs": {"type": "integer", "minimum": 0},
+        "status": { "$ref": "#/$defs/singleFlightStatus" },
+        "configured": { "type": "boolean" },
+        "activeLeaderCount": { "type": "integer", "minimum": 0 },
+        "leaderStartCount": { "type": "integer", "minimum": 0 },
+        "completedLeaderCount": { "type": "integer", "minimum": 0 },
+        "followerJoinCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutCount": { "type": "integer", "minimum": 0 },
+        "leaderFailureCount": { "type": "integer", "minimum": 0 },
+        "reusedResultCount": { "type": "integer", "minimum": 0 },
+        "statePoisonedCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutMs": { "type": "integer", "minimum": 0 },
         "lastKey": {
-          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/singleFlightLastKey"}]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/singleFlightLastKey" }]
         },
-        "suggestedAction": {"type": "string", "minLength": 1}
+        "suggestedAction": { "type": "string", "minLength": 1 }
       }
     },
     "singleFlightLastKey": {
@@ -380,52 +519,81 @@
       "required": ["keyHash", "workspaceGeneration", "indexGeneration", "graphGeneration"],
       "additionalProperties": false,
       "properties": {
-        "keyHash": {"type": "string", "minLength": 8},
-        "workspaceGeneration": {"type": "integer", "minimum": 0},
-        "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+        "keyHash": { "type": "string", "minLength": 8 },
+        "workspaceGeneration": { "type": "integer", "minimum": 0 },
+        "indexGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "graphGeneration": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "verificationPosture": {
       "type": "object",
-      "required": ["schema", "status", "windowHours", "recordCount", "recentRunCount", "staleRunCount", "unknownAgeCount", "recentReusableRunCount", "inFlightEquivalentCommandCount", "advisoryCounts", "evidenceHealth", "recoveryActions"],
+      "required": [
+        "schema",
+        "status",
+        "windowHours",
+        "recordCount",
+        "recentRunCount",
+        "staleRunCount",
+        "unknownAgeCount",
+        "recentReusableRunCount",
+        "inFlightEquivalentCommandCount",
+        "advisoryCounts",
+        "evidenceHealth",
+        "recoveryActions"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.verification.posture.v1"},
-        "status": {"type": "string"},
-        "windowHours": {"type": "integer", "minimum": 0},
-        "recordCount": {"type": "integer", "minimum": 0},
-        "recentRunCount": {"type": "integer", "minimum": 0},
-        "staleRunCount": {"type": "integer", "minimum": 0},
-        "unknownAgeCount": {"type": "integer", "minimum": 0},
-        "recentReusableRunCount": {"type": "integer", "minimum": 0},
-        "inFlightEquivalentCommandCount": {"type": "integer", "minimum": 0},
+        "schema": { "type": "string", "const": "ee.verification.posture.v1" },
+        "status": { "type": "string" },
+        "windowHours": { "type": "integer", "minimum": 0 },
+        "recordCount": { "type": "integer", "minimum": 0 },
+        "recentRunCount": { "type": "integer", "minimum": 0 },
+        "staleRunCount": { "type": "integer", "minimum": 0 },
+        "unknownAgeCount": { "type": "integer", "minimum": 0 },
+        "recentReusableRunCount": { "type": "integer", "minimum": 0 },
+        "inFlightEquivalentCommandCount": { "type": "integer", "minimum": 0 },
         "advisoryCounts": {
           "type": "object",
-          "required": ["remoteSuccess", "remoteFailed", "remoteInFlight", "localDisallowed", "topologyBlocked", "missingArtifactManifest"],
+          "required": [
+            "remoteSuccess",
+            "remoteFailed",
+            "remoteInFlight",
+            "localDisallowed",
+            "topologyBlocked",
+            "missingArtifactManifest"
+          ],
           "additionalProperties": false,
           "properties": {
-            "remoteSuccess": {"type": "integer", "minimum": 0},
-            "remoteFailed": {"type": "integer", "minimum": 0},
-            "remoteInFlight": {"type": "integer", "minimum": 0},
-            "localDisallowed": {"type": "integer", "minimum": 0},
-            "topologyBlocked": {"type": "integer", "minimum": 0},
-            "missingArtifactManifest": {"type": "integer", "minimum": 0}
+            "remoteSuccess": { "type": "integer", "minimum": 0 },
+            "remoteFailed": { "type": "integer", "minimum": 0 },
+            "remoteInFlight": { "type": "integer", "minimum": 0 },
+            "localDisallowed": { "type": "integer", "minimum": 0 },
+            "topologyBlocked": { "type": "integer", "minimum": 0 },
+            "missingArtifactManifest": { "type": "integer", "minimum": 0 }
           }
         },
         "evidenceHealth": {
           "type": "object",
-          "required": ["ledgerAvailable", "status", "malformedTimestampCount", "missingArtifactManifestCount", "localDisallowedCount", "topologyBlockedCount", "issueCount", "reason"],
+          "required": [
+            "ledgerAvailable",
+            "status",
+            "malformedTimestampCount",
+            "missingArtifactManifestCount",
+            "localDisallowedCount",
+            "topologyBlockedCount",
+            "issueCount",
+            "reason"
+          ],
           "additionalProperties": false,
           "properties": {
-            "ledgerAvailable": {"type": "boolean"},
-            "status": {"type": "string"},
-            "malformedTimestampCount": {"type": "integer", "minimum": 0},
-            "missingArtifactManifestCount": {"type": "integer", "minimum": 0},
-            "localDisallowedCount": {"type": "integer", "minimum": 0},
-            "topologyBlockedCount": {"type": "integer", "minimum": 0},
-            "issueCount": {"type": "integer", "minimum": 0},
-            "reason": {"type": ["string", "null"]}
+            "ledgerAvailable": { "type": "boolean" },
+            "status": { "type": "string" },
+            "malformedTimestampCount": { "type": "integer", "minimum": 0 },
+            "missingArtifactManifestCount": { "type": "integer", "minimum": 0 },
+            "localDisallowedCount": { "type": "integer", "minimum": 0 },
+            "topologyBlockedCount": { "type": "integer", "minimum": 0 },
+            "issueCount": { "type": "integer", "minimum": 0 },
+            "reason": { "type": ["string", "null"] }
           }
         },
         "recoveryActions": {
@@ -435,11 +603,11 @@
             "required": ["priority", "kind", "command", "message", "relatedBeadId"],
             "additionalProperties": false,
             "properties": {
-              "priority": {"type": "integer", "minimum": 0},
-              "kind": {"type": "string"},
-              "command": {"type": ["string", "null"]},
-              "message": {"type": "string"},
-              "relatedBeadId": {"type": ["string", "null"]}
+              "priority": { "type": "integer", "minimum": 0 },
+              "kind": { "type": "string" },
+              "command": { "type": ["string", "null"] },
+              "message": { "type": "string" },
+              "relatedBeadId": { "type": ["string", "null"] }
             }
           }
         }
@@ -447,40 +615,69 @@
     },
     "verificationLedger": {
       "type": "object",
-      "required": ["schema", "status", "ledgerAvailable", "activeBlockerCount", "localFallbackRefused", "localFallbackRefusedCount", "oldestRetryAfter", "newestRetryAfter", "blockerRefs", "recoveryActions"],
+      "required": [
+        "schema",
+        "status",
+        "ledgerAvailable",
+        "activeBlockerCount",
+        "localFallbackRefused",
+        "localFallbackRefusedCount",
+        "oldestRetryAfter",
+        "newestRetryAfter",
+        "blockerRefs",
+        "recoveryActions"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.rch.verify.ledger_status.v1"},
-        "status": {"type": "string", "enum": ["not_inspected", "not_initialized", "unavailable", "clear", "active_blockers", "serialization_failed"]},
-        "ledgerAvailable": {"type": "boolean"},
-        "activeBlockerCount": {"type": "integer", "minimum": 0},
-        "localFallbackRefused": {"type": "boolean"},
-        "localFallbackRefusedCount": {"type": "integer", "minimum": 0},
-        "oldestRetryAfter": {"type": ["string", "null"]},
-        "newestRetryAfter": {"type": ["string", "null"]},
+        "schema": { "type": "string", "const": "ee.rch.verify.ledger_status.v1" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_inspected",
+            "not_initialized",
+            "unavailable",
+            "clear",
+            "active_blockers",
+            "serialization_failed"
+          ]
+        },
+        "ledgerAvailable": { "type": "boolean" },
+        "activeBlockerCount": { "type": "integer", "minimum": 0 },
+        "localFallbackRefused": { "type": "boolean" },
+        "localFallbackRefusedCount": { "type": "integer", "minimum": 0 },
+        "oldestRetryAfter": { "type": ["string", "null"] },
+        "newestRetryAfter": { "type": ["string", "null"] },
         "blockerRefs": {
           "type": "array",
           "maxItems": 8,
-          "items": {"$ref": "#/$defs/verificationLedgerBlockerRef"}
+          "items": { "$ref": "#/$defs/verificationLedgerBlockerRef" }
         },
         "recoveryActions": {
           "type": "array",
-          "items": {"$ref": "#/$defs/verificationLedgerRecoveryAction"}
+          "items": { "$ref": "#/$defs/verificationLedgerRecoveryAction" }
         }
       }
     },
     "verificationLedgerBlockerRef": {
       "type": "object",
-      "required": ["commandHash", "status", "blockerFingerprint", "remediationBead", "retryAfter", "degradedCodes", "verificationAttribution"],
+      "required": [
+        "commandHash",
+        "status",
+        "blockerFingerprint",
+        "remediationBead",
+        "retryAfter",
+        "degradedCodes",
+        "verificationAttribution"
+      ],
       "additionalProperties": false,
       "properties": {
-        "commandHash": {"type": "string", "minLength": 1},
-        "status": {"type": "string"},
-        "blockerFingerprint": {"type": "string", "minLength": 1},
-        "remediationBead": {"type": ["string", "null"]},
-        "retryAfter": {"type": ["string", "null"]},
-        "degradedCodes": {"type": "array", "items": {"type": "string"}},
-        "verificationAttribution": {"type": "string"}
+        "commandHash": { "type": "string", "minLength": 1 },
+        "status": { "type": "string" },
+        "blockerFingerprint": { "type": "string", "minLength": 1 },
+        "remediationBead": { "type": ["string", "null"] },
+        "retryAfter": { "type": ["string", "null"] },
+        "degradedCodes": { "type": "array", "items": { "type": "string" } },
+        "verificationAttribution": { "type": "string" }
       }
     },
     "verificationLedgerRecoveryAction": {
@@ -488,10 +685,10 @@
       "required": ["priority", "kind", "command", "message"],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
-        "kind": {"type": "string"},
-        "command": {"type": "string"},
-        "message": {"type": "string"}
+        "priority": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "command": { "type": "string" },
+        "message": { "type": "string" }
       }
     },
     "rchWorkerPressure": {
@@ -508,7 +705,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.rch.worker_pressure.v1"},
+        "schema": { "type": "string", "const": "ee.rch.worker_pressure.v1" },
         "status": {
           "type": "string",
           "enum": [
@@ -521,14 +718,14 @@
             "not_collected"
           ]
         },
-        "workerCount": {"type": "integer", "minimum": 0},
-        "usableWorkerCount": {"type": "integer", "minimum": 0},
-        "blockedWorkerCount": {"type": "integer", "minimum": 0},
-        "staleWorkerCount": {"type": "integer", "minimum": 0},
-        "unknownWorkerCount": {"type": "integer", "minimum": 0},
+        "workerCount": { "type": "integer", "minimum": 0 },
+        "usableWorkerCount": { "type": "integer", "minimum": 0 },
+        "blockedWorkerCount": { "type": "integer", "minimum": 0 },
+        "staleWorkerCount": { "type": "integer", "minimum": 0 },
+        "unknownWorkerCount": { "type": "integer", "minimum": 0 },
         "workers": {
           "type": "array",
-          "items": {"$ref": "#/$defs/rchWorkerPressureWorker"}
+          "items": { "$ref": "#/$defs/rchWorkerPressureWorker" }
         }
       }
     },
@@ -546,24 +743,24 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "workerId": {"type": "string"},
-        "pressureState": {"type": "string"},
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "reasonCode": {"type": "string"},
-        "freeGb": {"type": ["integer", "null"], "minimum": 0},
-        "freeRatioBps": {"type": ["integer", "null"], "minimum": 0},
-        "telemetryFreshness": {"type": "string"},
-        "admissionImpact": {"type": "string"}
+        "workerId": { "type": "string" },
+        "pressureState": { "type": "string" },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "reasonCode": { "type": "string" },
+        "freeGb": { "type": ["integer", "null"], "minimum": 0 },
+        "freeRatioBps": { "type": ["integer", "null"], "minimum": 0 },
+        "telemetryFreshness": { "type": "string" },
+        "admissionImpact": { "type": "string" }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

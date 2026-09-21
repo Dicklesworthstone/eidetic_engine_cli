@@ -17,17 +17,17 @@
     "manifestHash"
   ],
   "properties": {
-    "schema": {"const": "ee.remote_build_artifact_manifest.v1"},
-    "artifactName": {"type": "string", "minLength": 1},
+    "schema": { "const": "ee.remote_build_artifact_manifest.v1" },
+    "artifactName": { "type": "string", "minLength": 1 },
     "producer": {
       "type": "object",
       "additionalProperties": false,
       "required": ["repository", "workflow", "runId", "runAttempt"],
       "properties": {
-        "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"},
-        "workflow": {"const": "macOS EE Artifact"},
-        "runId": {"type": "string", "pattern": "^[1-9][0-9]*$"},
-        "runAttempt": {"type": "integer", "minimum": 1}
+        "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        "workflow": { "const": "macOS EE Artifact" },
+        "runId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "runAttempt": { "type": "integer", "minimum": 1 }
       }
     },
     "source": {
@@ -44,24 +44,24 @@
         "effectiveInputHash"
       ],
       "properties": {
-        "requestedCommit": {"$ref": "#/$defs/gitObject"},
-        "resolvedCommit": {"$ref": "#/$defs/gitObject"},
-        "gitTree": {"$ref": "#/$defs/gitObject"},
+        "requestedCommit": { "$ref": "#/$defs/gitObject" },
+        "resolvedCommit": { "$ref": "#/$defs/gitObject" },
+        "gitTree": { "$ref": "#/$defs/gitObject" },
         "sourceManifest": {
           "type": "object",
           "additionalProperties": false,
           "required": ["algorithm", "hash", "fileCount", "byteCount"],
           "properties": {
-            "algorithm": {"const": "git_ls_tree_z_v1"},
-            "hash": {"$ref": "#/$defs/sha256"},
-            "fileCount": {"type": "integer", "minimum": 1},
-            "byteCount": {"type": "integer", "minimum": 1}
+            "algorithm": { "const": "git_ls_tree_z_v1" },
+            "hash": { "$ref": "#/$defs/sha256" },
+            "fileCount": { "type": "integer", "minimum": 1 },
+            "byteCount": { "type": "integer", "minimum": 1 }
           }
         },
-        "cargoLockHash": {"$ref": "#/$defs/sha256"},
-        "frankenStackLockHash": {"$ref": "#/$defs/sha256"},
-        "cargoTomlSourceHash": {"$ref": "#/$defs/sha256"},
-        "effectiveInputHash": {"$ref": "#/$defs/sha256"}
+        "cargoLockHash": { "$ref": "#/$defs/sha256" },
+        "frankenStackLockHash": { "$ref": "#/$defs/sha256" },
+        "cargoTomlSourceHash": { "$ref": "#/$defs/sha256" },
+        "effectiveInputHash": { "$ref": "#/$defs/sha256" }
       }
     },
     "build": {
@@ -82,15 +82,15 @@
         "argv": {
           "type": "array",
           "minItems": 1,
-          "items": {"type": "string", "minLength": 1}
+          "items": { "type": "string", "minLength": 1 }
         },
-        "commandHash": {"$ref": "#/$defs/sha256"},
-        "target": {"type": "string", "minLength": 1},
-        "profile": {"type": "string", "minLength": 1},
-        "cargoLocked": {"const": true},
-        "cargoLockHashBefore": {"$ref": "#/$defs/sha256"},
-        "cargoLockHashAfter": {"$ref": "#/$defs/sha256"},
-        "cargoLockUnchanged": {"const": true},
+        "commandHash": { "$ref": "#/$defs/sha256" },
+        "target": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 },
+        "cargoLocked": { "const": true },
+        "cargoLockHashBefore": { "$ref": "#/$defs/sha256" },
+        "cargoLockHashAfter": { "$ref": "#/$defs/sha256" },
+        "cargoLockUnchanged": { "const": true },
         "provenance": {
           "type": "object",
           "additionalProperties": false,
@@ -107,14 +107,14 @@
             "provenanceHash"
           ],
           "properties": {
-            "schema": {"const": "ee.remote_build.cargo_provenance.v1"},
+            "schema": { "const": "ee.remote_build.cargo_provenance.v1" },
             "rewriteId": {
               "enum": ["none", "franken_stack_path_rewrite_v1"]
             },
-            "cargoTomlSourceHash": {"$ref": "#/$defs/sha256"},
-            "cargoTomlEffectiveHash": {"$ref": "#/$defs/sha256"},
-            "cargoTomlNormalizedHash": {"$ref": "#/$defs/sha256"},
-            "cargoTomlPatchHash": {"$ref": "#/$defs/sha256"},
+            "cargoTomlSourceHash": { "$ref": "#/$defs/sha256" },
+            "cargoTomlEffectiveHash": { "$ref": "#/$defs/sha256" },
+            "cargoTomlNormalizedHash": { "$ref": "#/$defs/sha256" },
+            "cargoTomlPatchHash": { "$ref": "#/$defs/sha256" },
             "workspaceCargoConfigs": {
               "type": "array",
               "items": {
@@ -122,15 +122,15 @@
                 "additionalProperties": false,
                 "required": ["path", "hash", "sizeBytes"],
                 "properties": {
-                  "path": {"enum": [".cargo/config", ".cargo/config.toml"]},
-                  "hash": {"$ref": "#/$defs/sha256"},
-                  "sizeBytes": {"type": "integer", "minimum": 0}
+                  "path": { "enum": [".cargo/config", ".cargo/config.toml"] },
+                  "hash": { "$ref": "#/$defs/sha256" },
+                  "sizeBytes": { "type": "integer", "minimum": 0 }
                 }
               }
             },
-            "cargoHomeClass": {"const": "workspace_isolated"},
-            "frankenStackLockHash": {"$ref": "#/$defs/sha256"},
-            "provenanceHash": {"$ref": "#/$defs/sha256"}
+            "cargoHomeClass": { "const": "workspace_isolated" },
+            "frankenStackLockHash": { "$ref": "#/$defs/sha256" },
+            "provenanceHash": { "$ref": "#/$defs/sha256" }
           }
         }
       }
@@ -140,17 +140,17 @@
       "additionalProperties": false,
       "required": ["binary", "archive"],
       "properties": {
-        "binary": {"$ref": "#/$defs/artifactFile"},
+        "binary": { "$ref": "#/$defs/artifactFile" },
         "archive": {
           "type": "object",
           "additionalProperties": false,
           "required": ["fileName", "format", "member", "hash", "sizeBytes"],
           "properties": {
-            "fileName": {"type": "string", "minLength": 1},
-            "format": {"const": "tar_gz"},
-            "member": {"const": "ee"},
-            "hash": {"$ref": "#/$defs/sha256"},
-            "sizeBytes": {"type": "integer", "minimum": 1}
+            "fileName": { "type": "string", "minLength": 1 },
+            "format": { "const": "tar_gz" },
+            "member": { "const": "ee" },
+            "hash": { "$ref": "#/$defs/sha256" },
+            "sizeBytes": { "type": "integer", "minimum": 1 }
           }
         }
       }
@@ -174,23 +174,23 @@
           "semanticAssertions"
         ],
         "properties": {
-          "id": {"type": "string", "minLength": 1},
+          "id": { "type": "string", "minLength": 1 },
           "argv": {
             "type": "array",
             "minItems": 1,
-            "items": {"type": "string", "minLength": 1}
+            "items": { "type": "string", "minLength": 1 }
           },
-          "argvHash": {"$ref": "#/$defs/sha256"},
+          "argvHash": { "$ref": "#/$defs/sha256" },
           "expectedStdoutContains": {
             "type": "array",
             "minItems": 1,
-            "items": {"type": "string", "minLength": 1}
+            "items": { "type": "string", "minLength": 1 }
           },
-          "exitCode": {"const": 0},
-          "stdoutHash": {"$ref": "#/$defs/sha256"},
-          "stderrHash": {"$ref": "#/$defs/sha256"},
-          "status": {"const": "passed"},
-          "missingSemanticMarkers": {"type": "array", "maxItems": 0},
+          "exitCode": { "const": 0 },
+          "stdoutHash": { "$ref": "#/$defs/sha256" },
+          "stderrHash": { "$ref": "#/$defs/sha256" },
+          "status": { "const": "passed" },
+          "missingSemanticMarkers": { "type": "array", "maxItems": 0 },
           "semanticAssertions": {
             "type": "array",
             "items": {
@@ -198,18 +198,18 @@
               "additionalProperties": false,
               "required": ["path", "expected", "observed", "matched"],
               "properties": {
-                "path": {"type": "string", "pattern": "^/"},
-                "expected": {"type": ["string", "boolean"]},
-                "observed": {"type": ["string", "boolean", "null"]},
-                "matched": {"type": "boolean"}
+                "path": { "type": "string", "pattern": "^/" },
+                "expected": { "type": ["string", "boolean"] },
+                "observed": { "type": ["string", "boolean", "null"] },
+                "matched": { "type": "boolean" }
               }
             }
           }
         }
       }
     },
-    "status": {"const": "verified"},
-    "manifestHash": {"$ref": "#/$defs/sha256"}
+    "status": { "const": "verified" },
+    "manifestHash": { "$ref": "#/$defs/sha256" }
   },
   "$defs": {
     "gitObject": {
@@ -225,9 +225,9 @@
       "additionalProperties": false,
       "required": ["fileName", "hash", "sizeBytes"],
       "properties": {
-        "fileName": {"type": "string", "minLength": 1},
-        "hash": {"$ref": "#/$defs/sha256"},
-        "sizeBytes": {"type": "integer", "minimum": 1}
+        "fileName": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1 }
       }
     }
   }

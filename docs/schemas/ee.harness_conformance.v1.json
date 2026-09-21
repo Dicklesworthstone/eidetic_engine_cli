@@ -66,14 +66,7 @@
     }
   },
   "field_presets": {
-    "minimal": [
-      "schema",
-      "fixtureVersion",
-      "caseId",
-      "harness",
-      "fixtureKind",
-      "eventName"
-    ],
+    "minimal": ["schema", "fixtureVersion", "caseId", "harness", "fixtureKind", "eventName"],
     "summary": [
       "schema",
       "fixtureVersion",
@@ -165,21 +158,11 @@
     },
     "exitPolicy": {
       "type": "string",
-      "enum": [
-        "zero_required",
-        "non_zero_allowed",
-        "non_zero_required",
-        "not_applicable"
-      ]
+      "enum": ["zero_required", "non_zero_allowed", "non_zero_required", "not_applicable"]
     },
     "degradedPolicy": {
       "type": "string",
-      "enum": [
-        "must_absorb",
-        "must_emit",
-        "must_fail_closed",
-        "not_applicable"
-      ]
+      "enum": ["must_absorb", "must_emit", "must_fail_closed", "not_applicable"]
     },
     "harnessSupport": {
       "type": "object",
@@ -350,12 +333,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "redacted_json_event",
-              "redacted_transcript_excerpt",
-              "summary_only",
-              "none"
-            ]
+            "enum": ["redacted_json_event", "redacted_transcript_excerpt", "summary_only", "none"]
           },
           "uniqueItems": true
         }

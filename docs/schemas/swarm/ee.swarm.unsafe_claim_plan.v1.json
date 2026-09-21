@@ -49,12 +49,7 @@
     "ordering": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "reasonGroups",
-        "candidatePlans",
-        "plannerActions",
-        "evidenceSources"
-      ],
+      "required": ["reasonGroups", "candidatePlans", "plannerActions", "evidenceSources"],
       "properties": {
         "reasonGroups": {
           "type": "string",
@@ -308,7 +303,10 @@
         "evidenceSourceIds": { "$ref": "#/definitions/safeStringArray" },
         "candidateCoverage": {
           "type": "array",
-          "items": { "type": "string", "enum": ["all_candidates", "requested_candidate", "alternate_candidate", "unknown"] }
+          "items": {
+            "type": "string",
+            "enum": ["all_candidates", "requested_candidate", "alternate_candidate", "unknown"]
+          }
         },
         "boundedPreview": {
           "allOf": [{ "$ref": "#/definitions/safeString" }],
@@ -385,16 +383,10 @@
         "reasonGroupRefs": { "$ref": "#/definitions/safeStringArray" },
         "evidenceSourceIds": { "$ref": "#/definitions/safeStringArray" },
         "commandAction": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/definitions/readOnlyCommandAction" }
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/readOnlyCommandAction" }]
         },
         "bodyTemplate": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/definitions/bodyTemplate" }
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/bodyTemplate" }]
         }
       }
     },
@@ -403,7 +395,10 @@
       "additionalProperties": false,
       "required": ["templateKind", "title", "bodyPreview", "truncated"],
       "properties": {
-        "templateKind": { "type": "string", "enum": ["beads_comment", "agent_mail_message", "human_note"] },
+        "templateKind": {
+          "type": "string",
+          "enum": ["beads_comment", "agent_mail_message", "human_note"]
+        },
         "title": {
           "allOf": [{ "$ref": "#/definitions/safeString" }],
           "maxLength": 120
@@ -418,13 +413,7 @@
     "evidenceSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "sourceId",
-        "sourceKind",
-        "sourceRef",
-        "freshnessState",
-        "authoritative"
-      ],
+      "required": ["sourceId", "sourceKind", "sourceRef", "freshnessState", "authoritative"],
       "properties": {
         "sourceId": { "type": "string", "pattern": "^src-[a-z0-9-]+$" },
         "sourceKind": {
@@ -521,14 +510,8 @@
           "bv_command_timeout",
           "future_gate_reason:opaque_value"
         ],
-        "staleReasons": [
-          "tracker_authority_external_changes_pending_import"
-        ],
-        "degradedCodes": [
-          "agent_mail_unavailable",
-          "bv_command_timeout",
-          "rch_unavailable"
-        ],
+        "staleReasons": ["tracker_authority_external_changes_pending_import"],
+        "degradedCodes": ["agent_mail_unavailable", "bv_command_timeout", "rch_unavailable"],
         "sourceRefs": [
           "br://bd-1n3x1.16.1",
           "gate://swarm_work_packet_claim_gate_111111111111111111111111"
@@ -648,10 +631,7 @@
             "rg-bv-staleness",
             "rg-unknown"
           ],
-          "candidateSpecificDeltas": [
-            "requested_candidate_preserved",
-            "claim_command_suppressed"
-          ],
+          "candidateSpecificDeltas": ["requested_candidate_preserved", "claim_command_suppressed"],
           "needsFreshClaimGate": true,
           "mayEmitClaimCommand": false,
           "evidenceSourceIds": ["src-beads", "src-source-authority"]
@@ -715,7 +695,15 @@
           "commandAction": {
             "commandId": "claim_gate_retry_with_snapshot",
             "displayCommand": "ee swarm work-packet --claim-gate --candidate bd-1n3x1.16.1 --json",
-            "argv": ["ee", "swarm", "work-packet", "--claim-gate", "--candidate", "bd-1n3x1.16.1", "--json"],
+            "argv": [
+              "ee",
+              "swarm",
+              "work-packet",
+              "--claim-gate",
+              "--candidate",
+              "bd-1n3x1.16.1",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,

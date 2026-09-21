@@ -76,7 +76,15 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["memoryId", "kind", "content", "severity", "severitySource", "score", "matchedTerms"],
+        "required": [
+          "memoryId",
+          "kind",
+          "content",
+          "severity",
+          "severitySource",
+          "score",
+          "matchedTerms"
+        ],
         "properties": {
           "memoryId": {
             "type": "string",
@@ -109,7 +117,7 @@
           },
           "matchedTerms": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": { "type": "string" },
             "description": "Terms from the command that matched memory content."
           }
         }
@@ -122,10 +130,10 @@
         "type": "object",
         "required": ["code", "severity", "message", "repair"],
         "properties": {
-          "code": {"type": "string"},
-          "severity": {"type": "string"},
-          "message": {"type": "string"},
-          "repair": {"type": "string"}
+          "code": { "type": "string" },
+          "severity": { "type": "string" },
+          "message": { "type": "string" },
+          "repair": { "type": "string" }
         }
       },
       "description": "Degraded-mode signals from advisory pattern or memory retrieval. These signals never change exitCode from 0."

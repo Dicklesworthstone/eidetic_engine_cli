@@ -4,12 +4,7 @@
   "title": "ee.daemon.request.v1",
   "description": "Optional daemon RPC: 4-byte big-endian length followed by UTF-8 JSON. The workspace endpoint is `${XDG_RUNTIME_DIR}/ee/d-<workspace-hash>.sock`, falling back to the private per-UID `${TMPDIR:-/tmp}/ee-${uid}/d-<workspace-hash>.sock`. Long runtime paths use /tmp/ee-${uid} to preserve socket length headroom. The hash binds the canonical workspace path; --socket explicitly overrides selection. Memory methods require the peer UID and a non-empty workspace_id matching the daemon's bound workspace. Missing or mismatched workspace identity returns daemon_method_unauthorized. Strict method-specific schemas are advertised by ee.daemon.capabilities; callers must negotiate them before use and downgrade or fall back to the in-process CLI path when unavailable. Search uses ee.daemon.search.request.v2 and ee.daemon.search.response.v3. Bounded SessionStart and anchored recall use ee.daemon.orient_hook.request.v1 and ee.daemon.recall.request.v1, returning ee.daemon.memory_read.response.v1; both remain usable while embeddings warm. In v1, unknown top-level fields and unknown methods are rejected. Every CLI command remains usable without a daemon.",
   "type": "object",
-  "required": [
-    "schema",
-    "request_id",
-    "agent_id",
-    "method"
-  ],
+  "required": ["schema", "request_id", "agent_id", "method"],
   "additionalProperties": false,
   "properties": {
     "schema": {

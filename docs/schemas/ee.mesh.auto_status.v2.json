@@ -121,10 +121,7 @@
       }
     },
     "materialized": {
-      "anyOf": [
-        { "type": "null" },
-        { "$ref": "#/$defs/materialized" }
-      ]
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/materialized" }]
     },
     "peerStateBreakdown": {
       "$ref": "#/$defs/peerStateBreakdown"

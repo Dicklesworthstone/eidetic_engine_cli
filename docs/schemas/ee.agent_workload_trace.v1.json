@@ -178,7 +178,15 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["fact", "decision", "rule", "anti_pattern", "workflow_hint", "session_evidence", "other"]
+          "enum": [
+            "fact",
+            "decision",
+            "rule",
+            "anti_pattern",
+            "workflow_hint",
+            "session_evidence",
+            "other"
+          ]
         }
       }
     },

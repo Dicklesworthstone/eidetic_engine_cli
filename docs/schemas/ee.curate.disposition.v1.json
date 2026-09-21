@@ -7,9 +7,9 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
-    "success": {"type": "boolean"},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v1" },
+    "success": { "type": "boolean" },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": [
@@ -30,24 +30,33 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.curate.disposition.v1"},
-        "command": {"type": "string", "const": "curate disposition"},
-        "version": {"type": "string"},
-        "workspaceId": {"type": "string"},
-        "workspacePath": {"type": "string"},
-        "databasePath": {"type": "string"},
-        "dryRun": {"type": "boolean"},
-        "apply": {"type": "boolean"},
-        "durableMutation": {"type": "boolean"},
-        "summary": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "policies": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "schema": { "type": "string", "const": "ee.curate.disposition.v1" },
+        "command": { "type": "string", "const": "curate disposition" },
+        "version": { "type": "string" },
+        "workspaceId": { "type": "string" },
+        "workspacePath": { "type": "string" },
+        "databasePath": { "type": "string" },
+        "dryRun": { "type": "boolean" },
+        "apply": { "type": "boolean" },
+        "durableMutation": { "type": "boolean" },
+        "summary": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "policies": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "decisions": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
         "structuralAdjustments": {
           "type": "array",
-          "items": {"$ref": "#/$defs/structuralAdjustment"}
+          "items": { "$ref": "#/$defs/structuralAdjustment" }
         },
-        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
-        "nextAction": {"type": "string"}
+        "degraded": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "nextAction": { "type": "string" }
       }
     }
   },
@@ -65,7 +74,7 @@
         "dryRun": true,
         "apply": false,
         "durableMutation": false,
-        "summary": {"totalCandidates": 1, "dueCount": 0},
+        "summary": { "totalCandidates": 1, "dueCount": 0 },
         "policies": [],
         "decisions": [],
         "structuralAdjustments": [
@@ -89,8 +98,30 @@
   ],
   "field_presets": {
     "minimal": ["schema", "command", "summary"],
-    "summary": ["schema", "command", "dryRun", "apply", "summary", "structuralAdjustments", "nextAction"],
-    "standard": ["schema", "command", "version", "workspaceId", "dryRun", "apply", "durableMutation", "summary", "policies", "decisions", "structuralAdjustments", "degraded", "nextAction"],
+    "summary": [
+      "schema",
+      "command",
+      "dryRun",
+      "apply",
+      "summary",
+      "structuralAdjustments",
+      "nextAction"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "version",
+      "workspaceId",
+      "dryRun",
+      "apply",
+      "durableMutation",
+      "summary",
+      "policies",
+      "decisions",
+      "structuralAdjustments",
+      "degraded",
+      "nextAction"
+    ],
     "full": ["*"]
   },
   "$defs": {
@@ -110,26 +141,26 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "candidateId": {"type": "string"},
-        "memoryId": {"type": "string"},
-        "onionLayer": {"type": ["integer", "null"], "minimum": 0},
-        "maxLayer": {"type": "integer", "minimum": 0},
-        "isArticulationPoint": {"type": "boolean"},
-        "baseDecay": {"type": "number"},
-        "structuralMultiplier": {"type": "number", "exclusiveMinimum": 0},
-        "adjustedDecay": {"type": "number", "minimum": 0, "maximum": 1},
-        "adjustedTtlThresholdSeconds": {"type": "integer", "minimum": 1},
-        "rationale": {"type": "string"}
+        "candidateId": { "type": "string" },
+        "memoryId": { "type": "string" },
+        "onionLayer": { "type": ["integer", "null"], "minimum": 0 },
+        "maxLayer": { "type": "integer", "minimum": 0 },
+        "isArticulationPoint": { "type": "boolean" },
+        "baseDecay": { "type": "number" },
+        "structuralMultiplier": { "type": "number", "exclusiveMinimum": 0 },
+        "adjustedDecay": { "type": "number", "minimum": 0, "maximum": 1 },
+        "adjustedTtlThresholdSeconds": { "type": "integer", "minimum": 1 },
+        "rationale": { "type": "string" }
       }
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

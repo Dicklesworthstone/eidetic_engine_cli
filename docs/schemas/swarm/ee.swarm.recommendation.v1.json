@@ -4,17 +4,26 @@
   "title": "ee.swarm.recommendation.v1",
   "description": "Agent-facing recommendation emitted by the read-only swarm brief surface.",
   "type": "object",
-  "required": ["id", "kind", "confidence", "severity", "reasonCodes", "evidence", "suggestedCommands", "mustNotDo"],
+  "required": [
+    "id",
+    "kind",
+    "confidence",
+    "severity",
+    "reasonCodes",
+    "evidence",
+    "suggestedCommands",
+    "mustNotDo"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"type": "string"},
-    "kind": {"type": "string"},
-    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-    "severity": {"type": "string", "enum": ["info", "low", "medium", "high", "urgent"]},
-    "reasonCodes": {"type": "array", "items": {"type": "string"}},
-    "evidence": {"type": "array", "items": {"type": "string"}},
-    "suggestedCommands": {"type": "array", "items": {"type": "string"}},
-    "mustNotDo": {"type": "array", "items": {"type": "string"}}
+    "id": { "type": "string" },
+    "kind": { "type": "string" },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "urgent"] },
+    "reasonCodes": { "type": "array", "items": { "type": "string" } },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "suggestedCommands": { "type": "array", "items": { "type": "string" } },
+    "mustNotDo": { "type": "array", "items": { "type": "string" } }
   },
   "examples": [
     {

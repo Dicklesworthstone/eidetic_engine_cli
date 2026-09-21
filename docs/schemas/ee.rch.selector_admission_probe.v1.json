@@ -28,21 +28,11 @@
     },
     "status": {
       "type": "string",
-      "enum": [
-        "selected",
-        "selection_failed",
-        "not_applicable"
-      ]
+      "enum": ["selected", "selection_failed", "not_applicable"]
     },
     "required_runtime": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "enum": [
-        "Rust",
-        null
-      ]
+      "type": ["string", "null"],
+      "enum": ["Rust", null]
     },
     "workers_reported": {
       "type": "array",
@@ -67,10 +57,7 @@
       "minimum": 0
     },
     "selected_worker": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "selection_failure_reason": {
       "oneOf": [
@@ -97,10 +84,7 @@
       "type": "boolean"
     },
     "path_normalization_warning": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": ["string", "null"],
       "description": "Redacted RCH project-root, alias-root, or path-normalization warning line when observed."
     },
     "remote_required": {
@@ -113,24 +97,16 @@
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "kind",
-            "retry_guidance",
-            "evidence"
-          ],
+          "required": ["kind", "retry_guidance", "evidence"],
           "additionalProperties": false,
           "properties": {
             "kind": {
               "type": "string",
-              "enum": [
-                "active_project_exclusion"
-              ]
+              "enum": ["active_project_exclusion"]
             },
             "retry_guidance": {
               "type": "string",
-              "enum": [
-                "wait_for_active_build_or_coordinate_with_owner"
-              ]
+              "enum": ["wait_for_active_build_or_coordinate_with_owner"]
             },
             "evidence": {
               "type": "string",
@@ -165,12 +141,7 @@
             },
             "worker_posture": {
               "type": "string",
-              "enum": [
-                "active",
-                "progress_stale",
-                "heartbeat_stale",
-                "hook_inactive"
-              ]
+              "enum": ["active", "progress_stale", "heartbeat_stale", "hook_inactive"]
             },
             "heartbeat_age_secs": {
               "type": "integer",
@@ -206,21 +177,15 @@
             },
             "retry_after_hint": {
               "type": "string",
-              "enum": [
-                "after_active_build_completes"
-              ]
+              "enum": ["after_active_build_completes"]
             },
             "next_action": {
               "type": "string",
-              "enum": [
-                "wait_for_active_build_or_contact_owner_before_retry"
-              ]
+              "enum": ["wait_for_active_build_or_contact_owner_before_retry"]
             },
             "owner_escalation": {
               "type": "string",
-              "enum": [
-                "identify_or_contact_active_build_owner_before_cancelling_or_retrying"
-              ]
+              "enum": ["identify_or_contact_active_build_owner_before_cancelling_or_retrying"]
             }
           }
         },
@@ -235,13 +200,8 @@
       "schema": "ee.rch.selector_admission_probe.v1",
       "status": "selection_failed",
       "required_runtime": "Rust",
-      "workers_reported": [
-        "worker-06",
-        "worker-07"
-      ],
-      "daemon_workers_reported": [
-        "worker-06"
-      ],
+      "workers_reported": ["worker-06", "worker-07"],
+      "daemon_workers_reported": ["worker-06"],
       "workers_reported_count": 2,
       "daemon_workers_reported_count": 1,
       "selected_worker": null,

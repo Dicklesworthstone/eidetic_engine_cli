@@ -5,12 +5,7 @@
   "$comment": "DRAFT — pre-implementation artifact for bd-tc-epic-qzk7o.3.1 (T2.0). NOT registered, NOT emitted yet. The additionalProperties:false closed allowlist IS the contract the bead pins: everything not listed here is structurally excluded, which is how the non-leak goldens get their teeth. Field spellings marked TBD are the implementer's to finalize.",
   "description": "Typed memory payload of an origin event. Operations are create | revise | tombstone | shareWithdraw (the schema has NO update kind — the revision kind is REVISE; trust/validity/bodyAvailable events are explicitly deferred post-v1 per amended ADR 0086 TC-D3/D12: body-fetch eligibility is computed serve-side at fetch time). The closed metadata allowlist EXCLUDES: body text, title/first-line/preview, tags, provenance URIs, raw paths, evidence bodies, and the commitment nonce. Bodies move out-of-band via authorized body fetch and verify against the salted bodyCommitment; an immutable ledger body would contradict shareWithdraw purge semantics.",
   "type": "object",
-  "required": [
-    "operation",
-    "logicalMemoryId",
-    "revisionId",
-    "bodyCommitment"
-  ],
+  "required": ["operation", "logicalMemoryId", "revisionId", "bodyCommitment"],
   "additionalProperties": false,
   "properties": {
     "operation": {

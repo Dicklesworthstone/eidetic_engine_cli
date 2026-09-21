@@ -22,13 +22,7 @@
     },
     "phase": {
       "type": "string",
-      "enum": [
-        "enqueue",
-        "drain",
-        "batch_commit",
-        "shutdown",
-        "backpressure"
-      ]
+      "enum": ["enqueue", "drain", "batch_commit", "shutdown", "backpressure"]
     },
     "workspaceId": {
       "type": "string",

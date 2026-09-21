@@ -19,7 +19,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.environment_attestation.v1"},
+    "schema": { "type": "string", "const": "ee.environment_attestation.v1" },
     "attestationId": {
       "type": "string",
       "pattern": "^environment_attestation_[a-f0-9]{24}$",
@@ -29,26 +29,26 @@
       "$ref": "#/$defs/safeString",
       "description": "Redacted workspace label or stable workspace hash, never an unredacted home path."
     },
-    "generatedAt": {"type": "string", "format": "date-time"},
+    "generatedAt": { "type": "string", "format": "date-time" },
     "redactionStatus": {
       "type": "string",
       "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
     },
-    "summary": {"$ref": "#/$defs/summary"},
+    "summary": { "$ref": "#/$defs/summary" },
     "sourceAuthority": {
       "type": "array",
       "minItems": 1,
-      "items": {"$ref": "#/$defs/sourceAuthorityEntry"}
+      "items": { "$ref": "#/$defs/sourceAuthorityEntry" }
     },
-    "verdict": {"$ref": "#/$defs/attestationVerdict"},
-    "evidenceRefs": {"$ref": "#/$defs/stringArray"},
+    "verdict": { "$ref": "#/$defs/attestationVerdict" },
+    "evidenceRefs": { "$ref": "#/$defs/stringArray" },
     "recoveryActions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/recoveryAction"}
+      "items": { "$ref": "#/$defs/recoveryAction" }
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "$defs": {
@@ -58,26 +58,26 @@
       "maxLength": 240,
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "From: "},
-          {"pattern": "Subject: "},
-          {"pattern": "Message-ID:"},
-          {"pattern": "body:"},
-          {"pattern": "raw_inbox"},
-          {"pattern": "stdout:"},
-          {"pattern": "stderr:"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "From: " },
+          { "pattern": "Subject: " },
+          { "pattern": "Message-ID:" },
+          { "pattern": "body:" },
+          { "pattern": "raw_inbox" },
+          { "pattern": "stdout:" },
+          { "pattern": "stderr:" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" }
         ]
       }
     },
     "stringArray": {
       "type": "array",
-      "items": {"$ref": "#/$defs/safeString"},
+      "items": { "$ref": "#/$defs/safeString" },
       "uniqueItems": true
     },
     "severity": {
@@ -134,14 +134,7 @@
     },
     "authority": {
       "type": "string",
-      "enum": [
-        "authoritative",
-        "advisory",
-        "degraded",
-        "stale",
-        "unavailable",
-        "contradicted"
-      ]
+      "enum": ["authoritative", "advisory", "degraded", "stale", "unavailable", "contradicted"]
     },
     "sourceStatus": {
       "type": "string",
@@ -203,11 +196,11 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "safeToClaim": {"type": "boolean"},
-        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
-        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
-        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
-        "localCargoFallbackObserved": {"type": "boolean"}
+        "safeToClaim": { "type": "boolean" },
+        "remoteVerificationAdmitted": { "type": ["boolean", "null"] },
+        "sourceTestVerdict": { "$ref": "#/$defs/sourceTestVerdict" },
+        "environmentVerdict": { "$ref": "#/$defs/attestationVerdict" },
+        "localCargoFallbackObserved": { "type": "boolean" }
       }
     },
     "sourceAuthorityEntry": {
@@ -226,26 +219,26 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "source": {"$ref": "#/$defs/sourceKind"},
-        "authority": {"$ref": "#/$defs/authority"},
-        "status": {"$ref": "#/$defs/sourceStatus"},
-        "freshness": {"$ref": "#/$defs/freshness"},
-        "observedAt": {"type": ["string", "null"], "format": "date-time"},
-        "summary": {"$ref": "#/$defs/safeString"},
-        "evidenceRefs": {"$ref": "#/$defs/stringArray"},
+        "source": { "$ref": "#/$defs/sourceKind" },
+        "authority": { "$ref": "#/$defs/authority" },
+        "status": { "$ref": "#/$defs/sourceStatus" },
+        "freshness": { "$ref": "#/$defs/freshness" },
+        "observedAt": { "type": ["string", "null"], "format": "date-time" },
+        "summary": { "$ref": "#/$defs/safeString" },
+        "evidenceRefs": { "$ref": "#/$defs/stringArray" },
         "metrics": {
           "type": "array",
-          "items": {"$ref": "#/$defs/metric"},
+          "items": { "$ref": "#/$defs/metric" },
           "uniqueItems": true
         },
         "degradedCodes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradedCode"},
+          "items": { "$ref": "#/$defs/degradedCode" },
           "uniqueItems": true
         },
         "recoveryActions": {
           "type": "array",
-          "items": {"$ref": "#/$defs/recoveryAction"}
+          "items": { "$ref": "#/$defs/recoveryAction" }
         }
       }
     },
@@ -254,23 +247,16 @@
       "required": ["name", "value"],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "pattern": "^[a-z0-9_]+$"},
-        "value": {"$ref": "#/$defs/safeString"}
+        "name": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "value": { "$ref": "#/$defs/safeString" }
       }
     },
     "recoveryAction": {
       "type": "object",
-      "required": [
-        "priority",
-        "kind",
-        "command",
-        "mutatesState",
-        "requiredSubstrate",
-        "rationale"
-      ],
+      "required": ["priority", "kind", "command", "mutatesState", "requiredSubstrate", "rationale"],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
+        "priority": { "type": "integer", "minimum": 0 },
         "kind": {
           "type": "string",
           "enum": [
@@ -285,46 +271,28 @@
           ]
         },
         "command": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/commandAction"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/commandAction" }]
         },
-        "mutatesState": {"type": "boolean"},
+        "mutatesState": { "type": "boolean" },
         "requiredSubstrate": {
           "type": "string",
-          "enum": [
-            "agent_mail",
-            "beads",
-            "bv",
-            "ee",
-            "git",
-            "human",
-            "rch",
-            "static_local",
-            "none"
-          ]
+          "enum": ["agent_mail", "beads", "bv", "ee", "git", "human", "rch", "static_local", "none"]
         },
-        "rationale": {"$ref": "#/$defs/safeString"}
+        "rationale": { "$ref": "#/$defs/safeString" }
       }
     },
     "commandAction": {
       "type": "object",
-      "required": [
-        "displayCommand",
-        "argv",
-        "shellRequired",
-        "copySafety"
-      ],
+      "required": ["displayCommand", "argv", "shellRequired", "copySafety"],
       "additionalProperties": false,
       "properties": {
-        "displayCommand": {"$ref": "#/$defs/safeString"},
+        "displayCommand": { "$ref": "#/$defs/safeString" },
         "argv": {
           "type": "array",
           "minItems": 1,
-          "items": {"$ref": "#/$defs/safeString"}
+          "items": { "$ref": "#/$defs/safeString" }
         },
-        "shellRequired": {"type": "boolean"},
+        "shellRequired": { "type": "boolean" },
         "copySafety": {
           "type": "string",
           "enum": [
@@ -341,10 +309,10 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"$ref": "#/$defs/degradedCode"},
-        "severity": {"$ref": "#/$defs/severity"},
-        "message": {"$ref": "#/$defs/safeString"},
-        "repair": {"type": ["string", "null"], "maxLength": 240}
+        "code": { "$ref": "#/$defs/degradedCode" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "message": { "$ref": "#/$defs/safeString" },
+        "repair": { "type": ["string", "null"], "maxLength": 240 }
       }
     }
   },
@@ -417,7 +385,7 @@
           "observedAt": "2026-06-04T20:05:00Z",
           "summary": "Installed binary command surface is older than source docs.",
           "evidenceRefs": ["schema://ee.swarm.work_packet.claim_gate.v1"],
-          "metrics": [{"name": "help_surface_match", "value": "false"}],
+          "metrics": [{ "name": "help_surface_match", "value": "false" }],
           "degradedCodes": ["stale_binary_suspected"],
           "recoveryActions": [
             {
@@ -439,8 +407,8 @@
           "summary": "RCH-E327 blocked before Cargo; this is not a source test failure.",
           "evidenceRefs": ["rch://proof/command_hash/example"],
           "metrics": [
-            {"name": "remote_cargo_started", "value": "false"},
-            {"name": "local_fallback_refused", "value": "true"}
+            { "name": "remote_cargo_started", "value": "false" },
+            { "name": "local_fallback_refused", "value": "true" }
           ],
           "degradedCodes": [
             "rch_worker_topology_blocked",
@@ -488,8 +456,28 @@
   ],
   "field_presets": {
     "minimal": ["schema", "attestationId", "workspace", "summary", "verdict"],
-    "summary": ["schema", "attestationId", "workspace", "summary", "sourceAuthority", "verdict", "degraded"],
-    "standard": ["schema", "attestationId", "workspace", "generatedAt", "redactionStatus", "summary", "sourceAuthority", "verdict", "evidenceRefs", "recoveryActions", "degraded"],
+    "summary": [
+      "schema",
+      "attestationId",
+      "workspace",
+      "summary",
+      "sourceAuthority",
+      "verdict",
+      "degraded"
+    ],
+    "standard": [
+      "schema",
+      "attestationId",
+      "workspace",
+      "generatedAt",
+      "redactionStatus",
+      "summary",
+      "sourceAuthority",
+      "verdict",
+      "evidenceRefs",
+      "recoveryActions",
+      "degraded"
+    ],
     "full": ["*"]
   },
   "x-ee-status": {

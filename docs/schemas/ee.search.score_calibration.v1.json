@@ -31,14 +31,7 @@
     "status": {
       "type": "string",
       "description": "Calibration readiness; controls whether per-result scoreInterval bounds are real or fall back to a heuristic.",
-      "enum": [
-        "absent",
-        "unreadable",
-        "insufficient",
-        "corrupt",
-        "file_too_large",
-        "calibrated"
-      ]
+      "enum": ["absent", "unreadable", "insufficient", "corrupt", "file_too_large", "calibrated"]
     },
     "coverage": {
       "type": "number",
@@ -100,12 +93,7 @@
     "provenance": {
       "type": "object",
       "description": "bd-1cdea: deterministic provenance summary for the calibration evidence so consumers can audit which exact sources shaped the score intervals.",
-      "required": [
-        "jsonlHash",
-        "jsonlPath",
-        "feedbackEventIds",
-        "feedbackEventIdsTruncated"
-      ],
+      "required": ["jsonlHash", "jsonlPath", "feedbackEventIds", "feedbackEventIdsTruncated"],
       "additionalProperties": false,
       "properties": {
         "jsonlHash": {

@@ -141,10 +141,7 @@
     },
     "grantTarget": {
       "type": "object",
-      "required": [
-        "adapterVersion",
-        "peerId"
-      ],
+      "required": ["adapterVersion", "peerId"],
       "additionalProperties": false,
       "properties": {
         "adapterVersion": {
@@ -160,22 +157,11 @@
     },
     "lane": {
       "type": "string",
-      "enum": [
-        "metadata",
-        "body",
-        "embedding",
-        "graph_link",
-        "curation_signal",
-        "revision_notice"
-      ]
+      "enum": ["metadata", "body", "embedding", "graph_link", "curation_signal", "revision_notice"]
     },
     "laneDecision": {
       "type": "string",
-      "enum": [
-        "allow",
-        "quarantine",
-        "deny"
-      ]
+      "enum": ["allow", "quarantine", "deny"]
     },
     "policyGeneration": {
       "type": "string",
@@ -185,11 +171,7 @@
     },
     "policySnapshot": {
       "type": "object",
-      "required": [
-        "generation",
-        "lane",
-        "decision"
-      ],
+      "required": ["generation", "lane", "decision"],
       "additionalProperties": false,
       "properties": {
         "generation": {
@@ -205,18 +187,11 @@
     },
     "candidateKind": {
       "type": "string",
-      "enum": [
-        "memory",
-        "mesh_ledger_event"
-      ]
+      "enum": ["memory", "mesh_ledger_event"]
     },
     "candidatePin": {
       "type": "object",
-      "required": [
-        "candidateKind",
-        "candidateId",
-        "revisionId"
-      ],
+      "required": ["candidateKind", "candidateId", "revisionId"],
       "additionalProperties": false,
       "properties": {
         "candidateKind": {
@@ -237,11 +212,7 @@
     },
     "sampleStrategy": {
       "type": "string",
-      "enum": [
-        "random",
-        "highest-trust",
-        "most-recent"
-      ],
+      "enum": ["random", "highest-trust", "most-recent"],
       "description": "The random strategy is deterministic for the snapshot's fixed sampling input; issuance randomness affects only the optional bearer, never sample selection."
     },
     "trustClass": {
@@ -284,12 +255,7 @@
         },
         "level": {
           "type": "string",
-          "enum": [
-            "working",
-            "episodic",
-            "semantic",
-            "procedural"
-          ]
+          "enum": ["working", "episodic", "semantic", "procedural"]
         },
         "kind": {
           "type": "string",
@@ -344,11 +310,7 @@
     },
     "caution": {
       "type": "object",
-      "required": [
-        "kind",
-        "message",
-        "severity"
-      ],
+      "required": ["kind", "message", "severity"],
       "additionalProperties": false,
       "properties": {
         "kind": {
@@ -361,10 +323,7 @@
         },
         "severity": {
           "type": "string",
-          "enum": [
-            "info",
-            "warning"
-          ]
+          "enum": ["info", "warning"]
         }
       }
     }

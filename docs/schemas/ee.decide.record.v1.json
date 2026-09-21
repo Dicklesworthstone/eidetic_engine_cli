@@ -21,25 +21,22 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.decide.record.v1"},
-    "version": {"type": "string"},
-    "status": {"type": "string", "enum": ["recorded", "would_record"]},
-    "dryRun": {"type": "boolean"},
-    "persisted": {"type": "boolean"},
-    "workspaceId": {"type": "string"},
-    "databasePath": {"type": "string"},
-    "decision": {"$ref": "#/$defs/decisionItem"},
+    "schema": { "type": "string", "const": "ee.decide.record.v1" },
+    "version": { "type": "string" },
+    "status": { "type": "string", "enum": ["recorded", "would_record"] },
+    "dryRun": { "type": "boolean" },
+    "persisted": { "type": "boolean" },
+    "workspaceId": { "type": "string" },
+    "databasePath": { "type": "string" },
+    "decision": { "$ref": "#/$defs/decisionItem" },
     "superseded": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/decisionRef"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/decisionRef" }]
     },
-    "memoryAuditId": {"type": ["string", "null"]},
-    "memoryIndexJobId": {"type": ["string", "null"]},
-    "linkAuditId": {"type": ["string", "null"]},
-    "expireAuditId": {"type": ["string", "null"]},
-    "subscribe": {"$ref": "#/$defs/subscribe"}
+    "memoryAuditId": { "type": ["string", "null"] },
+    "memoryIndexJobId": { "type": ["string", "null"] },
+    "linkAuditId": { "type": ["string", "null"] },
+    "expireAuditId": { "type": ["string", "null"] },
+    "subscribe": { "$ref": "#/$defs/subscribe" }
   },
   "field_presets": {
     "minimal": ["schema", "version", "status", "dryRun", "persisted"],
@@ -92,20 +89,20 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"type": "string"},
-        "topic": {"type": "string"},
-        "normalizedTopic": {"type": "string"},
-        "chosen": {"type": "string"},
-        "alternatives": {"type": "array", "items": {"type": "string"}},
-        "options": {"type": "array", "items": {"type": "string"}},
-        "rationale": {"type": "string"},
-        "supersedes": {"type": ["string", "null"]},
-        "chainDepth": {"type": "integer", "minimum": 0},
-        "revisitBy": {"type": ["string", "null"], "format": "date-time"},
-        "revisitStatus": {"$ref": "#/$defs/revisitStatus"},
-        "superseded": {"type": "boolean"},
-        "validTo": {"type": ["string", "null"], "format": "date-time"},
-        "createdAt": {"type": "string", "format": "date-time"}
+        "memoryId": { "type": "string" },
+        "topic": { "type": "string" },
+        "normalizedTopic": { "type": "string" },
+        "chosen": { "type": "string" },
+        "alternatives": { "type": "array", "items": { "type": "string" } },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "rationale": { "type": "string" },
+        "supersedes": { "type": ["string", "null"] },
+        "chainDepth": { "type": "integer", "minimum": 0 },
+        "revisitBy": { "type": ["string", "null"], "format": "date-time" },
+        "revisitStatus": { "$ref": "#/$defs/revisitStatus" },
+        "superseded": { "type": "boolean" },
+        "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
       }
     },
     "decisionRef": {
@@ -113,9 +110,9 @@
       "required": ["memoryId", "validTo", "status"],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {"type": "string"},
-        "validTo": {"type": ["string", "null"], "format": "date-time"},
-        "status": {"type": "string"}
+        "memoryId": { "type": "string" },
+        "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "status": { "type": "string" }
       }
     },
     "revisitStatus": {
@@ -127,10 +124,10 @@
       "required": ["schema", "filter", "pollCommand", "streamCommand"],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.decide.subscribe.v1"},
-        "filter": {"type": "string"},
-        "pollCommand": {"type": "string"},
-        "streamCommand": {"type": "string"}
+        "schema": { "type": "string", "const": "ee.decide.subscribe.v1" },
+        "filter": { "type": "string" },
+        "pollCommand": { "type": "string" },
+        "streamCommand": { "type": "string" }
       }
     }
   }

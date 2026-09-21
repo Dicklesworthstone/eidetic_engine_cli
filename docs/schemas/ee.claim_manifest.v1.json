@@ -17,7 +17,7 @@
     },
     "artifacts": {
       "type": "array",
-      "items": {"$ref": "#/$defs/manifestArtifact"}
+      "items": { "$ref": "#/$defs/manifestArtifact" }
     },
     "lastVerifiedAt": {
       "type": ["string", "null"],
@@ -29,26 +29,13 @@
     },
     "verificationStatus": {
       "type": "string",
-      "enum": [
-        "unverified",
-        "passing",
-        "failing",
-        "stale",
-        "expired",
-        "incomplete"
-      ],
+      "enum": ["unverified", "passing", "failing", "stale", "expired", "incomplete"],
       "default": "unverified"
     }
   },
   "field_presets": {
     "minimal": ["schema", "claimId", "artifacts"],
-    "summary": [
-      "schema",
-      "claimId",
-      "verificationStatus",
-      "lastVerifiedAt",
-      "artifacts"
-    ],
+    "summary": ["schema", "claimId", "verificationStatus", "lastVerifiedAt", "artifacts"],
     "standard": [
       "schema",
       "claimId",

@@ -7,9 +7,9 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
-    "success": {"type": "boolean", "const": true},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v1" },
+    "success": { "type": "boolean", "const": true },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": [
@@ -31,22 +31,22 @@
       ],
       "additionalProperties": true,
       "properties": {
-        "schema": {"type": "string", "const": "ee.workspace_hygiene.v1"},
-        "command": {"type": "string", "const": "workspace hygiene"},
-        "readOnly": {"type": "boolean", "const": true},
-        "workspace": {"type": "string"},
+        "schema": { "type": "string", "const": "ee.workspace_hygiene.v1" },
+        "command": { "type": "string", "const": "workspace hygiene" },
+        "readOnly": { "type": "boolean", "const": true },
+        "workspace": { "type": "string" },
         "gitSummary": {
           "type": "object",
           "required": ["repositoryRoot", "dirtyPathCount", "bucketCounts", "kindCounts"],
           "additionalProperties": true,
           "properties": {
-            "repositoryRoot": {"type": "string"},
-            "dirtyPathCount": {"type": "integer", "minimum": 0},
-            "bucketCounts": {"type": "array", "items": {"$ref": "#/$defs/count"}},
-            "kindCounts": {"type": "array", "items": {"$ref": "#/$defs/count"}}
+            "repositoryRoot": { "type": "string" },
+            "dirtyPathCount": { "type": "integer", "minimum": 0 },
+            "bucketCounts": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+            "kindCounts": { "type": "array", "items": { "$ref": "#/$defs/count" } }
           }
         },
-        "pathClassifications": {"type": "array", "items": {"type": "object"}},
+        "pathClassifications": { "type": "array", "items": { "type": "object" } },
         "stagingRecommendations": {
           "type": "array",
           "items": {
@@ -54,20 +54,20 @@
             "required": ["name", "paths"],
             "additionalProperties": true,
             "properties": {
-              "name": {"type": "string"},
-              "paths": {"type": "array", "items": {"type": "string"}},
-              "pathCount": {"type": "integer", "minimum": 0},
-              "pathsTruncated": {"type": "boolean"},
-              "omittedPathCount": {"type": "integer", "minimum": 0},
-              "kinds": {"type": "array", "items": {"type": "string"}},
-              "reasons": {"type": "array", "items": {"type": "string"}},
-              "recommendation": {"type": "string"},
-              "readOnly": {"type": "boolean", "const": true}
+              "name": { "type": "string" },
+              "paths": { "type": "array", "items": { "type": "string" } },
+              "pathCount": { "type": "integer", "minimum": 0 },
+              "pathsTruncated": { "type": "boolean" },
+              "omittedPathCount": { "type": "integer", "minimum": 0 },
+              "kinds": { "type": "array", "items": { "type": "string" } },
+              "reasons": { "type": "array", "items": { "type": "string" } },
+              "recommendation": { "type": "string" },
+              "readOnly": { "type": "boolean", "const": true }
             }
           }
         },
-        "doNotCommit": {"type": "array", "items": {"type": "string"}},
-        "needsHumanReview": {"type": "array", "items": {"type": "string"}},
+        "doNotCommit": { "type": "array", "items": { "type": "string" } },
+        "needsHumanReview": { "type": "array", "items": { "type": "string" } },
         "outputTruncation": {
           "type": "object",
           "required": [
@@ -84,15 +84,15 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "truncated": {"type": "boolean"},
-            "maxPathClassifications": {"type": "integer", "minimum": 0},
-            "maxPathsPerList": {"type": "integer", "minimum": 0},
-            "maxPathsPerStagingGroup": {"type": "integer", "minimum": 0},
-            "omittedPathClassifications": {"type": "integer", "minimum": 0},
-            "omittedDoNotCommit": {"type": "integer", "minimum": 0},
-            "omittedNeedsHumanReview": {"type": "integer", "minimum": 0},
-            "omittedByBucket": {"type": "array", "items": {"$ref": "#/$defs/count"}},
-            "omittedByKind": {"type": "array", "items": {"$ref": "#/$defs/count"}},
+            "truncated": { "type": "boolean" },
+            "maxPathClassifications": { "type": "integer", "minimum": 0 },
+            "maxPathsPerList": { "type": "integer", "minimum": 0 },
+            "maxPathsPerStagingGroup": { "type": "integer", "minimum": 0 },
+            "omittedPathClassifications": { "type": "integer", "minimum": 0 },
+            "omittedDoNotCommit": { "type": "integer", "minimum": 0 },
+            "omittedNeedsHumanReview": { "type": "integer", "minimum": 0 },
+            "omittedByBucket": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+            "omittedByKind": { "type": "array", "items": { "$ref": "#/$defs/count" } },
             "stagingGroups": {
               "type": "array",
               "items": {
@@ -100,8 +100,8 @@
                 "required": ["name", "omittedPathCount"],
                 "additionalProperties": false,
                 "properties": {
-                  "name": {"type": "string"},
-                  "omittedPathCount": {"type": "integer", "minimum": 0}
+                  "name": { "type": "string" },
+                  "omittedPathCount": { "type": "integer", "minimum": 0 }
                 }
               }
             }
@@ -120,19 +120,19 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "readOnly": {"type": "boolean", "const": true},
-            "scannedFileCount": {"type": "integer", "minimum": 0},
-            "scannedByteCount": {"type": "integer", "minimum": 0},
-            "skippedContentScanCount": {"type": "integer", "minimum": 0},
-            "maxFiles": {"type": "integer", "minimum": 0},
-            "maxFileBytes": {"type": "integer", "minimum": 0},
-            "maxTotalBytes": {"type": "integer", "minimum": 0}
+            "readOnly": { "type": "boolean", "const": true },
+            "scannedFileCount": { "type": "integer", "minimum": 0 },
+            "scannedByteCount": { "type": "integer", "minimum": 0 },
+            "skippedContentScanCount": { "type": "integer", "minimum": 0 },
+            "maxFiles": { "type": "integer", "minimum": 0 },
+            "maxFileBytes": { "type": "integer", "minimum": 0 },
+            "maxTotalBytes": { "type": "integer", "minimum": 0 }
           }
         },
-        "coordinationState": {"type": "object"},
-        "beadsState": {"type": "object"},
-        "degraded": {"type": "array", "items": {"type": "string"}},
-        "nextActions": {"type": "array", "items": {"type": "string"}}
+        "coordinationState": { "type": "object" },
+        "beadsState": { "type": "object" },
+        "degraded": { "type": "array", "items": { "type": "string" } },
+        "nextActions": { "type": "array", "items": { "type": "string" } }
       }
     }
   },
@@ -142,15 +142,49 @@
       "required": ["name", "count"],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string"},
-        "count": {"type": "integer", "minimum": 0}
+        "name": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 }
       }
     }
   },
   "field_presets": {
-    "minimal": ["data.schema", "data.command", "data.readOnly", "data.gitSummary.dirtyPathCount", "data.outputTruncation.truncated", "data.secretScan.skippedContentScanCount"],
-    "summary": ["data.schema", "data.command", "data.gitSummary", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.outputTruncation", "data.secretScan", "data.degraded", "data.nextActions"],
-    "standard": ["data.schema", "data.command", "data.readOnly", "data.workspace", "data.gitSummary", "data.pathClassifications", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.outputTruncation", "data.secretScan", "data.coordinationState", "data.beadsState", "data.degraded", "data.nextActions"],
+    "minimal": [
+      "data.schema",
+      "data.command",
+      "data.readOnly",
+      "data.gitSummary.dirtyPathCount",
+      "data.outputTruncation.truncated",
+      "data.secretScan.skippedContentScanCount"
+    ],
+    "summary": [
+      "data.schema",
+      "data.command",
+      "data.gitSummary",
+      "data.stagingRecommendations",
+      "data.doNotCommit",
+      "data.needsHumanReview",
+      "data.outputTruncation",
+      "data.secretScan",
+      "data.degraded",
+      "data.nextActions"
+    ],
+    "standard": [
+      "data.schema",
+      "data.command",
+      "data.readOnly",
+      "data.workspace",
+      "data.gitSummary",
+      "data.pathClassifications",
+      "data.stagingRecommendations",
+      "data.doNotCommit",
+      "data.needsHumanReview",
+      "data.outputTruncation",
+      "data.secretScan",
+      "data.coordinationState",
+      "data.beadsState",
+      "data.degraded",
+      "data.nextActions"
+    ],
     "full": ["*"]
   }
 }

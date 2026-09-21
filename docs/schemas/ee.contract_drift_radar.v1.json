@@ -105,10 +105,7 @@
               "file": { "type": "string" },
               "line": { "type": "integer", "minimum": 0 },
               "code": {
-                "enum": [
-                  "dependency_profile_drift",
-                  "stale_dependency_profile_reference"
-                ]
+                "enum": ["dependency_profile_drift", "stale_dependency_profile_reference"]
               },
               "context": { "type": "string" },
               "expected": { "type": "string" }

@@ -63,12 +63,12 @@
   "$defs": {
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     },
     "reformulation": {
@@ -99,14 +99,7 @@
     },
     "didYouMean": {
       "type": "object",
-      "required": [
-        "score",
-        "relevanceScore",
-        "scoreKind",
-        "source",
-        "candidateStatus",
-        "why"
-      ],
+      "required": ["score", "relevanceScore", "scoreKind", "source", "candidateStatus", "why"],
       "additionalProperties": {
         "$ref": "#/$defs/jsonValue"
       },
@@ -127,12 +120,7 @@
         },
         "scoreKind": {
           "type": "string",
-          "enum": [
-            "query_relative_pool_minmax",
-            "cosine_similarity",
-            "rrf_fused",
-            "reranked"
-          ]
+          "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"]
         },
         "source": {
           "type": "string",

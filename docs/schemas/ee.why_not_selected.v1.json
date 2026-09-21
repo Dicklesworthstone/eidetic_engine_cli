@@ -29,13 +29,7 @@
     "selected": { "type": "boolean" },
     "retrievalStageReached": {
       "type": "string",
-      "enum": [
-        "retrieval",
-        "degraded_index",
-        "candidate_filter",
-        "selection",
-        "selected"
-      ]
+      "enum": ["retrieval", "degraded_index", "candidate_filter", "selection", "selected"]
     },
     "primaryReason": {
       "type": "string",
@@ -139,12 +133,7 @@
     "tokenBudgetFrontier": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "maxTokens",
-        "usedTokens",
-        "targetEstimatedTokens",
-        "requiredAdditionalTokens"
-      ],
+      "required": ["maxTokens", "usedTokens", "targetEstimatedTokens", "requiredAdditionalTokens"],
       "properties": {
         "maxTokens": { "type": "integer", "minimum": 1 },
         "usedTokens": { "type": "integer", "minimum": 0 },

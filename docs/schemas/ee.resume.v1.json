@@ -127,13 +127,7 @@
           "maxItems": 5,
           "items": {
             "type": "object",
-            "required": [
-              "workspaceRoot",
-              "storeDir",
-              "documents",
-              "lastWrite",
-              "provenance"
-            ],
+            "required": ["workspaceRoot", "storeDir", "documents", "lastWrite", "provenance"],
             "additionalProperties": false,
             "properties": {
               "workspaceRoot": { "type": "string", "minLength": 1, "maxLength": 4096 },
@@ -142,12 +136,7 @@
               "lastWrite": { "type": ["string", "null"], "format": "date-time" },
               "provenance": {
                 "type": "string",
-                "enum": [
-                  "workspace_root",
-                  "child_scan",
-                  "parent_scan",
-                  "workspace_registry"
-                ]
+                "enum": ["workspace_root", "child_scan", "parent_scan", "workspace_registry"]
               }
             }
           }

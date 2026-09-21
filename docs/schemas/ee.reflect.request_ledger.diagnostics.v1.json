@@ -100,9 +100,38 @@
     }
   },
   "field_presets": {
-    "minimal": ["schema", "returnedCount", "expiredPendingCount", "retention", "exportHygiene", "hmacKey", "nextAction"],
-    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "retention", "exportHygiene", "hmacKey", "nextAction"],
-    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "retention", "exportHygiene", "hmacKey", "requests", "expiredPending", "nextAction"],
+    "minimal": [
+      "schema",
+      "returnedCount",
+      "expiredPendingCount",
+      "retention",
+      "exportHygiene",
+      "hmacKey",
+      "nextAction"
+    ],
+    "summary": [
+      "schema",
+      "command",
+      "returnedCount",
+      "expiredPendingCount",
+      "retention",
+      "exportHygiene",
+      "hmacKey",
+      "nextAction"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "workspacePath",
+      "statusFilter",
+      "now",
+      "retention",
+      "exportHygiene",
+      "hmacKey",
+      "requests",
+      "expiredPending",
+      "nextAction"
+    ],
     "full": ["*"]
   },
   "$defs": {

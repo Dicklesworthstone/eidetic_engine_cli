@@ -27,45 +27,42 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "ee.support_bundle.environment_attestation_summary.v1"},
-    "sourceSchema": {"const": "ee.environment_attestation.v1"},
-    "status": {"const": "available"},
-    "attestationId": {"type": "string", "minLength": 1, "maxLength": 160},
-    "workspaceIncluded": {"const": false},
-    "workspaceHash": {"$ref": "#/$defs/hash"},
+    "schema": { "const": "ee.support_bundle.environment_attestation_summary.v1" },
+    "sourceSchema": { "const": "ee.environment_attestation.v1" },
+    "status": { "const": "available" },
+    "attestationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "workspaceIncluded": { "const": false },
+    "workspaceHash": { "$ref": "#/$defs/hash" },
     "redactionStatus": {
       "const": "counts_ids_statuses_codes_hashes_redacted_text_no_raw_paths_no_mail_bodies_no_source_text"
     },
-    "summary": {"$ref": "#/$defs/summary"},
-    "verdict": {"$ref": "#/$defs/attestationVerdict"},
-    "proofAdmission": {"$ref": "#/$defs/proofAdmission"},
-    "sourceAuthorityCounts": {"$ref": "#/$defs/sourceAuthorityCounts"},
+    "summary": { "$ref": "#/$defs/summary" },
+    "verdict": { "$ref": "#/$defs/attestationVerdict" },
+    "proofAdmission": { "$ref": "#/$defs/proofAdmission" },
+    "sourceAuthorityCounts": { "$ref": "#/$defs/sourceAuthorityCounts" },
     "sourceAuthority": {
       "type": "array",
-      "items": {"$ref": "#/$defs/sourceAuthorityEntry"}
+      "items": { "$ref": "#/$defs/sourceAuthorityEntry" }
     },
     "degradedCodes": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradedCode"},
+      "items": { "$ref": "#/$defs/degradedCode" },
       "uniqueItems": true
     },
     "recoveryActions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/recoveryAction"}
+      "items": { "$ref": "#/$defs/recoveryAction" }
     },
     "firstFailure": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/firstFailure"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/firstFailure" }]
     },
-    "disagreementEvidence": {"$ref": "#/$defs/disagreementEvidence"},
+    "disagreementEvidence": { "$ref": "#/$defs/disagreementEvidence" },
     "evidenceRefHashes": {
       "type": "array",
-      "items": {"$ref": "#/$defs/hash"}
+      "items": { "$ref": "#/$defs/hash" }
     },
-    "redaction": {"$ref": "#/$defs/redaction"},
-    "summaryHash": {"$ref": "#/$defs/hash"}
+    "redaction": { "$ref": "#/$defs/redaction" },
+    "summaryHash": { "$ref": "#/$defs/hash" }
   },
   "$defs": {
     "hash": {
@@ -77,17 +74,17 @@
       "maxLength": 512,
       "not": {
         "anyOf": [
-          {"pattern": "BEGIN PRIVATE KEY"},
-          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
-          {"pattern": "ghp_[A-Za-z0-9_]+"},
-          {"pattern": "Bearer [A-Za-z0-9._-]+"},
-          {"pattern": "DATABASE_URL="},
-          {"pattern": "body_md"},
-          {"pattern": "raw mail body"},
-          {"pattern": "/Users/[^\\s]+"},
-          {"pattern": "/home/[^\\s]+"},
-          {"pattern": "/Volumes/[^\\s]+"},
-          {"pattern": "/private/[^\\s]+"}
+          { "pattern": "BEGIN PRIVATE KEY" },
+          { "pattern": "BEGIN OPENSSH PRIVATE KEY" },
+          { "pattern": "ghp_[A-Za-z0-9_]+" },
+          { "pattern": "Bearer [A-Za-z0-9._-]+" },
+          { "pattern": "DATABASE_URL=" },
+          { "pattern": "body_md" },
+          { "pattern": "raw mail body" },
+          { "pattern": "/Users/[^\\s]+" },
+          { "pattern": "/home/[^\\s]+" },
+          { "pattern": "/Volumes/[^\\s]+" },
+          { "pattern": "/private/[^\\s]+" }
         ]
       }
     },
@@ -157,11 +154,11 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "safeToClaim": {"type": "boolean"},
-        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
-        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
-        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
-        "localCargoFallbackObserved": {"type": "boolean"}
+        "safeToClaim": { "type": "boolean" },
+        "remoteVerificationAdmitted": { "type": ["boolean", "null"] },
+        "sourceTestVerdict": { "$ref": "#/$defs/sourceTestVerdict" },
+        "environmentVerdict": { "$ref": "#/$defs/attestationVerdict" },
+        "localCargoFallbackObserved": { "type": "boolean" }
       }
     },
     "proofAdmission": {
@@ -175,11 +172,11 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "remoteVerificationAdmitted": {"type": ["boolean", "null"]},
-        "sourceTestVerdict": {"$ref": "#/$defs/sourceTestVerdict"},
-        "environmentVerdict": {"$ref": "#/$defs/attestationVerdict"},
-        "localCargoFallbackObserved": {"type": "boolean"},
-        "separateFromSourceTestVerdict": {"const": true}
+        "remoteVerificationAdmitted": { "type": ["boolean", "null"] },
+        "sourceTestVerdict": { "$ref": "#/$defs/sourceTestVerdict" },
+        "environmentVerdict": { "$ref": "#/$defs/attestationVerdict" },
+        "localCargoFallbackObserved": { "type": "boolean" },
+        "separateFromSourceTestVerdict": { "const": true }
       }
     },
     "sourceAuthorityCounts": {
@@ -187,14 +184,14 @@
       "required": ["total", "byStatus", "byAuthority"],
       "additionalProperties": false,
       "properties": {
-        "total": {"type": "integer", "minimum": 0},
+        "total": { "type": "integer", "minimum": 0 },
         "byStatus": {
           "type": "object",
-          "additionalProperties": {"type": "integer", "minimum": 0}
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         },
         "byAuthority": {
           "type": "object",
-          "additionalProperties": {"type": "integer", "minimum": 0}
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         }
       }
     },
@@ -216,29 +213,29 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "source": {"type": "string"},
-        "authority": {"type": "string"},
-        "status": {"type": "string"},
-        "freshness": {"type": "string"},
-        "observedAt": {"type": ["string", "null"]},
-        "summary": {"$ref": "#/$defs/safeString"},
-        "metricCount": {"type": "integer", "minimum": 0},
+        "source": { "type": "string" },
+        "authority": { "type": "string" },
+        "status": { "type": "string" },
+        "freshness": { "type": "string" },
+        "observedAt": { "type": ["string", "null"] },
+        "summary": { "$ref": "#/$defs/safeString" },
+        "metricCount": { "type": "integer", "minimum": 0 },
         "metrics": {
           "type": "array",
-          "items": {"$ref": "#/$defs/metric"}
+          "items": { "$ref": "#/$defs/metric" }
         },
         "degradedCodes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/degradedCode"}
+          "items": { "$ref": "#/$defs/degradedCode" }
         },
-        "recoveryActionCount": {"type": "integer", "minimum": 0},
+        "recoveryActionCount": { "type": "integer", "minimum": 0 },
         "recoveryActions": {
           "type": "array",
-          "items": {"$ref": "#/$defs/recoveryAction"}
+          "items": { "$ref": "#/$defs/recoveryAction" }
         },
         "evidenceRefHashes": {
           "type": "array",
-          "items": {"$ref": "#/$defs/hash"}
+          "items": { "$ref": "#/$defs/hash" }
         }
       }
     },
@@ -247,49 +244,34 @@
       "required": ["name", "value"],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string"},
-        "value": {"$ref": "#/$defs/safeString"}
+        "name": { "type": "string" },
+        "value": { "$ref": "#/$defs/safeString" }
       }
     },
     "recoveryAction": {
       "type": "object",
-      "required": [
-        "priority",
-        "kind",
-        "mutatesState",
-        "requiredSubstrate",
-        "rationale",
-        "command"
-      ],
+      "required": ["priority", "kind", "mutatesState", "requiredSubstrate", "rationale", "command"],
       "additionalProperties": false,
       "properties": {
-        "priority": {"type": "integer", "minimum": 0},
-        "kind": {"type": "string"},
-        "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"type": "string"},
-        "rationale": {"$ref": "#/$defs/safeString"},
+        "priority": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "type": "string" },
+        "rationale": { "$ref": "#/$defs/safeString" },
         "command": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/redactedCommand"}
-          ]
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/redactedCommand" }]
         }
       }
     },
     "redactedCommand": {
       "type": "object",
-      "required": [
-        "displayCommand",
-        "argvHash",
-        "shellRequired",
-        "copySafety"
-      ],
+      "required": ["displayCommand", "argvHash", "shellRequired", "copySafety"],
       "additionalProperties": false,
       "properties": {
-        "displayCommand": {"$ref": "#/$defs/safeString"},
-        "argvHash": {"$ref": "#/$defs/hash"},
-        "shellRequired": {"type": "boolean"},
-        "copySafety": {"type": "string"}
+        "displayCommand": { "$ref": "#/$defs/safeString" },
+        "argvHash": { "$ref": "#/$defs/hash" },
+        "shellRequired": { "type": "boolean" },
+        "copySafety": { "type": "string" }
       }
     },
     "firstFailure": {
@@ -297,13 +279,13 @@
       "required": ["code", "severity", "message", "repair"],
       "additionalProperties": false,
       "properties": {
-        "code": {"$ref": "#/$defs/degradedCode"},
+        "code": { "$ref": "#/$defs/degradedCode" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"$ref": "#/$defs/safeString"},
-        "repair": {"type": ["string", "null"], "maxLength": 512}
+        "message": { "$ref": "#/$defs/safeString" },
+        "repair": { "type": ["string", "null"], "maxLength": 512 }
       }
     },
     "disagreementEvidence": {
@@ -324,18 +306,18 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "beadsTrackerStale": {"type": "boolean"},
-        "bvRecommendationStale": {"type": "boolean"},
-        "agentMailProbeMismatch": {"type": "boolean"},
-        "sourceAuthorityAmbiguous": {"type": "boolean"},
-        "claimGateNeedsFreshRun": {"type": "boolean"},
-        "ciProofLaneArtifactMissing": {"type": "boolean"},
-        "ciProofLaneArtifactStale": {"type": "boolean"},
-        "ciProofLaneCancelledBeforeArtifact": {"type": "boolean"},
-        "ciProofLaneChecksumMismatch": {"type": "boolean"},
-        "ciProofLaneSurfaceProbeFailed": {"type": "boolean"},
-        "ciProofLaneUnknownSource": {"type": "boolean"},
-        "ciProofLaneDuplicateDispatch": {"type": "boolean"}
+        "beadsTrackerStale": { "type": "boolean" },
+        "bvRecommendationStale": { "type": "boolean" },
+        "agentMailProbeMismatch": { "type": "boolean" },
+        "sourceAuthorityAmbiguous": { "type": "boolean" },
+        "claimGateNeedsFreshRun": { "type": "boolean" },
+        "ciProofLaneArtifactMissing": { "type": "boolean" },
+        "ciProofLaneArtifactStale": { "type": "boolean" },
+        "ciProofLaneCancelledBeforeArtifact": { "type": "boolean" },
+        "ciProofLaneChecksumMismatch": { "type": "boolean" },
+        "ciProofLaneSurfaceProbeFailed": { "type": "boolean" },
+        "ciProofLaneUnknownSource": { "type": "boolean" },
+        "ciProofLaneDuplicateDispatch": { "type": "boolean" }
       }
     },
     "redaction": {
@@ -350,12 +332,12 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "rawWorkspacePathIncluded": {"const": false},
-        "rawMailBodiesIncluded": {"const": false},
-        "rawSourceSnippetsIncluded": {"const": false},
-        "rawCommandArgvIncluded": {"const": false},
-        "rawEvidenceRefsIncluded": {"const": false},
-        "hostPrivatePathsRedacted": {"const": true}
+        "rawWorkspacePathIncluded": { "const": false },
+        "rawMailBodiesIncluded": { "const": false },
+        "rawSourceSnippetsIncluded": { "const": false },
+        "rawCommandArgvIncluded": { "const": false },
+        "rawEvidenceRefsIncluded": { "const": false },
+        "hostPrivatePathsRedacted": { "const": true }
       }
     }
   },

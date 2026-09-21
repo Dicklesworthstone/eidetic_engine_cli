@@ -34,14 +34,7 @@
   "$defs": {
     "driftStatus": {
       "type": "string",
-      "enum": [
-        "current",
-        "changed",
-        "missing_source",
-        "stale_anchor",
-        "unverifiable",
-        "suppressed"
-      ]
+      "enum": ["current", "changed", "missing_source", "stale_anchor", "unverifiable", "suppressed"]
     },
     "anchorKind": {
       "type": "string",

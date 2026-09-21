@@ -27,12 +27,7 @@
     "platform": {
       "type": "string",
       "description": "Coarse host classification for the NUMA optimization. Linux is the only supported platform today; the others fall through to a safe-by-construction heap deserialization path.",
-      "enum": [
-        "linux",
-        "macos_unsupported",
-        "windows_unsupported",
-        "other_unsupported"
-      ]
+      "enum": ["linux", "macos_unsupported", "windows_unsupported", "other_unsupported"]
     },
     "supported": {
       "type": "boolean",
@@ -95,22 +90,22 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]},
+      "if": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] },
       "then": {
         "properties": {
-          "attempted": {"const": false},
-          "succeeded": {"const": false},
-          "fallbackPath": {"const": "disabled_by_operator"}
+          "attempted": { "const": false },
+          "succeeded": { "const": false },
+          "fallbackPath": { "const": "disabled_by_operator" }
         },
         "required": ["attempted", "succeeded", "fallbackPath"]
       }
     },
     {
-      "if": {"properties": {"supported": {"const": false}}, "required": ["supported"]},
+      "if": { "properties": { "supported": { "const": false } }, "required": ["supported"] },
       "then": {
         "properties": {
-          "succeeded": {"const": false},
-          "attempted": {"const": false}
+          "succeeded": { "const": false },
+          "attempted": { "const": false }
         },
         "required": ["succeeded", "attempted"]
       }

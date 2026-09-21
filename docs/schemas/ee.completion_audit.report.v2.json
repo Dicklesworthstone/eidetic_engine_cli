@@ -7,9 +7,9 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean", "const": true},
-    "fields": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean", "const": true },
+    "fields": { "type": "string" },
     "data": {
       "type": "object",
       "required": [
@@ -24,23 +24,23 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"type": "string", "const": "ee.completion_audit.report.v2"},
-        "checklist": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "schema": { "type": "string", "const": "ee.completion_audit.report.v2" },
+        "checklist": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
         "evidenceByRequirement": {
           "type": "array",
-          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         },
         "gaps": {
           "type": "array",
-          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         },
         "residualRisks": {
           "type": "array",
-          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         },
         "recommendedNextActions": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": { "type": "string" }
         },
         "localBuildPolicy": {
           "type": "object",
@@ -53,7 +53,7 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "policy": {"type": "string", "const": "rch_only"},
+            "policy": { "type": "string", "const": "rch_only" },
             "state": {
               "type": "string",
               "enum": [
@@ -64,14 +64,14 @@
                 "unknown"
               ]
             },
-            "requiredRemoteWrapper": {"type": "string"},
+            "requiredRemoteWrapper": { "type": "string" },
             "evidenceRecords": {
               "type": "array",
-              "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+              "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
             },
             "repairActions": {
               "type": "array",
-              "items": {"type": "string"}
+              "items": { "type": "string" }
             }
           }
         },
@@ -83,24 +83,32 @@
     },
     "degraded": {
       "type": "array",
-      "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
     }
   },
   "field_presets": {
     "minimal": ["completionVerdict"],
     "summary": ["completionVerdict", "gaps", "residualRisks", "recommendedNextActions"],
-    "standard": ["checklist", "evidenceByRequirement", "gaps", "residualRisks", "recommendedNextActions", "localBuildPolicy", "completionVerdict"],
+    "standard": [
+      "checklist",
+      "evidenceByRequirement",
+      "gaps",
+      "residualRisks",
+      "recommendedNextActions",
+      "localBuildPolicy",
+      "completionVerdict"
+    ],
     "full": ["*"]
   },
   "$defs": {
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

@@ -7,15 +7,15 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v2"},
-    "success": {"type": "boolean", "const": true},
+    "schema": { "type": "string", "const": "ee.response.v2" },
+    "success": { "type": "boolean", "const": true },
     "data": {
       "type": "object",
       "required": ["schema", "packetId", "redactionStatus"],
       "additionalProperties": true,
       "properties": {
-        "schema": {"type": "string", "const": "ee.swarm.work_packet.v1"},
-        "packetId": {"type": "string"},
+        "schema": { "type": "string", "const": "ee.swarm.work_packet.v1" },
+        "packetId": { "type": "string" },
         "redactionStatus": {
           "type": "string",
           "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
@@ -24,7 +24,7 @@
     },
     "degraded": {
       "type": "array",
-      "items": {"$ref": "#/$defs/degradation"}
+      "items": { "$ref": "#/$defs/degradation" }
     }
   },
   "field_presets": {
@@ -39,17 +39,17 @@
       "required": ["code", "severity", "message"],
       "additionalProperties": true,
       "properties": {
-        "code": {"type": "string"},
+        "code": { "type": "string" },
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
         },
-        "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]},
-        "source": {"type": "string"},
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] },
+        "source": { "type": "string" },
         "sources": {
           "type": "array",
-          "items": {"type": "string"}
+          "items": { "type": "string" }
         }
       }
     }

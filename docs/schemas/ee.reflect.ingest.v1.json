@@ -28,30 +28,27 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.reflect.ingest.v1"},
-    "command": {"type": "string", "const": "reflect ingest"},
-    "version": {"type": "string", "minLength": 1},
-    "workspaceId": {"type": "string", "minLength": 1},
-    "workspacePath": {"type": "string", "minLength": 1},
-    "databasePath": {"type": "string", "minLength": 1},
-    "reflectionKind": {"$ref": "#/$defs/reflectionKind"},
-    "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
-    "requestHash": {"$ref": "#/$defs/blake3Hash"},
-    "resultHash": {"$ref": "#/$defs/blake3Hash"},
+    "schema": { "type": "string", "const": "ee.reflect.ingest.v1" },
+    "command": { "type": "string", "const": "reflect ingest" },
+    "version": { "type": "string", "minLength": 1 },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "workspacePath": { "type": "string", "minLength": 1 },
+    "databasePath": { "type": "string", "minLength": 1 },
+    "reflectionKind": { "$ref": "#/$defs/reflectionKind" },
+    "requestId": { "type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$" },
+    "requestHash": { "$ref": "#/$defs/blake3Hash" },
+    "resultHash": { "$ref": "#/$defs/blake3Hash" },
     "sourceRefs": {
       "type": "array",
       "minItems": 1,
-      "items": {"$ref": "#/$defs/sourceRef"}
+      "items": { "$ref": "#/$defs/sourceRef" }
     },
     "candidateId": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "pattern": "^curate_[0-9a-f]{26}$"}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^curate_[0-9a-f]{26}$" }]
     },
-    "consumedAt": {"type": "string", "format": "date-time"},
-    "dryRun": {"type": "boolean"},
-    "durableMutation": {"type": "boolean"},
+    "consumedAt": { "type": "string", "format": "date-time" },
+    "dryRun": { "type": "boolean" },
+    "durableMutation": { "type": "boolean" },
     "outcome": {
       "type": "string",
       "enum": [
@@ -66,19 +63,16 @@
       ]
     },
     "durableIngestOutcome": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/durableIngestOutcome"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/durableIngestOutcome" }]
     },
     "validation": {
       "type": "object",
       "required": ["requestLedger", "challenge", "sourceLock", "replayGate"],
       "additionalProperties": false,
       "properties": {
-        "requestLedger": {"type": "string", "const": "matched"},
-        "challenge": {"type": "string", "enum": ["verified", "replayed"]},
-        "sourceLock": {"type": "string", "const": "current"},
+        "requestLedger": { "type": "string", "const": "matched" },
+        "challenge": { "type": "string", "enum": ["verified", "replayed"] },
+        "sourceLock": { "type": "string", "const": "current" },
         "replayGate": {
           "type": "string",
           "enum": [
@@ -98,21 +92,48 @@
       "required": ["schema", "requestId", "requestHash", "reflectionKind"],
       "additionalProperties": true,
       "properties": {
-        "schema": {"type": "string", "const": "ee.reflect.result.v1"},
-        "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
-        "requestHash": {"$ref": "#/$defs/blake3Hash"},
-        "reflectionKind": {"$ref": "#/$defs/reflectionKind"}
+        "schema": { "type": "string", "const": "ee.reflect.result.v1" },
+        "requestId": { "type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$" },
+        "requestHash": { "$ref": "#/$defs/blake3Hash" },
+        "reflectionKind": { "$ref": "#/$defs/reflectionKind" }
       }
     },
     "nextCommands": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1}
+      "items": { "type": "string", "minLength": 1 }
     }
   },
   "field_presets": {
     "minimal": ["candidateId", "outcome", "resultHash"],
-    "summary": ["command", "workspaceId", "reflectionKind", "requestId", "resultHash", "candidateId", "outcome", "validation", "nextCommands"],
-    "standard": ["command", "version", "workspaceId", "reflectionKind", "requestId", "requestHash", "resultHash", "sourceRefs", "candidateId", "consumedAt", "dryRun", "durableMutation", "outcome", "durableIngestOutcome", "validation", "nextCommands"],
+    "summary": [
+      "command",
+      "workspaceId",
+      "reflectionKind",
+      "requestId",
+      "resultHash",
+      "candidateId",
+      "outcome",
+      "validation",
+      "nextCommands"
+    ],
+    "standard": [
+      "command",
+      "version",
+      "workspaceId",
+      "reflectionKind",
+      "requestId",
+      "requestHash",
+      "resultHash",
+      "sourceRefs",
+      "candidateId",
+      "consumedAt",
+      "dryRun",
+      "durableMutation",
+      "outcome",
+      "durableIngestOutcome",
+      "validation",
+      "nextCommands"
+    ],
     "full": ["*"]
   },
   "$defs": {
@@ -140,9 +161,9 @@
       "required": ["kind", "id", "contentHash"],
       "additionalProperties": false,
       "properties": {
-        "kind": {"type": "string", "enum": ["memory", "evidence_span"]},
-        "id": {"type": "string", "minLength": 1},
-        "contentHash": {"$ref": "#/$defs/blake3Hash"}
+        "kind": { "type": "string", "enum": ["memory", "evidence_span"] },
+        "id": { "type": "string", "minLength": 1 },
+        "contentHash": { "$ref": "#/$defs/blake3Hash" }
       }
     },
     "durableIngestOutcome": {
@@ -161,7 +182,7 @@
             "unavailableStatus"
           ]
         },
-        "candidateId": {"type": "string", "pattern": "^curate_[0-9a-f]{26}$"}
+        "candidateId": { "type": "string", "pattern": "^curate_[0-9a-f]{26}$" }
       }
     }
   }

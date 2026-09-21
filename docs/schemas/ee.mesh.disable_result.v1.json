@@ -84,11 +84,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": [
-            "mesh_disable_noop",
-            "mesh_disable_bindings_retained",
-            "mesh_disable_dry_run"
-          ]
+          "enum": ["mesh_disable_noop", "mesh_disable_bindings_retained", "mesh_disable_dry_run"]
         },
         "message": { "type": "string", "minLength": 1 },
         "severity": { "type": "string", "enum": ["info", "warning"] }

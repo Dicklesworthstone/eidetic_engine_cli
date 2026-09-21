@@ -84,10 +84,7 @@
       "description": "One record per consulted source, sorted by sourceKind ascending. A source that was not consulted at all must still appear with state=unavailable and statusDetail explaining why (for example skipped_by_flag), so absence of a record is never ambiguous."
     },
     "candidateEvidence": {
-      "oneOf": [
-        { "type": "null" },
-        { "$ref": "#/definitions/candidateEvidence" }
-      ],
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/candidateEvidence" }],
       "description": "Present when the snapshot was taken for a specific claim candidate; null for candidate-independent posture snapshots."
     },
     "contradictions": {
@@ -256,10 +253,7 @@
           "required": ["capturedAt", "ageMs", "staleAfterMs", "freshnessState"],
           "properties": {
             "capturedAt": {
-              "oneOf": [
-                { "type": "string", "format": "date-time" },
-                { "type": "null" }
-              ],
+              "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
               "description": "Null when no evidence was captured (state=unavailable or timed_out with no fallback)."
             },
             "ageMs": { "type": ["integer", "null"], "minimum": 0 },
@@ -273,13 +267,7 @@
         "budget": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "commandBudgetMs",
-            "elapsedMs",
-            "timedOut",
-            "retriesUsed",
-            "retryBudget"
-          ],
+          "required": ["commandBudgetMs", "elapsedMs", "timedOut", "retriesUsed", "retryBudget"],
           "properties": {
             "commandBudgetMs": { "type": ["integer", "null"], "minimum": 0 },
             "elapsedMs": { "type": ["integer", "null"], "minimum": 0 },
@@ -319,12 +307,7 @@
             "active": { "type": "boolean" },
             "fallbackKind": {
               "type": ["string", "null"],
-              "enum": [
-                "stale_safe_snapshot",
-                "cached_read_only",
-                "alternate_command",
-                null
-              ]
+              "enum": ["stale_safe_snapshot", "cached_read_only", "alternate_command", null]
             },
             "fallbackAgeMs": { "type": ["integer", "null"], "minimum": 0 }
           }
@@ -469,7 +452,7 @@
         "filterContract"
       ],
       "properties": {
-        "commandId": {"type": "string", "const": "beads_actionable_queue"},
+        "commandId": { "type": "string", "const": "beads_actionable_queue" },
         "commandTemplate": {
           "type": "string",
           "const": "scripts/br_retry.sh actionable --json"
@@ -482,10 +465,10 @@
         "candidateIds": {
           "type": "array",
           "maxItems": 32,
-          "items": {"type": "string", "minLength": 1, "maxLength": 120},
+          "items": { "type": "string", "minLength": 1, "maxLength": 120 },
           "description": "Bounded, sorted bead ids from the queue answer. Truncation is reported via truncatedCandidateCount; membership decisions must be made by the producer against the full set, never re-derived from this bounded list."
         },
-        "truncatedCandidateCount": {"type": "integer", "minimum": 0},
+        "truncatedCandidateCount": { "type": "integer", "minimum": 0 },
         "filterContract": {
           "type": "object",
           "additionalProperties": false,
@@ -497,11 +480,11 @@
             "excludesInProgress"
           ],
           "properties": {
-            "excludesEpics": {"type": "boolean", "const": true},
-            "excludesAssigned": {"type": "boolean", "const": true},
-            "excludesBlocked": {"type": "boolean", "const": true},
-            "excludesDeferred": {"type": "boolean", "const": true},
-            "excludesInProgress": {"type": "boolean", "const": true}
+            "excludesEpics": { "type": "boolean", "const": true },
+            "excludesAssigned": { "type": "boolean", "const": true },
+            "excludesBlocked": { "type": "boolean", "const": true },
+            "excludesDeferred": { "type": "boolean", "const": true },
+            "excludesInProgress": { "type": "boolean", "const": true }
           },
           "description": "Static contract of the queue command: only open, unassigned, non-epic rows pass; blocked, deferred, and in-progress rows are structurally excluded because the queue is built from `br ready`."
         }
@@ -554,10 +537,7 @@
           "properties": {
             "present": { "type": ["boolean", "null"] },
             "sourceKind": {
-              "oneOf": [
-                { "$ref": "#/definitions/sourceKind" },
-                { "type": "null" }
-              ]
+              "oneOf": [{ "$ref": "#/definitions/sourceKind" }, { "type": "null" }]
             },
             "fallbackAgeMs": { "type": ["integer", "null"], "minimum": 0 }
           }
@@ -615,10 +595,7 @@
         "message": { "type": "string", "minLength": 1, "maxLength": 240 },
         "repair": { "type": ["string", "null"], "maxLength": 240 },
         "sourceKind": {
-          "oneOf": [
-            { "$ref": "#/definitions/sourceKind" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/definitions/sourceKind" }, { "type": "null" }]
         }
       }
     }

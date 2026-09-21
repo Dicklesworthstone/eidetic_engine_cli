@@ -48,7 +48,7 @@
     },
     "args": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": { "type": "string" }
     },
     "stdin_hash": {
       "type": "string",
@@ -82,7 +82,7 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"kind": {"const": "assert_ok"}}},
+      "if": { "properties": { "kind": { "const": "assert_ok" } } },
       "then": {
         "properties": {
           "fields": {
@@ -93,7 +93,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "assert_fail"}}},
+      "if": { "properties": { "kind": { "const": "assert_fail" } } },
       "then": {
         "properties": {
           "fields": {
@@ -104,7 +104,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "pack_hash_components"}}},
+      "if": { "properties": { "kind": { "const": "pack_hash_components" } } },
       "then": {
         "properties": {
           "fields": {
@@ -121,7 +121,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "db_generation_observed"}}},
+      "if": { "properties": { "kind": { "const": "db_generation_observed" } } },
       "then": {
         "properties": {
           "fields": {
@@ -132,23 +132,18 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "volatile_strip"}}},
+      "if": { "properties": { "kind": { "const": "volatile_strip" } } },
       "then": {
         "properties": {
           "fields": {
             "type": "object",
-            "required": [
-              "fields_stripped_count",
-              "fields_stripped",
-              "input_bytes",
-              "output_bytes"
-            ]
+            "required": ["fields_stripped_count", "fields_stripped", "input_bytes", "output_bytes"]
           }
         }
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "schema_gate"}}},
+      "if": { "properties": { "kind": { "const": "schema_gate" } } },
       "then": {
         "properties": {
           "fields": {
@@ -165,7 +160,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "field_selector"}}},
+      "if": { "properties": { "kind": { "const": "field_selector" } } },
       "then": {
         "properties": {
           "fields": {
@@ -183,23 +178,18 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "bench_iteration"}}},
+      "if": { "properties": { "kind": { "const": "bench_iteration" } } },
       "then": {
         "properties": {
           "fields": {
             "type": "object",
-            "required": [
-              "operation",
-              "status",
-              "profile",
-              "workload_tier"
-            ]
+            "required": ["operation", "status", "profile", "workload_tier"]
           }
         }
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "artifact_manifest"}}},
+      "if": { "properties": { "kind": { "const": "artifact_manifest" } } },
       "then": {
         "properties": {
           "fields": {
@@ -207,22 +197,19 @@
             "properties": {
               "manifest_schema": {
                 "type": "string",
-                "enum": [
-                  "ee.test_artifact_manifest.v1",
-                  "ee.test_artifact_manifest.v2"
-                ]
+                "enum": ["ee.test_artifact_manifest.v1", "ee.test_artifact_manifest.v2"]
               },
-              "phase": {"type": "string", "minLength": 1},
-              "binary_path": {"type": "string"},
-              "binary_hash": {"type": "string"},
-              "binary_hash_status": {"type": "string"},
-              "source_hash": {"type": "string"},
+              "phase": { "type": "string", "minLength": 1 },
+              "binary_path": { "type": "string" },
+              "binary_hash": { "type": "string" },
+              "binary_hash_status": { "type": "string" },
+              "source_hash": { "type": "string" },
               "command_hash": {
                 "type": "string",
                 "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$"
               },
-              "command_arg_count": {"type": "string", "pattern": "^[0-9]+$"},
-              "execution_substrate": {"type": "string", "minLength": 1}
+              "command_arg_count": { "type": "string", "pattern": "^[0-9]+$" },
+              "execution_substrate": { "type": "string", "minLength": 1 }
             },
             "required": [
               "manifest_schema",
@@ -250,12 +237,12 @@
       "if": {
         "required": ["kind", "fields"],
         "properties": {
-          "kind": {"const": "artifact_manifest"},
+          "kind": { "const": "artifact_manifest" },
           "fields": {
             "type": "object",
             "required": ["manifest_schema"],
             "properties": {
-              "manifest_schema": {"const": "ee.test_artifact_manifest.v2"}
+              "manifest_schema": { "const": "ee.test_artifact_manifest.v2" }
             }
           }
         }
@@ -277,25 +264,25 @@
               "verification_hash"
             ],
             "properties": {
-              "phase": {"const": "command_end"},
-              "binary_path": {"type": "string", "minLength": 1},
-              "binary_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "binary_hash_status": {"const": "available"},
-              "source_hash": {"type": "string", "pattern": "^git_tree:[0-9a-f]{40}$"},
+              "phase": { "const": "command_end" },
+              "binary_path": { "type": "string", "minLength": 1 },
+              "binary_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "binary_hash_status": { "const": "available" },
+              "source_hash": { "type": "string", "pattern": "^git_tree:[0-9a-f]{40}$" },
               "command_hash": {
                 "type": "string",
                 "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$"
               },
-              "command_arg_count": {"type": "string", "pattern": "^[1-9][0-9]*$"},
-              "execution_substrate": {"const": "remote_artifact"},
-              "artifact_manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-              "git_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-              "build_command_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "effective_input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "provenance_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "archive_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-              "verification_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "command_arg_count": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+              "execution_substrate": { "const": "remote_artifact" },
+              "artifact_manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+              "git_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+              "build_command_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "effective_input_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "provenance_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "archive_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "verification_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
               "remote_artifact_attestation": {
                 "$ref": "ee.remote_build_artifact_manifest.verification.v1.json"
               }
@@ -305,7 +292,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "lint_determinism"}}},
+      "if": { "properties": { "kind": { "const": "lint_determinism" } } },
       "then": {
         "properties": {
           "fields": {
@@ -322,7 +309,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "proptest_run"}}},
+      "if": { "properties": { "kind": { "const": "proptest_run" } } },
       "then": {
         "properties": {
           "fields": {
@@ -342,7 +329,7 @@
       }
     },
     {
-      "if": {"properties": {"kind": {"const": "redaction_apply"}}},
+      "if": { "properties": { "kind": { "const": "redaction_apply" } } },
       "then": {
         "properties": {
           "fields": {

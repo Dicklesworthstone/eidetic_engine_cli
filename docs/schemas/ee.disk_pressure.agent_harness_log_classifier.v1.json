@@ -34,33 +34,27 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "path": {"type": "string"},
-        "sizeBytes": {"type": "integer", "minimum": 0},
-        "filesystemLabel": {"type": "string"},
-        "onWorkspaceFilesystem": {"type": "boolean"},
-        "mtimeUnixSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "path": { "type": "string" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "filesystemLabel": { "type": "string" },
+        "onWorkspaceFilesystem": { "type": "boolean" },
+        "mtimeUnixSeconds": { "type": ["integer", "null"], "minimum": 0 },
         "activity": {
           "type": "string",
           "enum": ["active_open", "closed", "open_handle_probe_unavailable"]
         },
-        "owningProcessSummary": {"type": ["string", "null"]},
-        "tailByteTarget": {"type": "integer", "minimum": 0}
+        "owningProcessSummary": { "type": ["string", "null"] },
+        "tailByteTarget": { "type": "integer", "minimum": 0 }
       }
     },
-    "role": {"type": "string", "const": "agent_harness_log"},
+    "role": { "type": "string", "const": "agent_harness_log" },
     "repairKind": {
       "type": "string",
-      "enum": [
-        "preserve_tail_copy",
-        "rotate_with_manifest",
-        "move_preserve",
-        "ask_human",
-        "noop"
-      ]
+      "enum": ["preserve_tail_copy", "rotate_with_manifest", "move_preserve", "ask_human", "noop"]
     },
-    "reason": {"type": "string", "minLength": 1},
-    "suggestion": {"type": "string", "minLength": 1},
-    "mutationPolicy": {"type": "string", "const": "preservation_only"},
-    "sideEffectFree": {"type": "boolean", "const": true}
+    "reason": { "type": "string", "minLength": 1 },
+    "suggestion": { "type": "string", "minLength": 1 },
+    "mutationPolicy": { "type": "string", "const": "preservation_only" },
+    "sideEffectFree": { "type": "boolean", "const": true }
   }
 }

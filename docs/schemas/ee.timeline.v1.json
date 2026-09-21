@@ -123,41 +123,24 @@
           "type": "string"
         },
         "trustSubclass": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "provenanceUri": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "knownAt": {
           "type": "string",
           "format": "date-time"
         },
         "validFrom": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "validTo": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "validityThen": {
           "type": "string",
-          "enum": [
-            "active",
-            "future",
-            "expired",
-            "tombstoned"
-          ]
+          "enum": ["active", "future", "expired", "tombstoned"]
         },
         "validityWindowKind": {
           "type": "string"
@@ -182,11 +165,7 @@
       "properties": {
         "changeType": {
           "type": "string",
-          "enum": [
-            "added",
-            "superseded",
-            "tombstoned"
-          ]
+          "enum": ["added", "superseded", "tombstoned"]
         },
         "changedAt": {
           "type": "string",
@@ -215,14 +194,7 @@
     }
   },
   "field_presets": {
-    "minimal": [
-      "schema",
-      "topic",
-      "asOf",
-      "memoriesThen",
-      "changesSince",
-      "decisionsInEffect"
-    ],
+    "minimal": ["schema", "topic", "asOf", "memoriesThen", "changesSince", "decisionsInEffect"],
     "summary": [
       "schema",
       "topic",
@@ -241,9 +213,7 @@
       "decisionsInEffect",
       "truncated"
     ],
-    "full": [
-      "*"
-    ]
+    "full": ["*"]
   },
   "examples": [
     {
@@ -257,10 +227,7 @@
           "level": "procedural",
           "kind": "rule",
           "content": "Use RCH before release.",
-          "tags": [
-            "release",
-            "verification"
-          ],
+          "tags": ["release", "verification"],
           "confidence": 0.86,
           "trustClass": "human_explicit",
           "trustSubclass": null,

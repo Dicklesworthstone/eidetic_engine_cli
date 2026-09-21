@@ -109,10 +109,7 @@
       "type": "boolean"
     },
     "ledgerOutcome": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/ledgerOutcome"}
-      ]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/ledgerOutcome" }]
     },
     "request": {
       "type": "object",
@@ -162,8 +159,36 @@
   },
   "field_presets": {
     "minimal": ["requestId", "requestHash", "expiresAt"],
-    "summary": ["command", "workspaceId", "reflectionKind", "gapsOnly", "requestId", "requestHash", "sourceRefs", "persisted", "nextCommands"],
-    "standard": ["command", "version", "workspaceId", "reflectionKind", "gapsOnly", "requestId", "requestHash", "sourcePackageHash", "createdAt", "expiresAt", "hmacKeyId", "sourceRefs", "dryRun", "durableMutation", "persisted", "ledgerOutcome", "nextCommands"],
+    "summary": [
+      "command",
+      "workspaceId",
+      "reflectionKind",
+      "gapsOnly",
+      "requestId",
+      "requestHash",
+      "sourceRefs",
+      "persisted",
+      "nextCommands"
+    ],
+    "standard": [
+      "command",
+      "version",
+      "workspaceId",
+      "reflectionKind",
+      "gapsOnly",
+      "requestId",
+      "requestHash",
+      "sourcePackageHash",
+      "createdAt",
+      "expiresAt",
+      "hmacKeyId",
+      "sourceRefs",
+      "dryRun",
+      "durableMutation",
+      "persisted",
+      "ledgerOutcome",
+      "nextCommands"
+    ],
     "full": ["*"]
   },
   "$defs": {
@@ -202,12 +227,12 @@
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

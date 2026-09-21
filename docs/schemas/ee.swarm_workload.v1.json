@@ -182,12 +182,7 @@
     "workspaceShape": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "fixtureProfile",
-        "workspaceFingerprint",
-        "pathPolicy",
-        "repoState"
-      ],
+      "required": ["fixtureProfile", "workspaceFingerprint", "pathPolicy", "repoState"],
       "properties": {
         "fixtureProfile": {
           "$ref": "#/$defs/safeLabel"
@@ -197,11 +192,7 @@
         },
         "pathPolicy": {
           "type": "string",
-          "enum": [
-            "no_absolute_paths",
-            "relative_fixture_paths",
-            "hashed_path_tails"
-          ]
+          "enum": ["no_absolute_paths", "relative_fixture_paths", "hashed_path_tails"]
         },
         "pathTailHash": {
           "oneOf": [
@@ -215,12 +206,7 @@
         },
         "repoState": {
           "type": "string",
-          "enum": [
-            "clean_fixture",
-            "dirty_fixture",
-            "synthetic_empty",
-            "crowded_checkout"
-          ]
+          "enum": ["clean_fixture", "dirty_fixture", "synthetic_empty", "crowded_checkout"]
         }
       }
     },
@@ -274,12 +260,7 @@
       "description": "Command shape captured without raw argv values. It records verb chain, positional arity, flag names, output format, and a stable hash of the redacted shape.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "verbs",
-        "positionalArity",
-        "flagNames",
-        "commandHash"
-      ],
+      "required": ["verbs", "positionalArity", "flagNames", "commandHash"],
       "properties": {
         "verbs": {
           "type": "array",
@@ -344,12 +325,7 @@
     "resourceProfileHints": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "profile",
-        "requestedParallelAgents",
-        "maxParallelAgents",
-        "rchRequired"
-      ],
+      "required": ["profile", "requestedParallelAgents", "maxParallelAgents", "rchRequired"],
       "properties": {
         "profile": {
           "type": "string",

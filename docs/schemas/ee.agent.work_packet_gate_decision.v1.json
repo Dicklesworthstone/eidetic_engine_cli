@@ -26,7 +26,7 @@
     },
     "sourceSchema": {
       "oneOf": [
-        {"type": "null"},
+        { "type": "null" },
         {
           "type": "string",
           "enum": [
@@ -37,31 +37,28 @@
         }
       ]
     },
-    "safeToClaim": {"type": "boolean"},
+    "safeToClaim": { "type": "boolean" },
     "candidateId": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 96}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 96 }]
     },
-    "decision": {"type": "string", "maxLength": 64},
-    "action": {"type": "string", "maxLength": 64},
+    "decision": { "type": "string", "maxLength": 64 },
+    "action": { "type": "string", "maxLength": 64 },
     "argvActions": {
       "type": "array",
       "maxItems": 16,
-      "items": {"$ref": "#/$defs/argvAction"}
+      "items": { "$ref": "#/$defs/argvAction" }
     },
-    "mutatingActionsRequireHuman": {"type": "boolean"},
+    "mutatingActionsRequireHuman": { "type": "boolean" },
     "whyNotSafe": {
       "type": "array",
       "maxItems": 16,
-      "items": {"type": "string", "maxLength": 160}
+      "items": { "type": "string", "maxLength": 160 }
     },
-    "sourceSummary": {"$ref": "#/$defs/sourceSummary"},
+    "sourceSummary": { "$ref": "#/$defs/sourceSummary" },
     "degradedSummary": {
       "type": "array",
       "maxItems": 16,
-      "items": {"$ref": "#/$defs/degradedSummaryEntry"}
+      "items": { "$ref": "#/$defs/degradedSummaryEntry" }
     },
     "legacyCommandStringsRefused": {
       "type": "integer",
@@ -92,14 +89,7 @@
         {
           "commandId": "bead_claim_candidate",
           "actionKind": "claim",
-          "argv": [
-            "br",
-            "update",
-            "bd-safe.1",
-            "--status",
-            "in_progress",
-            "--json"
-          ],
+          "argv": ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
           "runnable": true,
           "reviewRequired": false,
           "mutatesState": true,
@@ -154,40 +144,22 @@
   ],
   "$defs": {
     "nullableString": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 160}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 160 }]
     },
     "nullableString32": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 32}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 32 }]
     },
     "nullableString48": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 48}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 48 }]
     },
     "nullableString64": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 64}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 64 }]
     },
     "nullableString96": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "string", "maxLength": 96}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "string", "maxLength": 96 }]
     },
     "nullableBoolean": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"}
-      ]
+      "oneOf": [{ "type": "null" }, { "type": "boolean" }]
     },
     "argvAction": {
       "type": "object",
@@ -205,7 +177,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "commandId": {"type": "string", "maxLength": 96},
+        "commandId": { "type": "string", "maxLength": 96 },
         "actionKind": {
           "type": "string",
           "enum": [
@@ -220,15 +192,15 @@
         "argv": {
           "type": "array",
           "maxItems": 32,
-          "items": {"type": "string", "maxLength": 120}
+          "items": { "type": "string", "maxLength": 120 }
         },
-        "runnable": {"type": "boolean"},
-        "reviewRequired": {"type": "boolean"},
-        "mutatesState": {"type": "boolean"},
-        "requiredSubstrate": {"$ref": "#/$defs/nullableString48"},
-        "when": {"$ref": "#/$defs/nullableString96"},
-        "copySafety": {"type": "string", "maxLength": 48},
-        "reason": {"type": "string", "maxLength": 64}
+        "runnable": { "type": "boolean" },
+        "reviewRequired": { "type": "boolean" },
+        "mutatesState": { "type": "boolean" },
+        "requiredSubstrate": { "$ref": "#/$defs/nullableString48" },
+        "when": { "$ref": "#/$defs/nullableString96" },
+        "copySafety": { "type": "string", "maxLength": 48 },
+        "reason": { "type": "string", "maxLength": 64 }
       }
     },
     "sourceSummary": {
@@ -247,20 +219,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "trackerHealth": {"$ref": "#/$defs/nullableString64"},
-        "trackerAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
-        "requiresCandidateDowngrade": {"$ref": "#/$defs/nullableBoolean"},
-        "agentMailStatus": {"$ref": "#/$defs/nullableString64"},
-        "reservationAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
-        "inboxAuthoritative": {"$ref": "#/$defs/nullableBoolean"},
-        "rchPosture": {"$ref": "#/$defs/nullableString64"},
-        "rchRemoteOnlyRequired": {"$ref": "#/$defs/nullableBoolean"},
-        "rchSafeToLaunchCargoVerification": {"$ref": "#/$defs/nullableBoolean"},
+        "trackerHealth": { "$ref": "#/$defs/nullableString64" },
+        "trackerAuthoritative": { "$ref": "#/$defs/nullableBoolean" },
+        "requiresCandidateDowngrade": { "$ref": "#/$defs/nullableBoolean" },
+        "agentMailStatus": { "$ref": "#/$defs/nullableString64" },
+        "reservationAuthoritative": { "$ref": "#/$defs/nullableBoolean" },
+        "inboxAuthoritative": { "$ref": "#/$defs/nullableBoolean" },
+        "rchPosture": { "$ref": "#/$defs/nullableString64" },
+        "rchRemoteOnlyRequired": { "$ref": "#/$defs/nullableBoolean" },
+        "rchSafeToLaunchCargoVerification": { "$ref": "#/$defs/nullableBoolean" },
         "sourceCount": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "integer", "minimum": 0}
-          ]
+          "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
         }
       }
     },
@@ -269,9 +238,9 @@
       "required": ["code", "source", "severity"],
       "additionalProperties": false,
       "properties": {
-        "code": {"type": "string", "maxLength": 96},
-        "source": {"$ref": "#/$defs/nullableString48"},
-        "severity": {"$ref": "#/$defs/nullableString32"}
+        "code": { "type": "string", "maxLength": 96 },
+        "source": { "$ref": "#/$defs/nullableString48" },
+        "severity": { "$ref": "#/$defs/nullableString32" }
       }
     }
   }

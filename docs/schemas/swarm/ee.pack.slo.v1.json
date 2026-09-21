@@ -4,41 +4,70 @@
   "title": "ee.pack.slo.v1",
   "description": "Context pack assembly SLO result. status is the worst of deterministic resourceStatus and measured elapsedStatus. Timing describes the producer assembly, including on cache hits; only resource degradations enter pack identity.",
   "type": "object",
-  "required": ["schema", "profile", "budgetClass", "actuals", "resourceStatus", "elapsedStatus", "status", "degradations"],
+  "required": [
+    "schema",
+    "profile",
+    "budgetClass",
+    "actuals",
+    "resourceStatus",
+    "elapsedStatus",
+    "status",
+    "degradations"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.pack.slo.v1"},
-    "profile": {"type": "string", "enum": ["lean", "standard", "swarm_heavy"]},
-    "budgetClass": {"$ref": "ee.resource.profile.v1.json#/properties/budgetClass"},
+    "schema": { "type": "string", "const": "ee.pack.slo.v1" },
+    "profile": { "type": "string", "enum": ["lean", "standard", "swarm_heavy"] },
+    "budgetClass": { "$ref": "ee.resource.profile.v1.json#/properties/budgetClass" },
     "admission": {
       "type": ["object", "null"],
       "required": ["outcome", "queueDepth", "concurrentPackMax", "retryAfterMs", "waitedMs"],
       "additionalProperties": false,
       "properties": {
-        "outcome": {"type": "string", "enum": ["admitted", "backoff"]},
-        "queueDepth": {"type": "integer", "minimum": 0},
-        "concurrentPackMax": {"type": "integer", "minimum": 1},
-        "retryAfterMs": {"type": ["integer", "null"], "minimum": 0},
-        "waitedMs": {"type": "integer", "minimum": 0}
+        "outcome": { "type": "string", "enum": ["admitted", "backoff"] },
+        "queueDepth": { "type": "integer", "minimum": 0 },
+        "concurrentPackMax": { "type": "integer", "minimum": 1 },
+        "retryAfterMs": { "type": ["integer", "null"], "minimum": 0 },
+        "waitedMs": { "type": "integer", "minimum": 0 }
       }
     },
     "actuals": {
       "type": "object",
-      "required": ["candidateCount", "scannedCount", "indexGeneration", "graphGeneration", "graphEdgesTraversed", "elapsedMs", "memoryBytesPeak"],
+      "required": [
+        "candidateCount",
+        "scannedCount",
+        "indexGeneration",
+        "graphGeneration",
+        "graphEdgesTraversed",
+        "elapsedMs",
+        "memoryBytesPeak"
+      ],
       "additionalProperties": false,
       "properties": {
-        "candidateCount": {"type": "integer", "minimum": 0},
-        "scannedCount": {"type": "integer", "minimum": 0},
-        "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "graphGeneration": {"type": ["integer", "null"], "minimum": 0},
-        "graphEdgesTraversed": {"type": "integer", "minimum": 0},
-        "elapsedMs": {"type": "integer", "minimum": 0},
-        "memoryBytesPeak": {"type": "integer", "minimum": 0}
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "scannedCount": { "type": "integer", "minimum": 0 },
+        "indexGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "graphGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "graphEdgesTraversed": { "type": "integer", "minimum": 0 },
+        "elapsedMs": { "type": "integer", "minimum": 0 },
+        "memoryBytesPeak": { "type": "integer", "minimum": 0 }
       }
     },
-    "resourceStatus": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "Deterministic candidate/graph/admission posture; compared across fresh and cached responses."},
-    "elapsedStatus": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "failure at or above elapsedMsFailure, warning at or above elapsedMsWarning, otherwise within_budget. Unsigned producer measurement."},
-    "status": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "Worst of resourceStatus and elapsedStatus; a latency breach does not change selected content or command success."},
+    "resourceStatus": {
+      "type": "string",
+      "enum": ["within_budget", "warning", "failure"],
+      "description": "Deterministic candidate/graph/admission posture; compared across fresh and cached responses."
+    },
+    "elapsedStatus": {
+      "type": "string",
+      "enum": ["within_budget", "warning", "failure"],
+      "description": "failure at or above elapsedMsFailure, warning at or above elapsedMsWarning, otherwise within_budget. Unsigned producer measurement."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["within_budget", "warning", "failure"],
+      "description": "Worst of resourceStatus and elapsedStatus; a latency breach does not change selected content or command success."
+    },
     "degradations": {
       "description": "Deterministic resource/admission degradations. elapsedStatus reports timing breaches without changing signed pack content.",
       "type": "array",
@@ -47,10 +76,17 @@
         "required": ["code", "severity", "message", "repair"],
         "additionalProperties": false,
         "properties": {
-          "code": {"type": "string", "enum": ["pack_assembly_slow", "pack_assembly_budget_exceeded", "pack_concurrent_limit_reached"]},
-          "severity": {"type": "string", "enum": ["low", "medium", "high"]},
-          "message": {"type": "string"},
-          "repair": {"type": ["string", "null"]}
+          "code": {
+            "type": "string",
+            "enum": [
+              "pack_assembly_slow",
+              "pack_assembly_budget_exceeded",
+              "pack_concurrent_limit_reached"
+            ]
+          },
+          "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "message": { "type": "string" },
+          "repair": { "type": ["string", "null"] }
         }
       }
     }

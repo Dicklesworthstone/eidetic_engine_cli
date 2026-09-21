@@ -74,15 +74,7 @@
     },
     "dominantStatus": {
       "type": "string",
-      "enum": [
-        "blocked",
-        "unavailable",
-        "stale",
-        "degraded",
-        "ok",
-        "not_applicable",
-        "unknown"
-      ]
+      "enum": ["blocked", "unavailable", "stale", "degraded", "ok", "not_applicable", "unknown"]
     },
     "substratePosture": {
       "type": "object",
@@ -140,8 +132,31 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "dominantStatus"],
-    "summary": ["command", "version", "fixture", "posture", "dominantStatus", "statusCounts", "substrates", "sideEffectFree"],
-    "standard": ["command", "version", "fixture", "sideEffectFree", "mutationPolicy", "posture", "dominantStatus", "substratePosture", "statusCounts", "substrates", "degraded", "recoveryActions", "assertions"],
+    "summary": [
+      "command",
+      "version",
+      "fixture",
+      "posture",
+      "dominantStatus",
+      "statusCounts",
+      "substrates",
+      "sideEffectFree"
+    ],
+    "standard": [
+      "command",
+      "version",
+      "fixture",
+      "sideEffectFree",
+      "mutationPolicy",
+      "posture",
+      "dominantStatus",
+      "substratePosture",
+      "statusCounts",
+      "substrates",
+      "degraded",
+      "recoveryActions",
+      "assertions"
+    ],
     "full": ["*"]
   },
   "$defs": {
@@ -262,12 +277,12 @@
     },
     "jsonValue": {
       "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"type": "string"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }
