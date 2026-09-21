@@ -887,54 +887,215 @@ impl BackflowReport {
     }
 }
 
-/// Record outcome feedback against a global row and flow a bounded, audited
-/// confidence adjustment back to the origin workspace row.
+/// There is no historical backflow mode: only a current, revealed revision
+/// within its authored validity window may drive a confidence adjustment.
+/// The caller owns the snapshot/transaction covering the body and sidecars.
+fn backflow_target_is_current(
+    connection: &DbConnection,
+    memory: &crate::db::StoredMemory,
+    reference: chrono::DateTime<chrono::Utc>,
+) -> crate::db::Result<bool> {
+    let parse = |raw: &str| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|time| time.with_timezone(&chrono::Utc))
+            .map_err(|_| global_mutation_error("Invalid feedback lifecycle metadata"))
+    };
+    let from = memory.valid_from.as_deref().map(parse).transpose()?;
+    let to = memory.valid_to.as_deref().map(parse).transpose()?;
+    if from.zip(to).is_some_and(|(from, to)| from > to) {
+        return Err(global_mutation_error("Invalid feedback validity window"));
+    }
+    let rows = connection.query(
+        "SELECT superseded_at FROM memories WHERE id = ?1 AND workspace_id = ?2",
+        &[
+            sqlmodel_core::Value::Text(memory.id.clone()),
+            sqlmodel_core::Value::Text(memory.workspace_id.clone()),
+        ],
+    )?;
+    let row = rows.first().filter(|_| rows.len() == 1)
+        .ok_or_else(|| global_mutation_error("Feedback source identity changed"))?;
+    let superseded = match row.get(0) {
+        Some(sqlmodel_core::Value::Null) => false,
+        Some(sqlmodel_core::Value::Text(raw)) => {
+            parse(raw)?;
+            true
+        }
+        _ => return Err(global_mutation_error("Invalid feedback revision metadata")),
+    };
+    let seal = connection.get_memory_seal(&memory.id)?;
+    if let Some(raw) = seal.as_ref().and_then(|seal| seal.revealed_at.as_deref()) {
+        parse(raw)?;
+    }
+    Ok(memory.tombstoned_at.is_none()
+        && !superseded
+        && from.is_none_or(|from| from <= reference)
+        && to.is_none_or(|to| reference <= to)
+        && seal.is_none_or(|seal| !seal.is_sealed()))
+}
+
+fn verified_backflow_origin(
+    memory: &crate::db::StoredMemory,
+) -> crate::db::Result<Option<(String, String)>> {
+    let Some(uri) = memory.provenance_uri.as_deref().filter(|uri| uri.starts_with("ee-mem://")) else {
+        return Ok(None);
+    };
+    let (workspace, id) = parse_promotion_provenance(uri)
+        .ok_or_else(|| global_mutation_error("Invalid feedback origin provenance"))?;
+    if workspace.parse::<crate::models::WorkspaceId>().is_err()
+        || id.parse::<crate::models::MemoryId>().is_err()
+    {
+        return Err(global_mutation_error("Invalid feedback origin identity"));
+    }
+    Ok(Some((workspace, id)))
+}
+
+/// Round toward the starting confidence when nearest-f32 rounding would
+/// exceed the requested step. Both endpoints are finite nonnegative unit
+/// scores, so adjacent positive float bit patterns are ordered numerically.
+fn bounded_backflow_target(before: f32, requested: f32) -> f32 {
+    let after = (before + requested).clamp(0.0, 1.0);
+    if (f64::from(after) - f64::from(before)).abs() > f64::from(requested.abs()) {
+        if after > before {
+            f32::from_bits(after.to_bits() - 1)
+        } else {
+            f32::from_bits(after.to_bits() + 1)
+        }
+    } else {
+        after
+    }
+}
+
+/// Read current confidence and commit its change, index repair, and audit as
+/// one unit. A concurrent writer either serializes or causes a reported
+/// transaction failure, never a successful lost update. Retired/missing or
+/// in-place-reworded origins retain historical feedback only in the global DB.
+fn persist_origin_backflow(
+    connection: &DbConnection,
+    options: &BackflowOptions<'_>,
+    global: &crate::db::StoredMemory,
+    origin: &(String, String),
+    feedback_id: &str,
+    reference: chrono::DateTime<chrono::Utc>,
+) -> crate::db::Result<Option<(f32, f32)>> {
+    if !options.weight.is_finite() {
+        return Err(global_mutation_error("Feedback weight must be finite"));
+    }
+    connection.with_transaction(|| {
+        let (workspace, id) = origin;
+        let Some(memory) = connection.get_memory(id)? else {
+            return Ok(None);
+        };
+        if memory.workspace_id != *workspace {
+            return Err(global_mutation_error("Feedback origin workspace mismatch"));
+        }
+        if !backflow_target_is_current(connection, &memory, reference)?
+            || memory.content != global.content
+        {
+            return Ok(None);
+        }
+        let before = memory.confidence;
+        if !before.is_finite() || !(0.0..=1.0).contains(&before) {
+            return Err(global_mutation_error("Invalid origin confidence"));
+        }
+        let step = options.weight.clamp(0.0, MAX_BACKFLOW_STEP);
+        let requested = match options.signal {
+            BackflowSignal::Helpful => step,
+            BackflowSignal::Harmful => -step,
+        };
+        let after = bounded_backflow_target(before, requested);
+        if before == after {
+            return Ok(Some((before, after)));
+        }
+        if !connection.apply_memory_reinforcement(id, workspace, after, &reference.to_rfc3339())? {
+            return Err(global_mutation_error("Origin feedback was not applied"));
+        }
+        // Confidence contributes to retrieval metadata. Do not leave a
+        // successful learning update behind an apparently current index.
+        let job = promotion_index_job_id();
+        connection.insert_search_index_job(
+            &job,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace.clone(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(id.clone()),
+                documents_total: 1,
+            },
+        )?;
+        connection.insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(workspace.clone()),
+                actor: options.actor.map(str::to_owned),
+                action: "memory.global_feedback_backflow".to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(id.clone()),
+                details: Some(json!({
+                    "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+                    "globalMemoryId": global.id,
+                    "feedbackEventId": feedback_id,
+                    "signal": options.signal.as_str(),
+                    "requestedDelta": requested,
+                    "appliedDelta": after - before,
+                    "confidenceBefore": before,
+                    "confidenceAfter": after,
+                    "indexJobId": job,
+                }).to_string()),
+            },
+        )?;
+        Ok(Some((before, after)))
+    })
+}
+
+/// Record global outcome evidence and apply a bounded origin adjustment.
+/// Executed reports state the actual origin delta, including zero when no
+/// current origin can be adjusted. Previews retain the requested-delta form
+/// and never open the origin store. Global and origin commits are separate.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when storage access fails or the
-/// global row does not exist.
+/// A failure after recording global feedback names the committed event and
+/// explicitly withholds a claim of origin success. Do not blindly resubmit:
+/// that would record another observation, not retry the same event.
 pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<BackflowReport, String> {
     if !options.weight.is_finite() {
         return Err("Global feedback weight must be finite".to_owned());
     }
     let (global_connection, global_workspace_id) =
         admission::open_existing_global(options.global_paths, options.dry_run)?;
-    let row = global_connection
-        .get_memory(options.global_memory_id)
-        .map_err(|error| format!("load global memory: {error}"))?
-        .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
-    if row.workspace_id != global_workspace_id {
-        return Err("Memory does not belong to the addressed global workspace".to_owned());
-    }
-    let origin = row
-        .provenance_uri
-        .as_deref()
-        .and_then(parse_promotion_provenance);
-
+    let reference = chrono::Utc::now();
     let step = options.weight.clamp(0.0, MAX_BACKFLOW_STEP);
-    let signed_delta = match options.signal {
+    let requested = match options.signal {
         BackflowSignal::Helpful => step,
         BackflowSignal::Harmful => -step,
     };
-
     if options.dry_run {
-        let _ = global_connection.close();
+        let snapshot = admission::ReadSnapshot::begin(&global_connection)
+            .map_err(|_| "Could not begin global feedback preview".to_owned())?;
+        let row = global_mutation_target(&global_connection, &global_workspace_id, options.global_memory_id)
+            .map_err(|_| "Could not verify global feedback target".to_owned())?;
+        let origin = verified_backflow_origin(&row)
+            .map_err(|_| "Could not verify global feedback origin".to_owned())?;
+        snapshot.finish().map_err(|_| "Could not release global feedback preview".to_owned())?;
         return Ok(BackflowReport {
             global_memory_id: row.id,
             origin,
-            applied_delta: signed_delta,
+            applied_delta: requested,
             origin_confidence_before: None,
             origin_confidence_after: None,
             executed: false,
         });
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    // 1) Feedback event on the global row itself.
-    global_connection
-        .insert_feedback_event(
-            &promotion_feedback_event_id(),
+    let feedback_id = promotion_feedback_event_id();
+    let (row, origin, current) = global_connection.with_transaction(|| {
+        let row = global_mutation_target(&global_connection, &global_workspace_id, options.global_memory_id)?;
+        let origin = verified_backflow_origin(&row)?;
+        let current = backflow_target_is_current(&global_connection, &row, reference)?;
+        // Feedback about retired knowledge remains useful historical evidence;
+        // it must not silently alter an otherwise current origin memory.
+        global_connection.insert_feedback_event(
+            &feedback_id,
             &crate::db::CreateFeedbackEventInput {
                 workspace_id: global_workspace_id.clone(),
                 target_type: "memory".to_owned(),
@@ -944,68 +1105,45 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
                 source_type: "outcome_observed".to_owned(),
                 source_id: options.actor.map(str::to_owned),
                 reason: Some("global-lane outcome evidence (backflow)".to_owned()),
-                evidence_json: None,
+                evidence_json: Some(json!({
+                    "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+                    "originWorkspaceId": origin.as_ref().map(|(workspace, _)| workspace),
+                    "originMemoryId": origin.as_ref().map(|(_, id)| id),
+                    "requestedDelta": requested,
+                    "sourceCurrent": current,
+                }).to_string()),
                 session_id: None,
             },
-        )
-        .map_err(|error| format!("record global feedback: {error}"))?;
+        )?;
+        Ok((row, origin, current))
+    }).map_err(|_| "Could not commit global feedback; inspect the global store before retrying".to_owned())?;
 
-    // 2) Bounded origin adjustment, when this row was promoted.
-    let (before, after) = if let Some((origin_workspace, origin_memory)) = &origin {
-        let workspace_connection = DbConnection::open_file(options.workspace_database_path)
-            .map_err(|error| format!("open workspace database: {error}"))?;
-        let origin_row = workspace_connection
-            .get_memory(origin_memory)
-            .map_err(|error| format!("load origin memory: {error}"))?;
-        let outcome = match origin_row {
-            Some(origin_row) if origin_row.tombstoned_at.is_none() => {
-                let before = origin_row.confidence;
-                let target = (before + signed_delta).clamp(0.0, 1.0);
-                let applied = workspace_connection
-                    .apply_memory_reinforcement(origin_memory, origin_workspace, target, &now)
-                    .map_err(|error| format!("adjust origin confidence: {error}"))?;
-                let details = json!({
-                    "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
-                    "globalMemoryId": row.id,
-                    "signal": options.signal.as_str(),
-                    "appliedDelta": signed_delta,
-                    "confidenceBefore": before,
-                    "confidenceAfter": target,
-                })
-                .to_string();
-                workspace_connection
-                    .insert_audit(
-                        &generate_audit_id(),
-                        &CreateAuditInput {
-                            workspace_id: Some(origin_workspace.clone()),
-                            actor: options.actor.map(str::to_owned),
-                            action: "memory.global_feedback_backflow".to_owned(),
-                            target_type: Some("memory".to_owned()),
-                            target_id: Some(origin_memory.clone()),
-                            details: Some(details),
-                        },
-                    )
-                    .map_err(|error| format!("origin audit: {error}"))?;
-                applied.then_some((before, target))
+    let adjustment = if current && let Some(origin) = &origin {
+        let result = (|| -> Result<Option<(f32, f32)>, String> {
+            if !options.workspace_database_path.try_exists()
+                .map_err(|_| "Could not inspect origin store".to_owned())?
+            {
+                return Err("Origin store does not exist".to_owned());
             }
-            // Origin tombstoned or vanished: feedback stays on the global
-            // row only; never resurrect or adjust dead rows.
-            _ => None,
-        };
-        let _ = workspace_connection.close();
-        match outcome {
-            Some((before, after)) => (Some(before), Some(after)),
-            None => (None, None),
-        }
+            let source = DbConnection::open_file(options.workspace_database_path)
+                .map_err(|_| "Could not open existing origin store".to_owned())?;
+            persist_origin_backflow(&source, options, &row, origin, &feedback_id, reference)
+                .map_err(|_| "Could not commit origin backflow".to_owned())
+        })();
+        result.map_err(|_| format!(
+            "global_feedback_origin_pending: feedback {feedback_id} is committed; the origin update was not confirmed; inspect both stores before retrying and do not blindly record the observation again"
+        ))?
     } else {
-        (None, None)
+        None
     };
-    let _ = global_connection.close();
-
+    let (before, after, applied_delta) = adjustment.map_or(
+        (None, None, 0.0),
+        |(before, after)| (Some(before), Some(after), after - before),
+    );
     Ok(BackflowReport {
         global_memory_id: row.id,
         origin,
-        applied_delta: signed_delta,
+        applied_delta,
         origin_confidence_before: before,
         origin_confidence_after: after,
         executed: true,
@@ -1795,6 +1933,276 @@ mod tests {
         }, &row).is_err());
         assert_eq!(source.count_table_rows("audit_log").unwrap(), before);
         assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
+    }
+
+    fn backflow_options<'a>(f: &'a PublicationFixture, id: &'a str) -> BackflowOptions<'a> {
+        BackflowOptions {
+            workspace_database_path: &f.source_path,
+            global_memory_id: id,
+            global_paths: &f.paths,
+            signal: BackflowSignal::Helpful,
+            weight: 0.05,
+            actor: Some("backflow-test"),
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn origin_backflow_commits_confidence_audit_and_index_repair_together() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        let before_jobs = source.count_table_rows("search_index_jobs").unwrap();
+        let before_audits = source.count_table_rows("audit_log").unwrap();
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        let memory = source.get_memory(&f.memory.id).unwrap().unwrap();
+        assert_eq!(report.origin_confidence_before, Some(f.memory.confidence));
+        assert_eq!(report.origin_confidence_after, Some(memory.confidence));
+        assert_eq!(report.applied_delta, memory.confidence - f.memory.confidence);
+        assert_eq!(memory.content, f.memory.content);
+        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), before_jobs + 1);
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), before_audits + 1);
+        let audit = source.query(
+            "SELECT details FROM audit_log WHERE action = 'memory.global_feedback_backflow'",
+            &[],
+        ).unwrap();
+        let Some(sqlmodel_core::Value::Text(details)) = audit[0].get(0) else { panic!("audit details"); };
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(details["globalMemoryId"], id);
+        assert!(details["feedbackEventId"].as_str().unwrap().starts_with("fb_"));
+        assert!(details["indexJobId"].as_str().unwrap().starts_with("sidx_"));
+    }
+
+    #[test]
+    fn origin_backflow_audit_failure_rolls_back_confidence_and_index_repair() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        let before = source.get_memory(&f.memory.id).unwrap();
+        let jobs = source.count_table_rows("search_index_jobs").unwrap();
+        source.execute_raw("ALTER TABLE audit_log RENAME TO unavailable_backflow_audit").unwrap();
+        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        assert!(error.contains("global_feedback_origin_pending"));
+        assert!(error.contains("feedback fb_") && error.contains("do not blindly"));
+        assert!(!error.contains(&f.memory.content));
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), jobs);
+        assert_eq!(f.count("feedback_events"), 1);
+    }
+
+    #[test]
+    fn origin_backflow_queue_failure_rolls_back_the_confidence_change() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        let before = source.get_memory(&f.memory.id).unwrap();
+        let audits = source.count_table_rows("audit_log").unwrap();
+        source.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_backflow_jobs").unwrap();
+        assert!(backflow_global_feedback(&backflow_options(&f, &id)).is_err());
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), audits);
+        assert_eq!(f.count("feedback_events"), 1);
+    }
+
+    #[test]
+    fn backflow_preserves_retired_future_expired_reworded_and_sealed_origins() {
+        for update in [
+            "tombstoned_at = '2021-01-01T00:00:00Z'",
+            "superseded_at = '2099-01-01T00:00:00Z'",
+            "valid_to = '2021-01-01T00:00:00Z'",
+            "valid_from = '2098-01-01T00:00:00Z'",
+            "content = 'Revised local advice.'",
+            "confidence = confidence",
+        ] {
+            let f = PublicationFixture::new();
+            let (id, _, _) = f.publish().unwrap();
+            let source = DbConnection::open_file(&f.source_path).unwrap();
+            source.execute_raw(&format!("UPDATE memories SET {update} WHERE id = '{}'", f.memory.id)).unwrap();
+            if update == "confidence = confidence" {
+                source.insert_memory_seal(&f.memory.id, &crate::models::memory_seal_commitment(f.memory.content.as_bytes()), "2020-01-01T00:00:00Z").unwrap();
+            }
+            let before = source.get_memory(&f.memory.id).unwrap();
+            let counts = (source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap());
+            let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+            assert!(report.executed && report.origin_confidence_after.is_none());
+            assert_eq!(report.applied_delta, 0.0, "{update}");
+            assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+            assert_eq!((source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap()), counts);
+            assert_eq!(f.count("feedback_events"), 1);
+        }
+    }
+
+    #[test]
+    fn backflow_reports_actual_clamping_and_zero_when_no_origin_exists() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        source.execute_raw(&format!("UPDATE memories SET confidence = 0.99 WHERE id = '{}'", f.memory.id)).unwrap();
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(report.origin_confidence_after, Some(1.0));
+        assert!((report.applied_delta - 0.01).abs() < 0.000001);
+        let counts = (source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap());
+        let saturated = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(saturated.applied_delta, 0.0);
+        assert_eq!(saturated.origin_confidence_after, Some(1.0));
+        assert_eq!((source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap()), counts);
+        f.destination.execute_raw(&format!("UPDATE memories SET provenance_uri = NULL WHERE id = '{id}'")).unwrap();
+        let direct = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert!(direct.origin.is_none() && direct.origin_confidence_after.is_none());
+        assert_eq!(direct.applied_delta, 0.0);
+    }
+
+    #[test]
+    fn feedback_on_withdrawn_global_knowledge_does_not_adjust_the_local_origin() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert!(report.executed && report.origin_confidence_after.is_none());
+        assert_eq!(report.applied_delta, 0.0);
+        assert_eq!(f.count("feedback_events"), 1);
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
+    }
+
+    #[test]
+    fn backflow_does_not_create_missing_origins_or_claim_their_update_succeeded() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let absent = f._temp.path().join("absent-feedback-origin.db");
+        let mut options = backflow_options(&f, &id);
+        options.workspace_database_path = &absent;
+        let error = backflow_global_feedback(&options).unwrap_err();
+        assert!(error.contains("global_feedback_origin_pending"));
+        assert!(!absent.exists());
+        assert_eq!(f.count("feedback_events"), 1);
+    }
+
+    #[test]
+    fn global_feedback_preview_never_opens_the_origin_or_changes_either_store() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let absent = f._temp.path().join("absent-preview-origin.db");
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let before = source.get_memory(&f.memory.id).unwrap();
+        let mut options = backflow_options(&f, &id);
+        options.workspace_database_path = &absent;
+        options.dry_run = true;
+        let report = backflow_global_feedback(&options).unwrap();
+        assert!(!report.executed && report.origin_confidence_after.is_none());
+        assert_eq!(report.applied_delta, MAX_BACKFLOW_STEP);
+        assert_eq!(f.count("feedback_events"), 0);
+        assert!(!absent.exists());
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+    }
+
+    #[test]
+    fn malformed_backflow_provenance_is_rejected_before_recording_global_feedback() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        f.destination.execute_raw(&format!("UPDATE memories SET provenance_uri = 'ee-mem://PRIVATE_CANARY/not-a-memory' WHERE id = '{id}'")).unwrap();
+        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        assert!(!error.contains("PRIVATE_CANARY"));
+        assert_eq!(f.count("feedback_events"), 0);
+    }
+
+    #[test]
+    fn valid_but_foreign_backflow_provenance_cannot_adjust_or_audit_another_workspace() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        let before = source.get_memory(&f.memory.id).unwrap();
+        let audits = source.count_table_rows("audit_log").unwrap();
+        f.destination.execute_raw(&format!("UPDATE memories SET provenance_uri = 'ee-mem://wsp_00000000000000000000000091/{}' WHERE id = '{id}'", f.memory.id)).unwrap();
+        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        assert!(error.contains("global_feedback_origin_pending"));
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), audits);
+    }
+
+    #[test]
+    fn concurrent_origin_feedback_never_reports_success_for_a_lost_confidence_update() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let global = f.destination.get_memory(&id).unwrap().unwrap();
+        let origin = (f.memory.workspace_id.clone(), f.memory.id.clone());
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let before_audits = source.count_table_rows("audit_log").unwrap();
+        let before_jobs = source.count_table_rows("search_index_jobs").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let successes = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2).map(|_| {
+                let path = f.source_path.clone();
+                let paths = f.paths.clone();
+                let global = global.clone();
+                let origin = origin.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let db = DbConnection::open_file(&path);
+                    let options = BackflowOptions {
+                        workspace_database_path: &path,
+                        global_memory_id: &global.id,
+                        global_paths: &paths,
+                        signal: BackflowSignal::Helpful,
+                        weight: 0.01,
+                        actor: None,
+                        dry_run: false,
+                    };
+                    barrier.wait();
+                    let Ok(db) = db else { return false; };
+                    persist_origin_backflow(&db, &options, &global, &origin, &promotion_feedback_event_id(), chrono::Utc::now())
+                        .is_ok_and(|change| change.is_some())
+                })
+            }).collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).filter(|success| *success).count()
+        });
+        assert!(successes > 0);
+        let current = source.get_memory(&f.memory.id).unwrap().unwrap();
+        let expected = (0..successes).fold(f.memory.confidence, |value, _| value + 0.01);
+        assert!((current.confidence - expected).abs() < 0.000001);
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), before_audits + u64::try_from(successes).unwrap());
+        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), before_jobs + u64::try_from(successes).unwrap());
+    }
+
+    #[test]
+    fn actual_backflow_steps_stay_within_the_cap_even_at_float_rounding_boundaries() {
+        for before in [0.0_f32, 0.01, 0.49, 0.9, 0.99, 1.0] {
+            for step in [0.0_f32, 0.000000001, MAX_BACKFLOW_STEP, -MAX_BACKFLOW_STEP] {
+                let after = bounded_backflow_target(before, step);
+                assert!((0.0..=1.0).contains(&after));
+                assert!((f64::from(after) - f64::from(before)).abs() <= f64::from(step.abs()));
+                assert!((after - before) * step >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_origin_lifecycle_never_leaks_or_partially_updates_confidence() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        source.execute_raw(&format!("UPDATE memories SET valid_to = 'PRIVATE_VALIDITY_CANARY' WHERE id = '{}'", f.memory.id)).unwrap();
+        let before = source.get_memory(&f.memory.id).unwrap();
+        let jobs = source.count_table_rows("search_index_jobs").unwrap();
+        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        assert!(!error.contains("PRIVATE_VALIDITY_CANARY"));
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
+        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), jobs);
+    }
+
+    #[test]
+    fn backflow_resumes_only_after_both_global_and_origin_seals_are_revealed() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        let commitment = crate::models::memory_seal_commitment(f.memory.content.as_bytes());
+        f.destination.insert_memory_seal(&id, &commitment, "2020-01-01T00:00:00Z").unwrap();
+        source.insert_memory_seal(&f.memory.id, &commitment, "2020-01-01T00:00:00Z").unwrap();
+        assert_eq!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta, 0.0);
+        assert!(f.destination.mark_memory_seal_revealed(&id, "2020-01-02T00:00:00Z").unwrap());
+        assert_eq!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta, 0.0);
+        assert!(source.mark_memory_seal_revealed(&f.memory.id, "2020-01-02T00:00:00Z").unwrap());
+        assert!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta > 0.0);
     }
 
 }
