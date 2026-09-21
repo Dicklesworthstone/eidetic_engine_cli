@@ -309,6 +309,21 @@ SECTION2_MARK = "# @SECTION-2-BEGIN"
 SECTION2_BUDGET = "# @SECTION-2-BUDGET:"
 
 
+def bench_orphans_of(bench_tracked: set[str], bench_roots: set[str]) -> list[str]:
+    """benches/ negative arm, as a PREDICATE over planted inputs.
+
+    This exists as a function rather than an inline set difference so the arm
+    can be exercised with inputs that do not exist in this repo. See
+    CONTROL_UNREACHABLE_BENCH: no tracked-but-unreachable bench file exists to
+    name, so the negative control was recorded as absent -- and an absent
+    negative control means the surface cannot demonstrate it would catch
+    anything, which is indistinguishable from a surface that catches nothing.
+    Planting the inputs is what makes it representable today instead of the day
+    someone happens to add such a file.
+    """
+    return sorted(bench_tracked - bench_roots)
+
+
 def read_allowlist() -> tuple[list[tuple[str, str, bool]], int | None]:
     """((path, reason, in_section_2) triples, declared section-2 budget).
 
@@ -386,7 +401,7 @@ def main() -> int:
         for r in roots
         if str(r.relative_to(REPO)).startswith("benches/")
     }
-    bench_orphans = sorted(bench_tracked - bench_roots)
+    bench_orphans = bench_orphans_of(bench_tracked, bench_roots)
     if bench_orphans and CONTROL_UNREACHABLE_BENCH is None:
         print(
             "[mod-reachability] benches/ now contains tracked .rs that are not target "
@@ -570,7 +585,13 @@ def self_test() -> int:
 
     failures: list[str] = []
 
+    # Counted, not hardcoded. The tally printed at the end used to be the
+    # literal "6/6" while the arms below were free to change underneath it, so
+    # the summary line could claim a population it no longer had.
+    arms_run: list[str] = []
+
     def arm(name: str, actual: object, expected: object) -> None:
+        arms_run.append(name)
         ok = actual == expected
         print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
         if not ok:
@@ -640,13 +661,55 @@ def self_test() -> int:
             [1],
         )
 
+        # ---- benches/ NEGATIVE ARM, on planted inputs -------------------
+        #
+        # CONTROL_UNREACHABLE_BENCH is None because no tracked-but-unreachable
+        # bench file exists in this repo to name. That was recorded honestly,
+        # but recording an absence is not the same as having the control: a
+        # surface whose negative arm never runs cannot show it would fail when
+        # it should, and from the outside that is indistinguishable from a
+        # surface that catches nothing. These three arms plant the inputs the
+        # repo does not supply, so the arm is EXERCISED now rather than awaited.
+        arm(
+            "benches/: a tracked bench file that is not a target root is flagged",
+            bench_orphans_of(
+                {"benches/remember.rs", "benches/helpers/planted.rs"},
+                {"benches/remember.rs"},
+            ),
+            ["benches/helpers/planted.rs"],
+        )
+        arm(
+            "benches/: when every tracked bench file IS a root, nothing is flagged",
+            bench_orphans_of({"benches/remember.rs"}, {"benches/remember.rs"}),
+            [],
+        )
+        # EMPTY-WORLD GUARD. The arm above passes on an empty tracked set too,
+        # for the wrong reason -- nothing to flag because nothing was scanned.
+        # A clean result and an empty scan must not be the same observation, so
+        # the emptiness is asserted as its own fact. main() reports the same
+        # condition per surface as `<-- EMPTY SCAN`.
+        arm(
+            "benches/: an EMPTY tracked set is distinguishable from a clean one",
+            (bench_orphans_of(set(), {"benches/remember.rs"}), len(set()) == 0),
+            ([], True),
+        )
+
     INCLUDE_ONLY.clear()
     if failures:
         print(f"\n[mod-reachability] self-test: {len(failures)} arm(s) FAILED:")
         for f in failures:
             print(f"    {f}")
         return 1
-    print("\n[mod-reachability] self-test: 6/6 arms passed.")
+    # A self-test that ran ZERO arms must not print a pass: an empty run and a
+    # clean run are the same string otherwise, which is the exact confusion
+    # these arms exist to prevent elsewhere in this file.
+    if not arms_run:
+        print(
+            "\n[mod-reachability] self-test: ZERO arms ran -- this is NOT a pass.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"\n[mod-reachability] self-test: {len(arms_run)}/{len(arms_run)} arms passed.")
     return 0
 
 
