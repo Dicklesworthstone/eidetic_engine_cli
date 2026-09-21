@@ -612,3 +612,18 @@ mod spawn_deadline_coverage;
 
 #[path = "contracts/capabilities_workspace.rs"]
 mod capabilities_workspace;
+
+// bd-unreachable-contract-test-files-npyqw: this file existed since 2026-09-15
+// with three #[test] fns -- handoff HMAC and canonical-hash stability, the
+// export/backup schema family, and redaction content hashes -- and NOTHING
+// included it, so it had never been compiled, let alone run. It is
+// self-contained (no `use super::*`, defines its own TestResult), so it
+// belongs in this registered list rather than under another module.
+//
+// DECLARED here is not the same claim as COMPILES. Both are evidenced:
+// with this declaration in place the full `cargo test --test contracts`
+// target built and ran 1514 tests, and all three of these passed -- they
+// were not among that run's failures. They also pass in isolation, both
+// serialized (256s) and in parallel (123s).
+#[path = "contracts/handoff_export_backup_conformance.rs"]
+mod handoff_export_backup_conformance;

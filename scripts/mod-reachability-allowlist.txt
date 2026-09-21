@@ -33,7 +33,7 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 
 # =========================================================================
 # @SECTION-2-BEGIN
-# @SECTION-2-BUDGET: 11
+# @SECTION-2-BUDGET: 10
 #
 # THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
 # sentence here. The gate fails in BOTH directions: more entries than the budget
@@ -70,7 +70,6 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 src/core/preflight_token.rs	bd-l6h3g item 1. DEAD: 0f68778a0 removed `pub mod preflight_token;` finishing the command-authorization control-plane retirement, and nothing references PreflightToken or preflight_token:: today. 1151 lines, security-adjacent (bypass-token issue/use/reject/revoke). Deletion escalated to the user under AGENTS.md RULE 1; REMOVE THIS LINE WHEN THE FILE IS DELETED OR RE-DECLARED.
 src/core/ask_evidence.rs	bd-l6h3g item 2. LIVE, declaration owed. scripts/delivery/ask-evidence-20260918.patch already specifies `#[path = "ask_evidence.rs"] pub(super) mod evidence;` in src/core/ask_admission.rs; the delivery applied the file and not the declaration. Ask lane owns it. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
 tests/contracts/ask_transcript.rs	bd-l6h3g item 2. LIVE, declaration owed. Same patch specifies `#[path = "ask_transcript.rs"] mod transcript;` in tests/contracts/ask_lifecycle.rs. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
-tests/contracts/handoff_export_backup_conformance.rs	bd-l6h3g item 4. UNDECIDED. 454 lines, 3 tests, added 6270648cb 2026-05-23, never declared in tests/contracts.rs or Cargo.toml in its entire history. Reads as forgotten rather than retired (no retirement commit exists), but declaring four-month-old in-process test code needs a compile first. REMOVE THIS LINE WHEN IT IS DECLARED OR RETIRED.
 tests/fixtures/closure_lint/test_assertion_cases/empty_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE: byte-identical to tests/closure_lint_test_files_fixtures/empty_test.rs, which is the copy closure_lint_harness.rs actually names. Nothing references this directory under any spelling. Present since 3dc3c2f36 (2026-05-15).
 tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/glob_match.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
