@@ -547,14 +547,40 @@ arm_pack_banner_names_its_scope() {
     assert_jq "$pack_json" \
         '(.data.pack.advisoryBanner.status // "") == "degraded"' \
         "$bead: precondition — the pack banner is in its degraded state"
-    # Same correction as the cross-surface arm: "this pack" alone also matches
-    # the pre-fix prose, so it is not a discriminating assertion.
-    assert_contains "$summary" "this pack only" \
-        "$bead: banner names the pack invocation as its scope"
-    assert_contains "$summary" "not workspace health" \
-        "$bead: banner disclaims workspace-health scope"
+    # PRECONDITION ON THE BRANCH, not just on the status. `advisory_summary`
+    # has TWO degraded arms (src/pack/mod.rs:5902): an early return for
+    # embed_model_unavailable at :5905, and the general arm at :5917. A
+    # degraded status alone does not say which one produced this string, and
+    # the assertions below are branch-specific. This fixture -- an empty index
+    # dir on a host with no embedding model -- always selects the embed arm.
+    # Asserting one arm's literal prose with nothing checking which arm ran is
+    # precisely how the assertions here came to be aimed at text this
+    # workspace cannot emit.
+    assert_jq "$pack_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length >= 1' \
+        "$bead: precondition — the degradation is a missing embedding model, so the banner comes from the embed arm (src/pack/mod.rs:5905)"
+
+    # BRANCH-INDEPENDENT. Both degraded arms name the other surface and speak
+    # of workspace posture; the pre-fix prose (a8fd99907:src/pack/mod.rs:1217)
+    # did neither. These two are what make this a scope assertion rather than
+    # a spelling assertion, and they go red on the original defect text.
     assert_contains "$summary" "ee doctor" \
         "$bead: banner points at the workspace-health surface"
+    assert_contains "$summary" "workspace posture" \
+        "$bead: banner frames the disagreement as workspace posture, which the pre-fix prose never mentioned"
+
+    # BRANCH-SPECIFIC, and pinned product-side by
+    # embed_model_unavailable_banner_keeps_its_specific_wording
+    # (src/pack/mod.rs:16424). The embed arm does not merely disclaim
+    # workspace scope the way the general arm does -- it states what `ee
+    # doctor` actually reports, which is the stronger form of the claim for
+    # the defect this bead was filed for: an agent told a workspace needs
+    # repair when doctor calls it healthy.
+    assert_contains "$summary" "keeps workspace posture ok" \
+        "$bead: banner reconciles with doctor's advisory-tier verdict instead of implying repair"
+    assert_contains "$summary" "lexical-only" \
+        "$bead: banner keeps the cause-specific ranking guidance for this arm"
+
     # The exact prose the field report blamed for sending agents to repair a
     # healthy workspace must be gone.
     assert_eq "$(printf '%s' "$summary" | grep -c 'repair degraded sources')" "0" \
@@ -634,16 +660,30 @@ arm_cross_surface_verdict_vocabulary() {
     # 3. LOAD-BEARING: given that divergence, the pack banner must name its own
     #    scope. This is the assertion that catches the surfaces drifting apart
     #    again, because it fails the moment the scope language is removed.
-    # "this pack" ALONE is satisfied by the pre-fix prose, which ended
-    # "...before relying on this pack." Verified by running this arm against
-    # v0.15.2: that assertion passed while the two below failed. Assert the
-    # actual scope CLAIM, which exists only in the fixed text.
-    assert_contains "$pack_summary" "this pack only" \
-        "$bead: diverging pack verdict names its per-invocation scope"
-    assert_contains "$pack_summary" "not workspace health" \
-        "$bead: diverging pack verdict disclaims workspace-health scope"
+    #
+    # Which scope language, though, depends on which arm of `advisory_summary`
+    # ran, so pin that first. This fixture selects the embed arm
+    # (src/pack/mod.rs:5905), never the general one at :5917.
+    assert_jq "$pack_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length >= 1' \
+        "$bead: precondition — the divergence is driven by a missing embedding model (selects the embed arm)"
+
+    # Branch-independent scope language. Comparing the three texts as strings:
+    # the pre-fix prose contains "this pack" but neither "ee doctor" nor
+    # "workspace posture"; both fixed arms contain both. So these two go red on
+    # the original defect and green on either fix -- which is what a scope
+    # assertion should do, where a literal-prose assertion only tracks spelling.
     assert_contains "$pack_summary" "ee doctor" \
         "$bead: diverging pack verdict points at the workspace-health surface"
+    assert_contains "$pack_summary" "workspace posture" \
+        "$bead: diverging pack verdict frames itself against workspace posture"
+
+    # Branch-specific: on the embed arm the banner states doctor's verdict
+    # outright, which is a stronger reconciliation than the general arm's
+    # disclaimer and is exactly what keeps an agent from "fixing" a healthy
+    # workspace when the two surfaces disagree.
+    assert_contains "$pack_summary" "keeps workspace posture ok" \
+        "$bead: diverging pack verdict states what doctor reports, reconciling the two surfaces"
 
     log_event arm_done bead_id "$bead" phase assert check cross_surface_verdict_vocabulary \
         verdict recorded workspace "$ws" host "$SUITE_HOST" \
