@@ -108,12 +108,35 @@ jobs:
       - name: Verify all targets and strict library Clippy with MCP
         if: ${{ !cancelled() }}
         run: |
-          failed=0
-          cargo check --locked --features mcp --all-targets > "$RUNNER_TEMP/mcp-check.log" 2>&1 || failed=1
+          # TWO COMMANDS, TWO EXIT CODES -- 10 check, 11 clippy, 12 both.
+          # Same shared-flag defect as git-capture-20260919.yml, fixed under
+          # bd-clippy-gate-has-no-runner-186zj, and sharpest here: THE TWO ARMS
+          # DO NOT COVER THE SAME TARGETS. check is --all-targets, clippy is
+          # --lib. Under one flag a red step could not tell you which scope
+          # failed, and the two scopes genuinely disagree on this repo --
+          # --all-targets carries lints --lib cannot reach. One value cannot
+          # carry two states. Do not collapse these back, and do not assume a
+          # green clippy arm here says anything about the test targets.
+          check_rc=0
+          clippy_rc=0
+          cargo check --locked --features mcp --all-targets > "$RUNNER_TEMP/mcp-check.log" 2>&1 || check_rc=1
           tail -n 100 "$RUNNER_TEMP/mcp-check.log"
-          cargo clippy --locked --features mcp --lib -- -D warnings > "$RUNNER_TEMP/mcp-clippy.log" 2>&1 || failed=1
+          cargo clippy --locked --features mcp --lib -- -D warnings > "$RUNNER_TEMP/mcp-clippy.log" 2>&1 || clippy_rc=1
           tail -n 100 "$RUNNER_TEMP/mcp-clippy.log"
-          exit "$failed"
+          # The exit code is the attribution; this line is for the reader who
+          # sees the log and never the exit status.
+          echo "ATTRIBUTION: check=$check_rc clippy=$clippy_rc (cargo check --locked --features mcp --all-targets / cargo clippy --locked --features mcp --lib -- -D warnings)"
+          if [ "$check_rc" -ne 0 ] && [ "$clippy_rc" -ne 0 ]; then
+            echo "FAILED: both arms"
+            exit 12
+          elif [ "$check_rc" -ne 0 ]; then
+            echo "FAILED: cargo check --features mcp --all-targets only; lib clippy was green"
+            exit 10
+          elif [ "$clippy_rc" -ne 0 ]; then
+            echo "FAILED: cargo clippy --features mcp --lib -- -D warnings only; check was green"
+            exit 11
+          fi
+          exit 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:

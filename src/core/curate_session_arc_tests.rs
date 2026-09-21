@@ -10,7 +10,7 @@ fn session_arc_within_one_window_retains_exact_source_identity() {
     let candidates = super::super::build_session_arc_candidates(
         &session.workspace_id,
         &session,
-        &[span.clone()],
+        std::slice::from_ref(&span),
         0.0,
     );
     assert_eq!(candidates.len(), 2);
@@ -51,7 +51,7 @@ fn session_arc_limit_never_splits_a_pair() {
         let mut candidates = super::super::build_session_arc_candidates(
             &session.workspace_id,
             &session,
-            &[span.clone()],
+            std::slice::from_ref(&span),
             0.0,
         );
         session_arc::limit_complete_pairs(&mut candidates, limit);

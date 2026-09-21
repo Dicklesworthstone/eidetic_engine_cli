@@ -155,7 +155,7 @@ fn reimport_reports_typed_only_conflicts_without_overwriting_or_publishing() {
     let original = record(1, "rule", Some(json!({"action":"first"})));
     let opts = options(
         root.path(),
-        &source(&[original.clone()], RedactionLevel::None),
+        &source(std::slice::from_ref(&original), RedactionLevel::None),
     );
     assert_eq!(import_jsonl_records(&opts).unwrap().memories_imported, 1);
     let db = DbConnection::open_file(database_path(&opts)).unwrap();
