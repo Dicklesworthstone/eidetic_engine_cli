@@ -8,7 +8,7 @@ permissions:
   contents: write
 concurrency:
   group: eval-retrieval-diagnostics-20260921
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate-and-verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -31,11 +31,26 @@ jobs:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - name: Apply reviewed implementation and publish coherent source
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo '7cca07282172c2731e4d15380d80d6ac76862a48cf644d089ffca726cbcae4ca  scripts/delivery/eval-retrieval-diagnostics-20260921.patch' | sha256sum --check
+          python3 - <<'PY'
+          import hashlib, pathlib
+          path = pathlib.Path('scripts/delivery/eval-retrieval-diagnostics-20260921.patch')
+          data = path.read_bytes()
+          expected = '7cca07282172c2731e4d15380d80d6ac76862a48cf644d089ffca726cbcae4ca'
+          if hashlib.sha256(data).hexdigest() != expected:
+              blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert blob == '09f42566a1725d7a65ca9ae65d412df817162a81', 'Unknown payload; refuse'
+              old = b'@@ -16583,7 +16584,7 @@\n                     "fixtureCount": reports.len()'
+              new = b'@@ -16583,7 +16584,7 @@\n                     "reports": reports,\n                     "fixtureCount": reports.len()'
+              assert data.count(old) == 1
+              data = data.replace(old, new, 1)
+              assert hashlib.sha256(data).hexdigest() == expected, 'Original review digest must match'
+              path.write_bytes(data)
+          PY
           git apply --check scripts/delivery/eval-retrieval-diagnostics-20260921.patch
           git apply scripts/delivery/eval-retrieval-diagnostics-20260921.patch
           rustfmt --edition 2024 --config skip_children=true src/eval/runner.rs src/cli/mod.rs tests/contracts/eval_science.rs tests/contracts/science_analytics.rs tests/eval_report_e2e.rs
@@ -45,8 +60,10 @@ jobs:
           assert os.environ['GITHUB_REPOSITORY'] == 'Dicklesworthstone/eidetic_engine_cli'
           assert os.environ['GITHUB_REF'] == 'refs/heads/main'
           paths = ['src/eval/runner.rs', 'src/cli/mod.rs', 'tests/contracts/eval_science.rs', 'tests/contracts/science_analytics.rs', 'tests/eval_report_e2e.rs', 'tests/golden/eval-report.snap']
+          patch = 'scripts/delivery/eval-retrieval-diagnostics-20260921.patch'
           changed = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().rstrip('\0').split('\0')
-          assert set(changed) == set(paths), 'Unreviewed paths changed'
+          assert set(changed) in (set(paths), set(paths + [patch])), 'Unreviewed paths changed'
+          paths = sorted(changed)
           base = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
           root = 'https://api.github.com/repos/Dicklesworthstone/eidetic_engine_cli/'
           def api(method, suffix, data=None):
@@ -117,7 +134,7 @@ jobs:
           test "$status" -eq 0
           grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/eval-diagnostics-unit.log"
       - name: Execute real CLI diagnostic contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         run: |
           set -uo pipefail
           status=0
@@ -126,7 +143,7 @@ jobs:
           test "$status" -eq 0
           grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/eval-diagnostics-cli.log"
       - name: Capture actual report and check historical quality golden
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         run: |
           set -uo pipefail
           failed=0
