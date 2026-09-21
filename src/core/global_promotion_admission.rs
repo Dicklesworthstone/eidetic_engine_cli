@@ -90,7 +90,8 @@ fn load_source_with_boundary(
         .get_memory_seal(&memory.id)
         .map_err(|_| "Could not verify memory seal sidecar for promotion".to_owned())?;
     if let Some(raw) = seal.as_ref().and_then(|seal| seal.revealed_at.as_deref()) {
-        timestamp(raw).map_err(|_| "Invalid promotion reveal metadata; source withheld".to_owned())?;
+        timestamp(raw)
+            .map_err(|_| "Invalid promotion reveal metadata; source withheld".to_owned())?;
     }
     let markers = db
         .query(
@@ -211,7 +212,10 @@ pub(super) fn find_twin(
 }
 
 fn bound_global_workspace(db: &DbConnection, paths: &GlobalStorePaths) -> Result<String, String> {
-    if db.needs_migration().map_err(|_| "Could not inspect global store schema".to_owned())? {
+    if db
+        .needs_migration()
+        .map_err(|_| "Could not inspect global store schema".to_owned())?
+    {
         return Err("Global store needs migration; preview and existing-record operations do not migrate stores".to_owned());
     }
     crate::core::workspace::select_existing_workspace_row(
@@ -229,7 +233,11 @@ pub(super) fn preview_twin(
     source: &StoredMemory,
     reference: DateTime<Utc>,
 ) -> Result<Option<String>, String> {
-    if !paths.database_path.try_exists().map_err(|_| "Could not inspect global store".to_owned())? {
+    if !paths
+        .database_path
+        .try_exists()
+        .map_err(|_| "Could not inspect global store".to_owned())?
+    {
         return Ok(None);
     }
     let db = DbConnection::open_file_read_only(&paths.database_path)
@@ -239,7 +247,9 @@ pub(super) fn preview_twin(
     let workspace = bound_global_workspace(&db, paths)?;
     let twin = find_twin(&db, &workspace, source, reference)
         .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
-    snapshot.finish().map_err(|_| "Could not release global preview snapshot".to_owned())?;
+    snapshot
+        .finish()
+        .map_err(|_| "Could not release global preview snapshot".to_owned())?;
     Ok(twin)
 }
 
@@ -250,7 +260,11 @@ pub(super) fn open_existing_global(
     paths: &GlobalStorePaths,
     read_only: bool,
 ) -> Result<(DbConnection, String), String> {
-    if !paths.database_path.try_exists().map_err(|_| "Could not inspect global store".to_owned())? {
+    if !paths
+        .database_path
+        .try_exists()
+        .map_err(|_| "Could not inspect global store".to_owned())?
+    {
         return Err("Global store does not exist".to_owned());
     }
     let db = if read_only {

@@ -65,7 +65,10 @@ pub(super) fn backfill_session(
                 return Err(backfill_error("Foreign CASS backfill evidence"));
             }
             let source_line = incoming.get(&stored.start_line).copied();
-            if !matches!(stored.producer_kind.as_str(), "cass_import" | "legacy_unknown") {
+            if !matches!(
+                stored.producer_kind.as_str(),
+                "cass_import" | "legacy_unknown"
+            ) {
                 // A different producer is not an import checkpoint. Do not
                 // mint a second interpretation for its occupied source slot.
                 if source_line.is_some_and(|span| same_upstream_reference(&stored, span)) {
@@ -184,8 +187,7 @@ pub(super) fn backfill_session(
 fn same_upstream_reference(stored: &StoredEvidenceSpan, span: &CassViewSpanForImport) -> bool {
     // The live insertion boundary stores the reference hash, not the host path.
     // Older imports can retain the original locator. Neither form changes IDs.
-    stored.cass_span_id == digest(&span.cass_span_id)
-        || stored.cass_span_id == span.cass_span_id
+    stored.cass_span_id == digest(&span.cass_span_id) || stored.cass_span_id == span.cass_span_id
 }
 
 fn snapshot_hash(incoming: &BTreeMap<u32, &CassViewSpanForImport>) -> String {
@@ -270,10 +272,15 @@ mod tests {
     }
 
     fn counts(db: &DbConnection) -> Vec<i64> {
-        ["sessions", "evidence_spans", "search_index_jobs", "audit_log"]
-            .into_iter()
-            .map(|table| db.count_table_rows(table).unwrap())
-            .collect()
+        [
+            "sessions",
+            "evidence_spans",
+            "search_index_jobs",
+            "audit_log",
+        ]
+        .into_iter()
+        .map(|table| db.count_table_rows(table).unwrap())
+        .collect()
     }
 
     #[test]
@@ -285,8 +292,8 @@ mod tests {
         .unwrap();
         let before = db.list_evidence_spans_for_session(&id).unwrap();
         let source_before = db.get_session(&id).unwrap();
-        let result = backfill_session(&db, &workspace, &id, &session, &transcript(&session, 4))
-            .unwrap();
+        let result =
+            backfill_session(&db, &workspace, &id, &session, &transcript(&session, 4)).unwrap();
         assert_eq!(result.inserted_lines, [2, 4]);
         assert!(result.index_job_id.is_some());
         for old in before {
@@ -297,15 +304,21 @@ mod tests {
         assert_eq!(db.count_table_rows("sessions").unwrap(), 1);
         let audits = db.list_audit_by_target("session", &id, None).unwrap();
         assert_eq!(audits.len(), 1);
-        assert!(audits[0].details.as_deref().unwrap().contains("\"spansAdded\":2"));
+        assert!(
+            audits[0]
+                .details
+                .as_deref()
+                .unwrap()
+                .contains("\"spansAdded\":2")
+        );
         assert!(!audits[0].details.as_deref().unwrap().contains("/private/"));
     }
 
     #[test]
     fn metadata_only_import_can_acquire_its_transcript_later() {
         let (db, workspace, id, session) = fixture(&[]);
-        let result = backfill_session(&db, &workspace, &id, &session, &transcript(&session, 3))
-            .unwrap();
+        let result =
+            backfill_session(&db, &workspace, &id, &session, &transcript(&session, 3)).unwrap();
         assert_eq!(result.inserted_lines, [1, 2, 3]);
         assert_eq!(db.count_table_rows("sessions").unwrap(), 1);
         assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 3);
@@ -315,8 +328,8 @@ mod tests {
     fn unchanged_import_does_not_mint_rows_audits_or_jobs() {
         let (db, workspace, id, session) = fixture(&[1, 2]);
         let before = counts(&db);
-        let result = backfill_session(&db, &workspace, &id, &session, &transcript(&session, 2))
-            .unwrap();
+        let result =
+            backfill_session(&db, &workspace, &id, &session, &transcript(&session, 2)).unwrap();
         assert_eq!(result, BackfillResult::default());
         assert_eq!(counts(&db), before);
     }
@@ -324,13 +337,17 @@ mod tests {
     #[test]
     fn completed_initial_job_cannot_hide_a_new_transcript_snapshot() {
         let (db, workspace, id, session) = fixture(&[1]);
-        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
         let spans = transcript(&session, 2);
         let first = backfill_session(&db, &workspace, &id, &session, &spans).unwrap();
         let job_id = first.index_job_id.as_ref().unwrap();
         assert_ne!(job_id, &stable_search_index_job_id(&workspace, &id));
         assert_eq!(
-            db.get_search_index_job(job_id).unwrap().unwrap().status_enum(),
+            db.get_search_index_job(job_id)
+                .unwrap()
+                .unwrap()
+                .status_enum(),
             Some(SearchIndexJobStatus::Pending)
         );
         let before = counts(&db);
@@ -338,7 +355,8 @@ mod tests {
         assert!(retry.inserted_lines.is_empty());
         assert_eq!(retry.index_job_id, first.index_job_id);
         assert_eq!(counts(&db), before);
-        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
         assert_eq!(
             backfill_session(&db, &workspace, &id, &session, &spans).unwrap(),
             BackfillResult::default()
@@ -373,7 +391,8 @@ mod tests {
         let spans = transcript(&session, 3);
         let other = CassSessionInfo::new("/private/cass-backfill/other.jsonl");
         let other_id = super::super::stable_session_id(&workspace, &other.source_path);
-        db.insert_session(&other_id, &session_input(&workspace, &other)).unwrap();
+        db.insert_session(&other_id, &session_input(&workspace, &other))
+            .unwrap();
         let collision_id = stable_evidence_id(&id, &spans[2].cass_span_id);
         db.insert_evidence_span(
             &collision_id,
@@ -404,10 +423,25 @@ mod tests {
         let mut changed_source = session.clone();
         changed_source.source_path = "/private/different-session.jsonl".to_owned();
         assert!(
-            backfill_session(&db, &workspace, &id, &changed_source, &transcript(&changed_source, 2))
-                .is_err()
+            backfill_session(
+                &db,
+                &workspace,
+                &id,
+                &changed_source,
+                &transcript(&changed_source, 2)
+            )
+            .is_err()
         );
-        assert!(backfill_session(&db, "foreign-workspace", &id, &session, &transcript(&session, 2)).is_err());
+        assert!(
+            backfill_session(
+                &db,
+                "foreign-workspace",
+                &id,
+                &session,
+                &transcript(&session, 2)
+            )
+            .is_err()
+        );
         assert_eq!(counts(&db), before);
     }
 }

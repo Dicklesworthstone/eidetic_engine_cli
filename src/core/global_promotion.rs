@@ -407,7 +407,9 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         .map_err(|_| "Could not begin global duplicate snapshot".to_owned())?;
     let twin = admission::find_twin(&global_connection, &global_workspace_id, &memory, reference)
         .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
-    snapshot.finish().map_err(|_| "Could not release global duplicate snapshot".to_owned())?;
+    snapshot
+        .finish()
+        .map_err(|_| "Could not release global duplicate snapshot".to_owned())?;
     admission::set_duplicate(&mut plan, twin.as_deref());
 
     let (global_memory_id, already_promoted, index_job_id) = match &plan.verdict {

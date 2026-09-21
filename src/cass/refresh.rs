@@ -464,10 +464,9 @@ mod canonical_reference_tests {
         .unwrap();
         let session = CassSessionInfo::new(source).with_agent(CassAgent::Codex);
         let spans: Vec<_> = (1..=count).map(|line| span(&session, line)).collect();
-        let result = super::super::persist_session_import_if_absent(
-            &db, &workspace, &session, &spans,
-        )
-        .unwrap();
+        let result =
+            super::super::persist_session_import_if_absent(&db, &workspace, &session, &spans)
+                .unwrap();
         let super::super::SessionImportPersistResult::Imported { session_id, .. } = result else {
             panic!("new fixture must import");
         };
@@ -497,7 +496,10 @@ mod canonical_reference_tests {
             let report = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
             assert!(report.changed);
             let first_added = if count == 2 { 2 } else { 3 };
-            assert_eq!(report.added_lines, (first_added..=count).collect::<Vec<_>>());
+            assert_eq!(
+                report.added_lines,
+                (first_added..=count).collect::<Vec<_>>()
+            );
             let job = report.index_job_id.unwrap();
             assert_ne!(job, original_job);
             let stored = db.get_session(&id).unwrap().unwrap();
@@ -569,8 +571,10 @@ mod canonical_reference_tests {
         let (db, workspace, id, session) = fixture("/private/denied-session.jsonl", 1);
         let first = span(&session, 1);
         let first_id = stable_evidence_id(&id, &first.cass_span_id);
-        db.execute_raw("UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'")
-            .unwrap();
+        db.execute_raw(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'",
+        )
+        .unwrap();
         let denied = db.get_evidence_span(&first_id).unwrap().unwrap();
         let incoming = vec![first, span(&session, 2)];
         let grown = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();

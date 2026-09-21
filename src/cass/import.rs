@@ -1516,6 +1516,18 @@ fn validate_reported_session_path(path: &str) -> Result<(), CassImportError> {
 #[path = "ingestion.rs"]
 mod ingestion;
 
+// bd-v9okn / bd-l6h3g. 5374d5563 added src/cass/backfill.rs (413 lines,
+// 7 #[test]) and touched no module file, so nothing compiled or formatted it
+// and the reachability gate reds main by name.
+//
+// IT BELONGS HERE, NOT IN src/cass/mod.rs, AND RUSTC SAID SO. Declared as
+// `cass::backfill`, `super::` means `cass`, which re-exports none of what the
+// file imports; every missing name's help pointer resolves into THIS file --
+// CassViewSpanForImport, SessionImportPersistResult, stable_session_id.
+// backfill.rs also opens its own `mod tests`, so `super::super::` inside that
+// block is one level higher again and lands on `cass::import` as written.
+#[path = "backfill.rs"]
+mod backfill;
 #[path = "refresh.rs"]
 mod refresh;
 
@@ -2409,6 +2421,18 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    // bd-v9okn / bd-l6h3g. 1eb449fbd added src/cass/backfill_public_tests.rs
+    // and declared nothing, so its one #[test] was compiled by no target. It is
+    // a FRAGMENT, not a module: it opens on an indented doc comment with a bare
+    // `#[test] fn`, and uses TestResult, unique_test_dir and write_fake_cass
+    // unqualified -- all defined in THIS module. A `#[path] mod` would not
+    // inherit that scope (the file has no `use super::*`), so include! is the
+    // mechanism it was authored for. Trade-off recorded rather than hidden:
+    // rustfmt does not follow include!, so the file compiles but stays
+    // unformatted, which the reachability gate reports on its own non-failing
+    // line.
+    include!("backfill_public_tests.rs");
 
     type TestResult = Result<(), String>;
 
