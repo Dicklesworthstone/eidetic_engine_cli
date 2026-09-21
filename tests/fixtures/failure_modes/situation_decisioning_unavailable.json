@@ -10,10 +10,7 @@
     "bead": "bd-14tio",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "situation show",
-    "situation explain"
-  ],
+  "surfaces": ["situation show", "situation explain"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

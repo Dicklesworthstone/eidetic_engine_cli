@@ -5,25 +5,18 @@
     "bead": "bd-17c65.7.3",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "remember"
-  ],
+  "surfaces": ["remember"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "Remember-time candidate proposal has no cluster key because no tags were supplied.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee remember 'One isolated fact.' --workspace . --level semantic --kind fact --json"
   },
   "expected_emission": {
     "code": "auto_propose_skipped_too_few_neighbors",
     "severity": "info",
-    "message_contains": [
-      "No tags were supplied",
-      "proposal"
-    ],
+    "message_contains": ["No tags were supplied", "proposal"],
     "repair_contains": "ee remember --tags",
     "repair_string": "Use `ee remember --tags <tag>` for memories that should participate in proposal clustering."
   }

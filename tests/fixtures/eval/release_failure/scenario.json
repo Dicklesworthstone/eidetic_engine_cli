@@ -1,19 +1,12 @@
 {
   "schema": "ee.eval_fixture.v1",
   "fixture_id": "fx.release_failure.v1",
-  "scenario_ids": [
-    "usr_pre_task_brief"
-  ],
+  "scenario_ids": ["usr_pre_task_brief"],
   "fixture_family": "release_failure",
   "coverage_state": "implemented",
   "journey": "Pre-task release brief and context pack surfaces prior release failure evidence before release work.",
-  "owning_bead_ids": [
-    "eidetic_engine_cli-eu92"
-  ],
-  "owning_gate_ids": [
-    "gate.7.walking_skeleton",
-    "gate.14.executable_claims"
-  ],
+  "owning_bead_ids": ["eidetic_engine_cli-eu92"],
+  "owning_gate_ids": ["gate.7.walking_skeleton", "gate.14.executable_claims"],
   "deterministic": {
     "fixed_clock": "2026-04-29T12:00:00Z",
     "deterministic_seed": "seed.release_failure.v1",
@@ -22,9 +15,7 @@
       "mem_00000000000000000000000102",
       "pack_00000000000000000000000101"
     ],
-    "workspace_fingerprints": [
-      "workspace.release_failure.v1"
-    ]
+    "workspace_fingerprints": ["workspace.release_failure.v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -43,13 +34,7 @@
   "command_sequence": [
     {
       "step": 1,
-      "argv": [
-        "ee",
-        "init",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "init", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -139,40 +124,20 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.workspace"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.workspace"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memory.id",
-        "data.memory.provenanceUri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memory.id", "data.memory.provenanceUri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memory.id",
-        "data.memory.provenanceUri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memory.id", "data.memory.provenanceUri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 4,
@@ -183,10 +148,7 @@
         "data.pack.provenance",
         "data.pack.hash"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     }
   ],
   "pack_quality_expectations": {
@@ -206,14 +168,8 @@
         ],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 1200,
@@ -227,14 +183,9 @@
         "event_id": "out.release_failure.helpful.v1",
         "case_id": "pq.release_failure.context.v1",
         "pack_profile": "balanced",
-        "feature_set": [
-          "lexical",
-          "provenance"
-        ],
+        "feature_set": ["lexical", "provenance"],
         "signal": "helpful",
-        "memory_ids": [
-          "mem_00000000000000000000000101"
-        ],
+        "memory_ids": ["mem_00000000000000000000000101"],
         "evidence_backed": true,
         "rationale": "The release command checklist was used before the agent attempted to publish."
       },
@@ -242,15 +193,9 @@
         "event_id": "out.release_failure.verification_saved.v1",
         "case_id": "pq.release_failure.context.v1",
         "pack_profile": "balanced",
-        "feature_set": [
-          "lexical",
-          "provenance"
-        ],
+        "feature_set": ["lexical", "provenance"],
         "signal": "verification_saved_by_pack_evidence",
-        "memory_ids": [
-          "mem_00000000000000000000000101",
-          "mem_00000000000000000000000102"
-        ],
+        "memory_ids": ["mem_00000000000000000000000101", "mem_00000000000000000000000102"],
         "evidence_backed": true,
         "rationale": "The pack surfaced the prior clippy failure before commit."
       },
@@ -258,14 +203,9 @@
         "event_id": "out.release_failure.counterfactual.v1",
         "case_id": "pq.release_failure.context.v1",
         "pack_profile": "balanced",
-        "feature_set": [
-          "lexical",
-          "provenance"
-        ],
+        "feature_set": ["lexical", "provenance"],
         "signal": "counterfactual_candidate",
-        "counterfactual_memory_ids": [
-          "mem_release_asset_checklist"
-        ],
+        "counterfactual_memory_ids": ["mem_release_asset_checklist"],
         "evidence_backed": false,
         "rationale": "A release-asset checklist might reduce follow-up verification misses, but this fixture has no observed outcome yet."
       }

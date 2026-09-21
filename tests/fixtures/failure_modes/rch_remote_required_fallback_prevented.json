@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.13.4",
     "epic_letter": "C"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,11 +20,7 @@
   "expected_emission": {
     "code": "rch_remote_required_fallback_prevented",
     "severity": "warning",
-    "message_contains": [
-      "Remote-only Cargo is required",
-      "neither",
-      "installed Codex RCH hook"
-    ],
+    "message_contains": ["Remote-only Cargo is required", "neither", "installed Codex RCH hook"],
     "repair_contains": "harness with an installed RCH hook",
     "repair_string": "Use a harness with an installed RCH hook, upgrade RCH to expose `rch exec`, or record static-only evidence."
   }

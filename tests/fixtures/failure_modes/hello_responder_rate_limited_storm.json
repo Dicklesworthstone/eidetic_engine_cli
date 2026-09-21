@@ -5,10 +5,7 @@
     "bead": "bd-36bbk.1.12",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh hello-responder status",
-    "mesh hello handler"
-  ],
+  "surfaces": ["mesh hello-responder status", "mesh hello handler"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +18,7 @@
   "expected_emission": {
     "code": "hello_responder_rate_limited_storm",
     "severity": "warning",
-    "message_contains": [
-      "hello responder",
-      "rate-limited"
-    ],
+    "message_contains": ["hello responder", "rate-limited"],
     "repair_contains": "discovery policy"
   }
 }

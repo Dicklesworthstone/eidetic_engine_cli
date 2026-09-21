@@ -33,11 +33,7 @@
     "emittedTopWhatIfs": 3,
     "omittedTopWhatIfs": 19,
     "largeMapsTruncated": true,
-    "omittedSections": [
-      "full_pagerank_map",
-      "full_betweenness_map",
-      "raw_cycle_candidates"
-    ]
+    "omittedSections": ["full_pagerank_map", "full_betweenness_map", "raw_cycle_candidates"]
   },
   "recommendationPosture": {
     "advisoryOnly": true,

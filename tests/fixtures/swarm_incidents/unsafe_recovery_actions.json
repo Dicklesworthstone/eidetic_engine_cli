@@ -4,11 +4,11 @@
   "fixedClock": "2026-05-15T00:00:00Z",
   "purpose": "Negative fixture proving the recovery-action verifier rejects unsafe automatic repair plans.",
   "substrates": {
-    "agentMail": {"status": "ok", "degradedCodes": []},
-    "beads": {"status": "ok", "degradedCodes": []},
-    "rch": {"status": "blocked", "degradedCodes": ["rch_worker_topology_blocked"]},
-    "disk": {"status": "degraded", "degradedCodes": ["disk_pressure_high"]},
-    "hotPath": {"status": "ok", "degradedCodes": []}
+    "agentMail": { "status": "ok", "degradedCodes": [] },
+    "beads": { "status": "ok", "degradedCodes": [] },
+    "rch": { "status": "blocked", "degradedCodes": ["rch_worker_topology_blocked"] },
+    "disk": { "status": "degraded", "degradedCodes": ["disk_pressure_high"] },
+    "hotPath": { "status": "ok", "degradedCodes": [] }
   },
   "expectedDegraded": [
     {
@@ -28,7 +28,20 @@
       "evidence": ["negative-fixture"],
       "destructive": false,
       "preconditions": [],
-      "repairSafety": {"riskClass": "destructive_or_irreversible_repair", "preflightCommand": "ee preflight check --cmd 'rm -rf /tmp/ee-incident-workspace' --workspace . --json", "requiresHumanApproval": true, "mutatesExternalState": true, "mutatesTrackerState": false, "privacyClass": "negative_fixture_command", "nextAction": "ask_human", "ruleId": "repair_safety:destructive_or_irreversible_repair", "source": "repair_action_safety", "reasonCode": "negative_incident_destructive_command", "evidence": ["negative-fixture"], "preconditions": ["human_approved_exact_command"]}
+      "repairSafety": {
+        "riskClass": "destructive_or_irreversible_repair",
+        "preflightCommand": "ee preflight check --cmd 'rm -rf /tmp/ee-incident-workspace' --workspace . --json",
+        "requiresHumanApproval": true,
+        "mutatesExternalState": true,
+        "mutatesTrackerState": false,
+        "privacyClass": "negative_fixture_command",
+        "nextAction": "ask_human",
+        "ruleId": "repair_safety:destructive_or_irreversible_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "negative_incident_destructive_command",
+        "evidence": ["negative-fixture"],
+        "preconditions": ["human_approved_exact_command"]
+      }
     },
     {
       "priority": 2,
@@ -39,7 +52,20 @@
       "evidence": ["negative-fixture"],
       "destructive": false,
       "preconditions": [],
-      "repairSafety": {"riskClass": "approval_required_repair", "preflightCommand": "ee preflight check --cmd 'cargo test --all-targets' --workspace . --json", "requiresHumanApproval": true, "mutatesExternalState": false, "mutatesTrackerState": false, "privacyClass": "negative_fixture_command", "nextAction": "ask_human", "ruleId": "repair_safety:approval_required_repair", "source": "repair_action_safety", "reasonCode": "negative_incident_local_cargo_fallback", "evidence": ["negative-fixture"], "preconditions": ["human_approved_exact_command"]}
+      "repairSafety": {
+        "riskClass": "approval_required_repair",
+        "preflightCommand": "ee preflight check --cmd 'cargo test --all-targets' --workspace . --json",
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "negative_fixture_command",
+        "nextAction": "ask_human",
+        "ruleId": "repair_safety:approval_required_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "negative_incident_local_cargo_fallback",
+        "evidence": ["negative-fixture"],
+        "preconditions": ["human_approved_exact_command"]
+      }
     }
   ],
   "redactionExpectations": {

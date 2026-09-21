@@ -5,12 +5,7 @@
     "bead": "gh-32",
     "epic_letter": "F4"
   },
-  "surfaces": [
-    "search",
-    "context",
-    "recall",
-    "model status"
-  ],
+  "surfaces": ["search", "context", "recall", "model status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -25,10 +20,7 @@
   "expected_emission": {
     "code": "model_lifecycle_unknown",
     "severity": "warning",
-    "message_contains": [
-      "could not probe",
-      "not probed"
-    ],
+    "message_contains": ["could not probe", "not probed"],
     "repair_contains": "ee model status --workspace . --json",
     "repair_string": "ee model status --workspace . --json"
   }

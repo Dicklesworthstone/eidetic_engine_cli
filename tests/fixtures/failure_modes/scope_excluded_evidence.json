@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "scope_excluded_evidence",
     "severity": "low",
-    "message_contains": [
-      "excluded",
-      "outside the requested trust lane"
-    ],
+    "message_contains": ["excluded", "outside the requested trust lane"],
     "repair_contains": "--memory-scope swarm"
   }
 }

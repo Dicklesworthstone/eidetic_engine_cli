@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "why"
-  ],
+  "surfaces": ["why"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "why_pack_selection_unavailable",
     "severity": "low",
-    "message_contains": [
-      "pack",
-      "selection"
-    ],
+    "message_contains": ["pack", "selection"],
     "repair_contains": "ee doctor --json",
     "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

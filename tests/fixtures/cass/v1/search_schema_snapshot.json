@@ -66,16 +66,8 @@
       "partial_results",
       "ann_stats"
     ],
-    "cache_stats_fields": [
-      "hits",
-      "misses",
-      "shortfall"
-    ],
-    "timing_fields": [
-      "search_ms",
-      "rerank_ms",
-      "other_ms"
-    ],
+    "cache_stats_fields": ["hits", "misses", "shortfall"],
+    "timing_fields": ["search_ms", "rerank_ms", "other_ms"],
     "index_freshness_fields": [
       "exists",
       "status",

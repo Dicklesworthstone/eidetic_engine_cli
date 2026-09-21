@@ -12,14 +12,8 @@
   "fixture_family": "structural_recall",
   "coverage_state": "implemented",
   "journey": "PPR pack-quality regression coverage keeps structurally useful memories visible without degrading lexical authority results.",
-  "owning_bead_ids": [
-    "bd-bife.11",
-    "bd-ov09"
-  ],
-  "owning_gate_ids": [
-    "gate.graph.ppr_pack_quality",
-    "gate.eval.structural_recall"
-  ],
+  "owning_bead_ids": ["bd-bife.11", "bd-ov09"],
+  "owning_gate_ids": ["gate.graph.ppr_pack_quality", "gate.eval.structural_recall"],
   "deterministic": {
     "fixed_clock": "2026-05-20T00:00:00Z",
     "deterministic_seed": "seed.structural_recall.v1",
@@ -36,9 +30,7 @@
       "mem_00000000000000000000001110",
       "pack_00000000000000000000001101"
     ],
-    "workspace_fingerprints": [
-      "workspace.structural_recall.v1"
-    ]
+    "workspace_fingerprints": ["workspace.structural_recall.v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -85,10 +77,7 @@
         "data.pack.provenance",
         "data.pack.hash"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     }
   ],
   "pack_quality_expectations": {
@@ -102,19 +91,11 @@
           "kind": "inline_query",
           "query": "thin-thread concurrency release compass"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000001101"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000001101"],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 900,
@@ -130,19 +111,11 @@
           "kind": "inline_query",
           "query": "RCH queue backpressure authority"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000001102"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000001102"],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 900,
@@ -158,19 +131,11 @@
           "kind": "inline_query",
           "query": "completion audit dominance alias"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000001104"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000001104"],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 900,
@@ -186,21 +151,11 @@
           "kind": "inline_query",
           "query": "local cargo fallback is acceptable when RCH is busy"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000001106"
-        ],
-        "critical_omitted_memory_ids": [
-          "mem_00000000000000000000001105"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000001106"],
+        "critical_omitted_memory_ids": ["mem_00000000000000000000001105"],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 900,
@@ -216,19 +171,11 @@
           "kind": "inline_query",
           "query": "fresh workspace init status"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000001107"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000001107"],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 900,
@@ -251,14 +198,8 @@
         ],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 1200,

@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect remote compile host state from rch.",
-    "setup_commands": [
-      "# run swarm brief --include-rch while rch is unavailable"
-    ],
+    "setup_commands": ["# run swarm brief --include-rch while rch is unavailable"],
     "invocation": "ee swarm brief --include-rch --workspace . --json"
   },
   "expected_emission": {
     "code": "rch_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "rch was not found"
-    ],
+    "message_contains": ["rch was not found"],
     "repair_contains": "rch",
     "repair_string": "rch status --json",
     "repair_command_regex": "(?<cmd>rch [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
@@ -40,9 +34,7 @@
         "ruleId": "repair_safety:read_only_probe",
         "source": "repair_action_safety",
         "reasonCode": "read_only_probe_command",
-        "evidence": [
-          "read_only_probe_command"
-        ],
+        "evidence": ["read_only_probe_command"],
         "preconditions": []
       }
     ]

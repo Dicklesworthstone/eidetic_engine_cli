@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Search readiness is pending because the selected workspace has not initialized storage yet.",
-    "setup_commands": [
-      "mkdir -p <workspace>"
-    ],
+    "setup_commands": ["mkdir -p <workspace>"],
     "invocation": "ee status --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "search_waiting_for_storage",
     "severity": "medium",
-    "message_contains": [
-      "Search readiness is pending",
-      "storage is initialized"
-    ],
+    "message_contains": ["Search readiness is pending", "storage is initialized"],
     "repair_contains": "ee init",
     "repair_string": "Run `ee init --workspace .`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

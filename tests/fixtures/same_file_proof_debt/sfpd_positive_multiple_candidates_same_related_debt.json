@@ -8,16 +8,16 @@
   "case": "several candidates point at the same related proof-debt bead; evidence stays bounded with one detail object per candidate and no duplicated unbounded payloads",
   "input": {
     "candidate_beads": [
-      {"id": "bd-2pos6.3", "status": "open"},
-      {"id": "bd-2pos6.4", "status": "open"},
-      {"id": "bd-2pos6.5", "status": "open"}
+      { "id": "bd-2pos6.3", "status": "open" },
+      { "id": "bd-2pos6.4", "status": "open" },
+      { "id": "bd-2pos6.5", "status": "open" }
     ],
     "related_bead": {
       "id": "bd-2pos6.2",
       "status": "blocked",
       "comment_evidence": [
-        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
-        {"kind": "rch_proof_blocker", "codes": ["telemetry_gap"]}
+        { "kind": "source_complete", "marker": "source-complete; RCH proof owed" },
+        { "kind": "rch_proof_blocker", "codes": ["telemetry_gap"] }
       ]
     },
     "path_relation": {

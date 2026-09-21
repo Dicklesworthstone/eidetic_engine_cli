@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "learn cluster",
-    "curate candidates"
-  ],
+  "surfaces": ["learn cluster", "curate candidates"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "clustering_threshold_too_strict",
     "severity": "warning",
-    "message_contains": [
-      "No cluster reached"
-    ],
+    "message_contains": ["No cluster reached"],
     "repair_contains": "cluster_coherence_threshold"
   }
 }

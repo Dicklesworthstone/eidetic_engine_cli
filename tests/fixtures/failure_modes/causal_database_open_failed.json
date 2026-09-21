@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace"
-  ],
+  "surfaces": ["causal trace"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "The causal trace command is pointed at an explicit database path that exists but cannot be opened as a database.",
-    "setup_commands": [
-      "mkdir bad.db"
-    ],
+    "setup_commands": ["mkdir bad.db"],
     "invocation": "ee causal trace failure-1 --database bad.db --database-workspace-id wsp_123 --json"
   },
   "expected_emission": {
     "code": "causal_database_open_failed",
     "severity": "warning",
-    "message_contains": [
-      "Failed to open causal trace database"
-    ]
+    "message_contains": ["Failed to open causal trace database"]
   }
 }

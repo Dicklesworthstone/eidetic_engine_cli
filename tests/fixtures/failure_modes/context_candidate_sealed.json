@@ -19,11 +19,7 @@
   "expected_emission": {
     "code": "context_candidate_sealed",
     "severity": "info",
-    "message_contains": [
-      "sealed",
-      "not yet revealed",
-      "excluded from the pack"
-    ],
+    "message_contains": ["sealed", "not yet revealed", "excluded from the pack"],
     "repair_contains": "ee memory reveal"
   }
 }

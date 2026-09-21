@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "handoff_hmac_skipped",
     "severity": "high",
-    "message_contains": [
-      "explicitly skipped",
-      "may be tampered"
-    ],
+    "message_contains": ["explicitly skipped", "may be tampered"],
     "repair_contains": "Recreate the capsule",
     "repair_string": "Recreate the capsule without --insecure-skip-hmac before trusting it."
   }

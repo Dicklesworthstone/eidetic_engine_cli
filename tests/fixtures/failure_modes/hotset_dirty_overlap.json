@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "One or more git-dirty paths overlap Agent Mail reservations, reducing hotset ranking confidence for contested paths.",
-    "setup_commands": [
-      "dirty a file inside a path another agent has reserved, then collect"
-    ],
+    "setup_commands": ["dirty a file inside a path another agent has reserved, then collect"],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
   "expected_emission": {
     "code": "hotset_dirty_overlap",
     "severity": "medium",
-    "message_contains": [
-      "overlap Agent Mail reservations"
-    ],
+    "message_contains": ["overlap Agent Mail reservations"],
     "repair_contains": "Commit or hand off the contested paths"
   }
 }

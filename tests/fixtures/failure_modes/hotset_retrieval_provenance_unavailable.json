@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "The selected workspace database is missing or unreadable, so the bounded in-process collector abstains from recent pack/search provenance.",
-    "setup_commands": [
-      "mkdir -p <uninitialized-workspace>"
-    ],
+    "setup_commands": ["mkdir -p <uninitialized-workspace>"],
     "invocation": "ee cache hotset-manifest --workspace <uninitialized-workspace> --json"
   },
   "expected_emission": {
     "code": "hotset_retrieval_provenance_unavailable",
     "severity": "low",
-    "message_contains": [
-      "workspace database is missing or unreadable"
-    ],
+    "message_contains": ["workspace database is missing or unreadable"],
     "repair_contains": "Initialize or repair the workspace database"
   }
 }

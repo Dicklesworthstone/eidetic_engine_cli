@@ -5,9 +5,7 @@
     "bead": "bd-3vw03",
     "epic_letter": "CONTRACTS"
   },
-  "surfaces": [
-    "curate apply"
-  ],
+  "surfaces": ["curate apply"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "create_derived_replay_missing_audit",
     "severity": "high",
-    "message_contains": [
-      "missing",
-      "audit"
-    ],
+    "message_contains": ["missing", "audit"],
     "repair_contains": "ee doctor --workspace . --json"
   }
 }

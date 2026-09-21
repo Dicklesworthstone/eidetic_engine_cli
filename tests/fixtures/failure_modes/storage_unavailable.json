@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "dependency contract"
-  ],
+  "surfaces": ["status", "dependency contract"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The FrankenSQLite/SQLModel storage capability probe cannot open or verify workspace storage.",
-    "setup_commands": [
-      "mkdir -p .ee/ee.db"
-    ],
+    "setup_commands": ["mkdir -p .ee/ee.db"],
     "invocation": "ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "storage_unavailable",
     "severity": "high",
-    "message_contains": [
-      "storage",
-      "unavailable"
-    ],
+    "message_contains": ["storage", "unavailable"],
     "repair_contains": "ee doctor",
     "repair_string": "Run `ee doctor --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

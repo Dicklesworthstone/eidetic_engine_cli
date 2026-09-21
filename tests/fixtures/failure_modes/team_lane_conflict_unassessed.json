@@ -5,9 +5,7 @@
     "bead": "bd-tc-epic-qzk7o",
     "epic_letter": "TC"
   },
-  "surfaces": [
-    "pack"
-  ],
+  "surfaces": ["pack"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "team_lane_conflict_unassessed",
     "severity": "info",
-    "message_contains": [
-      "unassessed",
-      "body is missing or sealed"
-    ],
+    "message_contains": ["unassessed", "body is missing or sealed"],
     "repair_contains": "Fetch or reveal the team body"
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-1idcb",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "focus suggest"
-  ],
+  "surfaces": ["focus suggest"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -21,9 +19,6 @@
   "expected_emission": {
     "code": "graph_empty",
     "severity": "info",
-    "message_contains": [
-      "Memory graph has no nodes",
-      "centrality contribution is zero"
-    ]
+    "message_contains": ["Memory graph has no nodes", "centrality contribution is zero"]
   }
 }

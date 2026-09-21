@@ -6,7 +6,7 @@
   "sourcePath": "redacted/baseline.json",
   "contentHash": "abc123baseline",
   "observedHash": "abc123baseline",
-  "profile": {"profileName": "workstation", "confidence": "high"},
+  "profile": { "profileName": "workstation", "confidence": "high" },
   "fixtureTier": "smoke",
   "commandFamily": "pack",
   "metrics": {

@@ -30,9 +30,7 @@
       "concurrencyGroup": "${{ github.workflow }}-${{ github.ref }}",
       "dispatchPolicy": "manual_review_required",
       "status": "unknown",
-      "runs": [
-
-      ]
+      "runs": []
     },
     {
       "workflowName": "macOS EE Artifact",
@@ -44,9 +42,7 @@
       "runs": [
         {
           "runId": "27009940002",
-          "jobIds": [
-            "79710782692"
-          ],
+          "jobIds": ["79710782692"],
           "event": "workflow_dispatch",
           "headSha": "33143b85697ef58bbc566aa64f918840f40dc3f0",
           "ref": "refs/heads/main",

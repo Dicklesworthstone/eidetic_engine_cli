@@ -10,9 +10,7 @@
   "dirtyIssueCount": 0,
   "mergeArtifactPaths": [],
   "mergeArtifactCount": 0,
-  "invalidLineNumbers": [
-    2703
-  ],
+  "invalidLineNumbers": [2703],
   "jsonlParseError": {
     "line": 2703,
     "column": null,

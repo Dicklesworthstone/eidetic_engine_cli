@@ -5,10 +5,7 @@
     "bead": "bd-3qs2i.2.1",
     "epic_letter": "F2"
   },
-  "surfaces": [
-    "context",
-    "pack"
-  ],
+  "surfaces": ["context", "pack"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -22,10 +19,6 @@
   "expected_emission": {
     "code": "pack_budget_too_small",
     "severity": "warning",
-    "message_contains": [
-      "Pack budget could not fit any candidate",
-      "Items=0",
-      "pool="
-    ]
+    "message_contains": ["Pack budget could not fit any candidate", "Items=0", "pool="]
   }
 }

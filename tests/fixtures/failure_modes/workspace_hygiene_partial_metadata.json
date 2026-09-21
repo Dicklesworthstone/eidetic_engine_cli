@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.11",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_partial_metadata",
     "severity": "warning",
-    "message_contains": [
-      "partial"
-    ],
+    "message_contains": ["partial"],
     "repair_contains": "metadata",
     "repair_string": "Repair unavailable metadata providers and rerun the hygiene report."
   }

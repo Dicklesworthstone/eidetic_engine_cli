@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect local agent status inventory because the requested agent-inventory connector filter is invalid.",
-    "setup_commands": [
-      "# request an unknown agent-inventory connector"
-    ],
+    "setup_commands": ["# request an unknown agent-inventory connector"],
     "invocation": "ee swarm brief --sources agent-inventory --agent-inventory-only not-a-real-agent --workspace . --json"
   },
   "expected_emission": {
     "code": "agent_status_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "unknown connector"
-    ],
+    "message_contains": ["unknown connector"],
     "repair_contains": "agent",
     "repair_string": "ee agent status --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

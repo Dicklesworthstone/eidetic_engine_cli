@@ -37,9 +37,7 @@
         {
           "stage": "retrieval",
           "elapsedMs": "<MEASURED>",
-          "sourceMetrics": [
-            "search_command_end_elapsed_ms_0001"
-          ],
+          "sourceMetrics": ["search_command_end_elapsed_ms_0001"],
           "ownerHint": "search"
         }
       ],

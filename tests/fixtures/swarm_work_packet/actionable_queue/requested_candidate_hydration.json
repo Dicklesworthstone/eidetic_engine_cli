@@ -77,40 +77,278 @@
       ]
     },
     "actionable": [
-      { "id": "bd-hydrate-001", "title": "Queue candidate 001", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-002", "title": "Queue candidate 002", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-003", "title": "Queue candidate 003", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-004", "title": "Queue candidate 004", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-005", "title": "Queue candidate 005", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-006", "title": "Queue candidate 006", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-007", "title": "Queue candidate 007", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-008", "title": "Queue candidate 008", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-009", "title": "Queue candidate 009", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-010", "title": "Queue candidate 010", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-011", "title": "Queue candidate 011", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-012", "title": "Queue candidate 012", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-013", "title": "Queue candidate 013", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-014", "title": "Queue candidate 014", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-015", "title": "Queue candidate 015", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-016", "title": "Queue candidate 016", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-017", "title": "Queue candidate 017", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-018", "title": "Queue candidate 018", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-019", "title": "Queue candidate 019", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-020", "title": "Queue candidate 020", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-021", "title": "Queue candidate 021", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-022", "title": "Queue candidate 022", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-023", "title": "Queue candidate 023", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-024", "title": "Queue candidate 024", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-025", "title": "Queue candidate 025", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-026", "title": "Queue candidate 026", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-027", "title": "Queue candidate 027", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-028", "title": "Queue candidate 028", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-029", "title": "Queue candidate 029", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-030", "title": "Queue candidate 030", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-031", "title": "Queue candidate 031", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-032", "title": "Queue candidate 032", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-033", "title": "Queue candidate 033", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
-      { "id": "bd-hydrate-099", "title": "Fix claim-gate candidate hydration", "status": "open", "priority": 1, "issue_type": "task", "assignee": null }
+      {
+        "id": "bd-hydrate-001",
+        "title": "Queue candidate 001",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-002",
+        "title": "Queue candidate 002",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-003",
+        "title": "Queue candidate 003",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-004",
+        "title": "Queue candidate 004",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-005",
+        "title": "Queue candidate 005",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-006",
+        "title": "Queue candidate 006",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-007",
+        "title": "Queue candidate 007",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-008",
+        "title": "Queue candidate 008",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-009",
+        "title": "Queue candidate 009",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-010",
+        "title": "Queue candidate 010",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-011",
+        "title": "Queue candidate 011",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-012",
+        "title": "Queue candidate 012",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-013",
+        "title": "Queue candidate 013",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-014",
+        "title": "Queue candidate 014",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-015",
+        "title": "Queue candidate 015",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-016",
+        "title": "Queue candidate 016",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-017",
+        "title": "Queue candidate 017",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-018",
+        "title": "Queue candidate 018",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-019",
+        "title": "Queue candidate 019",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-020",
+        "title": "Queue candidate 020",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-021",
+        "title": "Queue candidate 021",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-022",
+        "title": "Queue candidate 022",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-023",
+        "title": "Queue candidate 023",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-024",
+        "title": "Queue candidate 024",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-025",
+        "title": "Queue candidate 025",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-026",
+        "title": "Queue candidate 026",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-027",
+        "title": "Queue candidate 027",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-028",
+        "title": "Queue candidate 028",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-029",
+        "title": "Queue candidate 029",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-030",
+        "title": "Queue candidate 030",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-031",
+        "title": "Queue candidate 031",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-032",
+        "title": "Queue candidate 032",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-033",
+        "title": "Queue candidate 033",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-099",
+        "title": "Fix claim-gate candidate hydration",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "assignee": null
+      }
     ],
     "directCandidate": [
       {
@@ -132,7 +370,15 @@
     },
     {
       "program": "br",
-      "args": ["ready", "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
+      "args": [
+        "ready",
+        "--limit",
+        "0",
+        "--json",
+        "--no-auto-import",
+        "--no-auto-flush",
+        "--allow-stale"
+      ],
       "outputPointer": "/sourceOutputs/ready"
     },
     {
@@ -167,7 +413,14 @@
     },
     {
       "program": "br",
-      "args": ["show", "bd-hydrate-099", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
+      "args": [
+        "show",
+        "bd-hydrate-099",
+        "--json",
+        "--no-auto-import",
+        "--no-auto-flush",
+        "--allow-stale"
+      ],
       "outputPointer": "/sourceOutputs/directCandidate"
     }
   ],
@@ -221,18 +474,102 @@
       "unavailableSourceCount": 8
     },
     "sourceAuthoritySourceStates": [
-      { "sourceKind": "actionable_queue", "state": "ready", "authoritative": true, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "agent_mail", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "beads", "state": "ready", "authoritative": true, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "bv", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "git", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "host_profile", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "installed_binary", "state": "stale_fallback", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "memory_drift", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "rch", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "support_bundle", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "unknown" },
-      { "sourceKind": "toolchain", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
-      { "sourceKind": "workspace_hygiene", "state": "degraded_read_only", "authoritative": false, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" }
+      {
+        "sourceKind": "actionable_queue",
+        "state": "ready",
+        "authoritative": true,
+        "freshnessState": "fresh",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "agent_mail",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "beads",
+        "state": "ready",
+        "authoritative": true,
+        "freshnessState": "fresh",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "bv",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "git",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "host_profile",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "installed_binary",
+        "state": "stale_fallback",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "memory_drift",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "rch",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "support_bundle",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "unknown"
+      },
+      {
+        "sourceKind": "toolchain",
+        "state": "unavailable",
+        "authoritative": false,
+        "freshnessState": "unknown",
+        "timedOut": false,
+        "exitClass": "ok"
+      },
+      {
+        "sourceKind": "workspace_hygiene",
+        "state": "degraded_read_only",
+        "authoritative": false,
+        "freshnessState": "fresh",
+        "timedOut": false,
+        "exitClass": "ok"
+      }
     ],
     "installFreshnessAuthority": {
       "permittedVerdicts": ["path_binary_missing", "shadowed_binary"],
@@ -282,7 +619,17 @@
         "commandAction": {
           "commandId": "install_plan_offline",
           "displayCommand": "ee install plan --json --offline --manifest <release-manifest.json> --artifact-root <release-artifact-dir>",
-          "argv": ["ee", "install", "plan", "--json", "--offline", "--manifest", "<release-manifest.json>", "--artifact-root", "<release-artifact-dir>"],
+          "argv": [
+            "ee",
+            "install",
+            "plan",
+            "--json",
+            "--offline",
+            "--manifest",
+            "<release-manifest.json>",
+            "--artifact-root",
+            "<release-artifact-dir>"
+          ],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,

@@ -5,9 +5,7 @@
     "bead": "bd-17c65.2.1",
     "epic_letter": "B"
   },
-  "surfaces": [
-    "index status"
-  ],
+  "surfaces": ["index status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -23,9 +21,7 @@
   "expected_emission": {
     "code": "index_stale",
     "severity": "high",
-    "message_contains": [
-      "Search index is stale"
-    ],
+    "message_contains": ["Search index is stale"],
     "repair_contains": "ee index rebuild",
     "repair_string": "ee index rebuild --workspace .",
     "repair_command_regex": "(?<cmd>ee index rebuild --workspace \\.)",
@@ -43,12 +39,8 @@
         "ruleId": "repair_safety:idempotent_refresh",
         "source": "repair_action_safety",
         "reasonCode": "idempotent_refresh_command",
-        "evidence": [
-          "derived_asset_refresh_command"
-        ],
-        "preconditions": [
-          "workspace_must_be_explicit"
-        ]
+        "evidence": ["derived_asset_refresh_command"],
+        "preconditions": ["workspace_must_be_explicit"]
       }
     ]
   }

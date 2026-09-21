@@ -5,10 +5,7 @@
     "bead": "bd-1zb7k.4",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context",
-    "pack"
-  ],
+  "surfaces": ["context", "pack"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,9 +20,7 @@
   "expected_emission": {
     "code": "coordination_source_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "Coordination snapshot contains unavailable sources"
-    ],
+    "message_contains": ["Coordination snapshot contains unavailable sources"],
     "repair_contains": "Provide fresh redacted coordination sources",
     "repair_string": "Provide fresh redacted coordination sources or rerun ee swarm brief."
   }

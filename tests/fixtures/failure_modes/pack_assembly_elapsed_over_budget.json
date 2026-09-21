@@ -5,10 +5,7 @@
     "bead": "bd-jikgj",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context",
-    "pack"
-  ],
+  "surfaces": ["context", "pack"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

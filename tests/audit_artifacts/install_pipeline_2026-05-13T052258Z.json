@@ -24,13 +24,7 @@
   "release_workflow": {
     "path": ".github/workflows/release.yml",
     "targets_csv": "x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl",
-    "asset_categories": [
-      "tar.xz",
-      "tar.xz.sha256",
-      "sigstore",
-      "install.sh",
-      "install.ps1"
-    ],
+    "asset_categories": ["tar.xz", "tar.xz.sha256", "sigstore", "install.sh", "install.ps1"],
     "cosign_installer_present": true
   },
   "next_actions": [

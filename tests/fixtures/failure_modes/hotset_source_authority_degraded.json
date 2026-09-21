@@ -5,9 +5,7 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "hotset_source_authority_degraded",
     "severity": "medium",
-    "message_contains": [
-      "explicitly fails closed"
-    ],
+    "message_contains": ["explicitly fails closed"],
     "repair_contains": "Repair the degraded source-authority inputs"
   }
 }

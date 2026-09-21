@@ -66,11 +66,7 @@
           "reason": "bd-safe"
         }
       ],
-      "proofObligations": [
-        "git_diff_check",
-        "jq_fixture_validation",
-        "record_closeout_comment"
-      ],
+      "proofObligations": ["git_diff_check", "jq_fixture_validation", "record_closeout_comment"],
       "evidenceCaveats": []
     },
     "coordination": {

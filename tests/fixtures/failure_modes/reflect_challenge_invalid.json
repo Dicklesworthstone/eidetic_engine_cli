@@ -5,10 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "reflect propose",
-    "reflect result ingest"
-  ],
+  "surfaces": ["reflect propose", "reflect result ingest"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "reflect_challenge_invalid",
     "severity": "high",
-    "message_contains": [
-      "challenge",
-      "invalid"
-    ],
+    "message_contains": ["challenge", "invalid"],
     "repair_contains": "ee reflect propose",
     "repair_string": "Run `ee reflect propose --workspace . --json` to regenerate request and challenge material.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

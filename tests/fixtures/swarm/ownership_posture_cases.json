@@ -1,9 +1,6 @@
 {
   "schema": "ee.swarm.ownership_posture_cases.v1",
-  "payloadSchemas": [
-    "ee.swarm.brief.v1",
-    "ee.support_bundle.swarm_brief_summary.v1"
-  ],
+  "payloadSchemas": ["ee.swarm.brief.v1", "ee.support_bundle.swarm_brief_summary.v1"],
   "redactionPolicy": {
     "allowed": [
       "path_patterns",
@@ -32,14 +29,14 @@
       "fullOutput": {
         "schema": "ee.swarm.brief.v1",
         "redactionStatus": "paths_counts_subjects_only_no_content",
-        "sourceStatuses": {"git": "ready", "agent_mail": "ready", "beads": "ready"},
+        "sourceStatuses": { "git": "ready", "agent_mail": "ready", "beads": "ready" },
         "fileSurfaceRisks": [],
         "degraded": []
       },
       "compactSummary": {
         "schema": "ee.support_bundle.swarm_brief_summary.v1",
         "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
-        "counts": {"fileSurfaceRiskCount": 0, "activeConflictCount": 0},
+        "counts": { "fileSurfaceRiskCount": 0, "activeConflictCount": 0 },
         "fileSurfaceRiskSummary": {
           "countsBySeverity": {},
           "countsByReservationHolder": {},
@@ -61,7 +58,7 @@
       "fullOutput": {
         "schema": "ee.swarm.brief.v1",
         "redactionStatus": "paths_counts_subjects_only_no_content",
-        "sourceStatuses": {"git": "ready", "agent_mail": "unavailable", "beads": "ready"},
+        "sourceStatuses": { "git": "ready", "agent_mail": "unavailable", "beads": "ready" },
         "fileSurfaceRisks": [
           {
             "pathPattern": "src/core/swarm_brief.rs",
@@ -72,19 +69,22 @@
             "score": 52,
             "riskFactors": ["dirty_worktree_path", "dirty_bead_overlap"],
             "evidence": ["git_status:M:src/core/swarm_brief.rs", "bead:bd-1zb7k.16.4:ready"],
-            "suggestedCommands": ["git status --short -- src/core/swarm_brief.rs", "br show bd-1zb7k.16.4 --json"]
+            "suggestedCommands": [
+              "git status --short -- src/core/swarm_brief.rs",
+              "br show bd-1zb7k.16.4 --json"
+            ]
           }
         ],
-        "degraded": [{"code": "agent_mail_unavailable", "severity": "warning"}]
+        "degraded": [{ "code": "agent_mail_unavailable", "severity": "warning" }]
       },
       "compactSummary": {
         "schema": "ee.support_bundle.swarm_brief_summary.v1",
         "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
-        "counts": {"fileSurfaceRiskCount": 1, "activeConflictCount": 0},
+        "counts": { "fileSurfaceRiskCount": 1, "activeConflictCount": 0 },
         "fileSurfaceRiskSummary": {
-          "countsBySeverity": {"medium": 1},
+          "countsBySeverity": { "medium": 1 },
           "countsByReservationHolder": {},
-          "countsByGitStatus": {"M": 1},
+          "countsByGitStatus": { "M": 1 },
           "topRisks": [
             {
               "pathHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
@@ -93,7 +93,9 @@
               "riskFactors": ["dirty_worktree_path", "dirty_bead_overlap"],
               "reservationHolders": [],
               "relatedBeadIds": ["bd-1zb7k.16.4"],
-              "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
+              "suggestedCommandHashes": [
+                "blake3:4444444444444444444444444444444444444444444444444444444444444444"
+              ],
               "rawPathIncluded": false,
               "rawCommandsIncluded": false
             }
@@ -114,7 +116,7 @@
       "fullOutput": {
         "schema": "ee.swarm.brief.v1",
         "redactionStatus": "paths_counts_subjects_only_no_content",
-        "sourceStatuses": {"git": "ready", "agent_mail": "ready", "beads": "ready"},
+        "sourceStatuses": { "git": "ready", "agent_mail": "ready", "beads": "ready" },
         "fileSurfaceRisks": [
           {
             "pathPattern": "src/cli/mod.rs",
@@ -125,7 +127,10 @@
             "score": 25,
             "riskFactors": ["dirty_worktree_path"],
             "evidence": ["git_status:M:src/cli/mod.rs"],
-            "suggestedCommands": ["git status --short -- src/cli/mod.rs", "search Agent Mail and Beads before editing this surface"]
+            "suggestedCommands": [
+              "git status --short -- src/cli/mod.rs",
+              "search Agent Mail and Beads before editing this surface"
+            ]
           }
         ],
         "degraded": []
@@ -133,11 +138,11 @@
       "compactSummary": {
         "schema": "ee.support_bundle.swarm_brief_summary.v1",
         "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
-        "counts": {"fileSurfaceRiskCount": 1, "activeConflictCount": 0},
+        "counts": { "fileSurfaceRiskCount": 1, "activeConflictCount": 0 },
         "fileSurfaceRiskSummary": {
-          "countsBySeverity": {"medium": 1},
+          "countsBySeverity": { "medium": 1 },
           "countsByReservationHolder": {},
-          "countsByGitStatus": {"M": 1},
+          "countsByGitStatus": { "M": 1 },
           "topRisks": [
             {
               "pathHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
@@ -146,7 +151,9 @@
               "riskFactors": ["dirty_worktree_path"],
               "reservationHolders": [],
               "relatedBeadIds": [],
-              "suggestedCommandHashes": ["blake3:6666666666666666666666666666666666666666666666666666666666666666"],
+              "suggestedCommandHashes": [
+                "blake3:6666666666666666666666666666666666666666666666666666666666666666"
+              ],
               "rawPathIncluded": false,
               "rawCommandsIncluded": false
             }

@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal compare"
-  ],
+  "surfaces": ["causal compare"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "Persisted causal chain comparison is requested with a blank second chain id.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal compare chain-a --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_chain_pair_required",
     "severity": "warning",
-    "message_contains": [
-      "Provide two chain IDs"
-    ]
+    "message_contains": ["Provide two chain IDs"]
   }
 }

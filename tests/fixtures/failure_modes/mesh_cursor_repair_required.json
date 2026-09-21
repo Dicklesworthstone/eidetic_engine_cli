@@ -5,11 +5,7 @@
     "bead": "bd-3a2q4",
     "epic_letter": "SRR6.32"
   },
-  "surfaces": [
-    "mesh import",
-    "mesh status",
-    "doctor"
-  ],
+  "surfaces": ["mesh import", "mesh status", "doctor"],
   "severity": "critical",
   "repair_present": true,
   "trigger": {
@@ -23,11 +19,7 @@
   "expected_emission": {
     "code": "mesh_cursor_repair_required",
     "severity": "critical",
-    "message_contains": [
-      "cursor",
-      "repair",
-      "replay"
-    ],
+    "message_contains": ["cursor", "repair", "replay"],
     "repair_contains": "ee mesh repair",
     "repair_string": "Run `ee mesh repair --workspace . --cursor --json` before resuming peer sync."
   }

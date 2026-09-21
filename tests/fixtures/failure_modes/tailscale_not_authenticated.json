@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.1",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "tailscale_not_authenticated",
     "severity": "warning",
-    "message_contains": [
-      "Tailscale daemon",
-      "not authenticated"
-    ],
+    "message_contains": ["Tailscale daemon", "not authenticated"],
     "repair_contains": "tailscale up",
     "repair_string": "Run tailscale up.",
     "repair_command_regex": "(?P<cmd>tailscale up)"

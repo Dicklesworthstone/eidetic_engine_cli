@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "The bv binary cannot be spawned or exits nonzero during the bounded frontier probe.",
-    "setup_commands": [
-      "ee cache hotset-manifest --bv-program /nonexistent/bv --json"
-    ],
+    "setup_commands": ["ee cache hotset-manifest --bv-program /nonexistent/bv --json"],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
   "expected_emission": {
     "code": "hotset_bv_unavailable",
     "severity": "low",
-    "message_contains": [
-      "bv could not be spawned"
-    ],
+    "message_contains": ["bv could not be spawned"],
     "repair_contains": "Install bv on PATH or pass --bv-program."
   }
 }

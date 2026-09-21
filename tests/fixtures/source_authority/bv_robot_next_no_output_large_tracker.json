@@ -36,11 +36,7 @@
       },
       "partialData": {
         "available": true,
-        "droppedSections": [
-          "cycles",
-          "robot_next",
-          "claim_command"
-        ],
+        "droppedSections": ["cycles", "robot_next", "claim_command"],
         "reason": "bv robot-next exhausted its bounded budget with no stdout; bounded robot-insights metadata still reported graph scale"
       },
       "fallback": {
@@ -61,11 +57,7 @@
         "commandTemplate": "bv --robot-next --format json",
         "graphNodeCount": 4079,
         "graphEdgeCount": 6120,
-        "skippedPhases": [
-          "cycles",
-          "robot_next",
-          "claim_command"
-        ],
+        "skippedPhases": ["cycles", "robot_next", "claim_command"],
         "recommendationState": "no_output",
         "claimCommandSuppressed": true,
         "fallbackCommand": "bv --robot-insights --format json"

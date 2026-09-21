@@ -17,7 +17,7 @@
   "metrics": {
     "ndcgAt10": { "baseline": 0.856, "current": 0.851, "allowedDropPp": 2.0 },
     "mrr": { "baseline": 0.776, "current": 0.769, "allowedDropPp": 3.0 },
-    "precisionAt5": { "baseline": 0.836, "current": 0.830, "allowedDropPp": 5.0 },
+    "precisionAt5": { "baseline": 0.836, "current": 0.83, "allowedDropPp": 5.0 },
     "packHashStability": {
       "runs": 3,
       "stable": true,

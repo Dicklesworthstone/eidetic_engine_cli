@@ -71,7 +71,11 @@
             "exit": { "exitClass": "ok", "exitCode": 0 },
             "partialData": { "available": true, "droppedSections": [], "reason": null },
             "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
-            "repair": { "guidance": null, "command": "br show bd-example.mail --json", "safety": "read_only_probe" },
+            "repair": {
+              "guidance": null,
+              "command": "br show bd-example.mail --json",
+              "safety": "read_only_probe"
+            },
             "evidenceId": "sre-beads-replay-0002",
             "statusDetail": "candidate resolves in Beads"
           }
@@ -289,10 +293,7 @@
           "gate_verdict:external_state_required",
           "packet_recommendation_not_claim_safe:coordinate_before_claim"
         ],
-        "degradedCodes": [
-          "actionable_queue_timed_out",
-          "tracker_authority_degraded"
-        ],
+        "degradedCodes": ["actionable_queue_timed_out", "tracker_authority_degraded"],
         "nextCommandActions": [
           {
             "commandId": "bead_show_candidate",
@@ -345,7 +346,11 @@
             "exit": { "exitClass": "ok", "exitCode": 0 },
             "partialData": { "available": true, "droppedSections": [], "reason": null },
             "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
-            "repair": { "guidance": null, "command": "br show bd-example.memory --json", "safety": "read_only_probe" },
+            "repair": {
+              "guidance": null,
+              "command": "br show bd-example.memory --json",
+              "safety": "read_only_probe"
+            },
             "evidenceId": "sre-beads-memory-0001",
             "statusDetail": "candidate resolves in Beads"
           },
@@ -482,7 +487,11 @@
             "exit": { "exitClass": "ok", "exitCode": 0 },
             "partialData": { "available": true, "droppedSections": [], "reason": null },
             "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
-            "repair": { "guidance": null, "command": "br show bd-example.rch --json", "safety": "read_only_probe" },
+            "repair": {
+              "guidance": null,
+              "command": "br show bd-example.rch --json",
+              "safety": "read_only_probe"
+            },
             "evidenceId": "sre-beads-rch-0001",
             "statusDetail": "candidate resolves in Beads"
           },

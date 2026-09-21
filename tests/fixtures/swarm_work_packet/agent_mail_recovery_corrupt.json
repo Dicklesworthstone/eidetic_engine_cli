@@ -40,7 +40,10 @@
       "editScope": {
         "state": "known",
         "paths": ["README.md", "docs/**"],
-        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+        "sourceRefs": [
+          "swarm_brief.ready_reservation_pressure.likely_surfaces",
+          "work_packet.specialized_title_mapping"
+        ]
       },
       "decision": "stale_or_advisory",
       "collisionRisk": "medium",
@@ -48,9 +51,7 @@
         "agent_mail_recovery_corrupt",
         "agent_mail_reservation_evidence_unavailable"
       ],
-      "staleReasons": [
-        "agent_mail_inbox_evidence_unavailable"
-      ],
+      "staleReasons": ["agent_mail_inbox_evidence_unavailable"],
       "sourceRefs": ["br://bd-docs.1"]
     }
   ],
@@ -63,9 +64,7 @@
       "healthLevel": "green",
       "unreadCount": null,
       "ackRequiredCount": null,
-      "degradedCodes": [
-        "agent_mail_unavailable"
-      ],
+      "degradedCodes": ["agent_mail_unavailable"],
       "recoveryMode": "wait_for_repair",
       "archiveIndexParity": "unknown",
       "reservationAuthoritative": false,
@@ -141,7 +140,16 @@
           "commandAction": {
             "commandId": "agent_mail_support_bundle",
             "displayCommand": "ee support bundle --workspace . --redacted --dry-run --json",
-            "argv": ["ee", "support", "bundle", "--workspace", ".", "--redacted", "--dry-run", "--json"],
+            "argv": [
+              "ee",
+              "support",
+              "bundle",
+              "--workspace",
+              ".",
+              "--redacted",
+              "--dry-run",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
@@ -235,10 +243,7 @@
         "retryAfter": "2026-05-23T08:30:00Z",
         "remoteRequired": true,
         "localFallbackRefused": true,
-        "degradedCodes": [
-          "rch_verify_topology_blocked",
-          "rch_verify_local_fallback_refused"
-        ]
+        "degradedCodes": ["rch_verify_topology_blocked", "rch_verify_local_fallback_refused"]
       }
     ],
     "retryAfter": "2026-05-23T08:30:00Z"

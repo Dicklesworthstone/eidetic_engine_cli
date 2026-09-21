@@ -5,9 +5,7 @@
     "bead": "bd-1x87h",
     "epic_letter": "SRR6.24"
   },
-  "surfaces": [
-    "mesh peer unknown-attempt"
-  ],
+  "surfaces": ["mesh peer unknown-attempt"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "mesh_peer_unknown_attempt_denied",
     "severity": "medium",
-    "message_contains": [
-      "unknown"
-    ],
+    "message_contains": ["unknown"],
     "repair_contains": "ee mesh peer add"
   }
 }

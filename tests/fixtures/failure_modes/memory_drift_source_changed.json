@@ -5,10 +5,7 @@
     "bead": "bd-1z1fd.3",
     "epic_letter": "drift-sentinel"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "perf compare"
-  ],
+  "surfaces": ["perf compare"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A metric exists on one side of a performance comparison but not the other.",
-    "setup_commands": [
-      "# use baseline/candidate perf artifacts with non-identical metric keys"
-    ],
+    "setup_commands": ["# use baseline/candidate perf artifacts with non-identical metric keys"],
     "invocation": "ee perf compare baseline.json candidate.json --json"
   },
   "expected_emission": {
     "code": "metric_missing",
     "severity": "medium",
-    "message_contains": [
-      "Metric",
-      "missing on one side"
-    ],
+    "message_contains": ["Metric", "missing on one side"],
     "repair_contains": "same fixture"
   }
 }

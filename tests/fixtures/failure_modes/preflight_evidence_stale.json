@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "preflight"
-  ],
+  "surfaces": ["preflight"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "preflight_evidence_stale",
     "severity": "warning",
-    "message_contains": [
-      "evidence",
-      "stale"
-    ],
+    "message_contains": ["evidence", "stale"],
     "repair_contains": "ee preflight run",
     "repair_string": "ee preflight run <task> --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

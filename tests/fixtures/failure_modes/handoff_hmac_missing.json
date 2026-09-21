@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "handoff_hmac_missing",
     "severity": "high",
-    "message_contains": [
-      "unsigned",
-      "cannot be trusted"
-    ],
+    "message_contains": ["unsigned", "cannot be trusted"],
     "repair_contains": "--insecure-skip-hmac",
     "repair_string": "Recreate the capsule with this ee version, or pass --insecure-skip-hmac for audited emergency recovery."
   }

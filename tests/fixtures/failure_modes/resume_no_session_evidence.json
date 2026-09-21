@@ -5,24 +5,18 @@
     "bead": "bd-resume-verb-v0f57",
     "epic_letter": "RESUME"
   },
-  "surfaces": [
-    "resume"
-  ],
+  "surfaces": ["resume"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "ee resume ran against a store with zero live episodic memories: there is no session end-state to resume from. The command reports that honestly (and scans for nearby populated stores, reusing the orient discovery) instead of returning an empty report that reads like a fresh project.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee resume --workspace . --json"
   },
   "expected_emission": {
     "code": "resume_no_session_evidence",
     "severity": "info",
-    "message_contains": [
-      "episodic"
-    ],
+    "message_contains": ["episodic"],
     "repair_contains": "remember"
   }
 }

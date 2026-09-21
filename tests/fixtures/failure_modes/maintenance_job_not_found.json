@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job show"
-  ],
+  "surfaces": ["job show"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A maintenance job lookup asks for an id that is absent from job history.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee job show missing-job-id --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_not_found",
     "severity": "medium",
-    "message_contains": [
-      "No maintenance job history row"
-    ],
+    "message_contains": ["No maintenance job history row"],
     "repair_contains": "ee job list"
   }
 }

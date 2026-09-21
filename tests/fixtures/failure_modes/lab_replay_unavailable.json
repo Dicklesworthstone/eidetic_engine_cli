@@ -5,27 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "lab capture",
-    "lab replay",
-    "lab counterfactual"
-  ],
+  "surfaces": ["lab capture", "lab replay", "lab counterfactual"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Lab replay surfaces abstain because the requested frozen episode replay artifacts are missing or cannot be trusted.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee lab replay missing-episode-id --workspace . --json"
   },
   "expected_emission": {
     "code": "lab_replay_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "Lab replay",
-      "unavailable"
-    ],
+    "message_contains": ["Lab replay", "unavailable"],
     "repair_contains": "stored episodes"
   }
 }

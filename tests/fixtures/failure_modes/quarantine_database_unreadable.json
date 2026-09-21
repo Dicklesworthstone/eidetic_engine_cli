@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "quarantine",
-    "status"
-  ],
+  "surfaces": ["quarantine", "status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Quarantine reporting found the workspace database but could not open it.",
-    "setup_commands": [
-      "mkdir -p <workspace>/.ee",
-      "printf 'not sqlite' > <workspace>/.ee/ee.db"
-    ],
+    "setup_commands": ["mkdir -p <workspace>/.ee", "printf 'not sqlite' > <workspace>/.ee/ee.db"],
     "invocation": "ee diag quarantine list --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "quarantine_database_unreadable",
     "severity": "medium",
-    "message_contains": [
-      "Failed to open quarantine database"
-    ],
+    "message_contains": ["Failed to open quarantine database"],
     "repair_contains": "ee doctor",
     "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
@@ -42,9 +34,7 @@
         "ruleId": "repair_safety:read_only_probe",
         "source": "repair_action_safety",
         "reasonCode": "read_only_probe_command",
-        "evidence": [
-          "read_only_probe_command"
-        ],
+        "evidence": ["read_only_probe_command"],
         "preconditions": []
       }
     ]

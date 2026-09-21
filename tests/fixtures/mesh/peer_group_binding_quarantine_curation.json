@@ -3,13 +3,8 @@
   "workspaceId": "wsp_local_curation_001",
   "workspaceAlias": "local-curation",
   "peerGroupId": "pg_curation_review_001",
-  "peerIds": [
-    "peer_reviewer_001"
-  ],
-  "originWorkspaceIds": [
-    "wsp_remote_curation_001",
-    "wsp_remote_curation_002"
-  ],
+  "peerIds": ["peer_reviewer_001"],
+  "originWorkspaceIds": ["wsp_remote_curation_001", "wsp_remote_curation_002"],
   "originWorkspaceAliases": {
     "wsp_remote_curation_001": "remote-curation-a",
     "wsp_remote_curation_002": "remote-curation-b"

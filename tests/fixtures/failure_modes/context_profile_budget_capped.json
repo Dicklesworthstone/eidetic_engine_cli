@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "context_profile_budget_capped",
     "severity": "low",
-    "message_contains": [
-      "Context request budget was capped",
-      "operating profile"
-    ],
+    "message_contains": ["Context request budget was capped", "operating profile"],
     "repair_contains": "ee profile config plan",
     "repair_string": "ee profile config plan --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

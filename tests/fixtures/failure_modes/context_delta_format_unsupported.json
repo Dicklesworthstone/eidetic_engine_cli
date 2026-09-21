@@ -5,9 +5,7 @@
     "bead": "bd-muovx.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "context_delta_format_unsupported",
     "severity": "info",
-    "message_contains": [
-      "format",
-      "does not support context deltas"
-    ],
+    "message_contains": ["format", "does not support context deltas"],
     "repair_contains": "markdown",
     "repair_string": "Use `ee pack \"<task>\" --since <pack-hash> --json` for JSON context deltas, `--format markdown` for a markdown delta, or omit --since."
   }

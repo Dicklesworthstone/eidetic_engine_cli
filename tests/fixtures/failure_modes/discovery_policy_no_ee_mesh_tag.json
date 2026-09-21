@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.7",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh discovery-policy"
-  ],
+  "surfaces": ["mesh discovery-policy"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,11 +19,7 @@
   "expected_emission": {
     "code": "discovery_policy_no_ee_mesh_tag",
     "severity": "info",
-    "message_contains": [
-      "respondMode is service_tag",
-      "tag:ee-mesh",
-      "decline responses"
-    ],
+    "message_contains": ["respondMode is service_tag", "tag:ee-mesh", "decline responses"],
     "repair_contains": "tailscale up --advertise-tags=tag:ee-mesh"
   }
 }

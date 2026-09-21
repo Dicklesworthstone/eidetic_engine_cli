@@ -4,7 +4,13 @@
   "bead_id": "bd-1n3x1.15.2",
   "contract": "docs/swarm/same_file_proof_debt.md",
   "contract_case": "sfpd_positive_same_file_debt",
-  "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-003", "SFPD-MUST-004", "SFPD-SHOULD-002"],
+  "matrix_requirements": [
+    "SFPD-MUST-001",
+    "SFPD-MUST-002",
+    "SFPD-MUST-003",
+    "SFPD-MUST-004",
+    "SFPD-SHOULD-002"
+  ],
   "case": "motivating insights case: candidate likely edits the same relative path as a related bead whose source-complete work has its Cargo proof blocked by the environment",
   "input": {
     "candidate_bead": {
@@ -48,9 +54,9 @@
     "safeToClaim": false,
     "source_verdict": "not_reached_cargo",
     "nextCommandActions": [
-      {"kind": "stale_safe_bead_inspect", "command": "CI=1 br show bd-2pos6.2 --json"},
-      {"kind": "agent_mail_coordinate", "command": "send_message thread_id=bd-2pos6.2"},
-      {"kind": "rch_proof_inspect", "command": "ee verify rch blockers --workspace . --json"}
+      { "kind": "stale_safe_bead_inspect", "command": "CI=1 br show bd-2pos6.2 --json" },
+      { "kind": "agent_mail_coordinate", "command": "send_message thread_id=bd-2pos6.2" },
+      { "kind": "rch_proof_inspect", "command": "ee verify rch blockers --workspace . --json" }
     ],
     "first_failure_message": "missing named same-file signal: expected reason unproved_same_file_source_debt with coordinate_before_claim, not only generic dirty/collision reasons"
   }

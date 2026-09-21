@@ -1,19 +1,12 @@
 {
   "schema": "ee.eval_fixture.v1",
   "fixture_id": "fx.dangerous_cleanup.v1",
-  "scenario_ids": [
-    "usr_pre_cleanup_guard"
-  ],
+  "scenario_ids": ["usr_pre_cleanup_guard"],
   "fixture_family": "dangerous_cleanup",
   "coverage_state": "implemented",
   "journey": "Pre-cleanup context pack surfaces explicit safety rules and prior near-miss evidence before an agent touches workspace files.",
-  "owning_bead_ids": [
-    "eidetic_engine_cli-1kk2"
-  ],
-  "owning_gate_ids": [
-    "gate.7.walking_skeleton",
-    "gate.14.executable_claims"
-  ],
+  "owning_bead_ids": ["eidetic_engine_cli-1kk2"],
+  "owning_gate_ids": ["gate.7.walking_skeleton", "gate.14.executable_claims"],
   "deterministic": {
     "fixed_clock": "2026-04-29T12:10:00Z",
     "deterministic_seed": "seed.dangerous_cleanup.v1",
@@ -23,9 +16,7 @@
       "mem_00000000000000000000000303",
       "pack_00000000000000000000000301"
     ],
-    "workspace_fingerprints": [
-      "workspace.dangerous_cleanup.v1"
-    ]
+    "workspace_fingerprints": ["workspace.dangerous_cleanup.v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -44,13 +35,7 @@
   "command_sequence": [
     {
       "step": 1,
-      "argv": [
-        "ee",
-        "init",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "init", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -140,40 +125,20 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.workspace"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.workspace"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memory.id",
-        "data.memory.provenanceUri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memory.id", "data.memory.provenanceUri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memory.id",
-        "data.memory.provenanceUri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memory.id", "data.memory.provenanceUri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 4,
@@ -184,10 +149,7 @@
         "data.pack.provenance",
         "data.pack.hash"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     }
   ],
   "pack_quality_expectations": {
@@ -213,10 +175,7 @@
           "graph_snapshot_stale",
           "policy_guard_unavailable"
         ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 1600,

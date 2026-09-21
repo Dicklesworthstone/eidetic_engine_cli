@@ -7,7 +7,9 @@
   "repair_present": true,
   "trigger": {
     "description": "Existing mesh key storage is absent or cannot prove the platform owner, no-link, and durability contract.",
-    "setup_commands": ["remove or make the existing mesh key directory unsafe before inbound authentication"],
+    "setup_commands": [
+      "remove or make the existing mesh key directory unsafe before inbound authentication"
+    ],
     "invocation": "accept an authenticated mesh session"
   },
   "expected_emission": {

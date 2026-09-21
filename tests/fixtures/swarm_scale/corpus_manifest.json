@@ -184,15 +184,22 @@
     {
       "scale": "smoke_1k",
       "query": "release verification coordination",
-      "expectedTop3Ids": ["mem_swarm_smoke_000001", "mem_swarm_smoke_000007", "mem_swarm_smoke_000014"],
+      "expectedTop3Ids": [
+        "mem_swarm_smoke_000001",
+        "mem_swarm_smoke_000007",
+        "mem_swarm_smoke_000014"
+      ],
       "expectedMaxTokens": 1200,
       "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"
     }
   ],
   "artifacts": [
-    {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
-    {"path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema"},
-    {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
-    {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
+    { "path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest" },
+    { "path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema" },
+    {
+      "path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden",
+      "kind": "markdown_golden"
+    },
+    { "path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script" }
   ]
 }

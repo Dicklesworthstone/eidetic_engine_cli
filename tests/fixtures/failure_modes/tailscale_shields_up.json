@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.1",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "tailscale_shields_up",
     "severity": "warning",
-    "message_contains": [
-      "shields-up",
-      "peers cannot initiate discovery"
-    ],
+    "message_contains": ["shields-up", "peers cannot initiate discovery"],
     "repair_contains": "tailscale set --shields-up=false",
     "repair_string": "Run tailscale set --shields-up=false if you want symmetric mesh discovery.",
     "repair_command_regex": "(?P<cmd>tailscale set --shields-up=false)"

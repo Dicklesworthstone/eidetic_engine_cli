@@ -5,9 +5,7 @@
     "bead": "bd-1nxz4.2",
     "epic_letter": "SRR6"
   },
-  "surfaces": [
-    "support bundle"
-  ],
+  "surfaces": ["support bundle"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "derived_asset_schema_mismatch",
     "severity": "high",
-    "message_contains": [
-      "derived asset object",
-      "metadata"
-    ],
+    "message_contains": ["derived asset object", "metadata"],
     "repair_contains": "rebuild affected derived assets locally",
     "repair_string": "rebuild affected derived assets locally; do not reuse invalid objects"
   }

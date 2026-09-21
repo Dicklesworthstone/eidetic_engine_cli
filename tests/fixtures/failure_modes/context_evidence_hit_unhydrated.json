@@ -23,9 +23,7 @@
   "expected_emission": {
     "code": "context_evidence_hit_unhydrated",
     "severity": "low",
-    "message_contains": [
-      "has not been distilled into a memory"
-    ],
+    "message_contains": ["has not been distilled into a memory"],
     "repair_contains": "ee index rebuild"
   }
 }

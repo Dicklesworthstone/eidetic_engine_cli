@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "bv --robot-next runs but emits empty, unparseable, or pick-free robot output.",
-    "setup_commands": [
-      "ee cache hotset-manifest --bv-program <bv-emitting-nothing> --json"
-    ],
+    "setup_commands": ["ee cache hotset-manifest --bv-program <bv-emitting-nothing> --json"],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
   "expected_emission": {
     "code": "hotset_bv_no_output",
     "severity": "low",
-    "message_contains": [
-      "bv --robot-next"
-    ],
+    "message_contains": ["bv --robot-next"],
     "repair_contains": "Run `bv --robot-next` manually"
   }
 }

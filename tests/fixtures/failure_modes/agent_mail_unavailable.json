@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect Agent Mail inbox, reservation, or agent inventory state.",
-    "setup_commands": [
-      "# run swarm brief while Agent Mail is unreachable"
-    ],
+    "setup_commands": ["# run swarm brief while Agent Mail is unreachable"],
     "invocation": "ee swarm brief --workspace . --json"
   },
   "expected_emission": {
     "code": "agent_mail_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "Agent Mail"
-    ],
+    "message_contains": ["Agent Mail"],
     "repair_contains": "Agent Mail",
     "repair_strings": [
       "Provide a redacted Agent Mail snapshot path when collecting the brief.",
@@ -47,12 +41,8 @@
         "ruleId": "repair_safety:mutating_external_coordination_repair",
         "source": "repair_action_safety",
         "reasonCode": "external_coordination_repair_command",
-        "evidence": [
-          "external_coordination_repair_command"
-        ],
-        "preconditions": [
-          "shared_state_coordination_required"
-        ],
+        "evidence": ["external_coordination_repair_command"],
+        "preconditions": ["shared_state_coordination_required"],
         "manualStep": "Coordinate before mutating shared coordination or worker state."
       }
     ]

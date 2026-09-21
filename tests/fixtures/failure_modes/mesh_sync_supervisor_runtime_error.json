@@ -5,9 +5,7 @@
     "bead": "bd-1ylr3",
     "epic_letter": "SRR6.10"
   },
-  "surfaces": [
-    "mesh sync"
-  ],
+  "surfaces": ["mesh sync"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "mesh_sync_supervisor_runtime_error",
     "severity": "warning",
-    "message_contains": [
-      "Mesh sync supervisor did not start"
-    ],
+    "message_contains": ["Mesh sync supervisor did not start"],
     "repair_contains": "Asupersync runtime"
   }
 }

@@ -16,9 +16,6 @@
   "expected_emission": {
     "code": "ask_semantic_degraded",
     "severity": "info",
-    "message_contains": [
-      "hash-embedder fallback in play",
-      "w2 weight renormalized into w1"
-    ]
+    "message_contains": ["hash-embedder fallback in play", "w2 weight renormalized into w1"]
   }
 }

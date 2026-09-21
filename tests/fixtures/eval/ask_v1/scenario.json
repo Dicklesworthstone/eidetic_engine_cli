@@ -13,12 +13,8 @@
   "fixture_family": "ask",
   "coverage_state": "implemented",
   "journey": "Ask answers are extractive, citation-backed, conflict-aware, and calibrated to abstain when the fixture corpus lacks evidence.",
-  "owning_bead_ids": [
-    "bd-169v0.4"
-  ],
-  "owning_gate_ids": [
-    "gate.ask_quality.v1"
-  ],
+  "owning_bead_ids": ["bd-169v0.4"],
+  "owning_gate_ids": ["gate.ask_quality.v1"],
   "deterministic": {
     "fixed_clock": "2026-06-14T00:00:00Z",
     "deterministic_seed": "seed.ask_v1.hash_embedder",
@@ -30,9 +26,7 @@
       "mem_ask_conflict_negate",
       "mem_ask_version_current"
     ],
-    "workspace_fingerprints": [
-      "workspace.ask_v1"
-    ]
+    "workspace_fingerprints": ["workspace.ask_v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -135,7 +129,14 @@
     },
     {
       "step": 6,
-      "argv": ["ee", "ask", "Which command must run before every release tag?", "--workspace", "<workspace>", "--json"],
+      "argv": [
+        "ee",
+        "ask",
+        "Which command must run before every release tag?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -145,7 +146,14 @@
     },
     {
       "step": 7,
-      "argv": ["ee", "ask", "What colour is the CI dashboard?", "--workspace", "<workspace>", "--json"],
+      "argv": [
+        "ee",
+        "ask",
+        "What colour is the CI dashboard?",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -170,62 +178,32 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.answer.schema",
-        "data.answer.citations"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.answer.schema", "data.answer.citations"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.answer.confidence",
-        "data.answer.citations"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.answer.confidence", "data.answer.citations"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.answer.sides",
-        "data.answer._conflictDetected"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.answer.sides", "data.answer._conflictDetected"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 4,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.answer.abstained",
-        "data.answer.counterfactualHint"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.answer.abstained", "data.answer.counterfactualHint"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 5,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.answer.answerText",
-        "data.answer.citations"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.answer.answerText", "data.answer.citations"],
+      "absent_fields": ["secret", "token"]
     }
   ],
   "ask_quality_expectations": {
@@ -263,13 +241,8 @@
         "scenario_id": "ask_direct_fact",
         "command_step": 1,
         "question": "What Rust toolchain does Project Zephyr use?",
-        "expected_cited_memory_ids": [
-          "mem_ask_direct_toolchain"
-        ],
-        "expected_answer_terms": [
-          "Rust nightly 1.96.0",
-          "toolchain"
-        ],
+        "expected_cited_memory_ids": ["mem_ask_direct_toolchain"],
+        "expected_answer_terms": ["Rust nightly 1.96.0", "toolchain"],
         "expect_abstention": false,
         "expect_conflict": false
       },
@@ -282,10 +255,7 @@
           "mem_ask_multi_release_primary",
           "mem_ask_multi_release_support"
         ],
-        "expected_answer_terms": [
-          "smoke gate alpha",
-          "release readiness"
-        ],
+        "expected_answer_terms": ["smoke gate alpha", "release readiness"],
         "expect_abstention": false,
         "expect_conflict": false
       },
@@ -294,28 +264,18 @@
         "scenario_id": "ask_conflicting_evidence",
         "command_step": 3,
         "question": "Is remote cache delta enabled for Project Zephyr?",
-        "expected_cited_memory_ids": [
-          "mem_ask_conflict_affirm",
-          "mem_ask_conflict_negate"
-        ],
-        "expected_answer_terms": [
-          "remote cache delta",
-          "enabled"
-        ],
+        "expected_cited_memory_ids": ["mem_ask_conflict_affirm", "mem_ask_conflict_negate"],
+        "expected_answer_terms": ["remote cache delta", "enabled"],
         "expect_abstention": false,
         "expect_conflict": true,
         "expected_sides": [
           {
             "label": "affirming",
-            "cited_memory_ids": [
-              "mem_ask_conflict_affirm"
-            ]
+            "cited_memory_ids": ["mem_ask_conflict_affirm"]
           },
           {
             "label": "negating",
-            "cited_memory_ids": [
-              "mem_ask_conflict_negate"
-            ]
+            "cited_memory_ids": ["mem_ask_conflict_negate"]
           }
         ]
       },
@@ -334,13 +294,8 @@
         "scenario_id": "ask_version_sensitive_current",
         "command_step": 5,
         "question": "What is the current retention window for Project Zephyr traces?",
-        "expected_cited_memory_ids": [
-          "mem_ask_version_current"
-        ],
-        "expected_answer_terms": [
-          "30 days",
-          "2026-06-01"
-        ],
+        "expected_cited_memory_ids": ["mem_ask_version_current"],
+        "expected_answer_terms": ["30 days", "2026-06-01"],
         "expect_abstention": false,
         "expect_conflict": false
       }

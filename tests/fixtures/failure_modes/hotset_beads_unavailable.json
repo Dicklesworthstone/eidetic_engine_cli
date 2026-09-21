@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "Beads JSONL export is missing, unreadable, or over the bounded-read cap; the collector abstains from tracker signals.",
-    "setup_commands": [
-      "rm -f <workspace>/.beads/issues.jsonl"
-    ],
+    "setup_commands": ["rm -f <workspace>/.beads/issues.jsonl"],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
   "expected_emission": {
     "code": "hotset_beads_unavailable",
     "severity": "low",
-    "message_contains": [
-      "Beads JSONL export"
-    ],
+    "message_contains": ["Beads JSONL export"],
     "repair_contains": "Run `br sync --flush-only` to export tracker state, then re-collect."
   }
 }

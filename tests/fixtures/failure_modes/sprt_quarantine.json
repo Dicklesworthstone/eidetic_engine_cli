@@ -5,9 +5,7 @@
     "bead": "bd-3qs2i.3.1",
     "epic_letter": "F"
   },
-  "surfaces": [
-    "outcome"
-  ],
+  "surfaces": ["outcome"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -36,9 +34,6 @@
       "reason",
       "recovery"
     ],
-    "recovery_kinds": [
-      "command",
-      "narrow"
-    ]
+    "recovery_kinds": ["command", "narrow"]
   }
 }

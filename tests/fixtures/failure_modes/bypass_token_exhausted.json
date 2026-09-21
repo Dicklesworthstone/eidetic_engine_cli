@@ -5,9 +5,7 @@
     "bead": "bd-3usjw.6.1",
     "epic_letter": "W"
   },
-  "surfaces": [
-    "preflight"
-  ],
+  "surfaces": ["preflight"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "bypass_token_exhausted",
     "severity": "high",
-    "message_contains": [
-      "bypass token",
-      "remaining uses"
-    ],
+    "message_contains": ["bypass token", "remaining uses"],
     "repair_contains": "fresh one-shot",
     "repair_string": "Issue a fresh one-shot bypass token if the command is still approved."
   }

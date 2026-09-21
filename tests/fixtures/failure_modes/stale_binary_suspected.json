@@ -5,10 +5,7 @@
     "bead": "bd-3utv2.3",
     "epic_letter": "install-freshness"
   },
-  "surfaces": [
-    "swarm work-packet",
-    "diag environment-attestation"
-  ],
+  "surfaces": ["swarm work-packet", "diag environment-attestation"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {

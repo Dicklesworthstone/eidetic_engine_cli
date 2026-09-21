@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "handoff_capsule_machine_mismatch",
     "severity": "high",
-    "message_contains": [
-      "key context",
-      "workspace or machine"
-    ],
+    "message_contains": ["key context", "workspace or machine"],
     "repair_contains": "Resume on the original workspace/machine",
     "repair_string": "Resume on the original workspace/machine, or recreate the capsule here."
   }

@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job list"
-  ],
+  "surfaces": ["job list"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Maintenance job history listing receives a --since value that is not an RFC 3339 timestamp.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee job list --since not-a-date --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_since_invalid",
     "severity": "medium",
-    "message_contains": [
-      "since"
-    ],
+    "message_contains": ["since"],
     "repair_contains": "RFC 3339"
   }
 }

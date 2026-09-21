@@ -26,26 +26,19 @@
     "totalConfounders": 0,
     "methodUsed": "experiment"
   },
-  "filtersApplied": [
-    "artifact_id=mem_counterfactual_001",
-    "chain_id=chain_counterfactual_001"
-  ],
+  "filtersApplied": ["artifact_id=mem_counterfactual_001", "chain_id=chain_counterfactual_001"],
   "degradations": [
     {
       "code": "causal_confounders_unavailable",
       "message": "No explicit confounder ledger rows were supplied; refusing to fabricate confounders.",
       "severity": "warning",
-      "sources": [
-        "causal_estimate"
-      ]
+      "sources": ["causal_estimate"]
     },
     {
       "code": "causal_sample_underpowered",
       "message": "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.",
       "severity": "warning",
-      "sources": [
-        "causal_estimate"
-      ]
+      "sources": ["causal_estimate"]
     }
   ],
   "dryRun": false

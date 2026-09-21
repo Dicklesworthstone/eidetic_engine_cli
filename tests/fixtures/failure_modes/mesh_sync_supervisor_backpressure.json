@@ -5,26 +5,18 @@
     "bead": "bd-1ylr3",
     "epic_letter": "SRR6.10"
   },
-  "surfaces": [
-    "mesh sync"
-  ],
+  "surfaces": ["mesh sync"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "Foreground mesh sync has more enabled peers than the configured peer-concurrency limit, so the supervised loop queues excess peers instead of widening fan-out.",
-    "setup_commands": [
-      "ee init --workspace . --json",
-      "enroll at least two enabled mesh peers"
-    ],
+    "setup_commands": ["ee init --workspace . --json", "enroll at least two enabled mesh peers"],
     "invocation": "ee mesh sync --once --peer-concurrency 1 --workspace . --json"
   },
   "expected_emission": {
     "code": "mesh_sync_supervisor_backpressure",
     "severity": "info",
-    "message_contains": [
-      "Mesh sync supervisor limited",
-      "active peers"
-    ],
+    "message_contains": ["Mesh sync supervisor limited", "active peers"],
     "repair_contains": "--peer-concurrency"
   }
 }

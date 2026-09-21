@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "model status",
-    "model list"
-  ],
+  "surfaces": ["model status", "model list"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "model_registry_no_available_entry",
     "severity": "medium",
-    "message_contains": [
-      "no embedding model is marked available",
-      "semantic search is degraded"
-    ],
+    "message_contains": ["no embedding model is marked available", "semantic search is degraded"],
     "repair_contains": "ee doctor",
     "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

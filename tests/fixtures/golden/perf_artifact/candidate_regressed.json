@@ -6,7 +6,7 @@
   "sourcePath": "redacted/candidate.json",
   "contentHash": "abc123candidate",
   "observedHash": "abc123candidate",
-  "profile": {"profileName": "workstation", "confidence": "high"},
+  "profile": { "profileName": "workstation", "confidence": "high" },
   "fixtureTier": "smoke",
   "commandFamily": "pack",
   "metrics": {

@@ -84,10 +84,7 @@
     "clusterStride": 11,
     "clusterSize": 2,
     "expectedClusterCount": 46,
-    "polarityKeys": [
-      "asserts_remote_only_verification",
-      "asserts_local_only_verification"
-    ]
+    "polarityKeys": ["asserts_remote_only_verification", "asserts_local_only_verification"]
   },
   "outputPolicy": {
     "generatedRecordsPathTail": ".ee/lab/scale-envelope/scale_small_801029aa7dff/records.jsonl",

@@ -5,10 +5,7 @@
     "bead": "bd-1hvzh",
     "epic_letter": "bd-21xbi"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "lexical_ram_tier_disabled",
     "severity": "info",
-    "message_contains": [
-      "lexical RAM-tier",
-      "disabled"
-    ],
+    "message_contains": ["lexical RAM-tier", "disabled"],
     "repair_contains": "[search.lexical_ram_tier] enabled = true",
     "repair_string": "Set [search.lexical_ram_tier] enabled = true (or unset EE_LEXICAL_INDEX_PIN_RAM=0) and re-run to opt back into lexical posting-list RAM-tier pinning on supported Linux hosts."
   }

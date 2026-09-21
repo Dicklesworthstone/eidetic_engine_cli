@@ -5,11 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace",
-    "causal estimate",
-    "causal compare"
-  ],
+  "surfaces": ["causal trace", "causal estimate", "causal compare"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -23,9 +19,7 @@
   "expected_emission": {
     "code": "causal_evidence_table_missing",
     "severity": "warning",
-    "message_contains": [
-      "causal_evidence table is missing"
-    ],
+    "message_contains": ["causal_evidence table is missing"],
     "repair_contains": "ee init"
   }
 }

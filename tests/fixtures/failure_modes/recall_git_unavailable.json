@@ -5,9 +5,7 @@
     "bead": "bd-u875s.3",
     "epic_letter": "RECALL"
   },
-  "surfaces": [
-    "recall"
-  ],
+  "surfaces": ["recall"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "recall_git_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "--diff selector degraded to an empty path set",
-      "git was unavailable"
-    ],
+    "message_contains": ["--diff selector degraded to an empty path set", "git was unavailable"],
     "repair_contains": "git on PATH"
   }
 }

@@ -16,7 +16,7 @@
       "id": "bd-2pos6.2",
       "status": "blocked",
       "comment_evidence": [
-        {"kind": "source_complete", "marker": "source-complete; RCH proof owed"},
+        { "kind": "source_complete", "marker": "source-complete; RCH proof owed" },
         {
           "kind": "rch_proof_blocker",
           "codes": ["telemetry_gap", "remote_marker_missing"],

@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "graph",
-    "graph feature-enrichment"
-  ],
+  "surfaces": ["graph", "graph feature-enrichment"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The diagnostics capability-gap override forces graph compute to report the optional graph feature disabled.",
-    "setup_commands": [
-      "export EE_DIAG_FORCE_CAPABILITY_GAP=graph"
-    ],
+    "setup_commands": ["export EE_DIAG_FORCE_CAPABILITY_GAP=graph"],
     "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=graph ee status --workspace . --fields full --json"
   },
   "expected_emission": {
     "code": "graph_feature_disabled",
     "severity": "medium",
-    "message_contains": [
-      "Graph algorithm execution requires",
-      "graph feature"
-    ],
+    "message_contains": ["Graph algorithm execution requires", "graph feature"],
     "repair_contains": "--features graph"
   }
 }

@@ -5,10 +5,7 @@
     "bead": "bd-39tzu.4",
     "epic_letter": "PRM"
   },
-  "surfaces": [
-    "export agentsmd",
-    "diag agentsmd-drift"
-  ],
+  "surfaces": ["export agentsmd", "diag agentsmd-drift"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "agentsmd_unmanaged_edit_detected",
     "severity": "warning",
-    "message_contains": [
-      "hand-edited",
-      "--force-managed-block"
-    ],
+    "message_contains": ["hand-edited", "--force-managed-block"],
     "repair_contains": "ee export agentsmd --workspace . --dry-run"
   },
   "notes": "The refusal is the contract working, not a failure: hand edits inside the markers are presumed intentional until a human (or a reviewing agent) confirms otherwise via --dry-run and then --force-managed-block. Content outside the markers is never at risk."

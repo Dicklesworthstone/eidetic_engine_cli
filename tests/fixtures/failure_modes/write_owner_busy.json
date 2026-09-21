@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "write owner"
-  ],
+  "surfaces": ["write owner"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The write-owner diagnostic enqueues more deterministic write requests than the bounded owner channel can accept while the owner is not running.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee diag write-owner --capacity 1 --enqueue 2 --workspace . --json"
   },
   "expected_emission": {
     "code": "write_owner_busy",
     "severity": "medium",
-    "message_contains": [
-      "Write owner busy"
-    ],
+    "message_contains": ["Write owner busy"],
     "repair_contains": "diag locks"
   }
 }

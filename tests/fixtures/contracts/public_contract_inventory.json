@@ -52,10 +52,7 @@
       "surface": "context_pack_payload",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.pack.v2.json",
-      "canonicalDocs": [
-        "AGENTS.md#schema-versions",
-        "README.md#context-pack-controls"
-      ],
+      "canonicalDocs": ["AGENTS.md#schema-versions", "README.md#context-pack-controls"],
       "currentFacingContexts": [
         "AGENTS.md",
         "README.md",
@@ -71,10 +68,7 @@
       "surface": "pack_replay_response",
       "owner": "src/cli/mod.rs::handle_pack_replay",
       "schemaFile": "docs/schemas/ee.pack.replay.v2.json",
-      "canonicalDocs": [
-        "docs/pack-replay.md",
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/pack-replay.md", "docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [
         "docs/pack-replay.md",
         "docs/schemas/ee.pack.replay.v2.json",
@@ -89,10 +83,7 @@
       "surface": "pack_diff_response",
       "owner": "src/cli/mod.rs::handle_pack_diff",
       "schemaFile": "docs/schemas/ee.pack.diff.v2.json",
-      "canonicalDocs": [
-        "docs/pack-replay.md",
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/pack-replay.md", "docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [
         "docs/pack-replay.md",
         "docs/schemas/ee.pack.diff.v2.json",
@@ -107,10 +98,7 @@
       "surface": "support_bundle_pack_replay_summary",
       "owner": "src/core/support_bundle.rs::collect_pack_replay_summary",
       "schemaFile": "docs/schemas/ee.support_bundle.pack_replay_summary.v2.json",
-      "canonicalDocs": [
-        "docs/pack-replay.md",
-        "docs/testing-strategy.md"
-      ],
+      "canonicalDocs": ["docs/pack-replay.md", "docs/testing-strategy.md"],
       "currentFacingContexts": [
         "docs/pack-replay.md",
         "docs/testing-strategy.md",
@@ -126,10 +114,7 @@
       "surface": "context_delta_response",
       "owner": "src/core/context_delta.rs::ContextDeltaEnvelope",
       "schemaFile": "docs/schemas/ee.context.delta.v2.json",
-      "canonicalDocs": [
-        "docs/agent-ux/context-delta-apply.md",
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/agent-ux/context-delta-apply.md", "docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [
         "docs/agent-ux/context-delta-apply.md",
         "docs/schemas/ee.context.delta.v2.json",
@@ -216,10 +201,7 @@
         "docs/profiles.md#resource-admission-contract",
         "docs/schemas/ee.resource_admission.v1.json"
       ],
-      "currentFacingContexts": [
-        "docs/profiles.md",
-        "docs/schemas/ee.resource_admission.v1.json"
-      ],
+      "currentFacingContexts": ["docs/profiles.md", "docs/schemas/ee.resource_admission.v1.json"],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
     },
@@ -229,10 +211,7 @@
       "surface": "proof_broker_ledger",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/swarm/ee.proof_broker.v1.json",
-      "canonicalDocs": [
-        "docs/swarm/proof_broker.md",
-        "docs/schemas/swarm/ee.proof_broker.v1.json"
-      ],
+      "canonicalDocs": ["docs/swarm/proof_broker.md", "docs/schemas/swarm/ee.proof_broker.v1.json"],
       "currentFacingContexts": [
         "docs/swarm/proof_broker.md",
         "docs/schemas/swarm/ee.proof_broker.v1.json"
@@ -246,12 +225,8 @@
       "surface": "swarm_slo_attribution_event",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.swarm_slo.resource_usage_event.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.swarm_slo.resource_usage_event.v1.json"
-      ],
-      "currentFacingContexts": [
-        "docs/operator-swarm-slo.md"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.swarm_slo.resource_usage_event.v1.json"],
+      "currentFacingContexts": ["docs/operator-swarm-slo.md"],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
     },
@@ -261,12 +236,8 @@
       "surface": "swarm_slo_attribution_event",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.swarm_slo.coordination_event.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.swarm_slo.coordination_event.v1.json"
-      ],
-      "currentFacingContexts": [
-        "docs/operator-swarm-slo.md"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.swarm_slo.coordination_event.v1.json"],
+      "currentFacingContexts": ["docs/operator-swarm-slo.md"],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
     },
@@ -276,12 +247,8 @@
       "surface": "curate_auto_promote_payload",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.curate.auto_promote.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.curate.auto_promote.v1.json"
-      ],
-      "currentFacingContexts": [
-        "docs/schemas/ee.curate.auto_promote.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.curate.auto_promote.v1.json"],
+      "currentFacingContexts": ["docs/schemas/ee.curate.auto_promote.v1.json"],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
     },
@@ -291,10 +258,7 @@
       "surface": "memory_debt_doctor_report",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.curate.doctor.v1.json",
-      "canonicalDocs": [
-        "docs/agent-ux/memory-hygiene.md",
-        "docs/schemas/ee.curate.doctor.v1.json"
-      ],
+      "canonicalDocs": ["docs/agent-ux/memory-hygiene.md", "docs/schemas/ee.curate.doctor.v1.json"],
       "currentFacingContexts": [
         "README.md",
         "docs/agent-ux/memory-hygiene.md",
@@ -327,10 +291,7 @@
       "surface": "learn_gaps_report",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.learn.gaps.v1.json",
-      "canonicalDocs": [
-        "docs/agent-ux/memory-hygiene.md",
-        "docs/schemas/ee.learn.gaps.v1.json"
-      ],
+      "canonicalDocs": ["docs/agent-ux/memory-hygiene.md", "docs/schemas/ee.learn.gaps.v1.json"],
       "currentFacingContexts": [
         "README.md",
         "docs/agent-ux/memory-hygiene.md",
@@ -345,14 +306,8 @@
       "surface": "queryless_attempt_family_retrieval",
       "owner": "src/core/search.rs::run_family_retrieval",
       "schemaFile": "docs/schemas/ee.search.family.v1.json",
-      "canonicalDocs": [
-        "README.md#core-workflow",
-        "docs/schemas/ee.search.family.v1.json"
-      ],
-      "currentFacingContexts": [
-        "README.md",
-        "docs/schemas/ee.search.family.v1.json"
-      ],
+      "canonicalDocs": ["README.md#core-workflow", "docs/schemas/ee.search.family.v1.json"],
+      "currentFacingContexts": ["README.md", "docs/schemas/ee.search.family.v1.json"],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
     },
@@ -452,9 +407,7 @@
       "surface": "daemon_uds_rpc_request_envelope",
       "owner": "src/daemon/mod.rs::DAEMON_REQUEST_SCHEMA_V1",
       "schemaFile": "docs/schemas/ee.daemon.request.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.request.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.request.v1.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
@@ -465,9 +418,7 @@
       "surface": "daemon_uds_rpc_response_envelope",
       "owner": "src/daemon/mod.rs::DAEMON_RESPONSE_SCHEMA_V1",
       "schemaFile": "docs/schemas/ee.daemon.response.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.response.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.response.v1.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
@@ -478,9 +429,7 @@
       "surface": "daemon_search_method_request",
       "owner": "src/daemon/protocol.rs",
       "schemaFile": "docs/schemas/ee.daemon.search.request.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.search.request.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.search.request.v1.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [
         {
@@ -496,9 +445,7 @@
       "surface": "daemon_search_method_response",
       "owner": "src/daemon/protocol.rs",
       "schemaFile": "docs/schemas/ee.daemon.search.response.v2.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.search.response.v2.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.search.response.v2.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [
         {
@@ -542,9 +489,7 @@
       "surface": "daemon_start_payload",
       "owner": "src/cli/mod.rs::handle_daemon_hot_mode_start",
       "schemaFile": "docs/schemas/ee.daemon.start.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.start.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.start.v1.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
@@ -555,9 +500,7 @@
       "surface": "daemon_stop_payload",
       "owner": "src/cli/mod.rs::handle_daemon_hot_mode_stop",
       "schemaFile": "docs/schemas/ee.daemon.stop.v1.json",
-      "canonicalDocs": [
-        "docs/schemas/ee.daemon.stop.v1.json"
-      ],
+      "canonicalDocs": ["docs/schemas/ee.daemon.stop.v1.json"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
@@ -568,9 +511,7 @@
       "surface": "response_success_envelope",
       "owner": "src/models/mod.rs::RESPONSE_SCHEMA_V1",
       "schemaFile": "docs/schemas/ee.response.v1.json",
-      "canonicalDocs": [
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [
         {
@@ -607,9 +548,7 @@
       "surface": "response_success_envelope",
       "owner": "src/models/mod.rs::RESPONSE_SCHEMA_V0",
       "schemaFile": null,
-      "canonicalDocs": [
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [
         {
@@ -646,9 +585,7 @@
       "surface": "response_error_envelope",
       "owner": "docs/schemas/ee.error.v1.json",
       "schemaFile": "docs/schemas/ee.error.v1.json",
-      "canonicalDocs": [
-        "docs/migration_v0_1_to_v0_2.md"
-      ],
+      "canonicalDocs": ["docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [],
       "allowedHistoricalContexts": [
         {
@@ -684,10 +621,7 @@
       "surface": "orient_payload",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.orient.v1.json",
-      "canonicalDocs": [
-        "README.md",
-        "docs/agent-ux/primer.md"
-      ],
+      "canonicalDocs": ["README.md", "docs/agent-ux/primer.md"],
       "currentFacingContexts": [
         "README.md",
         "docs/agent-ux/primer.md",
@@ -702,10 +636,7 @@
       "surface": "tripwire_check_revivals_payload",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.memory_sentinel.revivals.v1.json",
-      "canonicalDocs": [
-        "README.md",
-        "docs/adr/0060-verifiable-memory-sentinels.md"
-      ],
+      "canonicalDocs": ["README.md", "docs/adr/0060-verifiable-memory-sentinels.md"],
       "currentFacingContexts": [
         "README.md",
         "docs/adr/0060-verifiable-memory-sentinels.md",
@@ -720,9 +651,7 @@
       "surface": "continuation_cursor_envelope",
       "owner": "src/output/mod.rs::public_schemas",
       "schemaFile": "docs/schemas/ee.cursor.v1.json",
-      "canonicalDocs": [
-        "docs/adr/0063-output-token-governor-and-continuation-cursors.md"
-      ],
+      "canonicalDocs": ["docs/adr/0063-output-token-governor-and-continuation-cursors.md"],
       "currentFacingContexts": [
         "docs/adr/0063-output-token-governor-and-continuation-cursors.md",
         "docs/degraded_code_taxonomy.md",

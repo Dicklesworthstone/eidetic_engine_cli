@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "diag dependencies",
-    "dependency contract"
-  ],
+  "surfaces": ["diag dependencies", "dependency contract"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The optional diagram backend is unavailable; plain Mermaid/text output remains available.",
-    "setup_commands": [
-      "ee diag dependencies --workspace . --json"
-    ],
+    "setup_commands": ["ee diag dependencies --workspace . --json"],
     "invocation": "ee diag dependencies --workspace . --json"
   },
   "expected_emission": {
     "code": "diagram_backend_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "Diagram",
-      "unavailable"
-    ],
+    "message_contains": ["Diagram", "unavailable"],
     "repair_contains": "Mermaid"
   }
 }

@@ -6,24 +6,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The diagnostics capability-gap override forces search to report as unimplemented.",
-    "setup_commands": [
-      "export EE_DIAG_FORCE_CAPABILITY_GAP=search"
-    ],
+    "setup_commands": ["export EE_DIAG_FORCE_CAPABILITY_GAP=search"],
     "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=search ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "search_unimplemented",
     "severity": "high",
-    "message_contains": [
-      "Search has no compiled implementation"
-    ],
+    "message_contains": ["Search has no compiled implementation"],
     "repair_contains": "search support",
     "repair_string": "Use a binary built with search support enabled."
   }

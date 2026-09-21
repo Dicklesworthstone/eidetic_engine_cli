@@ -5,9 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "why"
-  ],
+  "surfaces": ["why"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_causal_no_evidence",
     "severity": "low",
-    "message_contains": [
-      "causal evidence",
-      "no rows"
-    ],
+    "message_contains": ["causal evidence", "no rows"],
     "repair_contains": "ee outcome",
     "repair_string": "Record causal evidence with `ee outcome --causal-link ...`."
   }

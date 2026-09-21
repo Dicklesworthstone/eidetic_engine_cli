@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace"
-  ],
+  "surfaces": ["causal trace"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "The causal trace command is pointed at an explicit database path without the database workspace ID needed for replay.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal trace failure-1 --database .ee/ee.db --json"
   },
   "expected_emission": {
     "code": "causal_workspace_id_required",
     "severity": "warning",
-    "message_contains": [
-      "Provide a workspace ID"
-    ]
+    "message_contains": ["Provide a workspace ID"]
   }
 }

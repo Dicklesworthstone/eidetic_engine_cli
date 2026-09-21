@@ -5,27 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace",
-    "causal estimate",
-    "causal compare",
-    "causal promote-plan"
-  ],
+  "surfaces": ["causal trace", "causal estimate", "causal compare", "causal promote-plan"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "A causal command is invoked without any artifact, decision, chain, source, or scope filter.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal estimate --workspace . --json"
   },
   "expected_emission": {
     "code": "no_filters",
     "severity": "warning",
-    "message_contains": [
-      "No",
-      "provided"
-    ]
+    "message_contains": ["No", "provided"]
   }
 }

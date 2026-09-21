@@ -49,11 +49,7 @@
         "issueType": "feature",
         "title": "[CLUSTER] unsafe claim batch proof",
         "priority": 3,
-        "pathFamilies": [
-          "src/db",
-          "src/cli",
-          "tests"
-        ],
+        "pathFamilies": ["src/db", "src/cli", "tests"],
         "rawPathThatMustNotAppear": "src/db/mod.rs"
       },
       "alternatePlanner": {
@@ -68,22 +64,12 @@
             "status": "open",
             "priority": 3,
             "assignee": null,
-            "labels": [
-              "contract"
-            ],
-            "paths": [
-              "docs/schemas/ee.swarm.unsafe_claim_plan.v1.json"
-            ],
+            "labels": ["contract"],
+            "paths": ["docs/schemas/ee.swarm.unsafe_claim_plan.v1.json"],
             "gateSafeToClaim": false,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "tracker_authority",
-              "agent_mail_readiness",
-              "dirty_checkout"
-            ],
-            "candidateSpecificDeltas": [
-              "shared_gate:unsafe_due_to_conflict"
-            ]
+            "reasonGroupRefs": ["tracker_authority", "agent_mail_readiness", "dirty_checkout"],
+            "candidateSpecificDeltas": ["shared_gate:unsafe_due_to_conflict"]
           },
           {
             "id": "bd-1tp6p.2.1",
@@ -93,17 +79,11 @@
             "priority": 2,
             "assignee": null,
             "labels": [],
-            "paths": [
-              "src/db/mod.rs"
-            ],
+            "paths": ["src/db/mod.rs"],
             "gateSafeToClaim": false,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "dirty_checkout"
-            ],
-            "candidateSpecificDeltas": [
-              "dirty_path_overlap:src/db/mod.rs"
-            ]
+            "reasonGroupRefs": ["dirty_checkout"],
+            "candidateSpecificDeltas": ["dirty_path_overlap:src/db/mod.rs"]
           },
           {
             "id": "bd-3utv2.11",
@@ -112,29 +92,19 @@
             "status": "open",
             "priority": 2,
             "assignee": null,
-            "labels": [
-              "no-cargo"
-            ],
-            "paths": [
-              "scripts/install_freshness"
-            ],
+            "labels": ["no-cargo"],
+            "paths": ["scripts/install_freshness"],
             "gateSafeToClaim": null,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "installed_binary_freshness"
-            ],
-            "candidateSpecificDeltas": [
-              "install_freshness:runner_queue_follow_up"
-            ]
+            "reasonGroupRefs": ["installed_binary_freshness"],
+            "candidateSpecificDeltas": ["install_freshness:runner_queue_follow_up"]
           }
         ]
       }
     },
     {
       "id": "no_safe_alternate",
-      "coverage": [
-        "no_safe_alternate"
-      ],
+      "coverage": ["no_safe_alternate"],
       "unsafeReasons": [
         "agent_mail_unavailable",
         "rch_unavailable:topology_blocked",
@@ -155,17 +125,11 @@
             "status": "open",
             "priority": 1,
             "assignee": "OtherAgent",
-            "labels": [
-              "docs"
-            ],
-            "paths": [
-              "docs/unsafe_claim_plan.md"
-            ],
+            "labels": ["docs"],
+            "paths": ["docs/unsafe_claim_plan.md"],
             "gateSafeToClaim": null,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "reservation_conflict"
-            ],
+            "reasonGroupRefs": ["reservation_conflict"],
             "candidateSpecificDeltas": []
           },
           {
@@ -175,15 +139,11 @@
             "status": "open",
             "priority": 1,
             "assignee": null,
-            "labels": [
-              "contract"
-            ],
+            "labels": ["contract"],
             "paths": [],
             "gateSafeToClaim": null,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "recommendation_mismatch"
-            ],
+            "reasonGroupRefs": ["recommendation_mismatch"],
             "candidateSpecificDeltas": []
           },
           {
@@ -193,15 +153,11 @@
             "status": "open",
             "priority": 1,
             "assignee": null,
-            "labels": [
-              "tracker-only"
-            ],
+            "labels": ["tracker-only"],
             "paths": [],
             "gateSafeToClaim": false,
             "gateClaimCommandActionPresent": false,
-            "reasonGroupRefs": [
-              "rch_proof_admission"
-            ],
+            "reasonGroupRefs": ["rch_proof_admission"],
             "candidateSpecificDeltas": []
           }
         ]

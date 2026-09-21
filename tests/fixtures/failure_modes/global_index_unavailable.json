@@ -5,10 +5,7 @@
     "bead": "bd-reality-core-convergence-1azkt.4",
     "epic_letter": "D"
   },
-  "surfaces": [
-    "search",
-    "pack"
-  ],
+  "surfaces": ["search", "pack"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

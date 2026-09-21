@@ -17,10 +17,7 @@
   "expected_emission": {
     "code": "redaction_pattern_matched",
     "severity": "medium",
-    "message_contains": [
-      "redaction",
-      "matched"
-    ]
+    "message_contains": ["redaction", "matched"]
   },
   "notes": "The redaction event itself is non-fatal; severity is medium because the agent should KNOW the response was rewritten. After E5, a presence marker in capabilities.available also reflects which detector classes are enabled in this build."
 }

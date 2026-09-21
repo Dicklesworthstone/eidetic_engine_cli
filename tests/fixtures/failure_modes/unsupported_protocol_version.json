@@ -5,10 +5,7 @@
     "bead": "bd-97rgf.5",
     "epic_letter": "SRR6.27"
   },
-  "surfaces": [
-    "mesh hello",
-    "mesh auto-enroll"
-  ],
+  "surfaces": ["mesh hello", "mesh auto-enroll"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "unsupported_protocol_version",
     "severity": "medium",
-    "message_contains": [
-      "unsupported protocol",
-      "requires major"
-    ],
+    "message_contains": ["unsupported protocol", "requires major"],
     "repair_contains": "matching ee versions",
     "repair_string": "Run matching ee versions or upgrade/downgrade the peer before enabling mesh sync."
   }

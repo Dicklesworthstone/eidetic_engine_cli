@@ -17,8 +17,6 @@
   "expected_emission": {
     "code": "expired_filtered",
     "severity": "low",
-    "message_contains": [
-      "expired"
-    ]
+    "message_contains": ["expired"]
   }
 }

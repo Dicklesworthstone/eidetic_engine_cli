@@ -5,10 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "reflect request-ledger diagnostics",
-    "reflect result ingest"
-  ],
+  "surfaces": ["reflect request-ledger diagnostics", "reflect result ingest"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +18,7 @@
   "expected_emission": {
     "code": "reflect_request_consumed",
     "severity": "medium",
-    "message_contains": [
-      "consumed",
-      "candidate"
-    ],
+    "message_contains": ["consumed", "candidate"],
     "repair_contains": "ee curate candidates",
     "repair_string": "Run `ee curate candidates --workspace . --json` to inspect the candidate that consumed the request.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

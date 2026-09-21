@@ -5,9 +5,7 @@
     "bead": "bd-1prrl.2.5",
     "epic_letter": "swarmx.5"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "agent_profile_cold_start",
     "severity": "info",
-    "message_contains": [
-      "agent profile",
-      "cold start"
-    ],
+    "message_contains": ["agent profile", "cold start"],
     "repair_contains": "Record enough high-quality outcomes before relying on profile bias.",
     "repair_string": "Record enough high-quality outcomes before relying on profile bias."
   }

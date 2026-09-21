@@ -5,9 +5,7 @@
     "bead": "bd-gni47.3",
     "epic_letter": "SF"
   },
-  "surfaces": [
-    "graph feature-enrichment"
-  ],
+  "surfaces": ["graph feature-enrichment"],
   "severity": "high",
   "repair_present": true,
   "trigger": {

@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "profile config plan"
-  ],
+  "surfaces": ["profile config plan"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "A constrained operating profile declares that heavy verification gates require manual invocation.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "# select a profile with heavy_strategy = manual"
-    ],
+    "setup_commands": ["ee init --workspace .", "# select a profile with heavy_strategy = manual"],
     "invocation": "ee profile config plan --profile constrained --workspace . --json"
   },
   "expected_emission": {
     "code": "manual_heavy_strategy",
     "severity": "warning",
-    "message_contains": [
-      "Heavy tests require manual invocation"
-    ],
+    "message_contains": ["Heavy tests require manual invocation"],
     "repair_contains": "rch exec",
     "repair_string": "Use `rch exec -- cargo test` for heavy gates, or configure rch_preferred."
   }

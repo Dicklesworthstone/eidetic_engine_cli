@@ -7,9 +7,7 @@
   "exit_code": null,
   "remote_required": true,
   "worker_id": null,
-  "error_codes": [
-    "RCH-E327"
-  ],
+  "error_codes": ["RCH-E327"],
   "source_state": {
     "git_head": "4f2c9d1e8a7b65430f1e2d3c4b5a69788796a5b4",
     "git_tree": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
@@ -18,10 +16,7 @@
     "remote_source_materialized": false,
     "source_materialization": "none"
   },
-  "degraded_codes": [
-    "rch_verify_topology_blocked",
-    "rch_verify_local_fallback_refused"
-  ],
+  "degraded_codes": ["rch_verify_topology_blocked", "rch_verify_local_fallback_refused"],
   "stdout_tail": "",
   "stderr_tail": "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.\nremote required; refusing local fallback\n",
   "selector_admission_probe": {

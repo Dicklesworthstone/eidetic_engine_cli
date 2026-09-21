@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.4",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_beads_content_not_provided",
     "severity": "low",
-    "message_contains": [
-      ".beads/issues.jsonl",
-      "content"
-    ],
+    "message_contains": [".beads/issues.jsonl", "content"],
     "repair_contains": "readable",
     "repair_strings": [
       "Ensure .beads/issues.jsonl is readable by the agent so hygiene can scan it for conflict markers.",

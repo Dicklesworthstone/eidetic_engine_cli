@@ -13,10 +13,7 @@
   "expected_emission": {
     "code": "learn_gaps_no_miss_data",
     "severity": "info",
-    "message_contains": [
-      "No query-miss audit rows",
-      "effective window"
-    ],
+    "message_contains": ["No query-miss audit rows", "effective window"],
     "repair_contains": "low-utility searches will populate the miss ledger"
   }
 }

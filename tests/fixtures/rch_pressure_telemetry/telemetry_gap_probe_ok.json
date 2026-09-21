@@ -64,10 +64,6 @@
       "rch_verify_topology_blocked",
       "worker_outage"
     ],
-    "must_not_recommend": [
-      "cancel_active_build",
-      "local_cargo_fallback",
-      "agent_daemon_restart"
-    ]
+    "must_not_recommend": ["cancel_active_build", "local_cargo_fallback", "agent_daemon_restart"]
   }
 }

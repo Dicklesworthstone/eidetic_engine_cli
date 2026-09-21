@@ -5,9 +5,7 @@
     "bead": "bd-aunn3.2",
     "epic_letter": "AUNN3"
   },
-  "surfaces": [
-    "diag toolchain-provenance"
-  ],
+  "surfaces": ["diag toolchain-provenance"],
   "severity": "low",
   "repair_present": false,
   "trigger": {
@@ -20,9 +18,6 @@
   "expected_emission": {
     "code": "toolchain_tool_unresolved",
     "severity": "low",
-    "message_contains": [
-      "toolchain binary probe",
-      "could not resolve"
-    ]
+    "message_contains": ["toolchain binary probe", "could not resolve"]
   }
 }

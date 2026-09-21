@@ -5,10 +5,7 @@
     "bead": "bd-2e4xa",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh auto-enroll",
-    "mesh status"
-  ],
+  "surfaces": ["mesh auto-enroll", "mesh status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -25,10 +22,7 @@
   "expected_emission": {
     "code": "auto_enrollment_node_key_changed",
     "severity": "medium",
-    "message_contains": [
-      "node key",
-      "changed"
-    ],
+    "message_contains": ["node key", "changed"],
     "repair_contains": "ee mesh"
   }
 }

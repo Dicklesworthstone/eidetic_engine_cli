@@ -22,26 +22,9 @@
     "elapsed_ms",
     "degraded_codes"
   ],
-  "standardPhases": [
-    "input",
-    "dispatch",
-    "dependency_check",
-    "persistence",
-    "response"
-  ],
-  "capOperations": [
-    "truncation",
-    "sampling",
-    "top_n",
-    "abstention"
-  ],
-  "capEventFields": [
-    "cap_kind",
-    "dropped_count",
-    "drop_reason",
-    "cap_limit",
-    "retained_count"
-  ],
+  "standardPhases": ["input", "dispatch", "dependency_check", "persistence", "response"],
+  "capOperations": ["truncation", "sampling", "top_n", "abstention"],
+  "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
   "capEventExamples": [
     {
       "surface": "harness_contract",
@@ -86,7 +69,15 @@
       "ownerBeads": ["bd-1n0np.2", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "evidence_harvester",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -96,7 +87,15 @@
       "ownerBeads": ["bd-1n0np.3", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "anchors_freshness",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -106,7 +105,15 @@
       "ownerBeads": ["bd-1n0np.4", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "error_recall",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -116,7 +123,15 @@
       "ownerBeads": ["bd-1n0np.8", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "read_fence",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -126,7 +141,15 @@
       "ownerBeads": ["bd-1n0np.8", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "write_immune",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -136,7 +159,15 @@
       "ownerBeads": ["bd-1n0np.6", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "gap_honesty",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -146,7 +177,15 @@
       "ownerBeads": ["bd-1n0np.7", "bd-1n0np.15.5"],
       "status": "planned",
       "surface": "contradiction_resolution",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
       "sourceAnchors": []
@@ -156,26 +195,197 @@
       "ownerBeads": ["bd-1n0np.15", "bd-1n0np.15.5"],
       "status": "implemented",
       "surface": "harness_contract",
-      "requiredTraceFields": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"],
+      "requiredTraceFields": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ],
       "capOperations": ["truncation", "sampling", "top_n", "abstention"],
       "capEventFields": ["cap_kind", "dropped_count", "drop_reason", "cap_limit", "retained_count"],
-      "sourceAnchors": ["scripts/lib/e2e_harness.sh", "docs/observability/tracing_field_convention.md"]
+      "sourceAnchors": [
+        "scripts/lib/e2e_harness.sh",
+        "docs/observability/tracing_field_convention.md"
+      ]
     }
   ],
   "subsystemCoverageMatrix": [
-    {"subsystem": "evidence_harvester", "surface": "evidence_harvester", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "anchors_freshness", "surface": "anchors_freshness", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "error_recall", "surface": "error_recall", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "read_fence", "surface": "read_fence", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "write_immune", "surface": "write_immune", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "gap_honesty", "surface": "gap_honesty", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "contradiction_resolution", "surface": "contradiction_resolution", "status": "planned", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 0, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "planned_contract_only", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"},
-    {"subsystem": "harness_contract", "surface": "harness_contract", "status": "implemented", "ownerBeadCount": 2, "traceFieldCount": 7, "capOperationCount": 4, "capEventFieldCount": 5, "sourceAnchorCount": 2, "mustClauses": 10, "tested": 10, "passing": 10, "divergent": 0, "scoreMilli": 1000, "traceStatus": "shared_fields_declared", "capStatus": "no_silent_cap_declared", "anchorEvidenceStatus": "source_anchors_required", "runtimeProofPolicy": "rch_required_local_invalid", "complianceStatus": "declared_conformant"}
+    {
+      "subsystem": "evidence_harvester",
+      "surface": "evidence_harvester",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "anchors_freshness",
+      "surface": "anchors_freshness",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "error_recall",
+      "surface": "error_recall",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "read_fence",
+      "surface": "read_fence",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "write_immune",
+      "surface": "write_immune",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "gap_honesty",
+      "surface": "gap_honesty",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "contradiction_resolution",
+      "surface": "contradiction_resolution",
+      "status": "planned",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 0,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "planned_contract_only",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    },
+    {
+      "subsystem": "harness_contract",
+      "surface": "harness_contract",
+      "status": "implemented",
+      "ownerBeadCount": 2,
+      "traceFieldCount": 7,
+      "capOperationCount": 4,
+      "capEventFieldCount": 5,
+      "sourceAnchorCount": 2,
+      "mustClauses": 10,
+      "tested": 10,
+      "passing": 10,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "traceStatus": "shared_fields_declared",
+      "capStatus": "no_silent_cap_declared",
+      "anchorEvidenceStatus": "source_anchors_required",
+      "runtimeProofPolicy": "rch_required_local_invalid",
+      "complianceStatus": "declared_conformant"
+    }
   ],
   "anchors": [
     {
       "source": "docs/observability/tracing_field_convention.md",
-      "needles": ["workspace_id", "request_id", "bead_id", "surface", "phase", "elapsed_ms", "degraded_codes"]
+      "needles": [
+        "workspace_id",
+        "request_id",
+        "bead_id",
+        "surface",
+        "phase",
+        "elapsed_ms",
+        "degraded_codes"
+      ]
     },
     {
       "source": "scripts/check-tracing-fields.sh",

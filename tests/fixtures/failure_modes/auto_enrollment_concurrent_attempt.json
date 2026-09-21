@@ -5,9 +5,7 @@
     "bead": "bd-2e4xa",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh auto-enroll"
-  ],
+  "surfaces": ["mesh auto-enroll"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -23,9 +21,7 @@
   "expected_emission": {
     "code": "auto_enrollment_concurrent_attempt",
     "severity": "warning",
-    "message_contains": [
-      "concurrent"
-    ],
+    "message_contains": ["concurrent"],
     "repair_contains": "auto-enroll"
   }
 }

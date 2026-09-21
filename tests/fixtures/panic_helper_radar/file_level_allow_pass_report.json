@@ -6,9 +6,7 @@
     "scannedFileCount": 1,
     "violationCount": 0,
     "skippedCount": 0,
-    "scannedPaths": [
-      "tests/fixtures/panic_helper_radar/file_level_allow.rs"
-    ]
+    "scannedPaths": ["tests/fixtures/panic_helper_radar/file_level_allow.rs"]
   },
   "violations": [],
   "skipped": []

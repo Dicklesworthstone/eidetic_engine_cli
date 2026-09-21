@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "scope_strict_excluded_evidence",
     "severity": "medium",
-    "message_contains": [
-      "Strict memory scope",
-      "returning no scoped results"
-    ],
+    "message_contains": ["Strict memory scope", "returning no scoped results"],
     "repair_contains": "--strict-scope"
   }
 }

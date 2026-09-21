@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "health"
-  ],
+  "surfaces": ["status", "health"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "search_index_degraded",
     "severity": "medium",
-    "message_contains": [
-      "Search is compiled",
-      "index is missing"
-    ],
+    "message_contains": ["Search is compiled", "index is missing"],
     "repair_contains": "ee index status",
     "repair_string": "Run `ee index status --workspace . --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

@@ -2,12 +2,7 @@
   "schema": "ee.mesh.command_modes.v1",
   "bead": "bd-3omr5",
   "defaultMode": "off",
-  "precedence": [
-    "command_flag",
-    "environment",
-    "config",
-    "built_in_default"
-  ],
+  "precedence": ["command_flag", "environment", "config", "built_in_default"],
   "modes": [
     {
       "mode": "off",
@@ -43,13 +38,7 @@
       "currentRuntimeStatus": "unsupported_until_latency_budgeted_peer_query_lands"
     }
   ],
-  "surfaces": [
-    "search",
-    "context",
-    "pack",
-    "why",
-    "status"
-  ],
+  "surfaces": ["search", "context", "pack", "why", "status"],
   "surfaceMatrix": {
     "search": {
       "off": "local index only",

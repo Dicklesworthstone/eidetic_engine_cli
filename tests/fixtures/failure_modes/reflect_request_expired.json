@@ -5,10 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "reflect request-ledger diagnostics",
-    "reflect result ingest"
-  ],
+  "surfaces": ["reflect request-ledger diagnostics", "reflect result ingest"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "reflect_request_expired",
     "severity": "medium",
-    "message_contains": [
-      "expired",
-      "reflection request"
-    ],
+    "message_contains": ["expired", "reflection request"],
     "repair_contains": "ee reflect propose",
     "repair_string": "Run `ee reflect propose --workspace . --json` to create a fresh request.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

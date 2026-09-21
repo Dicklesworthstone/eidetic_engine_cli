@@ -5,27 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "doctor",
-    "dependency contract"
-  ],
+  "surfaces": ["status", "doctor", "dependency contract"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The TOON renderer capability is explicitly disabled; JSON remains the canonical output surface.",
-    "setup_commands": [
-      "export EE_DISABLE_TOON=1"
-    ],
+    "setup_commands": ["export EE_DISABLE_TOON=1"],
     "invocation": "EE_DISABLE_TOON=1 ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "toon_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "TOON",
-      "unavailable"
-    ],
+    "message_contains": ["TOON", "unavailable"],
     "repair_contains": "json",
     "repair_string": "Unset `EE_DISABLE_TOON` or use `--format json`."
   }

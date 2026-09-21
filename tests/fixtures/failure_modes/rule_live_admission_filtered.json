@@ -1,37 +1,47 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "rule_live_admission_filtered",
-  "introduced_by": {"bead": "bd-vp087", "epic_letter": "P1"},
+  "introduced_by": { "bead": "bd-vp087", "epic_letter": "P1" },
   "surfaces": ["search"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "A derived native rule candidate is missing, revoked, foreign, revision-stale or cannot be positively admitted from its source workspace and joined rule metadata.",
-    "setup_commands": ["ee init --workspace .", "ee index rebuild --workspace .", "# Supersede a previously indexed procedural rule."],
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee index rebuild --workspace .",
+      "# Supersede a previously indexed procedural rule."
+    ],
     "invocation": "ee search '<previous rule phrase>' --workspace . --json"
   },
   "expected_emission": {
     "code": "rule_live_admission_filtered",
     "severity": "low",
-    "message_contains": ["Filtered", "indexed rule candidates", "source-of-truth admission could not be verified"],
+    "message_contains": [
+      "Filtered",
+      "indexed rule candidates",
+      "source-of-truth admission could not be verified"
+    ],
     "repair_contains": "ee index rebuild",
     "repair_string": "ee index rebuild --workspace .",
     "repair_command_regex": "(?<cmd>ee index rebuild --workspace \\.)",
-    "repair_safety": [{
-      "appliesTo": "ee index rebuild --workspace .",
-      "command": "ee index rebuild --workspace .",
-      "riskClass": "idempotent_refresh",
-      "preflightCommand": null,
-      "requiresHumanApproval": false,
-      "mutatesExternalState": false,
-      "mutatesTrackerState": false,
-      "privacyClass": "bounded_command_no_raw_state",
-      "nextAction": "run_directly",
-      "ruleId": "repair_safety:idempotent_refresh",
-      "source": "repair_action_safety",
-      "reasonCode": "idempotent_refresh_command",
-      "evidence": ["derived_asset_refresh_command"],
-      "preconditions": ["workspace_must_be_explicit"]
-    }]
+    "repair_safety": [
+      {
+        "appliesTo": "ee index rebuild --workspace .",
+        "command": "ee index rebuild --workspace .",
+        "riskClass": "idempotent_refresh",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:idempotent_refresh",
+        "source": "repair_action_safety",
+        "reasonCode": "idempotent_refresh_command",
+        "evidence": ["derived_asset_refresh_command"],
+        "preconditions": ["workspace_must_be_explicit"]
+      }
+    ]
   }
 }

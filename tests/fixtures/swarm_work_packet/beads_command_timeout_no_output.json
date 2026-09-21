@@ -22,18 +22,14 @@
         "source": "beads",
         "status": "degraded",
         "freshness": "stale_fallback",
-        "degradedCodes": [
-          "beads_unavailable"
-        ],
+        "degradedCodes": ["beads_unavailable"],
         "provenance": "bounded Beads read timed out with no output; fallback rows are advisory only"
       },
       {
         "source": "agent_mail",
         "status": "unavailable",
         "freshness": "unknown",
-        "degradedCodes": [
-          "agent_mail_unavailable"
-        ],
+        "degradedCodes": ["agent_mail_unavailable"],
         "provenance": "health_check unavailable; reservation authority unknown"
       }
     ],
@@ -88,10 +84,7 @@
         "run_br_doctor_json",
         "do_not_claim_from_stale_fallback"
       ],
-      "evidenceCaveats": [
-        "beads_source_stale",
-        "mail_reservations_unknown"
-      ]
+      "evidenceCaveats": ["beads_source_stale", "mail_reservations_unknown"]
     },
     "coordination": {
       "activeReservationCount": 0,

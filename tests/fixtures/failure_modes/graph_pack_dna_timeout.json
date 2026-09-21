@@ -5,9 +5,7 @@
     "bead": "bd-1prrl.8.4",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {

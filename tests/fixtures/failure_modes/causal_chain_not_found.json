@@ -5,25 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal estimate",
-    "causal compare",
-    "causal promote-plan"
-  ],
+  "surfaces": ["causal estimate", "causal compare", "causal promote-plan"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "A causal command references a chain id that is not present in the evidence ledger.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal promote-plan trace_missing_chain --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_chain_not_found",
     "severity": "warning",
-    "message_contains": [
-      "No persisted causal chain"
-    ]
+    "message_contains": ["No persisted causal chain"]
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "diag integrity"
-  ],
+  "surfaces": ["diag integrity"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "integrity_schema_check_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "migration state",
-      "could not be inspected"
-    ],
+    "message_contains": ["migration state", "could not be inspected"],
     "repair_contains": "ee doctor",
     "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

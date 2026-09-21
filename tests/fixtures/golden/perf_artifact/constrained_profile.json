@@ -6,7 +6,7 @@
   "sourcePath": "redacted/constrained.json",
   "contentHash": "constrained123",
   "observedHash": "constrained123",
-  "profile": {"profileName": "constrained", "confidence": "high"},
+  "profile": { "profileName": "constrained", "confidence": "high" },
   "fixtureTier": "smoke",
   "commandFamily": "pack",
   "metrics": {

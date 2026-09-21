@@ -5,9 +5,7 @@
     "bead": "bd-orient-fast-content-iubub",
     "epic_letter": "O"
   },
-  "surfaces": [
-    "orient"
-  ],
+  "surfaces": ["orient"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "orient_doctor_skipped",
     "severity": "info",
-    "message_contains": [
-      "Doctor triage was skipped",
-      "--fast"
-    ],
+    "message_contains": ["Doctor triage was skipped", "--fast"],
     "repair_contains": "ee doctor --workspace"
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-bife.25",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "maintenance graph-witnesses-prune"
-  ],
+  "surfaces": ["maintenance graph-witnesses-prune"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_witness_unparseable_recorded_at",
     "severity": "medium",
-    "message_contains": [
-      "unparseable recordedAt timestamps",
-      "kept"
-    ],
+    "message_contains": ["unparseable recordedAt timestamps", "kept"],
     "repair_contains": "Inspect graph_algorithm_witnesses recorded_at values",
     "repair_string": "Inspect graph_algorithm_witnesses recorded_at values before pruning."
   }

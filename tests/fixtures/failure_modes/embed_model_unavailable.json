@@ -5,10 +5,7 @@
     "bead": "bd-3qs2i.4.1",
     "epic_letter": "F4"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "embed_model_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "Embedding model unavailable",
-      "lexical"
-    ],
+    "message_contains": ["Embedding model unavailable", "lexical"],
     "repair_contains": "ee index reembed --workspace .",
     "repair_string": "ee index reembed --workspace ."
   }

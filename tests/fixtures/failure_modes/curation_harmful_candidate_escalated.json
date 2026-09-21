@@ -5,10 +5,7 @@
     "bead": "bd-17c65.7.4",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "curate disposition",
-    "status"
-  ],
+  "surfaces": ["curate disposition", "status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "curation_harmful_candidate_escalated",
     "severity": "high",
-    "message_contains": [
-      "harmful-feedback",
-      "escalation"
-    ],
+    "message_contains": ["harmful-feedback", "escalation"],
     "repair_contains": "ee curate",
     "repair_string": "Run `ee curate disposition --json` and review escalated candidates.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

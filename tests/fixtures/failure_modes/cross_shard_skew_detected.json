@@ -5,10 +5,7 @@
     "bead": "bd-f6jfs.5",
     "epic_letter": "SHARD_FANOUT"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "cross_shard_skew_detected",
     "severity": "warning",
-    "message_contains": [
-      "Cross-shard read",
-      "inconsistent peer shard state"
-    ],
+    "message_contains": ["Cross-shard read", "inconsistent peer shard state"],
     "repair_contains": "ee status --json",
     "repair_string": "Re-run the search with a fresh shard catalog snapshot or inspect ee status --json.",
     "repair_command_regex": "(?<cmd>ee status --json)"

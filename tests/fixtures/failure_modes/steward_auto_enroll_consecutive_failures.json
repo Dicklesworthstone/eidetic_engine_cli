@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.14",
     "epic_letter": "SRR6.46.14"
   },
-  "surfaces": [
-    "daemon steward"
-  ],
+  "surfaces": ["daemon steward"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "steward_auto_enroll_consecutive_failures",
     "severity": "warning",
-    "message_contains": [
-      "consecutive"
-    ],
+    "message_contains": ["consecutive"],
     "repair_contains": "ee mesh auto-enroll"
   }
 }

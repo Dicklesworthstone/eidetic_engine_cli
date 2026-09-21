@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "tripwire check",
-    "preflight"
-  ],
+  "surfaces": ["tripwire check", "preflight"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "unsupported_condition",
     "severity": "warning",
-    "message_contains": [
-      "unsupported"
-    ],
+    "message_contains": ["unsupported"],
     "repair_contains": "provide a generated"
   }
 }

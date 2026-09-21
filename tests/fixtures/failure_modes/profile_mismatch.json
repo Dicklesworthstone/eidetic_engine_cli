@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "perf compare",
-    "perf budget check"
-  ],
+  "surfaces": ["perf compare", "perf budget check"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Baseline and candidate performance artifacts, or requested and observed budget profiles, do not match.",
-    "setup_commands": [
-      "# use two normalized perf artifacts with different profile values"
-    ],
+    "setup_commands": ["# use two normalized perf artifacts with different profile values"],
     "invocation": "ee perf compare baseline.json candidate.json --json"
   },
   "expected_emission": {
     "code": "profile_mismatch",
     "severity": "medium",
-    "message_contains": [
-      "Profile mismatch"
-    ],
+    "message_contains": ["Profile mismatch"],
     "repair_contains": "same profile",
     "repair_string": "Compare artifacts from the same profile"
   }

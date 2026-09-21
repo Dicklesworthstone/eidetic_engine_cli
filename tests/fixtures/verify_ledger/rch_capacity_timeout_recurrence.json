@@ -16,10 +16,7 @@
     "remote_source_materialized": false,
     "source_materialization": "none"
   },
-  "degraded_codes": [
-    "rch_verify_capacity_or_timeout",
-    "rch_verify_local_fallback_refused"
-  ],
+  "degraded_codes": ["rch_verify_capacity_or_timeout", "rch_verify_local_fallback_refused"],
   "stdout_tail": "",
   "stderr_tail": "selector: queue_timeout after 300s waiting for a build slot (0/4 slots free, queue empty)\nremote required; refusing local fallback\n",
   "selector_admission_probe": {

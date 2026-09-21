@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "info",
   "repair_present": false,
   "retired": true,

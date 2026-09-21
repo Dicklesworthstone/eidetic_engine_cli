@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal promote-plan"
-  ],
+  "surfaces": ["causal promote-plan"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
     "description": "Promotion planning runs without --dry-run, so the response recommends report-only automation.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal promote-plan --artifact-id artifact-1 --workspace . --json"
   },
   "expected_emission": {
     "code": "dry_run_recommended",
     "severity": "info",
-    "message_contains": [
-      "prefer --dry-run"
-    ]
+    "message_contains": ["prefer --dry-run"]
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-3a1op.4",
     "epic_letter": "ADR0066"
   },
-  "surfaces": [
-    "conflict resolve"
-  ],
+  "surfaces": ["conflict resolve"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "conflict_resolve_stale_surface",
     "severity": "medium",
-    "message_contains": [
-      "surface"
-    ],
+    "message_contains": ["surface"],
     "repair_contains": "conflict explain"
   }
 }

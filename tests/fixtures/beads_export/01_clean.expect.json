@@ -1,1 +1,7 @@
-{"dbCount": 3, "doctorOk": true, "expectedState": "healthy", "expectedCandidate": "none", "note": "all records parse; counts corroborate"}
+{
+  "dbCount": 3,
+  "doctorOk": true,
+  "expectedState": "healthy",
+  "expectedCandidate": "none",
+  "note": "all records parse; counts corroborate"
+}

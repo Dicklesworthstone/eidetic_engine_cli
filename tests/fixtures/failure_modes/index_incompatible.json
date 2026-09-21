@@ -5,10 +5,7 @@
     "bead": "gh-37",
     "epic_letter": "B"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

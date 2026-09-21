@@ -19,10 +19,7 @@
   "expected_emission": {
     "code": "low_recall_after_floor",
     "severity": "low",
-    "message_contains": [
-      "Only",
-      "candidates passed"
-    ],
+    "message_contains": ["Only", "candidates passed"],
     "repair_contains": "Rephrase"
   }
 }

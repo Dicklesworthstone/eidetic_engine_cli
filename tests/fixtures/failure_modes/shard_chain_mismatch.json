@@ -5,10 +5,7 @@
     "bead": "bd-f6jfs.6",
     "epic_letter": "SHARD_FANOUT"
   },
-  "surfaces": [
-    "audit verify",
-    "audit timeline"
-  ],
+  "surfaces": ["audit verify", "audit timeline"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,11 +19,7 @@
   "expected_emission": {
     "code": "shard_chain_mismatch",
     "severity": "high",
-    "message_contains": [
-      "shard",
-      "audit chain",
-      "mismatch"
-    ],
+    "message_contains": ["shard", "audit chain", "mismatch"],
     "repair_contains": "ee audit timeline",
     "repair_string": "Inspect ee audit timeline --workspace . --json for the shard_id reported by ee audit verify, then restore or quarantine the broken shard before trusting cross-shard audit evidence.",
     "repair_command_regex": "(?<cmd>ee audit timeline --workspace \\. --json)"

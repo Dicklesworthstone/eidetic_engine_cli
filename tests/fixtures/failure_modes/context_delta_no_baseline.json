@@ -22,9 +22,7 @@
   "expected_emission": {
     "code": "context_delta_no_baseline",
     "severity": "info",
-    "message_contains": [
-      "emitting the full pack instead"
-    ],
+    "message_contains": ["emitting the full pack instead"],
     "repair_contains": "pass an explicit pack hash to --since"
   }
 }

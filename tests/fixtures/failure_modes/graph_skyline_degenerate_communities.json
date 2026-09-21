@@ -5,10 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "status",
-    "insights"
-  ],
+  "surfaces": ["status", "insights"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,9 +19,6 @@
   "expected_emission": {
     "code": "graph_skyline_degenerate_communities",
     "severity": "info",
-    "message_contains": [
-      "degenerate",
-      "communities"
-    ]
+    "message_contains": ["degenerate", "communities"]
   }
 }

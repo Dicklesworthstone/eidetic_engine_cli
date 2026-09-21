@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "diag integrity"
-  ],
+  "surfaces": ["diag integrity"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "integrity_database_open_failed",
     "severity": "high",
-    "message_contains": [
-      "database exists",
-      "could not be opened"
-    ],
+    "message_contains": ["database exists", "could not be opened"],
     "repair_contains": "ee doctor",
     "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

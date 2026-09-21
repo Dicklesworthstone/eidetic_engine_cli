@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "quarantine",
-    "status"
-  ],
+  "surfaces": ["quarantine", "status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "quarantine_rows_unreadable",
     "severity": "medium",
-    "message_contains": [
-      "Failed to read feedback quarantine rows"
-    ],
+    "message_contains": ["Failed to read feedback quarantine rows"],
     "repair_contains": "ee migrate run",
     "repair_string": "ee migrate run --workspace . --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

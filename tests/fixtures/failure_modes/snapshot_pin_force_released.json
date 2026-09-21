@@ -5,10 +5,7 @@
     "bead": "bd-2caru.6",
     "epic_letter": "SRR"
   },
-  "surfaces": [
-    "status",
-    "workspace close"
-  ],
+  "surfaces": ["status", "workspace close"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "snapshot_pin_force_released",
     "severity": "medium",
-    "message_contains": [
-      "snapshot pin",
-      "force released"
-    ],
+    "message_contains": ["snapshot pin", "force released"],
     "repair_contains": "ee status --workspace . --json"
   }
 }

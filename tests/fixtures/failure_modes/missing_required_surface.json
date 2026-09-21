@@ -5,9 +5,7 @@
     "bead": "bd-3utv2.3",
     "epic_letter": "install-freshness"
   },
-  "surfaces": [
-    "swarm work-packet"
-  ],
+  "surfaces": ["swarm work-packet"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {

@@ -7,7 +7,9 @@
   "repair_present": true,
   "trigger": {
     "description": "Body-cache publication cannot prove the T2.1 secure-file contract, so no body bytes are written and retrieval stays metadata-only.",
-    "setup_commands": ["present a fresh authenticated body-share approval token on a host without the reviewed secure-file adapter"],
+    "setup_commands": [
+      "present a fresh authenticated body-share approval token on a host without the reviewed secure-file adapter"
+    ],
     "invocation": "ee team share bodies --confirm --token-stdin --workspace ."
   },
   "expected_emission": {

@@ -5,26 +5,18 @@
     "bead": "bd-wp5ac.1",
     "epic_letter": "Swarm-X"
   },
-  "surfaces": [
-    "audit lane"
-  ],
+  "surfaces": ["audit lane"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Audit-lane shutdown cannot drain all queued audit events before the configured shutdown budget expires.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee daemon --foreground --once --workspace . --json"
   },
   "expected_emission": {
     "code": "audit_lane_shutdown_drain_timeout",
     "severity": "medium",
-    "message_contains": [
-      "audit",
-      "shutdown",
-      "drain"
-    ],
+    "message_contains": ["audit", "shutdown", "drain"],
     "repair_contains": "EE_AUDIT_LANE_FLUSH_MS"
   }
 }

@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "health"
-  ],
+  "surfaces": ["status", "health"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "storage_degraded",
     "severity": "medium",
-    "message_contains": [
-      "Workspace storage exists",
-      "could not be opened"
-    ],
+    "message_contains": ["Workspace storage exists", "could not be opened"],
     "repair_contains": "ee doctor",
     "repair_string": "Run `ee doctor --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

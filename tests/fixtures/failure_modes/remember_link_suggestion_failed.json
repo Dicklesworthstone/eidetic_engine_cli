@@ -5,9 +5,7 @@
     "bead": "bd-17c65.7.3",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "remember"
-  ],
+  "surfaces": ["remember"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "remember_link_suggestion_failed",
     "severity": "low",
-    "message_contains": [
-      "Remembered the memory",
-      "link suggestions failed"
-    ],
+    "message_contains": ["Remembered the memory", "link suggestions failed"],
     "repair_contains": "memory tag/link indexes",
     "repair_string": "Run `ee doctor --json` and inspect memory tag/link indexes.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

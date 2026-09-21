@@ -336,7 +336,14 @@
         ]
       },
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "pack_candidate_impressions",
@@ -347,7 +354,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "derived_outcome_evidence",
@@ -358,7 +372,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "error_fingerprints",
@@ -369,7 +390,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "memory_sentinel_specs",
@@ -380,7 +408,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "memory_sentinel_results",
@@ -391,7 +426,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "typed_memory_fields",
@@ -402,7 +444,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "attestation_bundles",
@@ -413,7 +462,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "query_miss_ledger",
@@ -424,7 +480,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "workspace_generations",
@@ -435,7 +498,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     },
     {
       "assetKind": "source_write_stats",
@@ -446,7 +516,14 @@
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidence": "planned",
-      "coverageSurfaces": ["backup_create", "backup_inspect", "backup_verify", "backup_restore", "manifest_rehash", "roundtrip_e2e"]
+      "coverageSurfaces": [
+        "backup_create",
+        "backup_inspect",
+        "backup_verify",
+        "backup_restore",
+        "manifest_rehash",
+        "roundtrip_e2e"
+      ]
     }
   ]
 }

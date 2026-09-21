@@ -5,24 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal estimate"
-  ],
+  "surfaces": ["causal estimate"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
     "description": "Matching causal estimate reports the conditional-independence assumption.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal estimate --artifact-id artifact-1 --method matching --workspace . --json"
   },
   "expected_emission": {
     "code": "conditional_independence",
     "severity": "info",
-    "message_contains": [
-      "Conditional on covariates",
-      "exposure is independent"
-    ]
+    "message_contains": ["Conditional on covariates", "exposure is independent"]
   }
 }

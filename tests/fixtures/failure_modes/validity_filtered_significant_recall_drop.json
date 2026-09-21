@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "validity_filtered_significant_recall_drop",
     "severity": "info",
-    "message_contains": [
-      "Validity window filtering removed",
-      "remain"
-    ],
+    "message_contains": ["Validity window filtering removed", "remain"],
     "repair_contains": "--include-expired"
   }
 }

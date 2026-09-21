@@ -5,9 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "memory revise"
-  ],
+  "surfaces": ["memory revise"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -21,9 +19,6 @@
   "expected_emission": {
     "code": "graph_dominance_no_revision_chain",
     "severity": "info",
-    "message_contains": [
-      "revision chain",
-      "logical_id"
-    ]
+    "message_contains": ["revision chain", "logical_id"]
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-0ldej",
     "epic_letter": "AUNN3"
   },
-  "surfaces": [
-    "diag toolchain-provenance"
-  ],
+  "surfaces": ["diag toolchain-provenance"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -20,9 +18,6 @@
   "expected_emission": {
     "code": "toolchain_git_repository_absent",
     "severity": "info",
-    "message_contains": [
-      "no git repository",
-      "unknown, not untracked"
-    ]
+    "message_contains": ["no git repository", "unknown, not untracked"]
   }
 }

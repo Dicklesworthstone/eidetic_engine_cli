@@ -110,9 +110,7 @@
       "severity": "hot",
       "reasonCode": "index_swap_stalls",
       "detail": "index intake mode 'full_rebuild': 5 rebuilds, 2 swap stalls (avg swap 3.5 ms)",
-      "suggestedCommands": [
-        "adopt incremental index intake (bd-d67os.6)"
-      ]
+      "suggestedCommands": ["adopt incremental index intake (bd-d67os.6)"]
     },
     {
       "source": "singleflight",
@@ -129,18 +127,14 @@
       "severity": "warm",
       "reasonCode": "group_commit_active_coalescing",
       "detail": "group-commit: 4 batches, 8 coalesced writes, 4 fsyncs saved (avg batch 2.00); batching is absorbing durable-write pressure",
-      "suggestedCommands": [
-        "informational: group-commit batching is reducing write fsync pressure"
-      ]
+      "suggestedCommands": ["informational: group-commit batching is reducing write fsync pressure"]
     },
     {
       "source": "l2_cache",
       "severity": "warm",
       "reasonCode": "l2_cache_thrash",
       "detail": "L2 pack cache: 6 hits / 2 misses, 4 evictions across 8 inserts",
-      "suggestedCommands": [
-        "raise EE_L2_PACK_CACHE_BYTES or narrow the pack workload"
-      ]
+      "suggestedCommands": ["raise EE_L2_PACK_CACHE_BYTES or narrow the pack workload"]
     }
   ],
   "unavailableSources": []

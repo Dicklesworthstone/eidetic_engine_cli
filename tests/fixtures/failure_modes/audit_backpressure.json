@@ -5,25 +5,18 @@
     "bead": "bd-wp5ac.1",
     "epic_letter": "Swarm-X"
   },
-  "surfaces": [
-    "audit lane"
-  ],
+  "surfaces": ["audit lane"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "The audit-lane producer queue is full while a foreground durable mutation attempts to enqueue an audit event.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee remember 'audit lane pressure fixture' --workspace . --json"
   },
   "expected_emission": {
     "code": "audit_backpressure",
     "severity": "warning",
-    "message_contains": [
-      "audit",
-      "backpressure"
-    ],
+    "message_contains": ["audit", "backpressure"],
     "repair_contains": "EE_AUDIT_LANE_CAPACITY"
   }
 }

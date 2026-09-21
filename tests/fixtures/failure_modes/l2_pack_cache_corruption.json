@@ -1,7 +1,7 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "l2_pack_cache_corruption",
-  "introduced_by": {"bead": "bd-ndzfg.4", "epic_letter": "L"},
+  "introduced_by": { "bead": "bd-ndzfg.4", "epic_letter": "L" },
   "surfaces": ["pack"],
   "severity": "low",
   "repair_present": true,
@@ -20,10 +20,7 @@
   "expected_emission": {
     "code": "l2_pack_cache_corruption",
     "severity": "low",
-    "message_contains": [
-      "L2 pack cache",
-      "rejected"
-    ],
+    "message_contains": ["L2 pack cache", "rejected"],
     "repair_contains": "Remove the corrupt cache entry",
     "repair_string": "Remove the corrupt cache entry or lower the L2 cache TTL."
   }

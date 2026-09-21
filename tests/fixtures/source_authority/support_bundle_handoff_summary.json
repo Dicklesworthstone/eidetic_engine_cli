@@ -7,11 +7,7 @@
     "provenanceHash": "blake3:9a8b7c6d5e4f30211f0e2d3c4b5a6978"
   },
   "redactionStatus": "paths_counts_subjects_only_no_content",
-  "generatedFor": [
-    "support_bundle",
-    "handoff_capsule",
-    "agent_mail"
-  ],
+  "generatedFor": ["support_bundle", "handoff_capsule", "agent_mail"],
   "sourceSummaries": [
     {
       "sourceKind": "agent_mail",
@@ -19,9 +15,7 @@
       "authoritative": false,
       "freshnessState": "fresh",
       "timeoutClass": "none",
-      "degradedCodes": [
-        "agent_mail_recovery_corrupt"
-      ],
+      "degradedCodes": ["agent_mail_recovery_corrupt"],
       "summary": "Agent Mail transport answered, but durability recovery is corrupt; reservation and inbox evidence are diagnostic only."
     },
     {
@@ -30,9 +24,7 @@
       "authoritative": false,
       "freshnessState": "stale",
       "timeoutClass": "live_read_timed_out",
-      "degradedCodes": [
-        "source_authority_beads_timed_out"
-      ],
+      "degradedCodes": ["source_authority_beads_timed_out"],
       "summary": "A stale-safe tracker snapshot exists, but live Beads lookup timed out; candidate absence is not confirmed."
     },
     {
@@ -41,10 +33,7 @@
       "authoritative": false,
       "freshnessState": "unknown",
       "timeoutClass": "robot_next_no_output",
-      "degradedCodes": [
-        "bv_command_timeout",
-        "bv_no_output"
-      ],
+      "degradedCodes": ["bv_command_timeout", "bv_no_output"],
       "summary": "BV graph ranking produced no authoritative recommendation; graph hints remain advisory."
     },
     {
@@ -53,9 +42,7 @@
       "authoritative": false,
       "freshnessState": "fresh",
       "timeoutClass": "lock_contention",
-      "degradedCodes": [
-        "memory_drift_lock_contention"
-      ],
+      "degradedCodes": ["memory_drift_lock_contention"],
       "summary": "Memory-drift evidence was partially collected under lock contention and cannot authorize mutation."
     },
     {
@@ -64,9 +51,7 @@
       "authoritative": false,
       "freshnessState": "unknown",
       "timeoutClass": "telemetry_gap",
-      "degradedCodes": [
-        "rch_telemetry_gap"
-      ],
+      "degradedCodes": ["rch_telemetry_gap"],
       "summary": "RCH posture was unavailable for this decision; no remote proof was attached."
     }
   ],
@@ -75,24 +60,14 @@
     "lookupOutcome": "candidate_lookup_timed_out",
     "presentIn": [],
     "absentFrom": [],
-    "unavailableIn": [
-      "beads",
-      "bv",
-      "rch"
-    ],
+    "unavailableIn": ["beads", "bv", "rch"],
     "explanation": "Live candidate lookup timed out or was unavailable; do not claim or edit until the safe actionable queue and claim gate both answer fresh."
   },
   "blockerGroups": [
     {
       "code": "claim_gate_degraded_authority",
       "severity": "warning",
-      "sources": [
-        "agent_mail",
-        "beads",
-        "bv",
-        "memory_drift",
-        "rch"
-      ],
+      "sources": ["agent_mail", "beads", "bv", "memory_drift", "rch"],
       "reason": "One or more required claim sources is stale, timed out, corrupt, or unavailable.",
       "nextNonMutatingCommandIds": [
         "refresh_actionable_queue",

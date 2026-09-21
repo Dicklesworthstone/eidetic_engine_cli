@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.11.5",
     "epic_letter": "P"
   },
-  "surfaces": [
-    "diag artifacts"
-  ],
+  "surfaces": ["diag artifacts"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "agent_mail_archive_degraded",
     "severity": "warning",
-    "message_contains": [
-      "Agent Mail archive"
-    ],
+    "message_contains": ["Agent Mail archive"],
     "repair_contains": "manifest",
     "repair_strings": [
       "Use compress_preserve or ee artifact relocate with a manifest; never delete Agent Mail archive files automatically."

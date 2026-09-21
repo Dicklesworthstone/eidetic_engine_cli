@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.2",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "peer_discovery_budget_exhausted",
     "severity": "warning",
-    "message_contains": [
-      "discovery budget",
-      "exhausted"
-    ],
+    "message_contains": ["discovery budget", "exhausted"],
     "repair_contains": "EE_TAILSCALE_DISCOVERY_BUDGET_MS"
   }
 }

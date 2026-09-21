@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.13",
     "epic_letter": "SRR6.46.13"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "drift_grace_soft_stale_peer_count_high",
     "severity": "warning",
-    "message_contains": [
-      "soft_stale"
-    ],
+    "message_contains": ["soft_stale"],
     "repair_contains": "ee mesh status"
   }
 }

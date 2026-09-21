@@ -22,19 +22,14 @@
         "source": "agent_mail",
         "status": "degraded",
         "freshness": "unknown",
-        "degradedCodes": [
-          "agent_mail_unavailable"
-        ],
+        "degradedCodes": ["agent_mail_unavailable"],
         "provenance": "health_check degraded_read_only archive ahead of sqlite index"
       },
       {
         "source": "rch",
         "status": "degraded",
         "freshness": "current",
-        "degradedCodes": [
-          "rch_worker_topology_blocked",
-          "rch_remote_required_fallback_prevented"
-        ],
+        "degradedCodes": ["rch_worker_topology_blocked", "rch_remote_required_fallback_prevented"],
         "provenance": "rch exec remote-required preflight"
       },
       {
@@ -101,9 +96,7 @@
     },
     "checkout": {
       "dirtyPathCount": 1,
-      "dirtyPathsRedacted": [
-        ".beads/issues.jsonl"
-      ],
+      "dirtyPathsRedacted": [".beads/issues.jsonl"],
       "collisionRisk": "unknown"
     },
     "verification": {
@@ -131,10 +124,7 @@
         "why": "The packet cannot prove Cargo work while remote-only verification is blocked."
       }
     ],
-    "doNotProceedBecause": [
-      "remote_only_rch_not_safe",
-      "agent_mail_inbox_unavailable"
-    ],
+    "doNotProceedBecause": ["remote_only_rch_not_safe", "agent_mail_inbox_unavailable"],
     "safeToClaim": false,
     "degraded": [
       {

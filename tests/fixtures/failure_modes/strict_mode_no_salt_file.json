@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "strict_mode_no_salt_file",
     "severity": "high",
-    "message_contains": [
-      "key material is missing",
-      "capsule"
-    ],
+    "message_contains": ["key material is missing", "capsule"],
     "repair_contains": "Resume on the machine/workspace",
     "repair_string": "Resume on the machine/workspace that created the capsule, or recreate the capsule."
   }

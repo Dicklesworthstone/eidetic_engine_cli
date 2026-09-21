@@ -58,11 +58,7 @@
       "topology_blocked",
       "rch_verify_topology_blocked"
     ],
-    "must_not_recommend": [
-      "cancel_active_build",
-      "local_cargo_fallback",
-      "agent_daemon_restart"
-    ],
+    "must_not_recommend": ["cancel_active_build", "local_cargo_fallback", "agent_daemon_restart"],
     "notes": "active_build_count and queued_build_count must be preserved as 0; the contradiction is reported as bounded detail, never as active_project_exclusion ownership; no claim that remote Cargo was attempted"
   }
 }

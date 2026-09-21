@@ -5,11 +5,7 @@
     "bead": "bd-1pi9m.2",
     "epic_letter": "CAP"
   },
-  "surfaces": [
-    "journal append",
-    "journal list",
-    "journal show"
-  ],
+  "surfaces": ["journal append", "journal list", "journal show"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -23,10 +19,7 @@
   "expected_emission": {
     "code": "journal_disabled",
     "severity": "info",
-    "message_contains": [
-      "[journal] enabled = false",
-      "no journal rows"
-    ]
+    "message_contains": ["[journal] enabled = false", "no journal rows"]
   },
   "notes": "Capture must not silently drop evidence: the refusal is explicit (status journal_disabled + degraded entry) so a harness hook can detect the gate instead of assuming the entry landed."
 }

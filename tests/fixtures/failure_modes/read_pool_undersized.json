@@ -5,9 +5,7 @@
     "bead": "bd-2caru.7",
     "epic_letter": "SRR"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "read_pool_undersized",
     "severity": "low",
-    "message_contains": [
-      "read pool",
-      "undersized"
-    ],
+    "message_contains": ["read pool", "undersized"],
     "repair_contains": "increase storage.read_pool.size"
   }
 }

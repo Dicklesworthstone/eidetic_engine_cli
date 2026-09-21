@@ -4,9 +4,7 @@
   "data": {
     "impactStatus": "partial",
     "reason": "Changed paths map to fixture codes or catalog docs, but focused verification does not cover the full catalog.",
-    "changedPaths": [
-      "docs/degraded_codes.md"
-    ],
+    "changedPaths": ["docs/degraded_codes.md"],
     "fixtureCodes": [],
     "unmappedPaths": [],
     "caveats": [

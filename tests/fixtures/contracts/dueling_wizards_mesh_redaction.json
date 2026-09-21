@@ -26,15 +26,8 @@
     "revisionNotice",
     "curationSignal"
   ],
-  "allowedRedactionClasses": [
-    "omit",
-    "hash",
-    "redact"
-  ],
-  "allowedExportPostures": [
-    "deny",
-    "redact"
-  ],
+  "allowedRedactionClasses": ["omit", "hash", "redact"],
+  "allowedExportPostures": ["deny", "redact"],
   "outboundDecisionExamples": [
     {
       "exampleId": "memory_anchor_hash_preview",
@@ -101,10 +94,7 @@
       "anchorValueContract": {
         "rawAnchorValuesAllowed": false,
         "meshValueMaterialPolicy": "hash_or_redacted_anchor_value_only",
-        "allowedValueFields": [
-          "anchor_value_hash",
-          "redacted_anchor_value"
-        ],
+        "allowedValueFields": ["anchor_value_hash", "redacted_anchor_value"],
         "forbiddenOutboundFields": [
           "anchor_value",
           "raw_anchor_value",

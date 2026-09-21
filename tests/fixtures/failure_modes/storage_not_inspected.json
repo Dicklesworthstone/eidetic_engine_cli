@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -18,10 +16,7 @@
   "expected_emission": {
     "code": "storage_not_inspected",
     "severity": "low",
-    "message_contains": [
-      "Storage readiness was not inspected",
-      "no workspace"
-    ],
+    "message_contains": ["Storage readiness was not inspected", "no workspace"],
     "repair_contains": "ee status --workspace",
     "repair_string": "Run `ee status --workspace . --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

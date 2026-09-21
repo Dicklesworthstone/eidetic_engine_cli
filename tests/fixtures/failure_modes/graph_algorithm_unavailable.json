@@ -5,9 +5,7 @@
     "bead": "bd-3usjw.2",
     "epic_letter": "Bridge Part II"
   },
-  "surfaces": [
-    "graph centrality"
-  ],
+  "surfaces": ["graph centrality"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +21,7 @@
   "expected_emission": {
     "code": "graph_algorithm_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "Graph centrality algorithm",
-      "no computed scores"
-    ],
+    "message_contains": ["Graph centrality algorithm", "no computed scores"],
     "repair_contains": "ee graph centrality-refresh --algorithm authority",
     "repair_string": "ee graph centrality-refresh --algorithm authority",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

@@ -24,10 +24,7 @@
     "stable_ordering",
     "stderr_or_artifact_diagnostics"
   ],
-  "packAssertions": [
-    "pack_hash_reproducible",
-    "pack_hash_absence_is_failure_not_skip"
-  ],
+  "packAssertions": ["pack_hash_reproducible", "pack_hash_absence_is_failure_not_skip"],
   "determinismMatrix": [
     {
       "surface": "why_not",
@@ -36,7 +33,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -49,7 +51,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -62,7 +69,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -75,7 +87,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": ["created_at", "updated_at"],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -88,7 +105,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -101,7 +123,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -114,7 +141,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -127,7 +159,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -140,7 +177,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -153,7 +195,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": true,
       "packHashAbsenceFailure": true,
@@ -166,7 +213,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": true,
       "packHashAbsenceFailure": true,
@@ -179,7 +231,12 @@
       "stdoutMachineOnly": true,
       "diagnosticsChannel": "stderr_or_artifact",
       "runtimeProof": "rch_only",
-      "requiredAssertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "requiredAssertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "volatileFields": [],
       "packHashExpected": false,
       "packHashAbsenceFailure": false,
@@ -423,7 +480,12 @@
       "status": "in_progress",
       "command": "ee why-not <id> --task <task> --json",
       "schemaRefs": ["ee.why_not_selected.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -432,7 +494,12 @@
       "status": "planned",
       "command": "ee outcome harvest --dry-run --json",
       "schemaRefs": ["ee.outcome_harvest.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -441,7 +508,12 @@
       "status": "planned",
       "command": "ee outcome calibration --json",
       "schemaRefs": ["ee.outcome_calibration.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -450,7 +522,12 @@
       "status": "planned",
       "command": "ee impact <surface> --json",
       "schemaRefs": ["ee.impact.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": [],
       "anchorDeterminism": {
         "storageAssetKind": "memory_anchors",
@@ -460,10 +537,7 @@
         "redactedValueDeterministic": true,
         "generationSource": "workspace_generation_not_wall_clock",
         "ordering": "memory_id_anchor_kind_anchor_value_hash_generation",
-        "volatileFields": [
-          "created_at",
-          "updated_at"
-        ],
+        "volatileFields": ["created_at", "updated_at"],
         "requiredAssertions": [
           "stable_anchor_value_hash",
           "stable_redacted_anchor_value",
@@ -479,7 +553,12 @@
       "status": "planned",
       "command": "ee diagnose-error --json",
       "schemaRefs": ["ee.diagnose_error.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -488,7 +567,12 @@
       "status": "planned",
       "command": "ee blind-spots --json",
       "schemaRefs": ["ee.blind_spots.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -497,7 +581,12 @@
       "status": "implemented",
       "command": "ee conflict list --json",
       "schemaRefs": ["ee.conflict.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -506,7 +595,12 @@
       "status": "implemented",
       "command": "ee attest memory <id> --json",
       "schemaRefs": ["ee.attest.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -515,7 +609,12 @@
       "status": "implemented",
       "command": "ee bootstrap docs --dry-run --json",
       "schemaRefs": ["ee.bootstrap.docs.run.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     },
     {
@@ -524,7 +623,12 @@
       "status": "planned",
       "command": "ee pack/search/why --read-fence latest --json",
       "schemaRefs": ["ee.read_fence_consistency.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": ["pack_hash_reproducible", "pack_hash_absence_is_failure_not_skip"]
     },
     {
@@ -533,7 +637,12 @@
       "status": "planned",
       "command": "ee pack <task> --json",
       "schemaRefs": ["ee.pack.v2"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": ["pack_hash_reproducible", "pack_hash_absence_is_failure_not_skip"]
     },
     {
@@ -542,18 +651,32 @@
       "status": "planned",
       "command": "ee feedback roi --json",
       "schemaRefs": ["ee.feedback_roi.v1"],
-      "assertions": ["byte_identical_json", "volatile_fields_explicit", "stable_ordering", "stderr_or_artifact_diagnostics"],
+      "assertions": [
+        "byte_identical_json",
+        "volatile_fields_explicit",
+        "stable_ordering",
+        "stderr_or_artifact_diagnostics"
+      ],
       "packAssertions": []
     }
   ],
   "anchors": [
     {
       "source": "scripts/e2e_overhaul/determinism.sh",
-      "needles": ["run_3x_assert_identical", "strip_variable_fields", "VOLATILE_FIELD_NAMES", "determinism_pack_hash_reproducible"]
+      "needles": [
+        "run_3x_assert_identical",
+        "strip_variable_fields",
+        "VOLATILE_FIELD_NAMES",
+        "determinism_pack_hash_reproducible"
+      ]
     },
     {
       "source": "tests/determinism_unit.rs",
-      "needles": ["context_pack_hash_reproduces_across_three_invocations", "db_status_json_reproduces_across_three_invocations", "search_tie_break_stable_across_three_invocations"]
+      "needles": [
+        "context_pack_hash_reproduces_across_three_invocations",
+        "db_status_json_reproduces_across_three_invocations",
+        "search_tie_break_stable_across_three_invocations"
+      ]
     },
     {
       "source": "scripts/lib/e2e_harness.sh",

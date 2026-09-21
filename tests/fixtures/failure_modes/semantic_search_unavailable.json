@@ -13,6 +13,10 @@
   "expected_emission": {
     "code": "semantic_search_unavailable",
     "severity": "warning",
-    "message_contains": ["Recipe semantic search is unavailable", "Frankensearch lexical retrieval", "redistributed weights"]
+    "message_contains": [
+      "Recipe semantic search is unavailable",
+      "Frankensearch lexical retrieval",
+      "redistributed weights"
+    ]
   }
 }

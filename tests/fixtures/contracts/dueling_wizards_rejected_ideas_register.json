@@ -19,17 +19,8 @@
     "candidate_not_auto_mutation",
     "determinism_preserved"
   ],
-  "reopenEvidenceKinds": [
-    "measured_workflow_result",
-    "regression",
-    "benchmark",
-    "corpus_finding"
-  ],
-  "forbiddenReopenEvidence": [
-    "restated_proposal",
-    "aesthetic_preference",
-    "unmeasured_opinion"
-  ],
+  "reopenEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+  "forbiddenReopenEvidence": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
   "ideaWizardPhaseGates": [
     {
       "phase": 2,
@@ -83,11 +74,7 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "salvageMode": "versioned_eval_only",
-      "rationaleTags": [
-        "needs_dense_triplets",
-        "overfit_risk",
-        "pack_hash_drift"
-      ]
+      "rationaleTags": ["needs_dense_triplets", "overfit_risk", "pack_hash_drift"]
     },
     {
       "id": "cross_harness_bayesian_prior_calibration",
@@ -96,11 +83,7 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "salvageMode": "small_tie_breaker_only",
-      "rationaleTags": [
-        "sparse_agent_tag_cells",
-        "schema_bloat",
-        "overlaps_per_agent_bias"
-      ]
+      "rationaleTags": ["sparse_agent_tag_cells", "schema_bloat", "overlaps_per_agent_bias"]
     },
     {
       "id": "concept_drift_radar_auto_demote",
@@ -124,7 +107,12 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "minimumEvidenceCount": 1,
-      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "acceptedEvidenceKinds": [
+        "measured_workflow_result",
+        "regression",
+        "benchmark",
+        "corpus_finding"
+      ],
       "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
       "firstAllowedDisposition": "explicit_lab_or_eval_mode",
       "livePolicyMutation": "forbidden_until_deterministic_proof",
@@ -137,7 +125,12 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "minimumEvidenceCount": 1,
-      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "acceptedEvidenceKinds": [
+        "measured_workflow_result",
+        "regression",
+        "benchmark",
+        "corpus_finding"
+      ],
       "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
       "firstAllowedDisposition": "explicit_lab_or_eval_mode",
       "livePolicyMutation": "forbidden_until_deterministic_proof",
@@ -150,7 +143,12 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "minimumEvidenceCount": 1,
-      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "acceptedEvidenceKinds": [
+        "measured_workflow_result",
+        "regression",
+        "benchmark",
+        "corpus_finding"
+      ],
       "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
       "firstAllowedDisposition": "explicit_lab_or_eval_mode",
       "livePolicyMutation": "forbidden_until_deterministic_proof",
@@ -163,7 +161,12 @@
       "status": "killed",
       "reopenPolicy": "requires_new_evidence",
       "minimumEvidenceCount": 1,
-      "acceptedEvidenceKinds": ["measured_workflow_result", "regression", "benchmark", "corpus_finding"],
+      "acceptedEvidenceKinds": [
+        "measured_workflow_result",
+        "regression",
+        "benchmark",
+        "corpus_finding"
+      ],
       "forbiddenEvidenceKinds": ["restated_proposal", "aesthetic_preference", "unmeasured_opinion"],
       "firstAllowedDisposition": "explicit_lab_or_eval_mode",
       "livePolicyMutation": "forbidden_until_deterministic_proof",

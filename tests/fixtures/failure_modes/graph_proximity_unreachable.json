@@ -5,9 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "proximity"
-  ],
+  "surfaces": ["proximity"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,9 +20,6 @@
   "expected_emission": {
     "code": "graph_proximity_unreachable",
     "severity": "info",
-    "message_contains": [
-      "unreachable",
-      "different components"
-    ]
+    "message_contains": ["unreachable", "different components"]
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-gni47.3",
     "epic_letter": "SF"
   },
-  "surfaces": [
-    "graph feature-enrichment"
-  ],
+  "surfaces": ["graph feature-enrichment"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "singleflight_leader_failed",
     "severity": "medium",
-    "message_contains": [
-      "Single-flight coalescing failed",
-      "observed leader failure for key"
-    ],
+    "message_contains": ["Single-flight coalescing failed", "observed leader failure for key"],
     "repair_contains": "leader operation error",
     "repair_string": "Inspect the leader operation error; followers observed the same failure."
   }

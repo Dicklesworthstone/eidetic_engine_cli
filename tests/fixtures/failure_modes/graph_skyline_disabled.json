@@ -5,9 +5,7 @@
     "bead": "bd-reality-core-convergence-1azkt.31",
     "epic_letter": "E"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_skyline_disabled",
     "severity": "info",
-    "message_contains": [
-      "Knowledge skyline status is disabled",
-      "graph.feature.skyline.enabled"
-    ],
+    "message_contains": ["Knowledge skyline status is disabled", "graph.feature.skyline.enabled"],
     "repair_contains": "ee config set graph.feature.skyline.enabled true"
   }
 }

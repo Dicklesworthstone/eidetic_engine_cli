@@ -6,24 +6,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The diagnostics capability-gap override forces storage to report as unimplemented.",
-    "setup_commands": [
-      "export EE_DIAG_FORCE_CAPABILITY_GAP=storage"
-    ],
+    "setup_commands": ["export EE_DIAG_FORCE_CAPABILITY_GAP=storage"],
     "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=storage ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "storage_unimplemented",
     "severity": "high",
-    "message_contains": [
-      "Storage has no compiled implementation"
-    ],
+    "message_contains": ["Storage has no compiled implementation"],
     "repair_contains": "storage subsystem",
     "repair_string": "Use a binary built with the storage subsystem enabled."
   }

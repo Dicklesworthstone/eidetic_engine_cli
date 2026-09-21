@@ -5,24 +5,18 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "No source-authority snapshot is readable at the resolved path; verification posture cannot inform the hotset.",
-    "setup_commands": [
-      "rm -f <workspace>/.ee/source-authority-snapshot.json"
-    ],
+    "setup_commands": ["rm -f <workspace>/.ee/source-authority-snapshot.json"],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
   "expected_emission": {
     "code": "hotset_source_authority_missing",
     "severity": "low",
-    "message_contains": [
-      "source-authority snapshot"
-    ],
+    "message_contains": ["source-authority snapshot"],
     "repair_contains": "Capture the sourceAuthority block from `ee swarm work-packet"
   }
 }

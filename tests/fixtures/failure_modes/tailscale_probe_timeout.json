@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.1",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "tailscale_probe_timeout",
     "severity": "warning",
-    "message_contains": [
-      "Tailscale probe",
-      "timeout"
-    ],
+    "message_contains": ["Tailscale probe", "timeout"],
     "repair_contains": "EE_TAILSCALE_PROBE_TIMEOUT_MS",
     "repair_string": "Run tailscale status directly or raise EE_TAILSCALE_PROBE_TIMEOUT_MS.",
     "repair_command_regex": "(?P<cmd>tailscale status)"

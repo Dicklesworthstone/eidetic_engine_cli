@@ -5,24 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal estimate"
-  ],
+  "surfaces": ["causal estimate"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
     "description": "Replay causal estimate reports the replay-fidelity assumption.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal estimate --artifact-id artifact-1 --method replay --workspace . --json"
   },
   "expected_emission": {
     "code": "replay_fidelity",
     "severity": "info",
-    "message_contains": [
-      "Counterfactual replay",
-      "accurately represents"
-    ]
+    "message_contains": ["Counterfactual replay", "accurately represents"]
   }
 }

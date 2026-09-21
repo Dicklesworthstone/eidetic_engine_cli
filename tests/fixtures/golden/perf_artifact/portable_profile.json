@@ -6,7 +6,7 @@
   "sourcePath": "redacted/portable.json",
   "contentHash": "portable123",
   "observedHash": "portable123",
-  "profile": {"profileName": "portable", "confidence": "high"},
+  "profile": { "profileName": "portable", "confidence": "high" },
   "fixtureTier": "smoke",
   "commandFamily": "pack",
   "metrics": {

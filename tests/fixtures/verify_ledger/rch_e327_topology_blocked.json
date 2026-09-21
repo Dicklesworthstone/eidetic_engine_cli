@@ -13,10 +13,7 @@
     "dirty_status_hash": "sha256:b8c8e8c5fb6c7a1e1cf2c8b9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d",
     "verification_attribution": "cc-graph"
   },
-  "degraded_codes": [
-    "rch_verify_topology_blocked",
-    "rch_verify_local_fallback_refused"
-  ],
+  "degraded_codes": ["rch_verify_topology_blocked", "rch_verify_local_fallback_refused"],
   "stdout_tail": "",
   "stderr_tail": "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.\n",
   "known_blocker": {

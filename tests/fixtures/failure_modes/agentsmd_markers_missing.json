@@ -5,11 +5,7 @@
     "bead": "bd-39tzu.4",
     "epic_letter": "PRM"
   },
-  "surfaces": [
-    "export agentsmd",
-    "import agentsmd",
-    "diag agentsmd-drift"
-  ],
+  "surfaces": ["export agentsmd", "import agentsmd", "diag agentsmd-drift"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -23,10 +19,7 @@
   "expected_emission": {
     "code": "agentsmd_markers_missing",
     "severity": "info",
-    "message_contains": [
-      "no ee:agentsmd managed block",
-      "between its own markers"
-    ]
+    "message_contains": ["no ee:agentsmd managed block", "between its own markers"]
   },
   "notes": "Informational by design: a file without markers is the normal starting state of the bridge. The first `ee export agentsmd` writes the markers; until then import treats every rule-like line as hand-written."
 }

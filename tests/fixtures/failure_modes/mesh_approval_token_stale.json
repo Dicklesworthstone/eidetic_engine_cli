@@ -5,9 +5,7 @@
     "bead": "bd-tc-epic-qzk7o.2.2",
     "epic_letter": "TC"
   },
-  "surfaces": [
-    "mesh grant"
-  ],
+  "surfaces": ["mesh grant"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "mesh_approval_token_stale",
     "severity": "warning",
-    "message_contains": [
-      "mesh approval token is authentic",
-      "approved preview is stale"
-    ],
+    "message_contains": ["mesh approval token is authentic", "approved preview is stale"],
     "repair_contains": "read-only lane preview again",
     "repair_string": "Run the read-only lane preview again and submit its new approval token through bounded stdin."
   }

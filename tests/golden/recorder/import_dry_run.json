@@ -25,10 +25,7 @@
     "eventsRejected": 1,
     "payloadBytes": 167,
     "redactedBytes": 99,
-    "redactionClasses": [
-      "secret",
-      "token"
-    ],
+    "redactionClasses": ["secret", "token"],
     "chainComplete": true
   },
   "mutations": [
@@ -56,10 +53,7 @@
       "payloadHash": "blake3:DYNAMIC",
       "payloadBytes": 99,
       "redactionStatus": "full",
-      "redactionClasses": [
-        "secret",
-        "token"
-      ],
+      "redactionClasses": ["secret", "token"],
       "redactedBytes": 99,
       "previousEventHash": null,
       "eventHash": "blake3:DYNAMIC",
@@ -84,7 +78,5 @@
       "chainStatus": "linked"
     }
   ],
-  "warnings": [
-    "source contained 3 events but maxEvents limited mapping to 2"
-  ]
+  "warnings": ["source contained 3 events but maxEvents limited mapping to 2"]
 }

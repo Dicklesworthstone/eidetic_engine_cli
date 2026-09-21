@@ -5,10 +5,7 @@
     "bead": "bd-2z5ly.9.3",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "swarm brief",
-    "swarm work-packet"
-  ],
+  "surfaces": ["swarm brief", "swarm work-packet"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +18,7 @@
   "expected_emission": {
     "code": "beads_no_output",
     "severity": "warning",
-    "message_contains": [
-      "no output",
-      "advisory only"
-    ],
+    "message_contains": ["no output", "advisory only"],
     "repair_contains": "br",
     "repair_string": "br list --status in_progress --json",
     "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

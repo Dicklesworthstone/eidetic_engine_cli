@@ -3,10 +3,7 @@
   "evidence": {
     "contextHash": "blake3:d9cd5231776c092139912d35bf428df14135d84687f5da9a8d9a1801158e162a",
     "missing": [],
-    "noteInferenceCases": [
-      "procedural_rule",
-      "episodic_failure"
-    ],
+    "noteInferenceCases": ["procedural_rule", "episodic_failure"],
     "noteInferenceFixture": "tests/fixtures/note_inference_cases.jsonl",
     "packHash": "blake3:d9cd5231776c092139912d35bf428df14135d84687f5da9a8d9a1801158e162a",
     "packTextPresent": true,

@@ -5,9 +5,7 @@
     "bead": "bd-status-search-lexical-honesty-ejdpo",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "search_lexical_only",
     "severity": "medium",
-    "message_contains": [
-      "semantic retrieval is unavailable",
-      "lexical fallback"
-    ],
+    "message_contains": ["semantic retrieval is unavailable", "lexical fallback"],
     "repair_contains": "ee index rebuild --workspace .",
     "repair_string": "Run `ee index rebuild --workspace .`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

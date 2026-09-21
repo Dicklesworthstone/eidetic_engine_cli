@@ -128,9 +128,7 @@
         "rejectedSimHashCollisionBelowCosineFloor": 0
       },
       "embedderCallCount": 2,
-      "expectedDegradedCodes": [
-        "simhash_index_unavailable"
-      ],
+      "expectedDegradedCodes": ["simhash_index_unavailable"],
       "perfShape": {
         "embedderCallsAvoidedVsLegacy": 0,
         "writeLatencyDeltaMsLowerBound": null,

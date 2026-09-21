@@ -5,10 +5,7 @@
     "bead": "bd-17c65.2.4",
     "epic_letter": "B"
   },
-  "surfaces": [
-    "search",
-    "diag search"
-  ],
+  "surfaces": ["search", "diag search"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "profile_search_limit_capped",
     "severity": "low",
-    "message_contains": [
-      "limit",
-      "capped"
-    ],
+    "message_contains": ["limit", "capped"],
     "repair_contains": "profile",
     "repair_string": "ee profile config plan --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

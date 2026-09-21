@@ -5,12 +5,7 @@
     "bead": "bd-nw0v3.2",
     "epic_letter": "SRR6.16"
   },
-  "surfaces": [
-    "mesh cache",
-    "context",
-    "mesh status",
-    "doctor"
-  ],
+  "surfaces": ["mesh cache", "context", "mesh status", "doctor"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -25,10 +20,7 @@
   "expected_emission": {
     "code": "mesh_remote_body_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "remote body",
-      "unavailable"
-    ],
+    "message_contains": ["remote body", "unavailable"],
     "repair_contains": "sync",
     "repair_string": "Retry mesh sync or fetch after the peer advertises the body; until then, use metadata-only context."
   }

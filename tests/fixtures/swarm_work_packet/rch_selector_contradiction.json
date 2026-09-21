@@ -49,12 +49,7 @@
         {
           "commandId": "bead_show_candidate",
           "displayCommand": "br show bd-rch-selector --json",
-          "argv": [
-            "br",
-            "show",
-            "bd-rch-selector",
-            "--json"
-          ],
+          "argv": ["br", "show", "bd-rch-selector", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -83,11 +78,7 @@
         "collisionRisk": "none",
         "unsafeReasons": [],
         "staleReasons": [],
-        "sourceRefs": [
-          "br://bd-rch-selector",
-          "bv://bd-rch-selector",
-          "rch://selector-admission"
-        ]
+        "sourceRefs": ["br://bd-rch-selector", "bv://bd-rch-selector", "rch://selector-admission"]
       }
     ],
     "coordination": {
@@ -146,12 +137,8 @@
         "schema": "ee.rch.selector_admission_probe.v1",
         "status": "selection_failed",
         "requiredRuntime": "Rust",
-        "workersReported": [
-          "worker-01"
-        ],
-        "daemonWorkersReported": [
-          "worker-01"
-        ],
+        "workersReported": ["worker-01"],
+        "daemonWorkersReported": ["worker-01"],
         "workersReportedCount": 1,
         "daemonWorkersReportedCount": 1,
         "selectedWorker": null,

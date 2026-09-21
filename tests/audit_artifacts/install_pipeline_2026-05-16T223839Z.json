@@ -359,22 +359,13 @@
   "release_workflow": {
     "path": ".github/workflows/release.yml",
     "targets_csv": "aarch64-apple-darwin,aarch64-unknown-linux-gnu,x86_64-apple-darwin,x86_64-pc-windows-msvc,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl",
-    "asset_categories": [
-      "tar.xz",
-      "tar.xz.sha256",
-      "sigstore",
-      "install.sh",
-      "install.ps1"
-    ],
+    "asset_categories": ["tar.xz", "tar.xz.sha256", "sigstore", "install.sh", "install.ps1"],
     "cosign_installer_present": true,
     "tag_trigger_present": true,
     "cosign_bundle_present": true,
     "cosign_identity_bound": true,
     "release_verifies_sigstore_before_publish": true,
-    "smoke_containers": [
-      "debian:bookworm-slim",
-      "ubuntu:24.04"
-    ],
+    "smoke_containers": ["debian:bookworm-slim", "ubuntu:24.04"],
     "macos_smoke_present": true,
     "smoke_uses_release_tag": true,
     "smoke_uses_release_installer_asset": true,

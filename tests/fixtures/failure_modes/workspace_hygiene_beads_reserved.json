@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.11",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_beads_reserved",
     "severity": "warning",
-    "message_contains": [
-      "reserved"
-    ],
+    "message_contains": ["reserved"],
     "repair_contains": "reservation",
     "repair_strings": [
       "Wait for the active reservation to clear.",

@@ -5,9 +5,7 @@
     "bead": "bd-xwzeh",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "discovery_lists_unreadable",
     "severity": "high",
-    "message_contains": [
-      "no peer was probed",
-      "empty denylist"
-    ],
+    "message_contains": ["no peer was probed", "empty denylist"],
     "repair_contains": ".ee/"
   }
 }

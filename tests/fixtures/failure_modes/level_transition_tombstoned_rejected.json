@@ -5,12 +5,7 @@
     "bead": "bd-17c65.7.8",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "memory level",
-    "workflow close",
-    "curate apply",
-    "curate tombstone"
-  ],
+  "surfaces": ["memory level", "workflow close", "curate apply", "curate tombstone"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -25,10 +20,7 @@
   "expected_emission": {
     "code": "level_transition_tombstoned_rejected",
     "severity": "medium",
-    "message_contains": [
-      "tombstoned",
-      "transition"
-    ],
+    "message_contains": ["tombstoned", "transition"],
     "repair_contains": "ee memory history"
   }
 }

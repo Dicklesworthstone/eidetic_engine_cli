@@ -5,11 +5,7 @@
     "bead": "bd-21xbi.2",
     "epic_letter": "bd-21xbi"
   },
-  "surfaces": [
-    "status",
-    "doctor",
-    "search"
-  ],
+  "surfaces": ["status", "doctor", "search"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -23,10 +19,7 @@
   "expected_emission": {
     "code": "lexical_ram_tier_heap_warmload",
     "severity": "info",
-    "message_contains": [
-      "Lexical RAM-tier",
-      "heap memory"
-    ],
+    "message_contains": ["Lexical RAM-tier", "heap memory"],
     "repair_contains": "heap warmload",
     "repair_string": "Use the heap warmload path as the supported V1 optimization. Do not require OS-level pinning unless a future product decision explicitly re-scopes the feature and lands audited proof."
   }

@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "tripwire check",
-    "preflight"
-  ],
+  "surfaces": ["tripwire check", "preflight"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "tripwire_inputs_incomplete",
     "severity": "warning",
-    "message_contains": [
-      "Missing persisted tripwire inputs"
-    ],
+    "message_contains": ["Missing persisted tripwire inputs"],
     "repair_contains": "ee tripwire list",
     "repair_string": "ee tripwire list --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

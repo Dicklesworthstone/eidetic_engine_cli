@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "science analytics"
-  ],
+  "surfaces": ["science analytics"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "science_budget_exceeded",
     "severity": "medium",
-    "message_contains": [
-      "budget was exhausted"
-    ],
+    "message_contains": ["budget was exhausted"],
     "repair_contains": "Increase"
   }
 }

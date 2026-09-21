@@ -18,14 +18,8 @@
   "expected_emission": {
     "code": "mi_dedup_candidate_proposed",
     "severity": "info",
-    "message_contains": [
-      "Mutual-information dedup collapsed",
-      "metadata.mergedFrom",
-      "provenance"
-    ],
+    "message_contains": ["Mutual-information dedup collapsed", "metadata.mergedFrom", "provenance"],
     "repair_contains": "ee curate candidates --type dedup --json",
-    "repair_strings": [
-      "Review durable proposals with ee curate candidates --type dedup --json."
-    ]
+    "repair_strings": ["Review durable proposals with ee curate candidates --type dedup --json."]
   }
 }

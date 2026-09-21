@@ -5,25 +5,18 @@
     "bead": "bd-17c65.14.15.5",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "lab replay"
-  ],
+  "surfaces": ["lab replay"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "Lab replay was asked to verify determinism and repeated replay assemblies did not produce byte-identical normalized packs.",
-    "setup_commands": [
-      "ee lab capture --workspace . --task-input 'frozen replay' --json"
-    ],
+    "setup_commands": ["ee lab capture --workspace . --task-input 'frozen replay' --json"],
     "invocation": "ee lab replay EPISODE_ID --workspace . --verify-determinism --json"
   },
   "expected_emission": {
     "code": "lab_replay_nondeterministic",
     "severity": "high",
-    "message_contains": [
-      "Lab replay",
-      "non-identical"
-    ],
+    "message_contains": ["Lab replay", "non-identical"],
     "repair_contains": "verifyDeterminism"
   }
 }

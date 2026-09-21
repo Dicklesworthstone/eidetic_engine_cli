@@ -1,19 +1,12 @@
 {
   "schema": "ee.eval_fixture.v1",
   "fixture_id": "fx.memory_poisoning.v1",
-  "scenario_ids": [
-    "usr_import_poisoned_memory_guard"
-  ],
+  "scenario_ids": ["usr_import_poisoned_memory_guard"],
   "fixture_family": "memory_poisoning",
   "coverage_state": "implemented",
   "journey": "Stored instruction overrides remain inspectable evidence but are excluded from authoritative context packs, while safe guidance retains provenance.",
-  "owning_bead_ids": [
-    "eidetic_engine_cli-73b0"
-  ],
-  "owning_gate_ids": [
-    "gate.13.trust_policy",
-    "gate.14.executable_claims"
-  ],
+  "owning_bead_ids": ["eidetic_engine_cli-73b0"],
+  "owning_gate_ids": ["gate.13.trust_policy", "gate.14.executable_claims"],
   "deterministic": {
     "fixed_clock": "2026-04-29T12:20:00Z",
     "deterministic_seed": "seed.memory_poisoning.v1",
@@ -24,9 +17,7 @@
       "policy_00000000000000000000000401",
       "pack_00000000000000000000000401"
     ],
-    "workspace_fingerprints": [
-      "workspace.memory_poisoning.v1"
-    ]
+    "workspace_fingerprints": ["workspace.memory_poisoning.v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -46,13 +37,7 @@
   "command_sequence": [
     {
       "step": 1,
-      "argv": [
-        "ee",
-        "init",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "init", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -162,57 +147,26 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.workspace"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.workspace"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memoryId",
-        "data.provenance_uri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memoryId", "data.provenance_uri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memoryId",
-        "data.content",
-        "data.provenance_uri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token",
-        "systemPrompt"
-      ]
+      "required_fields": ["data.command", "data.memoryId", "data.content", "data.provenance_uri"],
+      "absent_fields": ["secret", "token", "systemPrompt"]
     },
     {
       "step": 4,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memoryId",
-        "data.content",
-        "data.provenance_uri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token",
-        "systemPrompt"
-      ]
+      "required_fields": ["data.command", "data.memoryId", "data.content", "data.provenance_uri"],
+      "absent_fields": ["secret", "token", "systemPrompt"]
     },
     {
       "step": 5,
@@ -225,21 +179,12 @@
         "data.pack.skipped",
         "degraded"
       ],
-      "absent_fields": [
-        "secret",
-        "token",
-        "ignorePreviousInstructions"
-      ]
+      "absent_fields": ["secret", "token", "ignorePreviousInstructions"]
     }
   ],
   "policy_expectations": {
-    "denied_memory_ids": [
-      "mem_00000000000000000000000402",
-      "mem_00000000000000000000000403"
-    ],
-    "allowed_memory_ids": [
-      "mem_00000000000000000000000401"
-    ],
+    "denied_memory_ids": ["mem_00000000000000000000000402", "mem_00000000000000000000000403"],
+    "allowed_memory_ids": ["mem_00000000000000000000000401"],
     "required_signal_codes": [
       "ignore_previous_instructions",
       "reveal_system_prompt",
@@ -261,18 +206,13 @@
           "kind": "inline_query",
           "query": "import legacy memories without trusting prompt injection"
         },
-        "expected_selected_memory_ids": [
-          "mem_00000000000000000000000401"
-        ],
+        "expected_selected_memory_ids": ["mem_00000000000000000000000401"],
         "critical_omitted_memory_ids": [
           "mem_00000000000000000000000402",
           "mem_00000000000000000000000403"
         ],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "context_filtered_results",
-          "context_lexical_fallback"
-        ],
+        "allowed_degradation_codes": ["context_filtered_results", "context_lexical_fallback"],
         "forbidden_redaction_leaks": [
           "secret",
           "token",

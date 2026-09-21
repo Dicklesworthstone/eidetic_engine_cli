@@ -11,11 +11,7 @@
     "bead": "ownership-posture-fresh-eyes-review",
     "reason": "fallback_code in specialized attribution report, not a top-level degraded code"
   },
-  "surfaces": [
-    "swarm brief",
-    "handoff capsule",
-    "compile blocker attribution"
-  ],
+  "surfaces": ["swarm brief", "handoff capsule", "compile blocker attribution"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -30,10 +26,7 @@
   "expected_emission": {
     "code": "unattributed_compile_blocker",
     "severity": "low",
-    "message_contains": [
-      "unattributed compile blocker",
-      "no active owner"
-    ],
+    "message_contains": ["unattributed compile blocker", "no active owner"],
     "repair_contains": "br list --status in_progress",
     "repair_string": "br list --status in_progress --json; bv --robot-file-beads <path>; search Agent Mail for the source path before editing"
   }

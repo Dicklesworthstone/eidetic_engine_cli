@@ -23,7 +23,7 @@
       "stderrExcerptHash": "blake3:first-failure-redacted",
       "artifactManifestHash": "blake3:agent-a-artifact-manifest",
       "retainedLogPathHash": "blake3:agent-a-retained-log-path",
-      "provenance": [{"source": "j1_jsonl", "eventKind": "artifact_manifest", "line": 4}]
+      "provenance": [{ "source": "j1_jsonl", "eventKind": "artifact_manifest", "line": 4 }]
     }
   ],
   "steps": [

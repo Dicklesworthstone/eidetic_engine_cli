@@ -37,9 +37,7 @@
         {
           "stage": "pack_selection",
           "elapsedMs": "<MEASURED>",
-          "sourceMetrics": [
-            "context_command_end_elapsed_ms_0001"
-          ],
+          "sourceMetrics": ["context_command_end_elapsed_ms_0001"],
           "ownerHint": "pack"
         }
       ],

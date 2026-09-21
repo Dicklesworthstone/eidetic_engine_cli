@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace"
-  ],
+  "surfaces": ["causal trace"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "The causal trace command is pointed at an explicit database path that does not exist.",
-    "setup_commands": [
-      "# use any workspace, but do not create missing.db"
-    ],
+    "setup_commands": ["# use any workspace, but do not create missing.db"],
     "invocation": "ee causal trace failure-1 --database missing.db --database-workspace-id wsp_123 --json"
   },
   "expected_emission": {
     "code": "causal_database_missing",
     "severity": "warning",
-    "message_contains": [
-      "Causal trace database does not exist"
-    ]
+    "message_contains": ["Causal trace database does not exist"]
   }
 }

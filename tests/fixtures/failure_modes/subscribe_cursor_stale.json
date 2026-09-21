@@ -5,9 +5,7 @@
     "bead": "bd-ub249",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "subscribe poll"
-  ],
+  "surfaces": ["subscribe poll"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "subscribe_cursor_stale",
     "severity": "warning",
-    "message_contains": [
-      "Requested cursor",
-      "ahead of the audit high watermark"
-    ],
+    "message_contains": ["Requested cursor", "ahead of the audit high watermark"],
     "repair_contains": "returned nextCursor",
     "repair_string": "Persist the returned nextCursor before polling again."
   }

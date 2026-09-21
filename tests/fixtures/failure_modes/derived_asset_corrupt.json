@@ -5,10 +5,7 @@
     "bead": "bd-17c65.12.6",
     "epic_letter": "L"
   },
-  "surfaces": [
-    "backup verify",
-    "backup restore"
-  ],
+  "surfaces": ["backup verify", "backup restore"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "derived_asset_corrupt",
     "severity": "high",
-    "message_contains": [
-      "derived backup asset",
-      "manifest"
-    ],
+    "message_contains": ["derived backup asset", "manifest"],
     "repair_contains": "ee backup verify",
     "repair_string": "run ee backup verify <id-or-path> --json and repair issues",
     "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: <[a-z|-]+>)?(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

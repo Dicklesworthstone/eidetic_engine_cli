@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "high",
   "repair_present": false,
   "trigger": {
@@ -21,8 +19,6 @@
   "expected_emission": {
     "code": "decay_sweep_handler_failed",
     "severity": "high",
-    "message_contains": [
-      "decay"
-    ]
+    "message_contains": ["decay"]
   }
 }

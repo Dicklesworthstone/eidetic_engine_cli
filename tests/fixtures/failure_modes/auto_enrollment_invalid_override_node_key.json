@@ -5,9 +5,7 @@
     "bead": "bd-2e4xa",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh auto-enroll"
-  ],
+  "surfaces": ["mesh auto-enroll"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "auto_enrollment_invalid_override_node_key",
     "severity": "warning",
-    "message_contains": [
-      "node key",
-      "Tailscale"
-    ],
+    "message_contains": ["node key", "Tailscale"],
     "repair_contains": "nodekey:"
   }
 }

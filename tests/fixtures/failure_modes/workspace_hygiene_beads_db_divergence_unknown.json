@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.4",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -20,10 +18,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_beads_db_divergence_unknown",
     "severity": "low",
-    "message_contains": [
-      "Beads",
-      "divergence"
-    ],
+    "message_contains": ["Beads", "divergence"],
     "repair_contains": "br sync",
     "repair_string": "Run `br sync --flush-only` to reconcile the Beads DB with the JSONL export.",
     "repair_command_regex": "Run `(?<cmd>br sync --flush-only)`",
@@ -42,12 +37,8 @@
         "ruleId": "repair_safety:mutating_external_coordination_repair",
         "source": "repair_action_safety",
         "reasonCode": "external_coordination_repair_command",
-        "evidence": [
-          "beads_mutation_command"
-        ],
-        "preconditions": [
-          "shared_state_coordination_required"
-        ]
+        "evidence": ["beads_mutation_command"],
+        "preconditions": ["shared_state_coordination_required"]
       }
     ]
   }

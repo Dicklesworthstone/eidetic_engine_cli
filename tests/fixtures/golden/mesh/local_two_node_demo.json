@@ -39,9 +39,7 @@
         "bodyDigest": "fixture:local-two-node-rule-v1",
         "bodyBytes": 58,
         "revisionToken": "rev_node01_000001",
-        "exportedLanes": [
-          "metadata"
-        ],
+        "exportedLanes": ["metadata"],
         "bodyExportedEagerly": false
       }
     },
@@ -53,9 +51,7 @@
         "nodeId": "node02",
         "sourceNodeId": "node01",
         "cacheState": "metadata_only",
-        "cachedMemoryIds": [
-          "meshmem_local_rule_001"
-        ],
+        "cachedMemoryIds": ["meshmem_local_rule_001"],
         "bodyCachedBeforeLazyFetch": false,
         "transport": "local_file"
       }
@@ -133,12 +129,7 @@
   },
   "structuredLog": {
     "schema": "ee.test_event.v1",
-    "requiredPhases": [
-      "setup",
-      "action",
-      "assert",
-      "cleanup"
-    ],
+    "requiredPhases": ["setup", "action", "assert", "cleanup"],
     "emitsRawMemoryBodies": false,
     "emitsPeerSecrets": false
   }

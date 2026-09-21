@@ -5,9 +5,7 @@
     "bead": "bd-2612e",
     "epic_letter": "MCP"
   },
-  "surfaces": [
-    "mcp serve-stdio"
-  ],
+  "surfaces": ["mcp serve-stdio"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "size_limit_exceeded",
     "severity": "medium",
-    "message_contains": [
-      "size"
-    ],
+    "message_contains": ["size"],
     "repair_contains": "request"
   }
 }

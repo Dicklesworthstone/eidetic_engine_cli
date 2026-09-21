@@ -5,10 +5,7 @@
     "bead": "bd-39tzu.2",
     "epic_letter": "PRM"
   },
-  "surfaces": [
-    "primer",
-    "orient"
-  ],
+  "surfaces": ["primer", "orient"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "primer_budget_floor",
     "severity": "info",
-    "message_contains": [
-      "floor"
-    ]
+    "message_contains": ["floor"]
   },
   "notes": "The floor is the contract working: a 200-token primer is a selection subset of the 600-token primer, not a rewrite (golden-tested at 200/600/4000 in tests/primer_cli_golden.rs). Agents seeing this code with an unexpectedly thin primer should raise --tokens rather than treat the output as incomplete."
 }

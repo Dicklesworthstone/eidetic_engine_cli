@@ -5,9 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "curate"
-  ],
+  "surfaces": ["curate"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "graph_curate_disconnected_graph",
     "severity": "warning",
-    "message_contains": [
-      "disconnected graph",
-      "connected component"
-    ],
+    "message_contains": ["disconnected graph", "connected component"],
     "repair_contains": "ee graph snapshot refresh",
     "repair_string": "Run `ee graph snapshot refresh --workspace .`, then inspect `ee health --robot-insights --workspace . --json`."
   }

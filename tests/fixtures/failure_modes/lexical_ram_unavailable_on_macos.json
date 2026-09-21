@@ -5,10 +5,7 @@
     "bead": "bd-21xbi.2",
     "epic_letter": "bd-21xbi"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "lexical_ram_unavailable_on_macos",
     "severity": "info",
-    "message_contains": [
-      "lexical RAM-tier",
-      "macOS"
-    ],
+    "message_contains": ["lexical RAM-tier", "macOS"],
     "repair_contains": "Linux",
     "repair_string": "Run ee on a Linux 256GB+ host to opt into lexical posting-list RAM-tier pinning; macOS keeps the optimization as an explicit no-op while the bd-21xbi.2 Linux mmap+mlock+madvise adapter ships under the unsafe-policy escape hatch."
   }

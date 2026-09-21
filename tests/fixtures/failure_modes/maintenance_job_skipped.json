@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A supervised maintenance job reports that it skipped work instead of completing successfully.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee job run custom --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_skipped",
     "severity": "medium",
-    "message_contains": [
-      "Custom steward jobs"
-    ],
+    "message_contains": ["Custom steward jobs"],
     "repair_contains": "ee job run"
   }
 }

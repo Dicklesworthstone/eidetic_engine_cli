@@ -22,9 +22,7 @@
         "source": "beads",
         "status": "degraded",
         "freshness": "current",
-        "degradedCodes": [
-          "beads_db_jsonl_count_mismatch"
-        ],
+        "degradedCodes": ["beads_db_jsonl_count_mismatch"],
         "provenance": "br doctor --json"
       },
       {
@@ -55,14 +53,7 @@
         {
           "commandId": "bead_show_candidate_stale_safe",
           "displayCommand": "br --no-auto-import --allow-stale show bd-safe.1 --json",
-          "argv": [
-            "br",
-            "--no-auto-import",
-            "--allow-stale",
-            "show",
-            "bd-safe.1",
-            "--json"
-          ],
+          "argv": ["br", "--no-auto-import", "--allow-stale", "show", "bd-safe.1", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -73,12 +64,7 @@
         {
           "commandId": "beads_doctor_no_db",
           "displayCommand": "br doctor --json --no-db",
-          "argv": [
-            "br",
-            "doctor",
-            "--json",
-            "--no-db"
-          ],
+          "argv": ["br", "doctor", "--json", "--no-db"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -89,14 +75,7 @@
         {
           "commandId": "swarm_brief_refresh",
           "displayCommand": "ee swarm brief --workspace . --json",
-          "argv": [
-            "ee",
-            "swarm",
-            "brief",
-            "--workspace",
-            ".",
-            "--json"
-          ],
+          "argv": ["ee", "swarm", "brief", "--workspace", ".", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -118,20 +97,16 @@
         "editScope": {
           "state": "known",
           "paths": ["README.md", "docs/**"],
-          "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+          "sourceRefs": [
+            "swarm_brief.ready_reservation_pressure.likely_surfaces",
+            "work_packet.specialized_title_mapping"
+          ]
         },
         "decision": "external_state_required",
         "collisionRisk": "none",
-        "unsafeReasons": [
-          "beads_requires_candidate_downgrade",
-          "beads_tracker_not_authoritative"
-        ],
-        "staleReasons": [
-          "beads_db_jsonl_count_mismatch"
-        ],
-        "sourceRefs": [
-          "br://bd-safe.1"
-        ]
+        "unsafeReasons": ["beads_requires_candidate_downgrade", "beads_tracker_not_authoritative"],
+        "staleReasons": ["beads_db_jsonl_count_mismatch"],
+        "sourceRefs": ["br://bd-safe.1"]
       }
     ],
     "candidateLane": {
@@ -144,7 +119,10 @@
       "editScope": {
         "state": "known",
         "paths": ["README.md", "docs/**"],
-        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+        "sourceRefs": [
+          "swarm_brief.ready_reservation_pressure.likely_surfaces",
+          "work_packet.specialized_title_mapping"
+        ]
       },
       "collisionRisk": "none",
       "decision": "external_state_required",
@@ -154,12 +132,8 @@
         "ready_unclaimed_visible_but_not_authoritative"
       ],
       "suggestedReservations": [],
-      "proofObligations": [
-        "repair_tracker_authority_before_claim"
-      ],
-      "evidenceCaveats": [
-        "beads_db_jsonl_count_mismatch"
-      ]
+      "proofObligations": ["repair_tracker_authority_before_claim"],
+      "evidenceCaveats": ["beads_db_jsonl_count_mismatch"]
     },
     "coordination": {
       "activeReservationCount": 0,
@@ -218,10 +192,7 @@
         "why": "Tracker counts do not match, so Beads claim mutation is unsafe."
       }
     ],
-    "doNotProceedBecause": [
-      "beads_db_jsonl_count_mismatch",
-      "beads_tracker_not_authoritative"
-    ],
+    "doNotProceedBecause": ["beads_db_jsonl_count_mismatch", "beads_tracker_not_authoritative"],
     "safeToClaim": false,
     "degraded": [
       {

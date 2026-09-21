@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A supervised maintenance job returns a failed outcome.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee job run decay_sweep --database ./missing-maintenance.db --dry-run --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_failed",
     "severity": "medium",
-    "message_contains": [
-      "Decay sweep database does not exist"
-    ],
+    "message_contains": ["Decay sweep database does not exist"],
     "repair_contains": "ee job run"
   }
 }

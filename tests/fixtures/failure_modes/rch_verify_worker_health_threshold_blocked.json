@@ -5,10 +5,7 @@
     "bead": "bd-37ugy",
     "epic_letter": "RCH"
   },
-  "surfaces": [
-    "verify proofs",
-    "rch verifier"
-  ],
+  "surfaces": ["verify proofs", "rch verifier"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +18,7 @@
   "expected_emission": {
     "code": "rch_verify_worker_health_threshold_blocked",
     "severity": "warning",
-    "message_contains": [
-      "rch_verify_worker_health_threshold_blocked",
-      "no_workers_passed_health"
-    ],
+    "message_contains": ["rch_verify_worker_health_threshold_blocked", "no_workers_passed_health"],
     "repair_contains": "bd-37ugy"
   }
 }

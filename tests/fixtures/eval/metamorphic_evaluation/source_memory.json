@@ -53,9 +53,7 @@
       "case_id": "base_rule_only",
       "semantic_mode": "semantic",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule"],
       "excluded_memory_ids": [],
       "degradation_codes": [],
       "review_codes": [],
@@ -70,16 +68,11 @@
       "case_id": "positive_feedback_added",
       "semantic_mode": "semantic",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule",
-        "mem_release_feedback_success"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule", "mem_release_feedback_success"],
       "excluded_memory_ids": [],
       "degradation_codes": [],
       "review_codes": [],
-      "metamorphic_codes": [
-        "positive_feedback_reinforces_rule"
-      ],
+      "metamorphic_codes": ["positive_feedback_reinforces_rule"],
       "scores": {
         "rule_confidence": 82,
         "contradiction_risk": 0,
@@ -90,20 +83,11 @@
       "case_id": "contradictory_evidence_added",
       "semantic_mode": "semantic",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule"
-      ],
-      "excluded_memory_ids": [
-        "mem_skip_verification_counterclaim"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule"],
+      "excluded_memory_ids": ["mem_skip_verification_counterclaim"],
       "degradation_codes": [],
-      "review_codes": [
-        "contradiction_detected",
-        "contradiction_requires_review"
-      ],
-      "metamorphic_codes": [
-        "contradiction_requires_review"
-      ],
+      "review_codes": ["contradiction_detected", "contradiction_requires_review"],
+      "metamorphic_codes": ["contradiction_requires_review"],
       "scores": {
         "rule_confidence": 52,
         "contradiction_risk": 91,
@@ -114,18 +98,11 @@
       "case_id": "supersession_chain_added",
       "semantic_mode": "semantic",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule",
-        "mem_release_procedure_latest"
-      ],
-      "excluded_memory_ids": [
-        "mem_release_procedure_old"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule", "mem_release_procedure_latest"],
+      "excluded_memory_ids": ["mem_release_procedure_old"],
       "degradation_codes": [],
       "review_codes": [],
-      "metamorphic_codes": [
-        "supersession_prefers_latest"
-      ],
+      "metamorphic_codes": ["supersession_prefers_latest"],
       "scores": {
         "rule_confidence": 82,
         "contradiction_risk": 0,
@@ -141,9 +118,7 @@
         "mem_release_procedure_latest",
         "mem_release_background_detail"
       ],
-      "excluded_memory_ids": [
-        "mem_release_procedure_old"
-      ],
+      "excluded_memory_ids": ["mem_release_procedure_old"],
       "degradation_codes": [],
       "review_codes": [],
       "metamorphic_codes": [],
@@ -157,20 +132,11 @@
       "case_id": "budget_tight",
       "semantic_mode": "semantic",
       "max_tokens": 360,
-      "selected_memory_ids": [
-        "mem_release_verification_rule"
-      ],
-      "excluded_memory_ids": [
-        "mem_release_background_detail",
-        "mem_release_procedure_old"
-      ],
-      "degradation_codes": [
-        "token_budget_exhausted"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule"],
+      "excluded_memory_ids": ["mem_release_background_detail", "mem_release_procedure_old"],
+      "degradation_codes": ["token_budget_exhausted"],
       "review_codes": [],
-      "metamorphic_codes": [
-        "lower_priority_context_trimmed"
-      ],
+      "metamorphic_codes": ["lower_priority_context_trimmed"],
       "scores": {
         "rule_confidence": 82,
         "contradiction_risk": 0,
@@ -181,10 +147,7 @@
       "case_id": "semantic_available",
       "semantic_mode": "semantic",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule",
-        "mem_release_procedure_latest"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule", "mem_release_procedure_latest"],
       "excluded_memory_ids": [],
       "degradation_codes": [],
       "review_codes": [],
@@ -199,18 +162,11 @@
       "case_id": "semantic_disabled_fallback",
       "semantic_mode": "lexical_fallback",
       "max_tokens": 1200,
-      "selected_memory_ids": [
-        "mem_release_verification_rule",
-        "mem_release_procedure_latest"
-      ],
+      "selected_memory_ids": ["mem_release_verification_rule", "mem_release_procedure_latest"],
       "excluded_memory_ids": [],
-      "degradation_codes": [
-        "semantic_disabled"
-      ],
+      "degradation_codes": ["semantic_disabled"],
       "review_codes": [],
-      "metamorphic_codes": [
-        "lexical_fallback_preserves_top_results"
-      ],
+      "metamorphic_codes": ["lexical_fallback_preserves_top_results"],
       "scores": {
         "rule_confidence": 82,
         "contradiction_risk": 0,
@@ -221,11 +177,6 @@
   "secret_policy": {
     "synthetic_secret_policy": "none",
     "secret_like_values_present": false,
-    "blocked_classes": [
-      "api_token",
-      "github_token",
-      "cloud_access_key",
-      "private_key"
-    ]
+    "blocked_classes": ["api_token", "github_token", "cloud_access_key", "private_key"]
   }
 }

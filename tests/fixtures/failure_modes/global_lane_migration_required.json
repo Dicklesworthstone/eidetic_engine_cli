@@ -5,9 +5,7 @@
     "bead": "bd-reality-core-convergence-1azkt.31",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search"
-  ],
+  "surfaces": ["search"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -24,10 +22,7 @@
   "expected_emission": {
     "code": "global_lane_migration_required",
     "severity": "info",
-    "message_contains": [
-      "user-global memory lane",
-      "needs a schema migration"
-    ],
+    "message_contains": ["user-global memory lane", "needs a schema migration"],
     "repair_contains": "ee migrate run --database"
   }
 }

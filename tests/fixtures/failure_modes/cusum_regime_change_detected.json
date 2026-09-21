@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.13",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "daemon",
-    "maintenance run"
-  ],
+  "surfaces": ["daemon", "maintenance run"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -22,9 +19,6 @@
   "expected_emission": {
     "code": "cusum_regime_change_detected",
     "severity": "warning",
-    "message_contains": [
-      "CUSUM regime change",
-      "maintenance scheduled"
-    ]
+    "message_contains": ["CUSUM regime change", "maintenance scheduled"]
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-nnfq4",
     "epic_letter": "SRR2"
   },
-  "surfaces": [
-    "verify proofs"
-  ],
+  "surfaces": ["verify proofs"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,11 +19,7 @@
   "expected_emission": {
     "code": "proof_tool_missing",
     "severity": "info",
-    "message_contains": [
-      "proof",
-      "tool",
-      "missing"
-    ],
+    "message_contains": ["proof", "tool", "missing"],
     "repair_contains": "Install Lean4 lake or TLA+ TLC",
     "repair_string": "Install Lean4 lake or TLA+ TLC, then rerun ee verify proofs --json.",
     "repair_command_regex": "(?P<cmd>ee verify proofs --json)"

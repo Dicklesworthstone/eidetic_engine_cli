@@ -6,9 +6,7 @@
     "bead": "bd-oja31",
     "epic_letter": "SRR1"
   },
-  "surfaces": [
-    "daemon"
-  ],
+  "surfaces": ["daemon"],
   "severity": "medium",
   "repair_present": false,
   "retired": true,
@@ -26,9 +24,6 @@
   "expected_emission": {
     "code": "daemon_ann_warmload_not_yet_implemented",
     "severity": "medium",
-    "message_contains": [
-      "ee.daemon.context is a stub",
-      "ANN warm-load"
-    ]
+    "message_contains": ["ee.daemon.context is a stub", "ANN warm-load"]
   }
 }

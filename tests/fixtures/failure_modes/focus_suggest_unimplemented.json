@@ -11,9 +11,7 @@
     "bead": "bd-sg5si",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "focus suggest"
-  ],
+  "surfaces": ["focus suggest"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -24,10 +22,7 @@
   "expected_emission": {
     "code": "focus_suggest_unimplemented",
     "severity": "info",
-    "message_contains": [
-      "ee focus suggest is in Phase 1",
-      "implements-surface:focus_suggest"
-    ],
+    "message_contains": ["ee focus suggest is in Phase 1", "implements-surface:focus_suggest"],
     "repair_contains": "ee context",
     "repair_string": "Use `ee context` or `ee search` until focus-suggest centrality lands."
   }

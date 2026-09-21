@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search"
-  ],
+  "surfaces": ["search"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "future_validity_filtered",
     "severity": "low",
-    "message_contains": [
-      "not-yet-valid",
-      "valid_from"
-    ],
+    "message_contains": ["not-yet-valid", "valid_from"],
     "repair_contains": "--include-future"
   }
 }

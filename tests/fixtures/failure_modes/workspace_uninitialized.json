@@ -5,9 +5,7 @@
     "bead": "bd-1idcb",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "focus suggest"
-  ],
+  "surfaces": ["focus suggest"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -18,10 +16,7 @@
   "expected_emission": {
     "code": "workspace_uninitialized",
     "severity": "warning",
-    "message_contains": [
-      "No initialized workspace",
-      "ee init"
-    ],
+    "message_contains": ["No initialized workspace", "ee init"],
     "repair_contains": "ee init"
   }
 }

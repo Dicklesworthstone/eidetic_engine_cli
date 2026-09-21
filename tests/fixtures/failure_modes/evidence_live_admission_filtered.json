@@ -5,10 +5,7 @@
     "bead": "bd-4frzq",
     "epic_letter": "P0"
   },
-  "surfaces": [
-    "search",
-    "diag search"
-  ],
+  "surfaces": ["search", "diag search"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "evidence_live_admission_filtered",
     "severity": "warning",
-    "message_contains": [
-      "Filtered",
-      "source-of-truth admission could not be verified"
-    ],
+    "message_contains": ["Filtered", "source-of-truth admission could not be verified"],
     "repair_contains": "ee index rebuild",
     "repair_string": "ee index rebuild --workspace .",
     "repair_command_regex": "(?<cmd>ee index rebuild --workspace \\.)",
@@ -45,12 +39,8 @@
         "ruleId": "repair_safety:idempotent_refresh",
         "source": "repair_action_safety",
         "reasonCode": "idempotent_refresh_command",
-        "evidence": [
-          "derived_asset_refresh_command"
-        ],
-        "preconditions": [
-          "workspace_must_be_explicit"
-        ]
+        "evidence": ["derived_asset_refresh_command"],
+        "preconditions": ["workspace_must_be_explicit"]
       }
     ]
   }

@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace"
-  ],
+  "surfaces": ["causal trace"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "The persisted causal trace helper is called without a failure memory id.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal trace --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_failure_id_required",
     "severity": "warning",
-    "message_contains": [
-      "Provide a failure memory ID"
-    ]
+    "message_contains": ["Provide a failure memory ID"]
   }
 }

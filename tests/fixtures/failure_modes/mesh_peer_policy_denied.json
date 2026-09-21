@@ -5,13 +5,7 @@
     "bead": "bd-3i5q7",
     "epic_letter": "SRR6.19"
   },
-  "surfaces": [
-    "mesh import",
-    "mesh export",
-    "status",
-    "doctor",
-    "support bundle"
-  ],
+  "surfaces": ["mesh import", "mesh export", "status", "doctor", "support bundle"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -26,11 +20,7 @@
   "expected_emission": {
     "code": "mesh_peer_policy_denied",
     "severity": "high",
-    "message_contains": [
-      "mesh policy",
-      "denied",
-      "policyRef"
-    ],
+    "message_contains": ["mesh policy", "denied", "policyRef"],
     "repair_contains": "mesh peer policy"
   }
 }

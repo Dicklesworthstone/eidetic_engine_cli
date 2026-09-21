@@ -1,15 +1,11 @@
 {
   "schema": "ee.eval_fixture.v1",
   "fixture_id": "fx.metamorphic_evaluation.v1",
-  "scenario_ids": [
-    "usr_eval_metamorphic_memory_regressions"
-  ],
+  "scenario_ids": ["usr_eval_metamorphic_memory_regressions"],
   "fixture_family": "metamorphic_evaluation",
   "coverage_state": "implemented",
   "journey": "Evaluation fixtures compare paired memory states so feedback, contradiction, supersession, budget pressure, and semantic fallback behavior remain stable across regressions.",
-  "owning_bead_ids": [
-    "eidetic_engine_cli-e46v"
-  ],
+  "owning_bead_ids": ["eidetic_engine_cli-e46v"],
   "owning_gate_ids": [
     "gate.4.frankensearch_contract",
     "gate.13.trust_policy",
@@ -28,9 +24,7 @@
       "pack_metamorphic_full",
       "pack_metamorphic_tight"
     ],
-    "workspace_fingerprints": [
-      "workspace.metamorphic_evaluation.v1"
-    ]
+    "workspace_fingerprints": ["workspace.metamorphic_evaluation.v1"]
   },
   "source": {
     "kind": "synthetic",
@@ -53,9 +47,7 @@
       "base_case_id": "base_rule_only",
       "variant_case_id": "positive_feedback_added",
       "assertion": "Adding positive feedback for the same rule must keep the rule selected and increase rule confidence.",
-      "required_codes": [
-        "positive_feedback_reinforces_rule"
-      ],
+      "required_codes": ["positive_feedback_reinforces_rule"],
       "must_hold": true
     },
     {
@@ -64,10 +56,7 @@
       "base_case_id": "base_rule_only",
       "variant_case_id": "contradictory_evidence_added",
       "assertion": "Adding a conflicting counterclaim must raise contradiction risk and mark the counterclaim for review rather than authoritative packing.",
-      "required_codes": [
-        "contradiction_detected",
-        "contradiction_requires_review"
-      ],
+      "required_codes": ["contradiction_detected", "contradiction_requires_review"],
       "must_hold": true
     },
     {
@@ -76,9 +65,7 @@
       "base_case_id": "base_rule_only",
       "variant_case_id": "supersession_chain_added",
       "assertion": "Adding a supersession link must prefer the latest procedure and exclude the superseded procedure from authoritative context.",
-      "required_codes": [
-        "supersession_prefers_latest"
-      ],
+      "required_codes": ["supersession_prefers_latest"],
       "must_hold": true
     },
     {
@@ -87,10 +74,7 @@
       "base_case_id": "budget_full",
       "variant_case_id": "budget_tight",
       "assertion": "Shrinking the token budget must lower selected tokens while preserving the highest-priority release rule.",
-      "required_codes": [
-        "token_budget_exhausted",
-        "lower_priority_context_trimmed"
-      ],
+      "required_codes": ["token_budget_exhausted", "lower_priority_context_trimmed"],
       "must_hold": true
     },
     {
@@ -99,23 +83,14 @@
       "base_case_id": "semantic_available",
       "variant_case_id": "semantic_disabled_fallback",
       "assertion": "Disabling semantic retrieval must emit semantic_disabled while preserving the lexical top result set for the same query.",
-      "required_codes": [
-        "semantic_disabled",
-        "lexical_fallback_preserves_top_results"
-      ],
+      "required_codes": ["semantic_disabled", "lexical_fallback_preserves_top_results"],
       "must_hold": true
     }
   ],
   "command_sequence": [
     {
       "step": 1,
-      "argv": [
-        "ee",
-        "init",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "init", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -181,14 +156,7 @@
     },
     {
       "step": 5,
-      "argv": [
-        "ee",
-        "search",
-        "release verification",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "search", "release verification", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -198,14 +166,7 @@
     },
     {
       "step": 6,
-      "argv": [
-        "ee",
-        "search",
-        "release verification",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "search", "release verification", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -218,79 +179,38 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.workspace"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.workspace"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.status",
-        "data.results"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.status", "data.results"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.pack.items",
-        "data.pack.hash"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.pack.items", "data.pack.hash"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 4,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.pack.items",
-        "data.pack.truncation"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.pack.items", "data.pack.truncation"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 5,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.results",
-        "data.retrieval.semanticMode"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.results", "data.retrieval.semanticMode"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 6,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.results",
-        "data.degraded"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.results", "data.degraded"],
+      "absent_fields": ["secret", "token"]
     }
   ],
   "degraded_branches": [

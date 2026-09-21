@@ -5,9 +5,7 @@
     "bead": "bd-3usjw.6.1",
     "epic_letter": "W"
   },
-  "surfaces": [
-    "preflight"
-  ],
+  "surfaces": ["preflight"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "bypass_rate_limit_exceeded",
     "severity": "high",
-    "message_contains": [
-      "rate limit",
-      "workspace"
-    ],
+    "message_contains": ["rate limit", "workspace"],
     "repair_contains": "hourly window",
     "repair_string": "Wait for the hourly window to clear or inspect recent bypass audit rows."
   }

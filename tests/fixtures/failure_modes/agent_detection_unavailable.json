@@ -5,27 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "agent status",
-    "doctor",
-    "dependency contract"
-  ],
+  "surfaces": ["agent status", "doctor", "dependency contract"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The agent-detection adapter cannot inspect local agent roots or source probes.",
-    "setup_commands": [
-      "ee agent status --workspace . --only not-a-real-agent --json"
-    ],
+    "setup_commands": ["ee agent status --workspace . --only not-a-real-agent --json"],
     "invocation": "ee agent status --workspace . --only not-a-real-agent --json"
   },
   "expected_emission": {
     "code": "agent_detection_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "agent",
-      "unavailable"
-    ],
+    "message_contains": ["agent", "unavailable"],
     "repair_contains": "agent",
     "repair_string": "ee agent sources --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

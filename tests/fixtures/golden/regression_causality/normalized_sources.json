@@ -18,12 +18,7 @@
       "summary": "Normalized beads_history evidence `evidence:beads` as hash-only or redacted-only evidence.",
       "degradedCodes": [],
       "provenance": {
-        "sourceFields": [
-          "artifactHash",
-          "observedAt",
-          "redactionStatus",
-          "status"
-        ],
+        "sourceFields": ["artifactHash", "observedAt", "redactionStatus", "status"],
         "suppressedFields": []
       }
     },
@@ -42,20 +37,10 @@
       "redactionStatus": "safe",
       "authoritative": true,
       "summary": "Normalized e2e_event_log evidence `evidence:events` as an available redaction-safe summary.",
-      "degradedCodes": [
-        "regression_evidence_raw_output_suppressed"
-      ],
+      "degradedCodes": ["regression_evidence_raw_output_suppressed"],
       "provenance": {
-        "sourceFields": [
-          "artifactHash",
-          "redactionStatus",
-          "schema",
-          "status",
-          "timestamp"
-        ],
-        "suppressedFields": [
-          "stderrTail"
-        ]
+        "sourceFields": ["artifactHash", "redactionStatus", "schema", "status", "timestamp"],
+        "suppressedFields": ["stderrTail"]
       }
     },
     {
@@ -73,9 +58,7 @@
       "redactionStatus": "safe",
       "authoritative": true,
       "summary": "Normalized rch_selector_admission evidence `evidence:rch` as a first-class blocked state.",
-      "degradedCodes": [
-        "rch_verify_remote_source_unknown"
-      ],
+      "degradedCodes": ["rch_verify_remote_source_unknown"],
       "provenance": {
         "sourceFields": [
           "commandHash",

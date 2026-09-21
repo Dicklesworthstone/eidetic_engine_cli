@@ -11,8 +11,6 @@
   "first_error_line": 742,
   "first_error_message": "trailing whitespace",
   "degraded_codes": [],
-  "error_codes": [
-    "static_check_failed"
-  ],
+  "error_codes": ["static_check_failed"],
   "verification_attribution": "CalmBay"
 }

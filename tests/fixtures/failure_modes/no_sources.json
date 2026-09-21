@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal compare"
-  ],
+  "surfaces": ["causal compare"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "A causal comparison has scope filters but no fixture replay, shadow run, counterfactual episode, or experiment source IDs.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal compare --workspace . --artifact-id artifact-1 --method replay --json"
   },
   "expected_emission": {
     "code": "no_sources",
     "severity": "warning",
-    "message_contains": [
-      "No source IDs provided"
-    ]
+    "message_contains": ["No source IDs provided"]
   }
 }

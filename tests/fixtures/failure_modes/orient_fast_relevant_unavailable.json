@@ -5,9 +5,7 @@
     "bead": "bd-orient-fast-content-iubub",
     "epic_letter": "O"
   },
-  "surfaces": [
-    "orient"
-  ],
+  "surfaces": ["orient"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "orient_fast_relevant_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "Bounded lexical retrieval was unavailable"
-    ],
+    "message_contains": ["Bounded lexical retrieval was unavailable"],
     "repair_contains": "ee index status --workspace . --json",
     "repair_string": "Run `ee index status --workspace . --json`; rebuild the lexical index if needed.",
     "repair_command_regex": "(?P<cmd>ee index status --workspace \\. --json)"

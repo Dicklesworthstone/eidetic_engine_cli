@@ -5,10 +5,7 @@
     "bead": "bd-ldstd",
     "epic_letter": "swarmx.4"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "numa_pin_disabled",
     "severity": "info",
-    "message_contains": [
-      "NUMA",
-      "disabled"
-    ],
+    "message_contains": ["NUMA", "disabled"],
     "repair_contains": "[graph.numa_pin] enabled = true",
     "repair_string": "Set [graph.numa_pin] enabled = true (or unset EE_GRAPH_NUMA_PIN_DISABLE) and re-run to opt back into NUMA-aware snapshot pinning on supported Linux hosts."
   }

@@ -5,10 +5,7 @@
     "bead": "bd-36bbk.1.8",
     "epic_letter": "SRR6.46.8"
   },
-  "surfaces": [
-    "daemon hello responder",
-    "mesh hello-responder status"
-  ],
+  "surfaces": ["daemon hello responder", "mesh hello-responder status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +19,7 @@
   "expected_emission": {
     "code": "hello_responder_node_key_mismatch",
     "severity": "medium",
-    "message_contains": [
-      "node key"
-    ],
+    "message_contains": ["node key"],
     "repair_contains": "ee mesh disable"
   }
 }

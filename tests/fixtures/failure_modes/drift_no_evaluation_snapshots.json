@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "analyze drift"
-  ],
+  "surfaces": ["analyze drift"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "Drift analysis runs before frozen evaluation snapshots are available.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee analyze drift --workspace . --json"
   },
   "expected_emission": {
     "code": "drift_no_evaluation_snapshots",
     "severity": "high",
-    "message_contains": [
-      "At least two evaluation snapshots"
-    ],
+    "message_contains": ["At least two evaluation snapshots"],
     "repair_contains": "ee eval run"
   }
 }

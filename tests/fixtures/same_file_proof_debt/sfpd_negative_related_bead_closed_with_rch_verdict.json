@@ -15,8 +15,8 @@
       "id": "bd-2pos6.2",
       "status": "closed",
       "comment_evidence": [
-        {"kind": "source_complete", "marker": "source-complete"},
-        {"kind": "rch_proof_pass", "codes": [], "verdict": "remote_pass"}
+        { "kind": "source_complete", "marker": "source-complete" },
+        { "kind": "rch_proof_pass", "codes": [], "verdict": "remote_pass" }
       ]
     },
     "path_relation": {

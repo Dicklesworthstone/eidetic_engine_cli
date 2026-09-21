@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.8",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "model status",
-    "model list"
-  ],
+  "surfaces": ["model status", "model list"],
   "severity": "warning",
   "repair_present": false,
   "repair_unavailable_reason": "No automatic repair is available in this build. An operator may import a verified local reranker artifact with --from-file.",

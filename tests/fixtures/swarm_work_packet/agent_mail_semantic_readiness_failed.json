@@ -38,7 +38,10 @@
       "editScope": {
         "state": "known",
         "paths": ["README.md", "docs/**"],
-        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+        "sourceRefs": [
+          "swarm_brief.ready_reservation_pressure.likely_surfaces",
+          "work_packet.specialized_title_mapping"
+        ]
       },
       "decision": "stale_or_advisory",
       "collisionRisk": "medium",
@@ -46,9 +49,7 @@
         "agent_mail_reservation_evidence_unavailable",
         "agent_mail_semantic_readiness_failed"
       ],
-      "staleReasons": [
-        "agent_mail_inbox_evidence_unavailable"
-      ],
+      "staleReasons": ["agent_mail_inbox_evidence_unavailable"],
       "sourceRefs": ["br://bd-docs.1"]
     }
   ],
@@ -61,10 +62,7 @@
       "healthLevel": "green",
       "unreadCount": null,
       "ackRequiredCount": null,
-      "degradedCodes": [
-        "agent_mail_semantic_readiness_failed",
-        "agent_mail_unavailable"
-      ],
+      "degradedCodes": ["agent_mail_semantic_readiness_failed", "agent_mail_unavailable"],
       "recoveryMode": "manual_coordination",
       "archiveIndexParity": "unknown",
       "reservationAuthoritative": false,
@@ -140,7 +138,16 @@
           "commandAction": {
             "commandId": "agent_mail_support_bundle",
             "displayCommand": "ee support bundle --workspace . --redacted --dry-run --json",
-            "argv": ["ee", "support", "bundle", "--workspace", ".", "--redacted", "--dry-run", "--json"],
+            "argv": [
+              "ee",
+              "support",
+              "bundle",
+              "--workspace",
+              ".",
+              "--redacted",
+              "--dry-run",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,

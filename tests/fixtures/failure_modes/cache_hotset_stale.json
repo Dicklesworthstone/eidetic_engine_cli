@@ -1,7 +1,7 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "cache_hotset_stale",
-  "introduced_by": {"bead": "bd-1zb7k.10.2", "epic_letter": "O"},
+  "introduced_by": { "bead": "bd-1zb7k.10.2", "epic_letter": "O" },
   "surfaces": ["cache hotset", "cache prewarm"],
   "severity": "medium",
   "repair_present": true,
@@ -17,10 +17,7 @@
   "expected_emission": {
     "code": "cache_hotset_stale",
     "severity": "medium",
-    "message_contains": [
-      "Hotset rejected",
-      "entries older than the current generation"
-    ],
+    "message_contains": ["Hotset rejected", "entries older than the current generation"],
     "repair_contains": "Recapture the hotset against the current",
     "repair_string": "Recapture the hotset against the current workspace and index generation."
   }

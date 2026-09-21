@@ -5,10 +5,7 @@
     "bead": "bd-2jl2.2",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "curate apply",
-    "curate tombstone"
-  ],
+  "surfaces": ["curate apply", "curate tombstone"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "load_bearing_tombstone_requires_override",
     "severity": "medium",
-    "message_contains": [
-      "load-bearing",
-      "rule-provenance"
-    ],
+    "message_contains": ["load-bearing", "rule-provenance"],
     "repair_contains": "--allow-tombstone-load-bearing"
   }
 }

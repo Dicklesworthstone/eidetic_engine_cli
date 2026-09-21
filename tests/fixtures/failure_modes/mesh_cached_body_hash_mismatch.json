@@ -5,12 +5,7 @@
     "bead": "bd-nw0v3.3",
     "epic_letter": "SRR6.16"
   },
-  "surfaces": [
-    "mesh cache",
-    "context",
-    "mesh status",
-    "doctor"
-  ],
+  "surfaces": ["mesh cache", "context", "mesh status", "doctor"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -25,11 +20,7 @@
   "expected_emission": {
     "code": "mesh_cached_body_hash_mismatch",
     "severity": "high",
-    "message_contains": [
-      "cached body",
-      "hash",
-      "mismatch"
-    ],
+    "message_contains": ["cached body", "hash", "mismatch"],
     "repair_contains": "Quarantine",
     "repair_string": "Quarantine the cached peer body, re-sync from the peer, and verify the advertised content hash before using body material."
   }

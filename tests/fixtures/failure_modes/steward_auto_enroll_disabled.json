@@ -5,25 +5,18 @@
     "bead": "bd-36bbk.1.14",
     "epic_letter": "SRR6.46.14"
   },
-  "surfaces": [
-    "daemon steward",
-    "mesh status"
-  ],
+  "surfaces": ["daemon steward", "mesh status"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "The steward drift-reconciliation pass is asked for auto-enrollment posture while EE_MESH_AUTO_ENROLL_ON_DEMAND is unset (the default: no silent config mutation), so reconciliation is reported as disabled rather than silently skipped.",
-    "setup_commands": [
-      "run the daemon steward with EE_MESH_AUTO_ENROLL_ON_DEMAND unset"
-    ],
+    "setup_commands": ["run the daemon steward with EE_MESH_AUTO_ENROLL_ON_DEMAND unset"],
     "invocation": "ee mesh status --workspace . --json"
   },
   "expected_emission": {
     "code": "steward_auto_enroll_disabled",
     "severity": "info",
-    "message_contains": [
-      "auto-enroll"
-    ],
+    "message_contains": ["auto-enroll"],
     "repair_contains": "EE_MESH_AUTO_ENROLL_ON_DEMAND"
   }
 }

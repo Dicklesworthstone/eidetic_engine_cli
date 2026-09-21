@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.11",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -20,10 +18,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_agent_mail_timeout",
     "severity": "warning",
-    "message_contains": [
-      "Agent Mail",
-      "timeout"
-    ],
+    "message_contains": ["Agent Mail", "timeout"],
     "repair_contains": "Agent Mail",
     "repair_strings": [
       "Retry with a current Agent Mail snapshot.",
@@ -44,9 +39,7 @@
         "ruleId": "repair_safety:read_only_probe",
         "source": "repair_action_safety",
         "reasonCode": "read_only_probe_command",
-        "evidence": [
-          "read_only_probe_command"
-        ],
+        "evidence": ["read_only_probe_command"],
         "preconditions": []
       }
     ]

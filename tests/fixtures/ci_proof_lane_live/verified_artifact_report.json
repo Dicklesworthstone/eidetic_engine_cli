@@ -18,16 +18,46 @@
       "exitCode": 0,
       "id": "version_json",
       "semanticAssertions": [
-        {"expected": "ee.response.v2", "matched": true, "observed": "ee.response.v2", "path": "/schema"},
-        {"expected": true, "matched": true, "observed": true, "path": "/success"},
-        {"expected": "version", "matched": true, "observed": "version", "path": "/data/command"},
-        {"expected": "ee.version.provenance.v1", "matched": true, "observed": "ee.version.provenance.v1", "path": "/data/schema"},
-        {"expected": "7d3bbeff83be35eb1357d15220b9c59952ea554b", "matched": true, "observed": "7d3bbeff83be35eb1357d15220b9c59952ea554b", "path": "/data/source/gitCommit"},
-        {"expected": true, "matched": true, "observed": true, "path": "/data/source/gitDirty"},
-        {"expected": "dirty", "matched": true, "observed": "dirty", "path": "/data/source/state"},
-        {"expected": "aarch64-apple-darwin", "matched": true, "observed": "aarch64-apple-darwin", "path": "/data/build/targetTriple"},
-        {"expected": "debug", "matched": true, "observed": "debug", "path": "/data/build/profile"},
-        {"expected": true, "matched": true, "observed": true, "path": "/data/provenance/available"}
+        {
+          "expected": "ee.response.v2",
+          "matched": true,
+          "observed": "ee.response.v2",
+          "path": "/schema"
+        },
+        { "expected": true, "matched": true, "observed": true, "path": "/success" },
+        { "expected": "version", "matched": true, "observed": "version", "path": "/data/command" },
+        {
+          "expected": "ee.version.provenance.v1",
+          "matched": true,
+          "observed": "ee.version.provenance.v1",
+          "path": "/data/schema"
+        },
+        {
+          "expected": "7d3bbeff83be35eb1357d15220b9c59952ea554b",
+          "matched": true,
+          "observed": "7d3bbeff83be35eb1357d15220b9c59952ea554b",
+          "path": "/data/source/gitCommit"
+        },
+        { "expected": true, "matched": true, "observed": true, "path": "/data/source/gitDirty" },
+        { "expected": "dirty", "matched": true, "observed": "dirty", "path": "/data/source/state" },
+        {
+          "expected": "aarch64-apple-darwin",
+          "matched": true,
+          "observed": "aarch64-apple-darwin",
+          "path": "/data/build/targetTriple"
+        },
+        {
+          "expected": "debug",
+          "matched": true,
+          "observed": "debug",
+          "path": "/data/build/profile"
+        },
+        {
+          "expected": true,
+          "matched": true,
+          "observed": true,
+          "path": "/data/provenance/available"
+        }
       ],
       "status": "passed",
       "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

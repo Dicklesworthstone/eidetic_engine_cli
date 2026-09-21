@@ -5,9 +5,7 @@
     "bead": "bd-3usjw.6.1",
     "epic_letter": "W"
   },
-  "surfaces": [
-    "preflight"
-  ],
+  "surfaces": ["preflight"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "bypass_token_expired",
     "severity": "medium",
-    "message_contains": [
-      "bypass token",
-      "expired"
-    ],
+    "message_contains": ["bypass token", "expired"],
     "repair_contains": "fresh bypass token",
     "repair_string": "Issue a fresh bypass token with an explicit reason."
   }

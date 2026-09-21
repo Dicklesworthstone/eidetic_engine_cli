@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "learn cluster",
-    "curate candidates"
-  ],
+  "surfaces": ["learn cluster", "curate candidates"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Cluster coherence analysis runs without enough embedding points to form a cluster.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee learn cluster --workspace . --json"
   },
   "expected_emission": {
     "code": "clustering_insufficient_data",
     "severity": "warning",
-    "message_contains": [
-      "No embedding points"
-    ],
+    "message_contains": ["No embedding points"],
     "repair_contains": "Collect at least three"
   }
 }

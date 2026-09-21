@@ -33,9 +33,7 @@
       "runs": [
         {
           "runId": "27006448052",
-          "jobIds": [
-            "79699108970"
-          ],
+          "jobIds": ["79699108970"],
           "event": "workflow_dispatch",
           "headSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
           "ref": "refs/heads/main",

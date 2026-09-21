@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.8",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "model status",
-    "model list"
-  ],
+  "surfaces": ["model status", "model list"],
   "severity": "high",
   "repair_present": false,
   "repair_unavailable_reason": "No automatic repair is available in this build. An operator must inspect the corrupt registry entry and supply a verified replacement artifact explicitly.",

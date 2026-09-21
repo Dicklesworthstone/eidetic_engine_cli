@@ -5,10 +5,7 @@
     "bead": "bd-112qm",
     "epic_letter": "SRR6"
   },
-  "surfaces": [
-    "mesh audit",
-    "support bundle"
-  ],
+  "surfaces": ["mesh audit", "support bundle"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "mesh_audit_ledger_missing",
     "severity": "high",
-    "message_contains": [
-      "mesh audit ledger",
-      "missing"
-    ],
+    "message_contains": ["mesh audit ledger", "missing"],
     "repair_contains": "ee audit verify --json",
     "repair_string": "Inspect `ee audit verify --json` and retry the mesh operation after the audit ledger is healthy."
   }

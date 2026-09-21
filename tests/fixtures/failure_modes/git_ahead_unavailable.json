@@ -5,9 +5,7 @@
     "bead": "bd-2gc7r.3",
     "epic_letter": "E"
   },
-  "surfaces": [
-    "hook git-readiness"
-  ],
+  "surfaces": ["hook git-readiness"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -21,8 +19,6 @@
   "expected_emission": {
     "code": "git_ahead_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "git_ahead_unavailable"
-    ]
+    "message_contains": ["git_ahead_unavailable"]
   }
 }

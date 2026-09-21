@@ -5,10 +5,7 @@
     "bead": "bd-2caru.7",
     "epic_letter": "SRR"
   },
-  "surfaces": [
-    "context",
-    "status"
-  ],
+  "surfaces": ["context", "status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "read_pool_acquire_timeout",
     "severity": "medium",
-    "message_contains": [
-      "read pool",
-      "acquire timeout"
-    ],
+    "message_contains": ["read pool", "acquire timeout"],
     "repair_contains": "increase storage.read_pool.size"
   }
 }

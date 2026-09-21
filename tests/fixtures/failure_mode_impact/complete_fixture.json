@@ -4,12 +4,8 @@
   "data": {
     "impactStatus": "complete",
     "reason": "All changed paths are concrete failure-mode fixture JSON files with known codes.",
-    "changedPaths": [
-      "tests/fixtures/failure_modes/weak_query_recall.json"
-    ],
-    "fixtureCodes": [
-      "weak_query_recall"
-    ],
+    "changedPaths": ["tests/fixtures/failure_modes/weak_query_recall.json"],
+    "fixtureCodes": ["weak_query_recall"],
     "unmappedPaths": [],
     "caveats": [],
     "signals": {

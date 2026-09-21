@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.13",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "daemon",
-    "maintenance run"
-  ],
+  "surfaces": ["daemon", "maintenance run"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "cusum_baseline_underpowered",
     "severity": "info",
-    "message_contains": [
-      "CUSUM baseline",
-      "underpowered"
-    ],
+    "message_contains": ["CUSUM baseline", "underpowered"],
     "repair_contains": "Collect at least 30 observations"
   }
 }

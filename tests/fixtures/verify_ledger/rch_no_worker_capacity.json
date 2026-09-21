@@ -13,9 +13,7 @@
     "dirty_status_hash": "sha256:c9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f80912a3b",
     "verification_attribution": "cc-graph"
   },
-  "degraded_codes": [
-    "rch_verify_no_worker_capacity"
-  ],
+  "degraded_codes": ["rch_verify_no_worker_capacity"],
   "stdout_tail": "",
   "stderr_tail": "RCH worker pool: 0/2 healthy, 0 capacity slots free.\n",
   "known_blocker": {

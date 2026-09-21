@@ -5,9 +5,7 @@
     "bead": "bd-1pi9m.5",
     "epic_letter": "CAP"
   },
-  "surfaces": [
-    "outcome"
-  ],
+  "surfaces": ["outcome"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

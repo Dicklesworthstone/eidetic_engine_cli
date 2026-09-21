@@ -5,9 +5,7 @@
     "bead": "bd-jnyui",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "daemon"
-  ],
+  "surfaces": ["daemon"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -21,8 +19,6 @@
   "expected_emission": {
     "code": "daemon_overloaded",
     "severity": "warning",
-    "message_contains": [
-      "daemon worker pool saturated"
-    ]
+    "message_contains": ["daemon worker pool saturated"]
   }
 }

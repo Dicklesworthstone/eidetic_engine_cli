@@ -5,10 +5,7 @@
     "bead": "bd-2caru.6",
     "epic_letter": "SRR"
   },
-  "surfaces": [
-    "context",
-    "status"
-  ],
+  "surfaces": ["context", "status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "snapshot_pin_expired",
     "severity": "medium",
-    "message_contains": [
-      "snapshot pin",
-      "expired"
-    ],
+    "message_contains": ["snapshot pin", "expired"],
     "repair_contains": "storage.read_pool.max_pin_duration_seconds"
   }
 }

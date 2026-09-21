@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal compare"
-  ],
+  "surfaces": ["causal compare"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -23,8 +21,6 @@
   "expected_emission": {
     "code": "causal_insufficient_chains",
     "severity": "info",
-    "message_contains": [
-      "comparison requires at least 2"
-    ]
+    "message_contains": ["comparison requires at least 2"]
   }
 }

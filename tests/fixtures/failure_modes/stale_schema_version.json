@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "certificate verify",
-    "perf compare"
-  ],
+  "surfaces": ["certificate verify", "perf compare"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A certificate or performance artifact uses an older schema version than the verifier accepts.",
-    "setup_commands": [
-      "# use a stale certificate manifest or artifact summary fixture"
-    ],
+    "setup_commands": ["# use a stale certificate manifest or artifact summary fixture"],
     "invocation": "ee certificate verify <certificate-id> --json"
   },
   "expected_emission": {
     "code": "stale_schema_version",
     "severity": "medium",
-    "message_contains": [
-      "schema version"
-    ],
+    "message_contains": ["schema version"],
     "repair_contains": "current ee version",
     "repair_string": "Re-export artifact with current ee version"
   }

@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal estimate"
-  ],
+  "surfaces": ["causal estimate"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -23,8 +21,6 @@
   "expected_emission": {
     "code": "causal_no_matching_chains",
     "severity": "info",
-    "message_contains": [
-      "No causal chains match"
-    ]
+    "message_contains": ["No causal chains match"]
   }
 }

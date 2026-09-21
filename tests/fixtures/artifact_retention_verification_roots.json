@@ -22,12 +22,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "cargo_target_e2e",
@@ -46,12 +41,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "workspace_target_e2e",
@@ -70,12 +60,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "golden_artifacts",
@@ -94,12 +79,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "bench_artifacts",
@@ -118,12 +98,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "tmp_e2e_workspaces",
@@ -142,12 +117,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "support_bundles",
@@ -166,12 +136,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "j1_current_log",
@@ -190,12 +155,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     },
     {
       "label": "current_retention_manifest",
@@ -214,12 +174,7 @@
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     }
   ]
 }

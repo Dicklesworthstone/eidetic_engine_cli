@@ -5,10 +5,7 @@
     "bead": "bd-39tzu.2",
     "epic_letter": "PRM"
   },
-  "surfaces": [
-    "primer",
-    "orient"
-  ],
+  "surfaces": ["primer", "orient"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "primer_cache_cold",
     "severity": "info",
-    "message_contains": [
-      "no primer cache row",
-      "assembled fresh"
-    ]
+    "message_contains": ["no primer cache row", "assembled fresh"]
   },
   "notes": "Informational by design: cold is the normal first-call state and after every memory write. Agents should never retry on this code; the warm-hit latency contract (<100ms) only applies to the cached path, which the very same call just warmed."
 }

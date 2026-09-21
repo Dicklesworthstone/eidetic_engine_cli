@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.1",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "pack",
-    "context"
-  ],
+  "surfaces": ["pack", "context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "pack_bin_version_too_new",
     "severity": "medium",
-    "message_contains": [
-      "binary pack version",
-      "newer than supported"
-    ],
+    "message_contains": ["binary pack version", "newer than supported"],
     "repair_contains": "Regenerate the pack with a reader-compatible ee version"
   }
 }

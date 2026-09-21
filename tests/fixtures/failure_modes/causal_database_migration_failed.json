@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace"
-  ],
+  "surfaces": ["causal trace"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -21,8 +19,6 @@
   "expected_emission": {
     "code": "causal_database_migration_failed",
     "severity": "warning",
-    "message_contains": [
-      "Failed to migrate causal trace database"
-    ]
+    "message_contains": ["Failed to migrate causal trace database"]
   }
 }

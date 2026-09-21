@@ -7,7 +7,9 @@
   "repair_present": true,
   "trigger": {
     "description": "A handshake, frame MAC, payload hash, wire size, negotiated capability, request budget, or response-correlation authentication check fails.",
-    "setup_commands": ["send a malformed, oversized, downgrade, wrong-MAC, or unnegotiated frame on a real session socket"],
+    "setup_commands": [
+      "send a malformed, oversized, downgrade, wrong-MAC, or unnegotiated frame on a real session socket"
+    ],
     "invocation": "exchange an authenticated mesh transport frame"
   },
   "expected_emission": {

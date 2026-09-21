@@ -5,10 +5,7 @@
     "bead": "bd-17c65.2.9",
     "epic_letter": "B"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -25,10 +22,7 @@
   "expected_emission": {
     "code": "output_redaction_disabled",
     "severity": "info",
-    "message_contains": [
-      "Output-time redaction is disabled",
-      "secret-like values"
-    ],
+    "message_contains": ["Output-time redaction is disabled", "secret-like values"],
     "repair_contains": "policy.output_redaction.enabled",
     "repair_string": "Set policy.output_redaction.enabled = true in .ee/config.toml."
   }

@@ -5,9 +5,7 @@
     "bead": "bd-fbeo2",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "diag environment-attestation"
-  ],
+  "surfaces": ["diag environment-attestation"],
   "severity": "high",
   "repair_present": false,
   "trigger": {
@@ -21,11 +19,6 @@
   "expected_emission": {
     "code": "ci_proof_lane_artifact_attestation_invalid",
     "severity": "high",
-    "message_contains": [
-      "artifact attestation",
-      "source",
-      "packaged bytes",
-      "behavior probe"
-    ]
+    "message_contains": ["artifact attestation", "source", "packaged bytes", "behavior probe"]
   }
 }

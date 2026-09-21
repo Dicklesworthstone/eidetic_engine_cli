@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A workspace path was selected but .ee/ee.db is missing.",
-    "setup_commands": [
-      "mkdir -p <workspace>"
-    ],
+    "setup_commands": ["mkdir -p <workspace>"],
     "invocation": "ee status --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "storage_not_initialized",
     "severity": "medium",
-    "message_contains": [
-      "Workspace storage is unavailable",
-      ".ee/ee.db is missing"
-    ],
+    "message_contains": ["Workspace storage is unavailable", ".ee/ee.db is missing"],
     "repair_contains": "ee init",
     "repair_string": "Run `ee init --workspace .`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

@@ -5,11 +5,7 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "symbol evidence links",
-    "context",
-    "why"
-  ],
+  "surfaces": ["symbol evidence links", "context", "why"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -25,9 +21,6 @@
   "expected_emission": {
     "code": "ambiguous_containing_symbols",
     "severity": "warning",
-    "message_contains": [
-      "multiple symbols matched",
-      "equal specificity"
-    ]
+    "message_contains": ["multiple symbols matched", "equal specificity"]
   }
 }

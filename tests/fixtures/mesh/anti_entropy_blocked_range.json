@@ -30,8 +30,5 @@
       "reason": "max_attempts_exceeded"
     }
   ],
-  "degraded": [
-    "mesh_anti_entropy_round_blocked",
-    "mesh_anti_entropy_supervisor_budget_exceeded"
-  ]
+  "degraded": ["mesh_anti_entropy_round_blocked", "mesh_anti_entropy_supervisor_budget_exceeded"]
 }

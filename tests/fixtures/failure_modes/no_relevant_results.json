@@ -16,10 +16,7 @@
   "expected_emission": {
     "code": "no_relevant_results",
     "severity": "medium",
-    "message_contains": [
-      "No memories scored above relevance floor",
-      "considered"
-    ],
+    "message_contains": ["No memories scored above relevance floor", "considered"],
     "repair_contains": "lower --relevance-floor"
   }
 }

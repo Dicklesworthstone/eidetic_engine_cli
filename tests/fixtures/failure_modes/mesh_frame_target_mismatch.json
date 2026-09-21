@@ -7,7 +7,9 @@
   "repair_present": true,
   "trigger": {
     "description": "A handshake or frame names the wrong team, node, workspace, session, or direction for the already verified endpoint.",
-    "setup_commands": ["send a correctly encoded frame with a near-identical but wrong authenticated binding"],
+    "setup_commands": [
+      "send a correctly encoded frame with a near-identical but wrong authenticated binding"
+    ],
     "invocation": "exchange an authenticated mesh transport frame"
   },
   "expected_emission": {

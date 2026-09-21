@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.2",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "peer_discovery_workspace_mismatch",
     "severity": "info",
-    "message_contains": [
-      "workspace IDs",
-      "not enrolled"
-    ],
+    "message_contains": ["workspace IDs", "not enrolled"],
     "repair_contains": "explicit"
   }
 }

@@ -16,10 +16,6 @@
   "expected_emission": {
     "code": "duplicates_collapsed",
     "severity": "low",
-    "message_contains": [
-      "Collapsed",
-      "duplicate hit",
-      "highest-scoring occurrence"
-    ]
+    "message_contains": ["Collapsed", "duplicate hit", "highest-scoring occurrence"]
   }
 }

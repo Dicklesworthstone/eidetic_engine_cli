@@ -5,9 +5,7 @@
     "bead": "bd-17c65.7.8",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "memory level"
-  ],
+  "surfaces": ["memory level"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "level_transition_concurrent_conflict",
     "severity": "medium",
-    "message_contains": [
-      "concurrent",
-      "transition"
-    ],
+    "message_contains": ["concurrent", "transition"],
     "repair_contains": "ee memory show"
   }
 }

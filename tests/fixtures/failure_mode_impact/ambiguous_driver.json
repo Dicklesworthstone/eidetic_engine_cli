@@ -4,9 +4,7 @@
   "data": {
     "impactStatus": "ambiguous",
     "reason": "At least one changed path cannot be mapped to a complete fixture-code set from path evidence alone.",
-    "changedPaths": [
-      "scripts/e2e_overhaul/failure_modes.sh"
-    ],
+    "changedPaths": ["scripts/e2e_overhaul/failure_modes.sh"],
     "fixtureCodes": [],
     "unmappedPaths": [],
     "caveats": [

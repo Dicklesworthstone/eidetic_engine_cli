@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.5",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +21,7 @@
   "expected_emission": {
     "code": "handoff_snapshot_stale",
     "severity": "medium",
-    "message_contains": [
-      "Workspace memory set has drifted",
-      "current ground truth"
-    ],
+    "message_contains": ["Workspace memory set has drifted", "current ground truth"],
     "repair_contains": "ee handoff create --workspace . --out handoff-refresh.json --json",
     "repair_string": "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
     "repair_command_regex": "(?<cmd>ee handoff create --workspace \\. --out handoff-refresh\\.json --json)"

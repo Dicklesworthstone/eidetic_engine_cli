@@ -6,24 +6,17 @@
     "bead": "bd-3mbao",
     "epic_letter": "SRR1"
   },
-  "surfaces": [
-    "daemon"
-  ],
+  "surfaces": ["daemon"],
   "severity": "high",
   "repair_present": false,
   "trigger": {
     "description": "A same-UID daemon peer calls a registered workspace-bound method such as ee.daemon.context without a non-empty workspace_id, or with a workspace_id that does not match the daemon's bound workspace. The dispatcher refuses the method with a structured authorization error instead of allowing every authenticated peer to call every method.",
-    "setup_commands": [
-      "ee daemon start --json"
-    ],
+    "setup_commands": ["ee daemon start --json"],
     "invocation": "ee.daemon.context RPC sent over the UDS socket with missing, blank, or mismatched workspace_id"
   },
   "expected_emission": {
     "code": "daemon_method_unauthorized",
     "severity": "high",
-    "message_contains": [
-      "registered daemon method",
-      "workspace"
-    ]
+    "message_contains": ["registered daemon method", "workspace"]
   }
 }

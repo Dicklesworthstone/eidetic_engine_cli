@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.7",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh discovery-policy"
-  ],
+  "surfaces": ["mesh discovery-policy"],
   "severity": "info",
   "repair_present": true,
   "trigger": {

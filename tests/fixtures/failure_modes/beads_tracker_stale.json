@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.13.3",
     "epic_letter": "C"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "beads_tracker_stale",
     "severity": "warning",
-    "message_contains": [
-      "Beads JSONL is newer than the local database"
-    ],
+    "message_contains": ["Beads JSONL is newer than the local database"],
     "repair_contains": "br sync --import-only",
     "repair_string": "br sync --import-only",
     "repair_command_regex": "(?<cmd>br sync --import-only)",
@@ -41,12 +37,8 @@
         "ruleId": "repair_safety:mutating_external_coordination_repair",
         "source": "repair_action_safety",
         "reasonCode": "external_coordination_repair_command",
-        "evidence": [
-          "beads_mutation_command"
-        ],
-        "preconditions": [
-          "shared_state_coordination_required"
-        ],
+        "evidence": ["beads_mutation_command"],
+        "preconditions": ["shared_state_coordination_required"],
         "manualStep": "Coordinate before mutating shared tracker state."
       }
     ]

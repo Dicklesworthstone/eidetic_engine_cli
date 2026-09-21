@@ -5,10 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "curate validate",
-    "curate apply"
-  ],
+  "surfaces": ["curate validate", "curate apply"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "derived_source_hash_drifted",
     "severity": "medium",
-    "message_contains": [
-      "hash drifted",
-      "source"
-    ],
+    "message_contains": ["hash drifted", "source"],
     "repair_contains": "ee curate propose-derived",
     "repair_string": "Run `ee curate propose-derived --workspace . --json` against the current source hashes.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

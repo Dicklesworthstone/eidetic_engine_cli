@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "decay_sweep_workspace_unresolved",
     "severity": "medium",
-    "message_contains": [
-      "workspace"
-    ],
+    "message_contains": ["workspace"],
     "repair_contains": "ee remember"
   }
 }

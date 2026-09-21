@@ -10,9 +10,7 @@
       "command": "rm -rf /tmp/work",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:rm_rf_root"
-      ]
+      "expectedRuleIds": ["builtin:rm_rf_root"]
     },
     {
       "id": "recursive_delete_home",
@@ -20,9 +18,7 @@
       "command": "rm -rf ~/projects",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:rm_rf_home"
-      ]
+      "expectedRuleIds": ["builtin:rm_rf_home"]
     },
     {
       "id": "git_hard_reset",
@@ -30,9 +26,7 @@
       "command": "git reset --hard HEAD~1",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_reset_hard"
-      ]
+      "expectedRuleIds": ["builtin:git_reset_hard"]
     },
     {
       "id": "git_hard_reset_with_global_option",
@@ -40,9 +34,7 @@
       "command": "git -C . reset --hard HEAD~1",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_reset_hard"
-      ]
+      "expectedRuleIds": ["builtin:git_reset_hard"]
     },
     {
       "id": "git_recursive_clean",
@@ -50,9 +42,7 @@
       "command": "git clean -fd",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_clean_fd"
-      ]
+      "expectedRuleIds": ["builtin:git_clean_fd"]
     },
     {
       "id": "git_worktree_add",
@@ -60,9 +50,7 @@
       "command": "git worktree add ../parallel main",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_worktree_add"
-      ]
+      "expectedRuleIds": ["builtin:git_worktree_add"]
     },
     {
       "id": "git_worktree_add_with_global_option",
@@ -70,9 +58,7 @@
       "command": "git -C . worktree add ../parallel main",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_worktree_add"
-      ]
+      "expectedRuleIds": ["builtin:git_worktree_add"]
     },
     {
       "id": "git_checkout_main_pathspec_overwrite",
@@ -80,9 +66,7 @@
       "command": "git checkout main -- src/lib.rs",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_checkout_off_main"
-      ]
+      "expectedRuleIds": ["builtin:git_checkout_off_main"]
     },
     {
       "id": "git_checkout_branch_creation_named_main",
@@ -90,9 +74,7 @@
       "command": "git checkout -b main",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_checkout_off_main"
-      ]
+      "expectedRuleIds": ["builtin:git_checkout_off_main"]
     },
     {
       "id": "git_switch_force_main",
@@ -100,9 +82,7 @@
       "command": "git switch --force main",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_checkout_off_main"
-      ]
+      "expectedRuleIds": ["builtin:git_checkout_off_main"]
     },
     {
       "id": "git_force_push",
@@ -110,9 +90,7 @@
       "command": "git push --force origin main",
       "expectedAction": "warn",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_push_force"
-      ]
+      "expectedRuleIds": ["builtin:git_push_force"]
     },
     {
       "id": "git_force_push_short_flag",
@@ -120,9 +98,7 @@
       "command": "git -C . push -f origin main",
       "expectedAction": "warn",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_push_force"
-      ]
+      "expectedRuleIds": ["builtin:git_push_force"]
     },
     {
       "id": "git_force_push_refspec",
@@ -130,9 +106,7 @@
       "command": "git push origin +main:main",
       "expectedAction": "warn",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:git_push_force"
-      ]
+      "expectedRuleIds": ["builtin:git_push_force"]
     },
     {
       "id": "kubectl_mass_delete",
@@ -140,9 +114,7 @@
       "command": "kubectl delete pods --all --all-namespaces",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:kubectl_mass_delete"
-      ]
+      "expectedRuleIds": ["builtin:kubectl_mass_delete"]
     },
     {
       "id": "drop_table_sql",
@@ -150,9 +122,7 @@
       "command": "psql -c 'DROP TABLE memories;'",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:drop_table_sql"
-      ]
+      "expectedRuleIds": ["builtin:drop_table_sql"]
     },
     {
       "id": "drop_table_sql_block_comment",
@@ -160,9 +130,7 @@
       "command": "psql -c 'DROP/**/TABLE memories;'",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:drop_table_sql"
-      ]
+      "expectedRuleIds": ["builtin:drop_table_sql"]
     },
     {
       "id": "terraform_destroy",
@@ -170,9 +138,7 @@
       "command": "terraform destroy -auto-approve",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:terraform_destroy"
-      ]
+      "expectedRuleIds": ["builtin:terraform_destroy"]
     },
     {
       "id": "raw_block_device_write",
@@ -180,9 +146,7 @@
       "command": "dd if=/dev/zero of=/dev/sda bs=1M",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:raw_block_device_write"
-      ]
+      "expectedRuleIds": ["builtin:raw_block_device_write"]
     },
     {
       "id": "filesystem_create",
@@ -190,9 +154,7 @@
       "command": "mkfs.ext4 /dev/sdb",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:filesystem_create"
-      ]
+      "expectedRuleIds": ["builtin:filesystem_create"]
     },
     {
       "id": "find_exec_shell_delete",
@@ -200,9 +162,7 @@
       "command": "find . -name '*.tmp' -exec sh -c 'rm -f \"$1\"' sh {} \\;",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:unsafe_cleanup"
-      ]
+      "expectedRuleIds": ["builtin:unsafe_cleanup"]
     },
     {
       "id": "xargs_shell_delete",
@@ -210,9 +170,7 @@
       "command": "rg TODO src | xargs sh -c 'rm -f \"$@\"' sh",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:unsafe_cleanup"
-      ]
+      "expectedRuleIds": ["builtin:unsafe_cleanup"]
     },
     {
       "id": "find_exec_nested_find_delete",
@@ -220,9 +178,7 @@
       "command": "find . -type d -exec sh -c 'find \"$1\" -name stale -delete' sh {} \\;",
       "expectedAction": "high_risk",
       "expectedExitCode": 0,
-      "expectedRuleIds": [
-        "builtin:unsafe_cleanup"
-      ]
+      "expectedRuleIds": ["builtin:unsafe_cleanup"]
     }
   ],
   "plannedCases": []

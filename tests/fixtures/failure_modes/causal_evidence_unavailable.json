@@ -5,26 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal trace",
-    "causal compare",
-    "causal estimate",
-    "causal promote-plan"
-  ],
+  "surfaces": ["causal trace", "causal compare", "causal estimate", "causal promote-plan"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "Causal analysis is requested before persisted causal evidence ledger rows are available.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal trace failure-1 --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_evidence_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "No persisted causal evidence ledger rows"
-    ]
+    "message_contains": ["No persisted causal evidence ledger rows"]
   }
 }

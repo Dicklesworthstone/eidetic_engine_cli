@@ -17,19 +17,13 @@
   "repair_present": true,
   "trigger": {
     "description": "The store-local authentication root (ADR 0086 TC-D14) cannot be established or verified because the workspace key directory is missing, malformed, symlinked, readable beyond the owner, or fails its known-answer/integrity self-check. Existing artifact-producing callers may surface their documented unauthenticated-artifact posture. Lane approval callers are stricter: explicit preview-token issuance and `ee mesh grant` return a high-severity `ee.error.v2` failure with no success artifact, bearer, lane mutation, or audit row.",
-    "setup_commands": [
-      "ee init --workspace . --json",
-      "chmod 0777 .ee/keys"
-    ],
+    "setup_commands": ["ee init --workspace . --json", "chmod 0777 .ee/keys"],
     "invocation": "ee mesh preview-grant peer_example123 --lane body --issue-approval-token --workspace . --json"
   },
   "expected_emission": {
     "code": "mesh_store_authentication_unavailable",
     "severity": "high",
-    "message_contains": [
-      "Store-authentication",
-      "not owner-only"
-    ],
+    "message_contains": ["Store-authentication", "not owner-only"],
     "repair_contains": "owner-only",
     "repair_string": "Restrict the key directory to 0700 and the key file to 0600 (owner-only), then re-run."
   }

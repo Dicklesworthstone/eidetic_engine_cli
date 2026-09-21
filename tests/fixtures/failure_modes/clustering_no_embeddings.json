@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "analyze clustering"
-  ],
+  "surfaces": ["analyze clustering"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "clustering_no_embeddings",
     "severity": "medium",
-    "message_contains": [
-      "Candidate embeddings not available"
-    ],
+    "message_contains": ["Candidate embeddings not available"],
     "repair_contains": "ee index rebuild"
   }
 }

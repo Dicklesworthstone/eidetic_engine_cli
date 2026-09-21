@@ -5,9 +5,7 @@
     "bead": "bd-1bfwa.3",
     "epic_letter": "ADR0069"
   },
-  "surfaces": [
-    "pack"
-  ],
+  "surfaces": ["pack"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "global_lane_conflict_deferred",
     "severity": "info",
-    "message_contains": [
-      "Global/workspace lane contradiction detected",
-      "globalLane markers"
-    ],
+    "message_contains": ["Global/workspace lane contradiction detected", "globalLane markers"],
     "repair_contains": "tombstone or revise the stale lane row"
   }
 }

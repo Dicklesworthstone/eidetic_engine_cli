@@ -5,9 +5,7 @@
     "bead": "bd-3qs2i.3.1",
     "epic_letter": "F"
   },
-  "surfaces": [
-    "outcome"
-  ],
+  "surfaces": ["outcome"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -36,10 +34,6 @@
       "quarantinedCandidateIds",
       "recovery"
     ],
-    "recovery_kinds": [
-      "narrow",
-      "config",
-      "flag"
-    ]
+    "recovery_kinds": ["narrow", "config", "flag"]
   }
 }

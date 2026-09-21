@@ -5,9 +5,7 @@
     "bead": "bd-tc-epic-qzk7o.2.7",
     "epic_letter": "team-confed T1.2"
   },
-  "surfaces": [
-    "share preview"
-  ],
+  "surfaces": ["share preview"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,11 +19,7 @@
   "expected_emission": {
     "code": "share_preview_peer_unknown",
     "severity": "warning",
-    "message_contains": [
-      "No outbound mesh policy",
-      "fails closed",
-      "nothing would be shared"
-    ],
+    "message_contains": ["No outbound mesh policy", "fails closed", "nothing would be shared"],
     "repair_contains": "mesh.peer_policies"
   }
 }

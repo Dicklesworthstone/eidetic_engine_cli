@@ -5,10 +5,7 @@
     "bead": "bd-2wngl",
     "epic_letter": "SRR6.8"
   },
-  "surfaces": [
-    "mesh status",
-    "mesh init"
-  ],
+  "surfaces": ["mesh status", "mesh init"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "mesh_disabled",
     "severity": "info",
-    "message_contains": [
-      "Optional mesh memory is disabled",
-      "local-only"
-    ],
+    "message_contains": ["Optional mesh memory is disabled", "local-only"],
     "repair_contains": "EE_MESH_ENABLED"
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-muovx",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "context_delta_larger_than_full",
     "severity": "info",
-    "message_contains": [
-      "Delta envelope",
-      "emit the full pack"
-    ],
+    "message_contains": ["Delta envelope", "emit the full pack"],
     "repair_contains": ""
   }
 }

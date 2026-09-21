@@ -11,11 +11,7 @@
     "confidence": 0.94,
     "utility": 0.9,
     "importance": 0.88,
-    "tags": [
-      "data-size-tier",
-      "packing",
-      "evaluation"
-    ],
+    "tags": ["data-size-tier", "packing", "evaluation"],
     "content": "When evaluating context packing at different data sizes, compare selected memory IDs, token budget usage, provenance coverage, and truncation explanations for small, medium, and large tier workspaces.",
     "provenance_uri": "file://tests/fixtures/eval/data_size_tiers/source_memory.json#seed-rule"
   },
@@ -81,11 +77,6 @@
   "secret_policy": {
     "synthetic_secret_policy": "none",
     "secret_like_values_present": false,
-    "blocked_classes": [
-      "api_token",
-      "github_token",
-      "cloud_access_key",
-      "private_key"
-    ]
+    "blocked_classes": ["api_token", "github_token", "cloud_access_key", "private_key"]
   }
 }

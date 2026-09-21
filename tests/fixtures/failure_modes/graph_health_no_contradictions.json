@@ -5,10 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "health",
-    "insights"
-  ],
+  "surfaces": ["health", "insights"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,9 +19,6 @@
   "expected_emission": {
     "code": "graph_health_no_contradictions",
     "severity": "info",
-    "message_contains": [
-      "contradiction",
-      "0"
-    ]
+    "message_contains": ["contradiction", "0"]
   }
 }

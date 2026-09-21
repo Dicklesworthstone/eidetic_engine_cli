@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "Feedback health cannot be inspected because the selected workspace database is missing or unreadable.",
-    "setup_commands": [
-      "mkdir -p <workspace>"
-    ],
+    "setup_commands": ["mkdir -p <workspace>"],
     "invocation": "ee --fields full status --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "feedback_health_unavailable",
     "severity": "low",
-    "message_contains": [
-      "Feedback health is unavailable",
-      "database is missing"
-    ],
+    "message_contains": ["Feedback health is unavailable", "database is missing"],
     "repair_contains": "ee init",
     "repair_string": "Run `ee init --workspace .` before inspecting feedback health.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

@@ -7,18 +7,13 @@
   "repair_present": true,
   "trigger": {
     "description": "ee remember receives a tag containing reserved delimiter characters, so the usage error includes acceptedPattern, acceptedExamples, normalizedFormCandidate, and byte-range matchedAt details for programmatic retry.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee remember 'Tag rejection should be recoverable.' --workspace . --level semantic --kind fact --tags 'bad tag' --json"
   },
   "expected_emission": {
     "code": "policy_tag_rejected_with_details",
     "severity": "low",
-    "message_contains": [
-      "tag",
-      "accepted set"
-    ],
+    "message_contains": ["tag", "accepted set"],
     "repair_contains": "accepted tag characters"
   }
 }

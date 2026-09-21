@@ -56,17 +56,13 @@
     "demoteCount": 0,
     "methodUsed": "replay"
   },
-  "filtersApplied": [
-    "artifact_id=mem_fixture_001"
-  ],
+  "filtersApplied": ["artifact_id=mem_fixture_001"],
   "degradations": [
     {
       "code": "causal_sample_underpowered",
       "message": "causal promote-plan has sample size 0 with no observed baseline/outcome ledger; no causal effect is actionable.",
       "severity": "warning",
-      "sources": [
-        "causal_promote_plan"
-      ]
+      "sources": ["causal_promote_plan"]
     }
   ],
   "dryRun": true

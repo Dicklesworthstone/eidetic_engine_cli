@@ -17,9 +17,6 @@
   "expected_emission": {
     "code": "ask_conflicting_evidence",
     "severity": "warning",
-    "message_contains": [
-      "top evidence clusters oppose each other",
-      "sides[] emitted"
-    ]
+    "message_contains": ["top evidence clusters oppose each other", "sides[] emitted"]
   }
 }

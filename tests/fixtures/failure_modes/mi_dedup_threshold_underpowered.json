@@ -7,10 +7,7 @@
   "repair_present": true,
   "trigger": {
     "description": "The caller requested `--dedupe=mi`, but fewer than two memory hits exposed usable content for deterministic token mutual-information estimation. Search returns the normal doc-id deduped results without MI clustering.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "ee index rebuild --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace .", "ee index rebuild --workspace ."],
     "invocation": "ee search 'cargo fmt release' --workspace . --dedupe=mi --json"
   },
   "expected_emission": {
@@ -22,8 +19,6 @@
       "docId dedup"
     ],
     "repair_contains": "ee remember",
-    "repair_strings": [
-      "Rebuild the index or run ee remember before retrying --dedupe=mi."
-    ]
+    "repair_strings": ["Rebuild the index or run ee remember before retrying --dedupe=mi."]
   }
 }

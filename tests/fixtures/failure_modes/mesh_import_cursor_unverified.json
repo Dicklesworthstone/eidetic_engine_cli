@@ -5,9 +5,7 @@
     "bead": "bd-q8m4s",
     "epic_letter": "team-confed"
   },
-  "surfaces": [
-    "mesh import"
-  ],
+  "surfaces": ["mesh import"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "mesh_import_cursor_unverified",
     "severity": "warning",
-    "message_contains": [
-      "cursor row(s)",
-      "locally durable contiguous accepted replay"
-    ],
+    "message_contains": ["cursor row(s)", "locally durable contiguous accepted replay"],
     "repair_contains": "complete contiguous event range"
   }
 }

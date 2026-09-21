@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.2",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "no_ee_peers_on_tailnet",
     "severity": "info",
-    "message_contains": [
-      "no eligible ee peers",
-      "tailnet"
-    ],
+    "message_contains": ["no eligible ee peers", "tailnet"],
     "repair_contains": "mesh enabled"
   }
 }

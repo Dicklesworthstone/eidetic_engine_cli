@@ -15,17 +15,13 @@
     "precisionAt5AllowedDropPp": 5.0
   },
   "metrics": {
-    "ndcgAt10": { "baseline": 0.850, "current": 0.844, "allowedDropPp": 2.0 },
-    "mrr": { "baseline": 0.770, "current": 0.763, "allowedDropPp": 3.0 },
-    "precisionAt5": { "baseline": 0.830, "current": 0.824, "allowedDropPp": 5.0 },
+    "ndcgAt10": { "baseline": 0.85, "current": 0.844, "allowedDropPp": 2.0 },
+    "mrr": { "baseline": 0.77, "current": 0.763, "allowedDropPp": 3.0 },
+    "precisionAt5": { "baseline": 0.83, "current": 0.824, "allowedDropPp": 5.0 },
     "packHashStability": {
       "runs": 3,
       "stable": true,
-      "hashes": [
-        "g10-hits-pack-fafdc27b",
-        "g10-hits-pack-fafdc27b",
-        "g10-hits-pack-fafdc27b"
-      ]
+      "hashes": ["g10-hits-pack-fafdc27b", "g10-hits-pack-fafdc27b", "g10-hits-pack-fafdc27b"]
     }
   },
   "regressionProof": {

@@ -5,12 +5,7 @@
     "bead": "bd-1z1fd.3",
     "epic_letter": "drift-sentinel"
   },
-  "surfaces": [
-    "search",
-    "context",
-    "swarm brief",
-    "swarm work-packet claim gate"
-  ],
+  "surfaces": ["search", "context", "swarm brief", "swarm work-packet claim gate"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

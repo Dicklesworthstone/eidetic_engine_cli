@@ -4,14 +4,7 @@
   "test_id": "bd-1nxz4.5",
   "kind": "command_end",
   "command": "cargo",
-  "args": [
-    "cargo",
-    "test",
-    "--test",
-    "verification_evidence_parsers",
-    "--",
-    "--nocapture"
-  ],
+  "args": ["cargo", "test", "--test", "verification_evidence_parsers", "--", "--nocapture"],
   "stdout_hash": "blake3:stdout-rch-e327",
   "stderr_excerpt": "worker-preflight-fail + local-fallback-refused",
   "exit_code": 1,
@@ -24,16 +17,12 @@
     "git_tree": "tree:verification-evidence-fixture",
     "dirty_status_hash": "dirty:none",
     "verification_attribution": "CalmBay",
-    "source_state_degraded_codes": [
-      "rch_verify_remote_command_failed"
-    ],
+    "source_state_degraded_codes": ["rch_verify_remote_command_failed"],
     "worker_state_degraded_codes": [
       "rch_verify_topology_blocked",
       "rch_verify_local_fallback_refused",
       "rch_verify_remote_marker_missing"
     ],
-    "error_codes": [
-      "RCH-E327"
-    ]
+    "error_codes": ["RCH-E327"]
   }
 }

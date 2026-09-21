@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "dependency contract"
-  ],
+  "surfaces": ["status", "dependency contract"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "search_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "search",
-      "unavailable"
-    ],
+    "message_contains": ["search", "unavailable"],
     "repair_contains": "ee index status",
     "repair_string": "Run `ee index status --workspace . --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

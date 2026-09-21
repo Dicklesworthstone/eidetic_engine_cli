@@ -42,12 +42,7 @@
         {
           "commandId": "bead_show_candidate",
           "displayCommand": "br show bd-blocked --json",
-          "argv": [
-            "br",
-            "show",
-            "bd-blocked",
-            "--json"
-          ],
+          "argv": ["br", "show", "bd-blocked", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -58,14 +53,7 @@
         {
           "commandId": "bead_claim_candidate",
           "displayCommand": "br update bd-blocked --status in_progress --json",
-          "argv": [
-            "br",
-            "update",
-            "bd-blocked",
-            "--status",
-            "in_progress",
-            "--json"
-          ],
+          "argv": ["br", "update", "bd-blocked", "--status", "in_progress", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": true,
@@ -94,10 +82,7 @@
         "collisionRisk": "none",
         "unsafeReasons": [],
         "staleReasons": [],
-        "sourceRefs": [
-          "br://bd-blocked",
-          "bv://top-pick"
-        ]
+        "sourceRefs": ["br://bd-blocked", "bv://top-pick"]
       }
     ],
     "coordination": {

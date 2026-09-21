@@ -18,23 +18,14 @@
         "warningBytes": 536870912,
         "degradedBytes": 2147483648
       },
-      "expectedSubpaths": [
-        "messages",
-        "backups",
-        "search"
-      ],
+      "expectedSubpaths": ["messages", "backups", "search"],
       "expectedActions": [
         "keep",
         "compress_preserve",
         "move_preserve",
         "eligible_for_human_cleanup"
       ],
-      "forbiddenActions": [
-        "delete",
-        "rm",
-        "rmdir",
-        "unlink"
-      ]
+      "forbiddenActions": ["delete", "rm", "rmdir", "unlink"]
     }
   ],
   "degradedCodes": [

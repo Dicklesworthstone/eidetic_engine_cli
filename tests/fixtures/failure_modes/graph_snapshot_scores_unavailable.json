@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "graph feature-enrichment"
-  ],
+  "surfaces": ["graph feature-enrichment"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_snapshot_scores_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "centrality",
-      "scores"
-    ],
+    "message_contains": ["centrality", "scores"],
     "repair_contains": "ee graph centrality-refresh"
   }
 }

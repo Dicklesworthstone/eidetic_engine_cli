@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "index rebuild",
-    "index publish"
-  ],
+  "surfaces": ["index rebuild", "index publish"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -24,9 +21,7 @@
   "expected_emission": {
     "code": "index_publish_lock_contention",
     "severity": "medium",
-    "message_contains": [
-      "index publish lock"
-    ],
+    "message_contains": ["index publish lock"],
     "repair_contains": "retry"
   }
 }

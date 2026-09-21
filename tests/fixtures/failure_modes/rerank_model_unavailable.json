@@ -5,9 +5,7 @@
     "bead": "bd-2vq2z.6",
     "epic_letter": "RERANK"
   },
-  "surfaces": [
-    "search"
-  ],
+  "surfaces": ["search"],
   "severity": "low",
   "repair_present": false,
   "repair_unavailable_reason": "No automatic repair is available in this build. Search remains fusion-only unless the operator supplies a verified local artifact to --from-file.",

@@ -5,10 +5,7 @@
     "bead": "bd-17c65.14.1",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "pack",
-    "context"
-  ],
+  "surfaces": ["pack", "context"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "pack_bin_content_hash_mismatch",
     "severity": "high",
-    "message_contains": [
-      "content_hash",
-      "canonical JSON"
-    ],
+    "message_contains": ["content_hash", "canonical JSON"],
     "repair_contains": "Regenerate the binary pack from the source workspace"
   }
 }

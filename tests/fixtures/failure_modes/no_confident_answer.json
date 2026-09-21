@@ -16,9 +16,6 @@
   "expected_emission": {
     "code": "no_confident_answer",
     "severity": "info",
-    "message_contains": [
-      "confidence below threshold",
-      "abstention payload returned"
-    ]
+    "message_contains": ["confidence below threshold", "abstention payload returned"]
   }
 }

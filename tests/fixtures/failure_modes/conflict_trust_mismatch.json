@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.9",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "conflict_trust_mismatch",
     "severity": "high",
-    "message_contains": [
-      "trust mismatch conflict",
-      "higher-trust memory"
-    ],
+    "message_contains": ["trust mismatch conflict", "higher-trust memory"],
     "repair_contains": "reviewing its provenance"
   }
 }

@@ -5,9 +5,7 @@
     "bead": "bd-1et0v.14",
     "epic_letter": "doctor-health"
   },
-  "surfaces": [
-    "doctor"
-  ],
+  "surfaces": ["doctor"],
   "severity": "info",
   "repair_present": true,
   "trigger": {

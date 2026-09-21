@@ -4,13 +4,8 @@
   "workspaceAlias": "local-release",
   "peerGroupId": "pg_release_mesh_001",
   "peerGroupLabel": "release-mesh",
-  "peerIds": [
-    "peer_alice_laptop_001",
-    "peer_builder_host_001"
-  ],
-  "originWorkspaceIds": [
-    "wsp_remote_release_001"
-  ],
+  "peerIds": ["peer_alice_laptop_001", "peer_builder_host_001"],
+  "originWorkspaceIds": ["wsp_remote_release_001"],
   "originWorkspaceAliases": {
     "wsp_remote_release_001": "remote-release"
   },

@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "scope_agent_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "current agent identity",
-      "EE_AGENT_NAME"
-    ],
+    "message_contains": ["current agent identity", "EE_AGENT_NAME"],
     "repair_contains": "EE_AGENT_NAME",
     "repair_string": "Set EE_AGENT_NAME for self/team scoped retrieval."
   }

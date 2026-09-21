@@ -5,10 +5,7 @@
     "bead": "bd-3vw03",
     "epic_letter": "CONTRACTS"
   },
-  "surfaces": [
-    "curate validate",
-    "curate apply"
-  ],
+  "surfaces": ["curate validate", "curate apply"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "derived_source_evidence_missing",
     "severity": "medium",
-    "message_contains": [
-      "evidence",
-      "missing"
-    ],
+    "message_contains": ["evidence", "missing"],
     "repair_contains": "ee curate show"
   }
 }

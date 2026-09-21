@@ -1,7 +1,7 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "scale_posture_warming",
-  "introduced_by": {"bead": "bd-ssoco.1", "epic_letter": "scale-envelope"},
+  "introduced_by": { "bead": "bd-ssoco.1", "epic_letter": "scale-envelope" },
   "surfaces": ["scale envelope", "swarm scale", "cache prewarm"],
   "severity": "low",
   "repair_present": true,
@@ -17,10 +17,7 @@
   "expected_emission": {
     "code": "scale_posture_warming",
     "severity": "low",
-    "message_contains": [
-      "Scale posture is warming",
-      "derived assets are still warming"
-    ],
+    "message_contains": ["Scale posture is warming", "derived assets are still warming"],
     "repair_contains": "Allow the warmup to complete, or run the recommended cache/index prewarm action",
     "repair_string": "Allow the warmup to complete, or run the recommended cache/index prewarm action before measuring steady-state SLOs."
   }

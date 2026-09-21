@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.18",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "pack --stream"
-  ],
+  "surfaces": ["pack --stream"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "context_stream_partial_emission",
     "severity": "warning",
-    "message_contains": [
-      "Context stream ended",
-      "terminal frame"
-    ],
+    "message_contains": ["Context stream ended", "terminal frame"],
     "repair_contains": "Retry `ee pack --stream`",
     "repair_string": "Retry `ee pack --stream`; treat the partial stream as incomplete.",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

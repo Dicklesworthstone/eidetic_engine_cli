@@ -5,9 +5,7 @@
     "bead": "bd-gni47.3",
     "epic_letter": "SF"
   },
-  "surfaces": [
-    "graph feature-enrichment"
-  ],
+  "surfaces": ["graph feature-enrichment"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "singleflight_follower_timeout",
     "severity": "medium",
-    "message_contains": [
-      "Single-flight coalescing failed",
-      "follower timed out waiting for key"
-    ],
+    "message_contains": ["Single-flight coalescing failed", "follower timed out waiting for key"],
     "repair_contains": "longer wait budget",
     "repair_string": "Retry the read with a longer wait budget."
   }

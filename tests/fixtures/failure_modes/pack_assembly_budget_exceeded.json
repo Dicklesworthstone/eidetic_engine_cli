@@ -5,10 +5,7 @@
     "bead": "bd-1zb7k.5",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context",
-    "pack"
-  ],
+  "surfaces": ["context", "pack"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "pack_assembly_budget_exceeded",
     "severity": "medium",
-    "message_contains": [
-      "Pack assembly",
-      "exceeded"
-    ],
+    "message_contains": ["Pack assembly", "exceeded"],
     "repair_contains": "--resource-profile"
   }
 }

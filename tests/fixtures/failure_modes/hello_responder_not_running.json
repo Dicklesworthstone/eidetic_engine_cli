@@ -5,11 +5,7 @@
     "bead": "bd-36bbk.1.12",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh hello-responder status",
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["mesh hello-responder status", "status", "doctor"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,11 +18,7 @@
   "expected_emission": {
     "code": "hello_responder_not_running",
     "severity": "medium",
-    "message_contains": [
-      "Mesh is enabled",
-      "hello responder",
-      "not running"
-    ],
+    "message_contains": ["Mesh is enabled", "hello responder", "not running"],
     "repair_contains": "ee daemon --foreground"
   }
 }

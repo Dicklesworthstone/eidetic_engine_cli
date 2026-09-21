@@ -22,41 +22,51 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.swarm_fixture_corpus.v1"},
-    "corpusId": {"type": "string"},
-    "seedFamily": {"type": "string", "const": "seed.swarm_scale.v1"},
-    "fixedClock": {"type": "string"},
+    "schema": { "type": "string", "const": "ee.swarm_fixture_corpus.v1" },
+    "corpusId": { "type": "string" },
+    "seedFamily": { "type": "string", "const": "seed.swarm_scale.v1" },
+    "fixedClock": { "type": "string" },
     "hashEmbedder": {
       "type": "object",
       "required": ["algorithm", "dimensions"],
       "additionalProperties": false,
       "properties": {
-        "algorithm": {"type": "string"},
-        "dimensions": {"type": "integer", "minimum": 1}
+        "algorithm": { "type": "string" },
+        "dimensions": { "type": "integer", "minimum": 1 }
       }
     },
     "volatileFieldDenylist": {
       "type": "array",
       "minItems": 1,
-      "items": {"type": "string"}
+      "items": { "type": "string" }
     },
     "scales": {
       "type": "array",
       "minItems": 4,
       "items": {
         "type": "object",
-        "required": ["name", "agentCount", "memoryCount", "materializedInCi", "memoryIdPrefix", "expectedFirstMemoryId", "expectedLastMemoryId", "expectedGraphNodes", "expectedGraphEdges"],
+        "required": [
+          "name",
+          "agentCount",
+          "memoryCount",
+          "materializedInCi",
+          "memoryIdPrefix",
+          "expectedFirstMemoryId",
+          "expectedLastMemoryId",
+          "expectedGraphNodes",
+          "expectedGraphEdges"
+        ],
         "additionalProperties": false,
         "properties": {
-          "name": {"type": "string"},
-          "agentCount": {"type": "integer", "minimum": 1},
-          "memoryCount": {"type": "integer", "minimum": 1},
-          "materializedInCi": {"type": "boolean"},
-          "memoryIdPrefix": {"type": "string"},
-          "expectedFirstMemoryId": {"type": "string"},
-          "expectedLastMemoryId": {"type": "string"},
-          "expectedGraphNodes": {"type": "integer", "minimum": 1},
-          "expectedGraphEdges": {"type": "integer", "minimum": 0}
+          "name": { "type": "string" },
+          "agentCount": { "type": "integer", "minimum": 1 },
+          "memoryCount": { "type": "integer", "minimum": 1 },
+          "materializedInCi": { "type": "boolean" },
+          "memoryIdPrefix": { "type": "string" },
+          "expectedFirstMemoryId": { "type": "string" },
+          "expectedLastMemoryId": { "type": "string" },
+          "expectedGraphNodes": { "type": "integer", "minimum": 1 },
+          "expectedGraphEdges": { "type": "integer", "minimum": 0 }
         }
       }
     },
@@ -65,13 +75,13 @@
       "required": ["namePrefix", "programCycle", "modelCycle", "trustClassCycle"],
       "additionalProperties": false,
       "properties": {
-        "namePrefix": {"type": "string"},
-        "programCycle": {"type": "array", "items": {"type": "string"}},
-        "modelCycle": {"type": "array", "items": {"type": "string"}},
-        "trustClassCycle": {"type": "array", "items": {"type": "string"}}
+        "namePrefix": { "type": "string" },
+        "programCycle": { "type": "array", "items": { "type": "string" } },
+        "modelCycle": { "type": "array", "items": { "type": "string" } },
+        "trustClassCycle": { "type": "array", "items": { "type": "string" } }
       }
     },
-    "topics": {"type": "array", "items": {"type": "string"}},
+    "topics": { "type": "array", "items": { "type": "string" } },
     "conflicts": {
       "type": "array",
       "items": {
@@ -79,16 +89,22 @@
         "required": ["kind", "memoryIds", "reason"],
         "additionalProperties": false,
         "properties": {
-          "kind": {"type": "string", "enum": ["direct", "stale_replacement", "partial_overlap"]},
-          "memoryIds": {"type": "array", "minItems": 2, "items": {"type": "string"}},
-          "reason": {"type": "string"}
+          "kind": { "type": "string", "enum": ["direct", "stale_replacement", "partial_overlap"] },
+          "memoryIds": { "type": "array", "minItems": 2, "items": { "type": "string" } },
+          "reason": { "type": "string" }
         }
       }
     },
-    "coordinationSnapshots": {"type": "array", "items": {"type": "object"}},
+    "coordinationSnapshots": { "type": "array", "items": { "type": "object" } },
     "scenarioStates": {
       "type": "object",
-      "required": ["dirtyWorktrees", "coordinationSources", "beadsGraphs", "agentMailSnapshots", "rchPressureSnapshots"],
+      "required": [
+        "dirtyWorktrees",
+        "coordinationSources",
+        "beadsGraphs",
+        "agentMailSnapshots",
+        "rchPressureSnapshots"
+      ],
       "additionalProperties": false,
       "properties": {
         "dirtyWorktrees": {
@@ -99,10 +115,10 @@
             "required": ["id", "dirtyFileCount", "risk"],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "dirtyFileCount": {"type": "integer", "minimum": 0},
-              "risk": {"type": "string"},
-              "pathPatterns": {"type": "array", "items": {"type": "string"}}
+              "id": { "type": "string" },
+              "dirtyFileCount": { "type": "integer", "minimum": 0 },
+              "risk": { "type": "string" },
+              "pathPatterns": { "type": "array", "items": { "type": "string" } }
             }
           }
         },
@@ -114,11 +130,11 @@
             "required": ["id", "beads", "agentMail", "bv", "rch"],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "beads": {"type": "string"},
-              "agentMail": {"type": "string"},
-              "bv": {"type": "string"},
-              "rch": {"type": "string"}
+              "id": { "type": "string" },
+              "beads": { "type": "string" },
+              "agentMail": { "type": "string" },
+              "bv": { "type": "string" },
+              "rch": { "type": "string" }
             }
           }
         },
@@ -130,11 +146,11 @@
             "required": ["id", "readyCount", "blockedCount", "inProgressCount", "edgeCount"],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "readyCount": {"type": "integer", "minimum": 0},
-              "blockedCount": {"type": "integer", "minimum": 0},
-              "inProgressCount": {"type": "integer", "minimum": 0},
-              "edgeCount": {"type": "integer", "minimum": 0}
+              "id": { "type": "string" },
+              "readyCount": { "type": "integer", "minimum": 0 },
+              "blockedCount": { "type": "integer", "minimum": 0 },
+              "inProgressCount": { "type": "integer", "minimum": 0 },
+              "edgeCount": { "type": "integer", "minimum": 0 }
             }
           }
         },
@@ -146,11 +162,11 @@
             "required": ["id", "reservationCount", "unreadCount", "ackRequiredCount"],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "reservationCount": {"type": "integer", "minimum": 0},
-              "unreadCount": {"type": "integer", "minimum": 0},
-              "ackRequiredCount": {"type": "integer", "minimum": 0},
-              "degradedCode": {"type": "string"}
+              "id": { "type": "string" },
+              "reservationCount": { "type": "integer", "minimum": 0 },
+              "unreadCount": { "type": "integer", "minimum": 0 },
+              "ackRequiredCount": { "type": "integer", "minimum": 0 },
+              "degradedCode": { "type": "string" }
             }
           }
         },
@@ -162,17 +178,17 @@
             "required": ["id", "posture", "queueDepth", "activeBuilds"],
             "additionalProperties": false,
             "properties": {
-              "id": {"type": "string"},
-              "posture": {"type": "string"},
-              "queueDepth": {"type": "integer", "minimum": 0},
-              "activeBuilds": {"type": "integer", "minimum": 0},
-              "degradedCode": {"type": "string"}
+              "id": { "type": "string" },
+              "posture": { "type": "string" },
+              "queueDepth": { "type": "integer", "minimum": 0 },
+              "activeBuilds": { "type": "integer", "minimum": 0 },
+              "degradedCode": { "type": "string" }
             }
           }
         }
       }
     },
-    "verificationEvidence": {"type": "array", "items": {"type": "object"}},
+    "verificationEvidence": { "type": "array", "items": { "type": "object" } },
     "expectedPacks": {
       "type": "array",
       "items": {
@@ -180,11 +196,16 @@
         "required": ["scale", "query", "expectedTop3Ids", "expectedMaxTokens", "markdownGolden"],
         "additionalProperties": false,
         "properties": {
-          "scale": {"type": "string"},
-          "query": {"type": "string"},
-          "expectedTop3Ids": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
-          "expectedMaxTokens": {"type": "integer", "minimum": 1},
-          "markdownGolden": {"type": "string"}
+          "scale": { "type": "string" },
+          "query": { "type": "string" },
+          "expectedTop3Ids": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": { "type": "string" }
+          },
+          "expectedMaxTokens": { "type": "integer", "minimum": 1 },
+          "markdownGolden": { "type": "string" }
         }
       }
     },
@@ -195,8 +216,8 @@
         "required": ["path", "kind"],
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "kind": {"type": "string"}
+          "path": { "type": "string" },
+          "kind": { "type": "string" }
         }
       }
     }

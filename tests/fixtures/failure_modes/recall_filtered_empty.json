@@ -5,9 +5,7 @@
     "bead": "bd-u875s.3",
     "epic_letter": "RECALL"
   },
-  "surfaces": [
-    "recall"
-  ],
+  "surfaces": ["recall"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -21,9 +19,6 @@
   "expected_emission": {
     "code": "recall_filtered_empty",
     "severity": "info",
-    "message_contains": [
-      "matched the surface",
-      "filters removed them all"
-    ]
+    "message_contains": ["matched the surface", "filters removed them all"]
   }
 }

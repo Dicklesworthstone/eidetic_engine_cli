@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.1",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "tailscale_daemon_unreachable",
     "severity": "warning",
-    "message_contains": [
-      "Tailscale daemon",
-      "reachable"
-    ],
+    "message_contains": ["Tailscale daemon", "reachable"],
     "repair_contains": "tailscale status",
     "repair_string": "Run tailscale status and inspect the local tailscaled service.",
     "repair_command_regex": "(?P<cmd>tailscale status)"

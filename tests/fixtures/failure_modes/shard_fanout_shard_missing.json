@@ -5,9 +5,7 @@
     "bead": "bd-f6jfs.2",
     "epic_letter": "SHARD_FANOUT"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "shard_fanout_shard_missing",
     "severity": "warning",
-    "message_contains": [
-      "workspace shard",
-      "missing"
-    ],
+    "message_contains": ["workspace shard", "missing"],
     "repair_contains": "ee migrate shard-fanout",
     "repair_string": "Run ee migrate shard-fanout --workspace . --dry-run --json.",
     "repair_command_regex": "(?<cmd>ee migrate shard-fanout --workspace \\. --dry-run --json)"

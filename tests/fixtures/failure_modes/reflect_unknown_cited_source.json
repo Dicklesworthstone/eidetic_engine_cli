@@ -5,9 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "reflect result ingest"
-  ],
+  "surfaces": ["reflect result ingest"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "reflect_unknown_cited_source",
     "severity": "medium",
-    "message_contains": [
-      "unknown",
-      "source"
-    ],
+    "message_contains": ["unknown", "source"],
     "repair_contains": "ee reflect request-ledger diagnostics",
     "repair_string": "Run `ee reflect request-ledger diagnostics --workspace . --json` to compare cited sources to the retained request.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

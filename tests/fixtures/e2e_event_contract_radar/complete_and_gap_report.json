@@ -40,9 +40,7 @@
     {
       "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/cleanup_trap_only.sh",
       "scriptPathHash": "sha256:6386fc0c0d90ce293ec372261b8d60001d3bd9afc2de746d245b6c85551b231e",
-      "declaredEventSchemas": [
-        "ee.test_event.v1"
-      ],
+      "declaredEventSchemas": ["ee.test_event.v1"],
       "status": "advisory_gap",
       "coverage": {
         "commandStart": "missing",
@@ -101,10 +99,7 @@
     {
       "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/complete.sh",
       "scriptPathHash": "sha256:215df8535c2709731e7a6071bdc8482bee4157f560d6f489afe052f57d670f59",
-      "declaredEventSchemas": [
-        "ee.response.v2",
-        "ee.test_event.v1"
-      ],
+      "declaredEventSchemas": ["ee.response.v2", "ee.test_event.v1"],
       "status": "pass",
       "coverage": {
         "commandStart": "present",
@@ -171,10 +166,7 @@
     {
       "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/set_e_implicit_exit.sh",
       "scriptPathHash": "sha256:3eb674287ab9d797fd816e0b7fdca005dbacde54463101d945372c62f9ce3091",
-      "declaredEventSchemas": [
-        "ee.response.v2",
-        "ee.test_event.v1"
-      ],
+      "declaredEventSchemas": ["ee.response.v2", "ee.test_event.v1"],
       "status": "advisory_gap",
       "coverage": {
         "commandStart": "present",
@@ -208,9 +200,7 @@
     {
       "scriptPath": "tests/fixtures/e2e_event_contract_radar/scripts/success_only.sh",
       "scriptPathHash": "sha256:22af9a7a2732f2794fbd4055045885c137f0de1bca8a2bac0702bf7c1d5d57ac",
-      "declaredEventSchemas": [
-        "ee.test_event.v1"
-      ],
+      "declaredEventSchemas": ["ee.test_event.v1"],
       "status": "advisory_gap",
       "coverage": {
         "commandStart": "present",

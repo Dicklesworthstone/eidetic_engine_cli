@@ -5,9 +5,7 @@
     "bead": "bd-bife.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_pack_dna_no_dominator",
     "severity": "low",
-    "message_contains": [
-      "trust anchor",
-      "dominator"
-    ],
+    "message_contains": ["trust anchor", "dominator"],
     "repair_contains": "trust_class=human_explicit",
     "repair_string": "Seed a trusted source memory with `trust_class=human_explicit`."
   }

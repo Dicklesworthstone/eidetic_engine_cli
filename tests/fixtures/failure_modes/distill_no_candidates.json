@@ -5,9 +5,7 @@
     "bead": "bd-1pi9m.3",
     "epic_letter": "CAP"
   },
-  "surfaces": [
-    "journal distill"
-  ],
+  "surfaces": ["journal distill"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "distill_no_candidates",
     "severity": "info",
-    "message_contains": [
-      "proposal thresholds",
-      "honest empty"
-    ]
+    "message_contains": ["proposal thresholds", "honest empty"]
   },
   "notes": "Distillation only promotes command_failure clusters, first-seen failure shapes, and lone surprises; notes and observations abstain below_signal_threshold by design. Agents should treat this code as 'capture more failure/surprise evidence or widen --session/--agent/--since', never as an error to retry."
 }

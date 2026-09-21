@@ -24,10 +24,7 @@
   "expected_emission": {
     "code": "memory_drift_lock_contention",
     "severity": "warning",
-    "message_contains": [
-      "blocked by database read-snapshot contention",
-      "NOT inspected"
-    ],
+    "message_contains": ["blocked by database read-snapshot contention", "NOT inspected"],
     "repair_contains": "ee doctor"
   }
 }

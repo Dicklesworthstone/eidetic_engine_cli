@@ -39,9 +39,7 @@
           },
           "partialData": {
             "available": false,
-            "droppedSections": [
-              "actionable_rows"
-            ],
+            "droppedSections": ["actionable_rows"],
             "reason": "the actionable-queue probe shares the live br read that timed out"
           },
           "fallback": {
@@ -94,10 +92,7 @@
           },
           "partialData": {
             "available": false,
-            "droppedSections": [
-              "ready_rows",
-              "comments"
-            ],
+            "droppedSections": ["ready_rows", "comments"],
             "reason": "br ready exhausted the retry budget during a concurrent JSONL flush"
           },
           "fallback": {
@@ -158,10 +153,7 @@
         "lookupOutcome": "candidate_lookup_timed_out",
         "presentIn": [],
         "absentFrom": [],
-        "unavailableIn": [
-          "actionable_queue",
-          "beads"
-        ],
+        "unavailableIn": ["actionable_queue", "beads"],
         "staleFallbackPresence": {
           "present": true,
           "sourceKind": "beads",
@@ -191,8 +183,17 @@
     "ee.producer.metadata.v1": {
       "schema": "ee.producer.metadata.v1",
       "sourceSystem": "verification",
-      "identity": {"status": "known", "agentName": "BlueLake", "harness": "codex-cli", "model": "gpt-5"},
-      "run": {"runId": "run-20260513-001", "sessionId": "session-001", "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "identity": {
+        "status": "known",
+        "agentName": "BlueLake",
+        "harness": "codex-cli",
+        "model": "gpt-5"
+      },
+      "run": {
+        "runId": "run-20260513-001",
+        "sessionId": "session-001",
+        "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+      },
       "observedAt": "2026-05-13T14:00:00Z"
     },
     "ee.trust_lane.v1": {
@@ -218,11 +219,32 @@
       "startedAt": "2026-05-13T00:00:00Z",
       "finishedAt": "2026-05-13T00:00:01Z",
       "durationMs": 1000,
-      "environment": {"workspaceFingerprint": "repo:25e38e130474e7f0292de2a3", "cwd": "/repo", "toolchain": "rustc 1.96.0-nightly"},
-      "offload": {"requiredRemote": false, "remoteRequiredEnv": null, "offloadTool": null, "worker": null, "fallbackDetected": false, "fallbackReason": null},
-      "outputSummary": {"stdoutTail": null, "stderrTail": null, "redacted": false},
+      "environment": {
+        "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+        "cwd": "/repo",
+        "toolchain": "rustc 1.96.0-nightly"
+      },
+      "offload": {
+        "requiredRemote": false,
+        "remoteRequiredEnv": null,
+        "offloadTool": null,
+        "worker": null,
+        "fallbackDetected": false,
+        "fallbackReason": null
+      },
+      "outputSummary": { "stdoutTail": null, "stderrTail": null, "redacted": false },
       "artifacts": [],
-      "producer": {"schema": "ee.producer.metadata.v1", "sourceSystem": "verification", "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null}, "run": {"runId": "verify-run-20260513", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"}, "observedAt": "2026-05-13T00:00:00Z"}
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "verification",
+        "identity": { "status": "unknown", "agentName": null, "harness": null, "model": null },
+        "run": {
+          "runId": "verify-run-20260513",
+          "sessionId": null,
+          "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+        },
+        "observedAt": "2026-05-13T00:00:00Z"
+      }
     },
     "ee.verification.broker_view.v1": {
       "schema": "ee.verification.broker_view.v1",
@@ -240,10 +262,15 @@
       "effectiveInputHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "provenanceHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
       "executionSubstrate": "remote_artifact",
-      "rch": {"requiredRemote": true, "workerHost": "worker-c", "jobId": null},
+      "rch": { "requiredRemote": true, "workerHost": "worker-c", "jobId": null },
       "exitCode": 0,
       "finishedAt": "2026-05-15T05:00:42Z",
-      "compatibilityReasonCodes": ["command_match", "env_class_match", "source_match", "substrate_match"],
+      "compatibilityReasonCodes": [
+        "command_match",
+        "env_class_match",
+        "source_match",
+        "substrate_match"
+      ],
       "staleReasonCodes": [],
       "firstFailureSummaryRef": null,
       "suggestedAction": "cite_existing_run"
@@ -271,7 +298,13 @@
       "state": "completed",
       "admission": {
         "verdict": "reuse_existing",
-        "reasonCodes": ["command_match", "env_class_match", "runtime_match", "source_match", "tripwire_clean"],
+        "reasonCodes": [
+          "command_match",
+          "env_class_match",
+          "runtime_match",
+          "source_match",
+          "tripwire_clean"
+        ],
         "nextAction": "cite_existing_run",
         "reuseRunId": "vrun_rch_00000000000000000001",
         "waitOwner": null
@@ -408,8 +441,17 @@
       "schema": "ee.coordination_snapshot.v1",
       "capturedAt": "2026-05-13T14:00:00Z",
       "scope": "workspace",
-      "freshness": {"status": "fresh", "staleAfterMs": 86400000},
-      "summary": {"sourceCount": 1, "entryCount": 1, "staleSourceCount": 0, "degradedSourceCount": 0, "unavailableSourceCount": 0, "activeConflictCount": 0, "activeReservationCount": 0, "inProgressBeadCount": 1},
+      "freshness": { "status": "fresh", "staleAfterMs": 86400000 },
+      "summary": {
+        "sourceCount": 1,
+        "entryCount": 1,
+        "staleSourceCount": 0,
+        "degradedSourceCount": 0,
+        "unavailableSourceCount": 0,
+        "activeConflictCount": 0,
+        "activeReservationCount": 0,
+        "inProgressBeadCount": 1
+      },
       "sources": [
         {
           "kind": "beads",
@@ -419,7 +461,17 @@
           "lastSyncedAt": "2026-05-13T14:00:00Z",
           "stale": false,
           "entryCount": 1,
-          "entries": [{"kind": "bead", "id": "bd-1zb7k.7", "status": "in_progress", "summary": "S6 schema lifecycle work", "severity": "info", "conflict": false, "provenance": ["br://bd-1zb7k.7"]}],
+          "entries": [
+            {
+              "kind": "bead",
+              "id": "bd-1zb7k.7",
+              "status": "in_progress",
+              "summary": "S6 schema lifecycle work",
+              "severity": "info",
+              "conflict": false,
+              "provenance": ["br://bd-1zb7k.7"]
+            }
+          ],
           "degraded": []
         }
       ]
@@ -534,26 +586,35 @@
       "evidenceId": "coord_fallback_00000000000000000001",
       "capturedAt": "2026-05-15T11:21:00Z",
       "status": "blocked",
-      "source": {"kind": "rch", "sourceId": "rch-workers"},
+      "source": { "kind": "rch", "sourceId": "rch-workers" },
       "reasonCode": "rch_worker_topology_blocked",
       "summary": {
         "text": "Remote-required Cargo verification could not start because every configured RCH worker failed SSH probe; no local Cargo fallback was used.",
         "contentHash": "blake3:7f5a79840ff5e4fa1dc9d54ec78f4f0557c2a73ad53b228f6b31fd6383365f85",
         "redacted": true
       },
-      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "links": { "beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": [] },
       "fallbackAction": {
         "kind": "beads_comment",
         "summary": "Record the blocked RCH posture and continue with static-only work until remote workers recover.",
         "command": "br comment bd-1zb7k.13.2 \"RCH remote verification blocked; static evidence only\"",
         "manualStep": null
       },
-      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "redaction": {
+        "rawInboxIncluded": false,
+        "rawLogIncluded": false,
+        "secretScanApplied": true,
+        "pathPolicy": "labels_only"
+      },
       "producer": {
         "schema": "ee.producer.metadata.v1",
         "sourceSystem": "coordination_fallback",
-        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
-        "run": {"runId": "coord-fallback-20260515", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "identity": { "status": "unknown", "agentName": null, "harness": null, "model": null },
+        "run": {
+          "runId": "coord-fallback-20260515",
+          "sessionId": null,
+          "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+        },
         "observedAt": "2026-05-15T11:21:00Z"
       }
     },
@@ -561,7 +622,7 @@
       "schema": "ee.source_run_evidence.v1",
       "runId": "source_run_agent_mail_20260524_000001",
       "capturedAt": "2026-05-24T05:04:00Z",
-      "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check"},
+      "source": { "kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check" },
       "command": {
         "display": "agent-mail health_check",
         "argv": ["mcp_agent_mail.health_check"],
@@ -569,10 +630,24 @@
         "commandHash": "blake3:8e01e52e854b3ebaf808a4d9a13b2ad82464b1207612066df00d8355d5f8dca6",
         "normalizedArgvHash": "blake3:ca04f1b794394366028cfad3f5a2b3ce4ff2d195d902f8aa70f4e70c1d903f56"
       },
-      "policy": {"requiredMode": "best_effort_coordination", "onFailure": "continue_degraded", "failClosedReason": null},
-      "timing": {"startedAt": "2026-05-24T05:04:00Z", "finishedAt": "2026-05-24T05:04:01Z", "timeoutMs": 5000, "elapsedMs": 548},
+      "policy": {
+        "requiredMode": "best_effort_coordination",
+        "onFailure": "continue_degraded",
+        "failClosedReason": null
+      },
+      "timing": {
+        "startedAt": "2026-05-24T05:04:00Z",
+        "finishedAt": "2026-05-24T05:04:01Z",
+        "timeoutMs": 5000,
+        "elapsedMs": 548
+      },
       "status": "malformed_store",
-      "exit": {"exitCode": null, "signal": null, "killedOwnChild": false, "killedPeerProcesses": false},
+      "exit": {
+        "exitCode": null,
+        "signal": null,
+        "killedOwnChild": false,
+        "killedPeerProcesses": false
+      },
       "output": {
         "stdoutBytes": 0,
         "stderrBytes": 286,
@@ -641,26 +716,57 @@
           "redactionStatus": "id_only"
         }
       ],
-      "redaction": {"rawBodiesIncluded": false, "rawEnvIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "redaction": {
+        "rawBodiesIncluded": false,
+        "rawEnvIncluded": false,
+        "secretScanApplied": true,
+        "pathPolicy": "labels_only"
+      },
       "provenanceHash": "blake3:0c9cad06f83d37ecf7ff74f206dc65075f2b920098d494f3c29f578c0dce0f15",
       "producer": {
         "schema": "ee.producer.metadata.v1",
         "sourceSystem": "verification",
-        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
-        "run": {"runId": "source-run-watchdog-20260524", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "identity": { "status": "unknown", "agentName": null, "harness": null, "model": null },
+        "run": {
+          "runId": "source-run-watchdog-20260524",
+          "sessionId": null,
+          "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+        },
         "observedAt": "2026-05-24T05:04:01Z"
       }
     },
     "ee.resource.profile.v1": {
       "schema": "ee.resource.profile.v1",
       "profile": "swarm_heavy",
-      "budgetClass": {"candidatesScannedMax": 1600, "graphTraversalMaxEdges": 65536, "elapsedMsTarget": 1000, "elapsedMsWarning": 2000, "elapsedMsFailure": 10000, "concurrentPackMax": 16}
+      "budgetClass": {
+        "candidatesScannedMax": 1600,
+        "graphTraversalMaxEdges": 65536,
+        "elapsedMsTarget": 1000,
+        "elapsedMsWarning": 2000,
+        "elapsedMsFailure": 10000,
+        "concurrentPackMax": 16
+      }
     },
     "ee.pack.slo.v1": {
       "schema": "ee.pack.slo.v1",
       "profile": "standard",
-      "budgetClass": {"candidatesScannedMax": 240, "graphTraversalMaxEdges": 8192, "elapsedMsTarget": 200, "elapsedMsWarning": 500, "elapsedMsFailure": 2000, "concurrentPackMax": 4},
-      "actuals": {"candidateCount": 12, "scannedCount": 12, "indexGeneration": null, "graphGeneration": null, "graphEdgesTraversed": 0, "elapsedMs": 18, "memoryBytesPeak": 65536},
+      "budgetClass": {
+        "candidatesScannedMax": 240,
+        "graphTraversalMaxEdges": 8192,
+        "elapsedMsTarget": 200,
+        "elapsedMsWarning": 500,
+        "elapsedMsFailure": 2000,
+        "concurrentPackMax": 4
+      },
+      "actuals": {
+        "candidateCount": 12,
+        "scannedCount": 12,
+        "indexGeneration": null,
+        "graphGeneration": null,
+        "graphEdgesTraversed": 0,
+        "elapsedMs": 18,
+        "memoryBytesPeak": 65536
+      },
       "resourceStatus": "within_budget",
       "elapsedStatus": "within_budget",
       "status": "within_budget",
@@ -672,7 +778,10 @@
       "subjectSummary": "Run cargo fmt --check before release",
       "agreementScore": 0.92,
       "memberMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
-      "memberProducers": [{"agentName": "BlueLake", "trustClass": "agent_validated"}, {"agentName": null, "trustClass": "human_explicit"}],
+      "memberProducers": [
+        { "agentName": "BlueLake", "trustClass": "agent_validated" },
+        { "agentName": null, "trustClass": "human_explicit" }
+      ],
       "semanticSimilarityMin": 0.92,
       "firstRecordedAt": "2026-05-13T00:00:00Z",
       "lastReinforcedAt": "2026-05-13T01:00:00Z"
@@ -682,7 +791,10 @@
       "subjectFingerprint": "blake3:7fd01e847fe35e5a5d1a752a67d90adf75a752f8a1a4f6c30dca186660afc532",
       "kind": "direct",
       "conflictingMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010003"],
-      "evidencePointers": ["ee://memory/mem_00000000000000000000010001", "ee://memory/mem_00000000000000000000010003"],
+      "evidencePointers": [
+        "ee://memory/mem_00000000000000000000010001",
+        "ee://memory/mem_00000000000000000000010003"
+      ],
       "earliestAt": "2026-05-13T00:00:00Z",
       "latestAt": "2026-05-13T02:00:00Z",
       "recommendedAction": "review"
@@ -692,13 +804,60 @@
       "corpusId": "swarm-fixture-corpus-v1",
       "seedFamily": "seed.swarm_scale.v1",
       "fixedClock": "2026-05-13T00:00:00Z",
-      "hashEmbedder": {"algorithm": "blake3-xof-unit-vector", "dimensions": 384},
-      "volatileFieldDenylist": ["generatedAt", "observedAt", "recordedAt", "refreshedAt", "timestamp", "wallClockMs"],
+      "hashEmbedder": { "algorithm": "blake3-xof-unit-vector", "dimensions": 384 },
+      "volatileFieldDenylist": [
+        "generatedAt",
+        "observedAt",
+        "recordedAt",
+        "refreshedAt",
+        "timestamp",
+        "wallClockMs"
+      ],
       "scales": [
-        {"name": "micro_256", "agentCount": 16, "memoryCount": 256, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_micro_", "expectedFirstMemoryId": "mem_swarm_micro_000001", "expectedLastMemoryId": "mem_swarm_micro_000256", "expectedGraphNodes": 272, "expectedGraphEdges": 640},
-        {"name": "smoke_1k", "agentCount": 64, "memoryCount": 1000, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_smoke_", "expectedFirstMemoryId": "mem_swarm_smoke_000001", "expectedLastMemoryId": "mem_swarm_smoke_001000", "expectedGraphNodes": 1064, "expectedGraphEdges": 2500},
-        {"name": "mid_10k", "agentCount": 64, "memoryCount": 10000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_mid_", "expectedFirstMemoryId": "mem_swarm_mid_000001", "expectedLastMemoryId": "mem_swarm_mid_010000", "expectedGraphNodes": 10064, "expectedGraphEdges": 25000},
-        {"name": "large_100k", "agentCount": 256, "memoryCount": 100000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_large_", "expectedFirstMemoryId": "mem_swarm_large_000001", "expectedLastMemoryId": "mem_swarm_large_100000", "expectedGraphNodes": 100256, "expectedGraphEdges": 250000}
+        {
+          "name": "micro_256",
+          "agentCount": 16,
+          "memoryCount": 256,
+          "materializedInCi": true,
+          "memoryIdPrefix": "mem_swarm_micro_",
+          "expectedFirstMemoryId": "mem_swarm_micro_000001",
+          "expectedLastMemoryId": "mem_swarm_micro_000256",
+          "expectedGraphNodes": 272,
+          "expectedGraphEdges": 640
+        },
+        {
+          "name": "smoke_1k",
+          "agentCount": 64,
+          "memoryCount": 1000,
+          "materializedInCi": true,
+          "memoryIdPrefix": "mem_swarm_smoke_",
+          "expectedFirstMemoryId": "mem_swarm_smoke_000001",
+          "expectedLastMemoryId": "mem_swarm_smoke_001000",
+          "expectedGraphNodes": 1064,
+          "expectedGraphEdges": 2500
+        },
+        {
+          "name": "mid_10k",
+          "agentCount": 64,
+          "memoryCount": 10000,
+          "materializedInCi": false,
+          "memoryIdPrefix": "mem_swarm_mid_",
+          "expectedFirstMemoryId": "mem_swarm_mid_000001",
+          "expectedLastMemoryId": "mem_swarm_mid_010000",
+          "expectedGraphNodes": 10064,
+          "expectedGraphEdges": 25000
+        },
+        {
+          "name": "large_100k",
+          "agentCount": 256,
+          "memoryCount": 100000,
+          "materializedInCi": false,
+          "memoryIdPrefix": "mem_swarm_large_",
+          "expectedFirstMemoryId": "mem_swarm_large_000001",
+          "expectedLastMemoryId": "mem_swarm_large_100000",
+          "expectedGraphNodes": 100256,
+          "expectedGraphEdges": 250000
+        }
       ],
       "agentTemplate": {
         "namePrefix": "SwarmAgent",
@@ -708,44 +867,119 @@
       },
       "topics": ["release", "database", "coordination", "verification", "refactor", "policy"],
       "conflicts": [
-        {"kind": "direct", "memoryIds": ["mem_swarm_smoke_000007", "mem_swarm_smoke_000008"], "reason": "One memory says release tags require local-only checks; the other requires remote verification evidence."}
+        {
+          "kind": "direct",
+          "memoryIds": ["mem_swarm_smoke_000007", "mem_swarm_smoke_000008"],
+          "reason": "One memory says release tags require local-only checks; the other requires remote verification evidence."
+        }
       ],
       "coordinationSnapshots": [
-        {"schema": "ee.coordination_snapshot.v1", "scope": "workspace", "sources": ["beads", "agent_mail"], "expectedActiveReservationCount": 3, "expectedInProgressBeadCount": 2}
+        {
+          "schema": "ee.coordination_snapshot.v1",
+          "scope": "workspace",
+          "sources": ["beads", "agent_mail"],
+          "expectedActiveReservationCount": 3,
+          "expectedInProgressBeadCount": 2
+        }
       ],
       "scenarioStates": {
         "dirtyWorktrees": [
-          {"id": "clean", "dirtyFileCount": 0, "risk": "none"},
-          {"id": "overlap_swarm_core", "dirtyFileCount": 2, "risk": "high", "pathPatterns": ["src/core/swarm_brief.rs", "tests/fixtures/swarm_scale/**"]}
+          { "id": "clean", "dirtyFileCount": 0, "risk": "none" },
+          {
+            "id": "overlap_swarm_core",
+            "dirtyFileCount": 2,
+            "risk": "high",
+            "pathPatterns": ["src/core/swarm_brief.rs", "tests/fixtures/swarm_scale/**"]
+          }
         ],
         "coordinationSources": [
-          {"id": "all_current", "beads": "current", "agentMail": "current", "bv": "current", "rch": "current"},
-          {"id": "degraded_stale_mix", "beads": "stale", "agentMail": "unavailable", "bv": "current", "rch": "topology_blocked"}
+          {
+            "id": "all_current",
+            "beads": "current",
+            "agentMail": "current",
+            "bv": "current",
+            "rch": "current"
+          },
+          {
+            "id": "degraded_stale_mix",
+            "beads": "stale",
+            "agentMail": "unavailable",
+            "bv": "current",
+            "rch": "topology_blocked"
+          }
         ],
         "beadsGraphs": [
-          {"id": "ready_wide", "readyCount": 24, "blockedCount": 3, "inProgressCount": 4, "edgeCount": 31},
-          {"id": "blocked_rch_gate", "readyCount": 0, "blockedCount": 2, "inProgressCount": 1, "edgeCount": 2}
+          {
+            "id": "ready_wide",
+            "readyCount": 24,
+            "blockedCount": 3,
+            "inProgressCount": 4,
+            "edgeCount": 31
+          },
+          {
+            "id": "blocked_rch_gate",
+            "readyCount": 0,
+            "blockedCount": 2,
+            "inProgressCount": 1,
+            "edgeCount": 2
+          }
         ],
         "agentMailSnapshots": [
-          {"id": "reservations_current", "reservationCount": 3, "unreadCount": 5, "ackRequiredCount": 1},
-          {"id": "unreachable", "reservationCount": 0, "unreadCount": 0, "ackRequiredCount": 0, "degradedCode": "agent_mail_unavailable"}
+          {
+            "id": "reservations_current",
+            "reservationCount": 3,
+            "unreadCount": 5,
+            "ackRequiredCount": 1
+          },
+          {
+            "id": "unreachable",
+            "reservationCount": 0,
+            "unreadCount": 0,
+            "ackRequiredCount": 0,
+            "degradedCode": "agent_mail_unavailable"
+          }
         ],
         "rchPressureSnapshots": [
-          {"id": "remote_ready", "posture": "remote_ready", "queueDepth": 0, "activeBuilds": 2},
-          {"id": "topology_blocked", "posture": "blocked", "queueDepth": 0, "activeBuilds": 0, "degradedCode": "rch_worker_topology_blocked"}
+          { "id": "remote_ready", "posture": "remote_ready", "queueDepth": 0, "activeBuilds": 2 },
+          {
+            "id": "topology_blocked",
+            "posture": "blocked",
+            "queueDepth": 0,
+            "activeBuilds": 0,
+            "degradedCode": "rch_worker_topology_blocked"
+          }
         ]
       },
       "verificationEvidence": [
-        {"schema": "ee.verification.evidence.v1", "verificationId": "ver_swarm_smoke_000001", "status": "passed", "beadId": "bd-bife.17", "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"}
+        {
+          "schema": "ee.verification.evidence.v1",
+          "verificationId": "ver_swarm_smoke_000001",
+          "status": "passed",
+          "beadId": "bd-bife.17",
+          "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"
+        }
       ],
       "expectedPacks": [
-        {"scale": "smoke_1k", "query": "release verification coordination", "expectedTop3Ids": ["mem_swarm_smoke_000001", "mem_swarm_smoke_000007", "mem_swarm_smoke_000014"], "expectedMaxTokens": 1200, "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"}
+        {
+          "scale": "smoke_1k",
+          "query": "release verification coordination",
+          "expectedTop3Ids": [
+            "mem_swarm_smoke_000001",
+            "mem_swarm_smoke_000007",
+            "mem_swarm_smoke_000014"
+          ],
+          "expectedMaxTokens": 1200,
+          "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"
+        }
       ],
       "artifacts": [
-        {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
-        {"path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema"},
-        {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
-        {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
+        { "path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest" },
+        { "path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema" },
+        {
+          "path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden",
+          "kind": "markdown_golden"
+        },
+        { "path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script" }
       ]
     },
     "ee.handoff.memory_set_fingerprint.v1": {
@@ -761,11 +995,18 @@
       "workspace": "[REDACTED:path]",
       "redactionStatus": "paths_counts_subjects_only_no_content",
       "sources": [],
-      "dirtyFiles": [{"path": "src/core/swarm_brief.rs", "status": "M"}],
+      "dirtyFiles": [{ "path": "src/core/swarm_brief.rs", "status": "M" }],
       "recentCommits": [],
-      "beads": {"ready": [], "blocked": [], "inProgress": [], "deferred": []},
+      "beads": { "ready": [], "blocked": [], "inProgress": [], "deferred": [] },
       "bv": null,
-      "fileReservations": [{"pathPattern": "src/core/swarm_brief.rs", "holder": "OtherAgent", "exclusive": true, "expiresAt": "2026-05-15T16:00:00Z"}],
+      "fileReservations": [
+        {
+          "pathPattern": "src/core/swarm_brief.rs",
+          "holder": "OtherAgent",
+          "exclusive": true,
+          "expiresAt": "2026-05-15T16:00:00Z"
+        }
+      ],
       "fileSurfaceRisks": [
         {
           "pathPattern": "src/core/swarm_brief.rs",
@@ -775,7 +1016,10 @@
           "severity": "medium",
           "score": 67,
           "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
-          "evidence": ["git_status:M:src/core/swarm_brief.rs", "agent_mail_reservation:OtherAgent:src/core/swarm_brief.rs"],
+          "evidence": [
+            "git_status:M:src/core/swarm_brief.rs",
+            "agent_mail_reservation:OtherAgent:src/core/swarm_brief.rs"
+          ],
           "suggestedCommands": ["message OtherAgent before editing src/core/swarm_brief.rs"]
         }
       ],
@@ -809,9 +1053,19 @@
           "lastActivityAt": "2026-05-15T15:45:00Z",
           "ageSeconds": 60,
           "evidenceSources": ["agent_mail_agent", "agent_mail_reservation"],
-          "evidence": ["agent_mail_agent_last_active:bd-active:2026-05-15T15:45:00Z", "agent_mail_reservation:bd-active:OtherAgent:active"],
-          "suggestedCommands": ["br show bd-active --json", "Search Agent Mail for thread bd-active", "message OtherAgent before reclaiming bd-active"],
-          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+          "evidence": [
+            "agent_mail_agent_last_active:bd-active:2026-05-15T15:45:00Z",
+            "agent_mail_reservation:bd-active:OtherAgent:active"
+          ],
+          "suggestedCommands": [
+            "br show bd-active --json",
+            "Search Agent Mail for thread bd-active",
+            "message OtherAgent before reclaiming bd-active"
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not force-release reservations from liveness guidance alone."
+          ]
         },
         {
           "beadId": "bd-quiet",
@@ -824,9 +1078,19 @@
           "lastActivityAt": "2026-05-15T08:00:00Z",
           "ageSeconds": 28800,
           "evidenceSources": ["beads_updated_at"],
-          "evidence": ["beads_updated_at:bd-quiet:2026-05-15T08:00:00Z", "last_activity_age_seconds:28800"],
-          "suggestedCommands": ["br show bd-quiet --json", "Search Agent Mail for thread bd-quiet", "message QuietAgent before reclaiming bd-quiet"],
-          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+          "evidence": [
+            "beads_updated_at:bd-quiet:2026-05-15T08:00:00Z",
+            "last_activity_age_seconds:28800"
+          ],
+          "suggestedCommands": [
+            "br show bd-quiet --json",
+            "Search Agent Mail for thread bd-quiet",
+            "message QuietAgent before reclaiming bd-quiet"
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not force-release reservations from liveness guidance alone."
+          ]
         },
         {
           "beadId": "bd-blocked",
@@ -839,9 +1103,20 @@
           "lastActivityAt": "2026-05-01T12:00:00.123456Z",
           "ageSeconds": 2800000,
           "evidenceSources": ["beads_updated_at"],
-          "evidence": ["beads_updated_at:bd-blocked:2026-05-01T12:00:00.123456Z", "bead:bd-blocked:in_progress:[swarm-brief] blocked waiting on operator proof"],
-          "suggestedCommands": ["br show bd-blocked --json", "Search Agent Mail for thread bd-blocked", "message OtherAgent before reclaiming bd-blocked", "ee --fields full swarm brief --workspace . --json"],
-          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+          "evidence": [
+            "beads_updated_at:bd-blocked:2026-05-01T12:00:00.123456Z",
+            "bead:bd-blocked:in_progress:[swarm-brief] blocked waiting on operator proof"
+          ],
+          "suggestedCommands": [
+            "br show bd-blocked --json",
+            "Search Agent Mail for thread bd-blocked",
+            "message OtherAgent before reclaiming bd-blocked",
+            "ee --fields full swarm brief --workspace . --json"
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not force-release reservations from liveness guidance alone."
+          ]
         },
         {
           "beadId": "bd-human",
@@ -854,9 +1129,20 @@
           "lastActivityAt": "2026-05-01T12:00:00.123456Z",
           "ageSeconds": 2800000,
           "evidenceSources": ["beads_updated_at"],
-          "evidence": ["beads_updated_at:bd-human:2026-05-01T12:00:00.123456Z", "human_approval_required:true"],
-          "suggestedCommands": ["br show bd-human --json", "Search Agent Mail for thread bd-human", "Ask the human/operator for explicit approval before reopening or deleting anything."],
-          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone.", "Do not treat deferred or human-approval work as abandoned."]
+          "evidence": [
+            "beads_updated_at:bd-human:2026-05-01T12:00:00.123456Z",
+            "human_approval_required:true"
+          ],
+          "suggestedCommands": [
+            "br show bd-human --json",
+            "Search Agent Mail for thread bd-human",
+            "Ask the human/operator for explicit approval before reopening or deleting anything."
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not force-release reservations from liveness guidance alone.",
+            "Do not treat deferred or human-approval work as abandoned."
+          ]
         },
         {
           "beadId": "bd-mail-degraded",
@@ -869,9 +1155,19 @@
           "lastActivityAt": "2026-05-01T12:00:00.123456Z",
           "ageSeconds": 2800000,
           "evidenceSources": ["agent_mail_degraded", "beads_updated_at"],
-          "evidence": ["beads_updated_at:bd-mail-degraded:2026-05-01T12:00:00.123456Z", "source_status:agent_mail:not_ready"],
-          "suggestedCommands": ["br show bd-mail-degraded --json", "Search Agent Mail for thread bd-mail-degraded", "message QuietAgent before reclaiming bd-mail-degraded"],
-          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not treat missing Agent Mail data as inactivity proof."]
+          "evidence": [
+            "beads_updated_at:bd-mail-degraded:2026-05-01T12:00:00.123456Z",
+            "source_status:agent_mail:not_ready"
+          ],
+          "suggestedCommands": [
+            "br show bd-mail-degraded --json",
+            "Search Agent Mail for thread bd-mail-degraded",
+            "message QuietAgent before reclaiming bd-mail-degraded"
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not treat missing Agent Mail data as inactivity proof."
+          ]
         },
         {
           "beadId": "bd-stale",
@@ -885,15 +1181,16 @@
           "ageSeconds": 2800000,
           "evidenceSources": ["beads_updated_at", "agent_mail_thread", "git_commit"],
           "evidence": ["beads_updated_at:bd-stale:2026-05-01T12:00:00.123456Z"],
-          "suggestedCommands": ["br show bd-stale --json", "br update bd-stale --status open --json"],
+          "suggestedCommands": [
+            "br show bd-stale --json",
+            "br update bd-stale --status open --json"
+          ],
           "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output."]
         }
       ],
       "inbox": [],
       "threads": [],
-      "agentMailAgents": [
-        {"name": "OtherAgent", "lastActiveAt": "2026-05-15T15:45:00Z"}
-      ],
+      "agentMailAgents": [{ "name": "OtherAgent", "lastActiveAt": "2026-05-15T15:45:00Z" }],
       "resourcePressure": [],
       "hostProfile": null,
       "agentInventory": null,
@@ -907,8 +1204,8 @@
         "unknownAgeCount": 0,
         "recentReusableRunCount": 1,
         "inFlightEquivalentCommandCount": 0,
-        "advisoryCounts": {"remoteSuccess": 1},
-        "evidenceHealth": {"status": "healthy"},
+        "advisoryCounts": { "remoteSuccess": 1 },
+        "evidenceHealth": { "status": "healthy" },
         "recoveryActions": [],
         "rchQueueStatus": "clear",
         "rchSlotsAvailable": 4,
@@ -930,7 +1227,7 @@
       "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
       "reportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
       "workspaceHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
-      "limits": {"maxRecommendations": 6},
+      "limits": { "maxRecommendations": 6 },
       "counts": {
         "fileSurfaceRiskCount": 1,
         "activeReservationCount": 1,
@@ -949,7 +1246,7 @@
         "symbolRiskPathCount": 0,
         "symbolRiskHighRiskSymbolCount": 0
       },
-      "bv": {"topPickIds": []},
+      "bv": { "topPickIds": [] },
       "memoryDrift": {
         "status": "degraded",
         "available": true,
@@ -964,7 +1261,7 @@
         "affectedCount": 2,
         "topAffectedMemoryIds": ["mem_changed", "mem_missing"],
         "degradedCodes": ["memory_drift_source_changed", "memory_drift_source_missing"],
-        "sourceKindCounts": {"provenance_chain": 2, "pack_record": 1},
+        "sourceKindCounts": { "provenance_chain": 2, "pack_record": 1 },
         "rawSnippetsIncluded": false,
         "rawCommandBodiesIncluded": false,
         "fullListingsIncluded": false
@@ -990,7 +1287,7 @@
         "rawLogsIncluded": false,
         "rawMailBodiesIncluded": false
       },
-      "sourceStatusCounts": {"ready": 1},
+      "sourceStatusCounts": { "ready": 1 },
       "sourceStatuses": [],
       "resourcePressurePosture": "low",
       "rchWorkerPressure": {
@@ -1047,9 +1344,9 @@
       },
       "degradedCodes": [],
       "fileSurfaceRiskSummary": {
-        "countsBySeverity": {"medium": 1},
-        "countsByReservationHolder": {"blake3:a9794fb0c2dc": 1},
-        "countsByGitStatus": {"M": 1},
+        "countsBySeverity": { "medium": 1 },
+        "countsByReservationHolder": { "blake3:a9794fb0c2dc": 1 },
+        "countsByGitStatus": { "M": 1 },
         "topRisks": [
           {
             "pathHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
@@ -1058,16 +1355,18 @@
             "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
             "reservationHolders": ["blake3:a9794fb0c2dc"],
             "relatedBeadIds": ["bd-1zb7k.16.4"],
-            "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
+            "suggestedCommandHashes": [
+              "blake3:4444444444444444444444444444444444444444444444444444444444444444"
+            ],
             "rawPathIncluded": false,
             "rawCommandsIncluded": false
           }
         ]
       },
       "readyReservationPressureSummary": {
-        "countsByAction": {"wait": 1},
-        "countsBySeverity": {"high": 1},
-        "countsByReservationHolder": {"blake3:a9794fb0c2dc": 1},
+        "countsByAction": { "wait": 1 },
+        "countsBySeverity": { "high": 1 },
+        "countsByReservationHolder": { "blake3:a9794fb0c2dc": 1 },
         "topReadyBeads": [
           {
             "beadId": "bd-1zb7k.16.4",
@@ -1081,8 +1380,12 @@
             "earliestExpiresAt": "2026-06-02T12:00:00Z",
             "maxRiskScore": 92,
             "riskFactors": ["active_exclusive_reservation", "ready_work_overlap"],
-            "likelySurfaceHashes": ["blake3:8888888888888888888888888888888888888888888888888888888888888888"],
-            "suggestedCommandHashes": ["blake3:9999999999999999999999999999999999999999999999999999999999999999"],
+            "likelySurfaceHashes": [
+              "blake3:8888888888888888888888888888888888888888888888888888888888888888"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:9999999999999999999999999999999999999999999999999999999999999999"
+            ],
             "rawTitleIncluded": false,
             "rawSurfacesIncluded": false,
             "rawCommandsIncluded": false
@@ -1090,9 +1393,22 @@
         ]
       },
       "stalledBeadLivenessSummary": {
-        "countsByPosture": {"active": 1, "blocked_with_evidence": 1, "human_approval_required": 1, "quiet_but_recent": 1, "reclaim_candidate": 1, "stale_needs_message": 1},
-        "countsByAction": {"inspect_full": 1, "leave_alone": 1, "message_holder": 2, "reopen_manually": 1, "request_human_approval": 1},
-        "countsBySeverity": {"high": 2, "low": 2, "medium": 2},
+        "countsByPosture": {
+          "active": 1,
+          "blocked_with_evidence": 1,
+          "human_approval_required": 1,
+          "quiet_but_recent": 1,
+          "reclaim_candidate": 1,
+          "stale_needs_message": 1
+        },
+        "countsByAction": {
+          "inspect_full": 1,
+          "leave_alone": 1,
+          "message_holder": 2,
+          "reopen_manually": 1,
+          "request_human_approval": 1
+        },
+        "countsBySeverity": { "high": 2, "low": 2, "medium": 2 },
         "topInProgressBeads": [
           {
             "beadId": "bd-active",
@@ -1105,8 +1421,12 @@
             "lastActivityAt": "2026-05-15T15:45:00Z",
             "ageSeconds": 60,
             "evidenceSources": ["agent_mail_agent", "agent_mail_reservation"],
-            "evidenceHashes": ["blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
-            "suggestedCommandHashes": ["blake3:1010101010101010101010101010101010101010101010101010101010101010"],
+            "evidenceHashes": [
+              "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:1010101010101010101010101010101010101010101010101010101010101010"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1122,8 +1442,12 @@
             "lastActivityAt": "2026-05-15T08:00:00Z",
             "ageSeconds": 28800,
             "evidenceSources": ["beads_updated_at"],
-            "evidenceHashes": ["blake3:2525252525252525252525252525252525252525252525252525252525252525"],
-            "suggestedCommandHashes": ["blake3:2626262626262626262626262626262626262626262626262626262626262626"],
+            "evidenceHashes": [
+              "blake3:2525252525252525252525252525252525252525252525252525252525252525"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:2626262626262626262626262626262626262626262626262626262626262626"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1139,8 +1463,12 @@
             "lastActivityAt": "2026-05-01T12:00:00.123456Z",
             "ageSeconds": 2800000,
             "evidenceSources": ["beads_updated_at"],
-            "evidenceHashes": ["blake3:1313131313131313131313131313131313131313131313131313131313131313"],
-            "suggestedCommandHashes": ["blake3:1414141414141414141414141414141414141414141414141414141414141414"],
+            "evidenceHashes": [
+              "blake3:1313131313131313131313131313131313131313131313131313131313131313"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:1414141414141414141414141414141414141414141414141414141414141414"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1156,8 +1484,12 @@
             "lastActivityAt": "2026-05-01T12:00:00.123456Z",
             "ageSeconds": 2800000,
             "evidenceSources": ["beads_updated_at"],
-            "evidenceHashes": ["blake3:1616161616161616161616161616161616161616161616161616161616161616"],
-            "suggestedCommandHashes": ["blake3:1717171717171717171717171717171717171717171717171717171717171717"],
+            "evidenceHashes": [
+              "blake3:1616161616161616161616161616161616161616161616161616161616161616"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:1717171717171717171717171717171717171717171717171717171717171717"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1173,8 +1505,12 @@
             "lastActivityAt": "2026-05-01T12:00:00.123456Z",
             "ageSeconds": 2800000,
             "evidenceSources": ["agent_mail_degraded", "beads_updated_at"],
-            "evidenceHashes": ["blake3:2020202020202020202020202020202020202020202020202020202020202020"],
-            "suggestedCommandHashes": ["blake3:2121212121212121212121212121212121212121212121212121212121212121"],
+            "evidenceHashes": [
+              "blake3:2020202020202020202020202020202020202020202020202020202020202020"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:2121212121212121212121212121212121212121212121212121212121212121"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1190,8 +1526,12 @@
             "lastActivityAt": "2026-05-01T12:00:00.123456Z",
             "ageSeconds": 2800000,
             "evidenceSources": ["beads_updated_at", "agent_mail_thread", "git_commit"],
-            "evidenceHashes": ["blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
-            "suggestedCommandHashes": ["blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+            "evidenceHashes": [
+              "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ],
+            "suggestedCommandHashes": [
+              "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ],
             "rawTitleIncluded": false,
             "rawEvidenceIncluded": false,
             "rawCommandsIncluded": false
@@ -1215,7 +1555,11 @@
         "rawAgentNamesIncluded": false
       },
       "topRecommendations": [],
-      "provenance": {"underlyingReportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111", "sideEffectFree": true, "sourceProvenance": []},
+      "provenance": {
+        "underlyingReportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "sideEffectFree": true,
+        "sourceProvenance": []
+      },
       "redaction": {
         "rawMailBodiesIncluded": false,
         "rawQueryTextIncluded": false,
@@ -1249,7 +1593,12 @@
         "confidence": "high",
         "safeToClaim": true,
         "reasons": ["bead_ready", "no_dirty_path_overlap", "coordination_sources_fresh"],
-        "proofObligations": ["record_overlap_decision_in_closeout", "reserve_files_before_editing", "run_claim_gate_before_claim", "use_rch_for_cargo_verification"],
+        "proofObligations": [
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "run_claim_gate_before_claim",
+          "use_rch_for_cargo_verification"
+        ],
         "suggestedCommands": ["br show bd-example.1 --json"]
       },
       "candidates": [
@@ -1280,7 +1629,13 @@
         "activeClaimCount": 0,
         "dirtyPathCount": 0,
         "fileCollisionCount": 0,
-        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 0, "ackRequiredCount": 0, "degradedCodes": []},
+        "agentMail": {
+          "status": "fresh",
+          "healthLevel": "green",
+          "unreadCount": 0,
+          "ackRequiredCount": 0,
+          "degradedCodes": []
+        },
         "activeClaims": [],
         "fileCollisions": []
       },
@@ -1313,18 +1668,60 @@
       },
       "verification": {
         "requiredCommands": [
-          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "after_substantive_rust_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+          {
+            "commandId": "cargo_check_all_targets",
+            "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets",
+            "requiredSubstrate": "rch",
+            "when": "after_substantive_rust_changes",
+            "lastOutcome": "not_run",
+            "lastCommandHash": null
+          }
         ],
         "staticChecks": [
-          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null}
+          {
+            "commandId": "json_schema_parse",
+            "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json",
+            "requiredSubstrate": "static_local",
+            "when": "after_schema_edits",
+            "lastOutcome": "passed",
+            "lastCommandHash": null
+          }
         ],
         "closeoutEvidenceRequired": true
       },
       "sourceProvenance": [
-        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
-        {"source": "bv", "collector": "swarm next-action", "status": "fresh", "freshness": "current", "digest": "blake3:bv", "redaction": "ids_scores_reasons"},
-        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"},
-        {"source": "rch", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:rch", "redaction": "counts_worker_labels_no_raw_logs"}
+        {
+          "source": "beads",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:beads",
+          "redaction": "ids_statuses_titles"
+        },
+        {
+          "source": "bv",
+          "collector": "swarm next-action",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:bv",
+          "redaction": "ids_scores_reasons"
+        },
+        {
+          "source": "agent-mail",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:mail",
+          "redaction": "counts_subjects_no_bodies"
+        },
+        {
+          "source": "rch",
+          "collector": "swarm brief",
+          "status": "fresh",
+          "freshness": "current",
+          "digest": "blake3:rch",
+          "redaction": "counts_worker_labels_no_raw_logs"
+        }
       ],
       "mutationPolicy": {
         "sideEffectFree": true,
@@ -1511,9 +1908,7 @@
         "exitClass": "ok",
         "authoritative": true,
         "rowCount": 1,
-        "candidateIds": [
-          "bd-example.1"
-        ],
+        "candidateIds": ["bd-example.1"],
         "truncatedCandidateCount": 0,
         "filterContract": {
           "excludesEpics": true,
@@ -1563,9 +1958,7 @@
           "sourceCount": 4
         },
         "evidenceFreshness": "fresh",
-        "reasonCodes": [
-          "redaction_posture_verified"
-        ],
+        "reasonCodes": ["redaction_posture_verified"],
         "abstentionReasons": [],
         "nextCommands": [],
         "nextCommandActions": [
@@ -1593,20 +1986,13 @@
       },
       "unsafeReasons": [],
       "staleReasons": [],
-      "sourceRefs": [
-        "br://bd-example.1"
-      ],
+      "sourceRefs": ["br://bd-example.1"],
       "degradedCodes": [],
       "nextCommandActions": [
         {
           "commandId": "bead_show_candidate",
           "displayCommand": "br show bd-example.1 --json",
-          "argv": [
-            "br",
-            "show",
-            "bd-example.1",
-            "--json"
-          ],
+          "argv": ["br", "show", "bd-example.1", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -1618,14 +2004,7 @@
       "claimCommandAction": {
         "commandId": "bead_claim_candidate",
         "displayCommand": "br update bd-example.1 --status in_progress --json",
-        "argv": [
-          "br",
-          "update",
-          "bd-example.1",
-          "--status",
-          "in_progress",
-          "--json"
-        ],
+        "argv": ["br", "update", "bd-example.1", "--status", "in_progress", "--json"],
         "shellRequired": false,
         "copySafety": "safe_structured_argv",
         "mutatesState": true,
@@ -1667,14 +2046,8 @@
           "bv_command_timeout",
           "future_gate_reason:opaque_value"
         ],
-        "staleReasons": [
-          "tracker_authority_external_changes_pending_import"
-        ],
-        "degradedCodes": [
-          "agent_mail_unavailable",
-          "bv_command_timeout",
-          "rch_unavailable"
-        ],
+        "staleReasons": ["tracker_authority_external_changes_pending_import"],
+        "degradedCodes": ["agent_mail_unavailable", "bv_command_timeout", "rch_unavailable"],
         "sourceRefs": [
           "br://bd-1n3x1.16.1",
           "gate://swarm_work_packet_claim_gate_111111111111111111111111"
@@ -1794,10 +2167,7 @@
             "rg-bv-staleness",
             "rg-unknown"
           ],
-          "candidateSpecificDeltas": [
-            "requested_candidate_preserved",
-            "claim_command_suppressed"
-          ],
+          "candidateSpecificDeltas": ["requested_candidate_preserved", "claim_command_suppressed"],
           "needsFreshClaimGate": true,
           "mayEmitClaimCommand": false,
           "evidenceSourceIds": ["src-beads", "src-source-authority"]
@@ -1861,7 +2231,15 @@
           "commandAction": {
             "commandId": "claim_gate_retry_with_snapshot",
             "displayCommand": "ee swarm work-packet --claim-gate --candidate bd-1n3x1.16.1 --json",
-            "argv": ["ee", "swarm", "work-packet", "--claim-gate", "--candidate", "bd-1n3x1.16.1", "--json"],
+            "argv": [
+              "ee",
+              "swarm",
+              "work-packet",
+              "--claim-gate",
+              "--candidate",
+              "bd-1n3x1.16.1",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
@@ -2105,7 +2483,16 @@
           "commandAction": {
             "commandId": "agent_mail_snapshot_refresh",
             "displayCommand": "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json",
-            "argv": ["scripts/agent_mail_snapshot.sh", "--project", ".", "--agent", "<AGENT_NAME>", "--json", "--output", "/private/tmp/ee-agent-mail-snapshot.json"],
+            "argv": [
+              "scripts/agent_mail_snapshot.sh",
+              "--project",
+              ".",
+              "--agent",
+              "<AGENT_NAME>",
+              "--json",
+              "--output",
+              "/private/tmp/ee-agent-mail-snapshot.json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
@@ -2116,7 +2503,10 @@
           "manualStep": null,
           "sourceRefs": ["source:agent_mail"],
           "rationale": "Agent Mail evidence is missing, stale, corrupt, or non-authoritative; regenerate a redacted snapshot before trusting coordination state.",
-          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+          "stopConditionRefs": [
+            "agent_mail_or_tracker_not_authoritative",
+            "source_authority_fail_closed"
+          ]
         },
         {
           "priority": 30,
@@ -2166,7 +2556,10 @@
           "manualStep": null,
           "sourceRefs": ["source:beads", "source:actionable_queue"],
           "rationale": "Tracker or actionable-queue authority is degraded, contradictory, or absent; inspect tracker health before updating Beads state.",
-          "stopConditionRefs": ["agent_mail_or_tracker_not_authoritative", "source_authority_fail_closed"]
+          "stopConditionRefs": [
+            "agent_mail_or_tracker_not_authoritative",
+            "source_authority_fail_closed"
+          ]
         },
         {
           "priority": 60,
@@ -2185,7 +2578,18 @@
           "commandAction": {
             "commandId": "repair_plan_rerun_claim_gate",
             "displayCommand": "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate bd-22po3.1 --json",
-            "argv": ["ee", "swarm", "work-packet", "--workspace", ".", "--include-rch", "--claim-gate", "--candidate", "bd-22po3.1", "--json"],
+            "argv": [
+              "ee",
+              "swarm",
+              "work-packet",
+              "--workspace",
+              ".",
+              "--include-rch",
+              "--claim-gate",
+              "--candidate",
+              "bd-22po3.1",
+              "--json"
+            ],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
@@ -2259,25 +2663,119 @@
       "fixedClock": "2026-05-15T00:00:00Z",
       "purpose": "RCH fleet is healthy, but remote-required Cargo verification is blocked before execution by path topology.",
       "substrates": {
-        "agentMail": {"status": "ok", "evidence": ["inbox fetch succeeds"], "degradedCodes": [], "metrics": {"unread": 0, "ackRequired": 0}},
-        "beads": {"status": "ok", "evidence": ["br doctor ok"], "degradedCodes": [], "metrics": {"jsonlRecords": 1848, "cycles": 0}},
-        "rch": {"status": "blocked", "evidence": ["RCH-E327 alias root is not a symlink: /data/projects"], "degradedCodes": ["rch_worker_topology_blocked", "rch_remote_required_fallback_prevented"], "metrics": {"workersHealthy": 3, "localFallback": false}},
-        "disk": {"status": "ok", "evidence": ["CARGO_TARGET_DIR uses external scratch"], "degradedCodes": [], "metrics": {"externalTarget": true}},
-        "hotPath": {"status": "not_applicable", "evidence": ["no search/context burst in this scenario"], "degradedCodes": [], "metrics": {}}
+        "agentMail": {
+          "status": "ok",
+          "evidence": ["inbox fetch succeeds"],
+          "degradedCodes": [],
+          "metrics": { "unread": 0, "ackRequired": 0 }
+        },
+        "beads": {
+          "status": "ok",
+          "evidence": ["br doctor ok"],
+          "degradedCodes": [],
+          "metrics": { "jsonlRecords": 1848, "cycles": 0 }
+        },
+        "rch": {
+          "status": "blocked",
+          "evidence": ["RCH-E327 alias root is not a symlink: /data/projects"],
+          "degradedCodes": [
+            "rch_worker_topology_blocked",
+            "rch_remote_required_fallback_prevented"
+          ],
+          "metrics": { "workersHealthy": 3, "localFallback": false }
+        },
+        "disk": {
+          "status": "ok",
+          "evidence": ["CARGO_TARGET_DIR uses external scratch"],
+          "degradedCodes": [],
+          "metrics": { "externalTarget": true }
+        },
+        "hotPath": {
+          "status": "not_applicable",
+          "evidence": ["no search/context burst in this scenario"],
+          "degradedCodes": [],
+          "metrics": {}
+        }
       },
       "expectedDegraded": [
-        {"code": "rch_worker_topology_blocked", "severity": "warning", "surface": "diag incident", "reason": "Remote-required Cargo cannot start until the path topology policy accepts the local /data/projects alias layout."},
-        {"code": "rch_remote_required_fallback_prevented", "severity": "medium", "surface": "diag incident", "reason": "Local Cargo fallback is explicitly forbidden for this repository."}
+        {
+          "code": "rch_worker_topology_blocked",
+          "severity": "warning",
+          "surface": "diag incident",
+          "reason": "Remote-required Cargo cannot start until the path topology policy accepts the local /data/projects alias layout."
+        },
+        {
+          "code": "rch_remote_required_fallback_prevented",
+          "severity": "medium",
+          "surface": "diag incident",
+          "reason": "Local Cargo fallback is explicitly forbidden for this repository."
+        }
       ],
       "expectedRecoveryActions": [
-        {"priority": 1, "kind": "observe", "summary": "Capture RCH status and exact topology error before changing code.", "command": "rch status --workers --jobs --json", "manualStep": null, "evidence": ["RCH-E327"], "destructive": false, "preconditions": [], "repairSafety": {"riskClass": "read_only_probe", "preflightCommand": null, "requiresHumanApproval": false, "mutatesExternalState": false, "mutatesTrackerState": false, "privacyClass": "synthetic_incident_fixture", "nextAction": "run_directly", "ruleId": "repair_safety:read_only_probe", "source": "repair_action_safety", "reasonCode": "incident_rch_status_observe", "evidence": ["RCH-E327"], "preconditions": []}},
-        {"priority": 2, "kind": "repair", "summary": "Install or build a patched native macOS RCH client; do not run local Cargo as fallback.", "command": null, "manualStep": "Coordinate on bd-18i4h and verify the patched RCH client before retrying ee Cargo gates.", "evidence": ["bd-18i4h"], "destructive": false, "preconditions": ["RCH source patch is reviewed", "native client install is approved"], "repairSafety": {"riskClass": "unavailable_or_manual_only", "preflightCommand": null, "requiresHumanApproval": false, "mutatesExternalState": false, "mutatesTrackerState": false, "privacyClass": "manual_coordination", "nextAction": "manual_only", "ruleId": "repair_safety:unavailable_or_manual_only", "source": "repair_action_safety", "reasonCode": "incident_rch_repair_manual_only", "evidence": ["bd-18i4h"], "preconditions": ["RCH source patch is reviewed", "native client install is approved"]}}
+        {
+          "priority": 1,
+          "kind": "observe",
+          "summary": "Capture RCH status and exact topology error before changing code.",
+          "command": "rch status --workers --jobs --json",
+          "manualStep": null,
+          "evidence": ["RCH-E327"],
+          "destructive": false,
+          "preconditions": [],
+          "repairSafety": {
+            "riskClass": "read_only_probe",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "synthetic_incident_fixture",
+            "nextAction": "run_directly",
+            "ruleId": "repair_safety:read_only_probe",
+            "source": "repair_action_safety",
+            "reasonCode": "incident_rch_status_observe",
+            "evidence": ["RCH-E327"],
+            "preconditions": []
+          }
+        },
+        {
+          "priority": 2,
+          "kind": "repair",
+          "summary": "Install or build a patched native macOS RCH client; do not run local Cargo as fallback.",
+          "command": null,
+          "manualStep": "Coordinate on bd-18i4h and verify the patched RCH client before retrying ee Cargo gates.",
+          "evidence": ["bd-18i4h"],
+          "destructive": false,
+          "preconditions": ["RCH source patch is reviewed", "native client install is approved"],
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "manual_coordination",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "repair_action_safety",
+            "reasonCode": "incident_rch_repair_manual_only",
+            "evidence": ["bd-18i4h"],
+            "preconditions": ["RCH source patch is reviewed", "native client install is approved"]
+          }
+        }
       ],
-      "redactionExpectations": {"pathPolicy": "redact_home", "secretPolicy": "no_secrets", "allowedHostLabels": ["worker-c", "worker-b", "worker-a"]},
-      "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+      "redactionExpectations": {
+        "pathPolicy": "redact_home",
+        "secretPolicy": "no_secrets",
+        "allowedHostLabels": ["worker-c", "worker-b", "worker-a"]
+      },
+      "assertions": {
+        "deterministic": true,
+        "noLiveServices": true,
+        "noLocalCargo": true,
+        "noDeletion": true,
+        "noMutation": true
+      },
       "artifacts": [
-        {"path": "tests/fixtures/swarm_incidents/rch_topology_blocked.json", "kind": "fixture"},
-        {"path": "docs/schemas/swarm/ee.swarm_incident.v1.json", "kind": "schema"}
+        { "path": "tests/fixtures/swarm_incidents/rch_topology_blocked.json", "kind": "fixture" },
+        { "path": "docs/schemas/swarm/ee.swarm_incident.v1.json", "kind": "schema" }
       ]
     }
   }

@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.2",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status"
-  ],
+  "surfaces": ["mesh status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "tailscale_peer_list_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "peer list",
-      "unavailable"
-    ],
+    "message_contains": ["peer list", "unavailable"],
     "repair_contains": "tailscale"
   }
 }

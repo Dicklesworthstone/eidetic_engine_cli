@@ -21,11 +21,7 @@
     "packHashStability": {
       "runs": 3,
       "stable": true,
-      "hashes": [
-        "g8-skyline-pack-c1a920f6",
-        "g8-skyline-pack-c1a920f6",
-        "g8-skyline-pack-c1a920f6"
-      ]
+      "hashes": ["g8-skyline-pack-c1a920f6", "g8-skyline-pack-c1a920f6", "g8-skyline-pack-c1a920f6"]
     }
   },
   "regressionProof": {

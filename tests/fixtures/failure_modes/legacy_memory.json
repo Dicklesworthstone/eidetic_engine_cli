@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "high",
   "repair_present": false,
   "trigger": {
@@ -21,9 +19,6 @@
   "expected_emission": {
     "code": "legacy_memory",
     "severity": "high",
-    "message_contains": [
-      "packed legacy",
-      "revalidated"
-    ]
+    "message_contains": ["packed legacy", "revalidated"]
   }
 }

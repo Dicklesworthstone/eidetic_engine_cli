@@ -5,16 +5,12 @@
     "bead": "bd-1zb7k.9",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "A context pack has no selected memories, so no consensus neighborhood can be formed.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee context 'sparse consensus subject' --workspace . --json"
   },
   "expected_emission": {

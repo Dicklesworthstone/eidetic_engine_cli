@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -18,10 +16,7 @@
   "expected_emission": {
     "code": "memory_health_unavailable",
     "severity": "low",
-    "message_contains": [
-      "Memory health is unavailable",
-      "workspace"
-    ],
+    "message_contains": ["Memory health is unavailable", "workspace"],
     "repair_contains": "ee init --workspace",
     "repair_string": "Run `ee init --workspace .` before inspecting memory health.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

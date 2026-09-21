@@ -5,10 +5,7 @@
     "bead": "bd-1zb7k.19.1",
     "epic_letter": "AFR"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -24,10 +21,7 @@
   "expected_emission": {
     "code": "flight_recorder_directory_unwritable",
     "severity": "medium",
-    "message_contains": [
-      "flight recorder",
-      "directory"
-    ],
+    "message_contains": ["flight recorder", "directory"],
     "repair_contains": "EE_FLIGHT_RECORDER_DIR"
   }
 }

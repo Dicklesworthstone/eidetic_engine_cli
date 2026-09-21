@@ -49,12 +49,7 @@
         {
           "commandId": "bead_show_candidate",
           "displayCommand": "br show bd-envelope-stale --json",
-          "argv": [
-            "br",
-            "show",
-            "bd-envelope-stale",
-            "--json"
-          ],
+          "argv": ["br", "show", "bd-envelope-stale", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": false,
@@ -65,14 +60,7 @@
         {
           "commandId": "bead_claim_candidate",
           "displayCommand": "br update bd-envelope-stale --status in_progress --json",
-          "argv": [
-            "br",
-            "update",
-            "bd-envelope-stale",
-            "--status",
-            "in_progress",
-            "--json"
-          ],
+          "argv": ["br", "update", "bd-envelope-stale", "--status", "in_progress", "--json"],
           "shellRequired": false,
           "copySafety": "safe_structured_argv",
           "mutatesState": true,
@@ -101,11 +89,7 @@
         "collisionRisk": "none",
         "unsafeReasons": [],
         "staleReasons": [],
-        "sourceRefs": [
-          "br://bd-envelope-stale",
-          "bv://bd-envelope-stale",
-          "agent-mail://snapshot"
-        ]
+        "sourceRefs": ["br://bd-envelope-stale", "bv://bd-envelope-stale", "agent-mail://snapshot"]
       }
     ],
     "coordination": {

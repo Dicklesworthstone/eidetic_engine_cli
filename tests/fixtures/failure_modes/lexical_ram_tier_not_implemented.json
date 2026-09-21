@@ -5,10 +5,7 @@
     "bead": "bd-1hvzh",
     "epic_letter": "bd-21xbi"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "info",
   "repair_present": true,
   "retired": true,
@@ -18,18 +15,13 @@
   },
   "trigger": {
     "description": "Historical: `ee status --json` or `ee doctor --json` used this code while bd-21xbi exposed a lexical RAM-tier scaffold with no live loader. The code is retired because the live V1 contract now reports the safe heap-warmload path as `lexical_ram_tier_heap_warmload` instead of promising an OS-level mmap/mlock adapter.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "lexical_ram_tier_not_implemented",
     "severity": "info",
-    "message_contains": [
-      "lexical",
-      "not implemented"
-    ],
+    "message_contains": ["lexical", "not implemented"],
     "repair_contains": "No current production path",
     "repair_string": "No current production path should emit this code. Treat it as a retired tombstone and expect live V1 status to report lexical_ram_tier_heap_warmload for the safe heap-warmload path."
   }

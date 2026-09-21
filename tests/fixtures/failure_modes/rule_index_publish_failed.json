@@ -5,12 +5,7 @@
     "bead": "bd-index-auto-freshness-m5kwf",
     "epic_letter": "I"
   },
-  "surfaces": [
-    "rule add",
-    "rule mark",
-    "rule update",
-    "rule protect"
-  ],
+  "surfaces": ["rule add", "rule mark", "rule update", "rule protect"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

@@ -5,24 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "perf compare"
-  ],
+  "surfaces": ["perf compare"],
   "severity": "high",
   "repair_present": false,
   "trigger": {
     "description": "A normalized artifact summary has a kind that the comparison engine does not support.",
-    "setup_commands": [
-      "# use a perf artifact summary fixture with an unsupported artifact kind"
-    ],
+    "setup_commands": ["# use a perf artifact summary fixture with an unsupported artifact kind"],
     "invocation": "ee perf compare baseline.json candidate.json --json"
   },
   "expected_emission": {
     "code": "unsupported_artifact_kind",
     "severity": "high",
-    "message_contains": [
-      "Artifact kind",
-      "not supported"
-    ]
+    "message_contains": ["Artifact kind", "not supported"]
   }
 }

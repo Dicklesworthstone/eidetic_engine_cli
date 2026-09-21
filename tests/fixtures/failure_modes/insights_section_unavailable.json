@@ -10,25 +10,18 @@
     "bead": "bd-2pos6.4",
     "reason": "kTruss now has a DB-backed structural evidence builder, so no registered insights section is metadata-only."
   },
-  "surfaces": [
-    "insights"
-  ],
+  "surfaces": ["insights"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "Historical tombstone: a registered ee insights section was selected while its evidence builder was still metadata-only.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee insights --section kTruss --workspace . --json"
   },
   "expected_emission": {
     "code": "insights_section_unavailable",
     "severity": "info",
-    "message_contains": [
-      "registered insights sections",
-      "DB-backed evidence"
-    ],
+    "message_contains": ["registered insights sections", "DB-backed evidence"],
     "repair_contains": "implement the unavailable section builder",
     "repair_string": "Use sections with non-empty evidence, or implement the unavailable section builder."
   }

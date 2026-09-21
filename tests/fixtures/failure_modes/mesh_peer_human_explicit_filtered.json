@@ -5,9 +5,7 @@
     "bead": "bd-29ulx",
     "epic_letter": "SRR6.5"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

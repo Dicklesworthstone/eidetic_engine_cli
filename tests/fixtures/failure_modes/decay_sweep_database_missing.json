@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "The decay sweep job resolved a database path, but the file does not exist.",
-    "setup_commands": [
-      "# run in a directory without .ee/ee.db"
-    ],
+    "setup_commands": ["# run in a directory without .ee/ee.db"],
     "invocation": "ee job run decay_sweep --workspace . --json"
   },
   "expected_emission": {
     "code": "decay_sweep_database_missing",
     "severity": "medium",
-    "message_contains": [
-      "Decay sweep database does not exist"
-    ],
+    "message_contains": ["Decay sweep database does not exist"],
     "repair_contains": "ee init"
   }
 }

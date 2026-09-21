@@ -5,9 +5,7 @@
     "bead": "bd-17c65.14.12",
     "epic_letter": "N"
   },
-  "surfaces": [
-    "outcome"
-  ],
+  "surfaces": ["outcome"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -23,11 +21,7 @@
   "expected_emission": {
     "code": "anti_pattern_proposed",
     "severity": "info",
-    "message_contains": [
-      "Anti-pattern candidate",
-      "proposed after",
-      "harmful outcomes"
-    ],
+    "message_contains": ["Anti-pattern candidate", "proposed after", "harmful outcomes"],
     "details_contains": [
       "candidateId",
       "targetMemoryId",
@@ -36,8 +30,6 @@
       "advisorySeverity",
       "recovery"
     ],
-    "recovery_kinds": [
-      "command"
-    ]
+    "recovery_kinds": ["command"]
   }
 }

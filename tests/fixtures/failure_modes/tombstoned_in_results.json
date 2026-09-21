@@ -17,12 +17,15 @@
   "expected_emission": {
     "code": "tombstoned_in_results",
     "severity": "low",
-    "message_contains": [
-      "tombstoned",
-      "--include-tombstoned"
-    ]
+    "message_contains": ["tombstoned", "--include-tombstoned"]
   },
   "extra_required_response_fields": {
-    "result_fields": ["docId", "tombstoned", "tombstonedAt", "metadata.tombstoned", "metadata.tombstoned_at"]
+    "result_fields": [
+      "docId",
+      "tombstoned",
+      "tombstonedAt",
+      "metadata.tombstoned",
+      "metadata.tombstoned_at"
+    ]
   }
 }

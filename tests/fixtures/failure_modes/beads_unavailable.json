@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect Beads issue state.",
-    "setup_commands": [
-      "# run swarm brief where br is unavailable or .beads cannot be read"
-    ],
+    "setup_commands": ["# run swarm brief where br is unavailable or .beads cannot be read"],
     "invocation": "ee swarm brief --workspace . --json"
   },
   "expected_emission": {
     "code": "beads_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "br was not found"
-    ],
+    "message_contains": ["br was not found"],
     "repair_contains": "br",
     "repair_string": "br ready --json",
     "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

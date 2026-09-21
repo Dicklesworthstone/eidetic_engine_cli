@@ -5,10 +5,7 @@
     "bead": "bd-16pwc.2",
     "epic_letter": "SRR5"
   },
-  "surfaces": [
-    "daemon",
-    "swarm brief"
-  ],
+  "surfaces": ["daemon", "swarm brief"],
   "severity": "info",
   "repair_present": false,
   "trigger": {
@@ -22,9 +19,6 @@
   "expected_emission": {
     "code": "cass_prefetch_budget_exceeded",
     "severity": "info",
-    "message_contains": [
-      "CASS prefetch",
-      "budget"
-    ]
+    "message_contains": ["CASS prefetch", "budget"]
   }
 }

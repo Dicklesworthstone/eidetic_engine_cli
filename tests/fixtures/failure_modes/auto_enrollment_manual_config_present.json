@@ -5,10 +5,7 @@
     "bead": "bd-36bbk.1.3",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh auto-enroll",
-    "mesh status"
-  ],
+  "surfaces": ["mesh auto-enroll", "mesh status"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -24,9 +21,7 @@
   "expected_emission": {
     "code": "auto_enrollment_manual_config_present",
     "severity": "medium",
-    "message_contains": [
-      "manual peer configuration"
-    ],
+    "message_contains": ["manual peer configuration"],
     "repair_contains": "--replace-manual-with-auto"
   }
 }

@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "swarm brief"
-  ],
+  "surfaces": ["swarm brief"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect graph-aware Beads triage from bv.",
-    "setup_commands": [
-      "# run swarm brief where bv is unavailable"
-    ],
+    "setup_commands": ["# run swarm brief where bv is unavailable"],
     "invocation": "ee swarm brief --workspace . --json"
   },
   "expected_emission": {
     "code": "bv_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "bv was not found"
-    ],
+    "message_contains": ["bv was not found"],
     "repair_contains": "bv",
     "repair_string": "bv --robot-triage --robot-triage-by-track",
     "repair_command_regex": "(?<cmd>bv [a-z-][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

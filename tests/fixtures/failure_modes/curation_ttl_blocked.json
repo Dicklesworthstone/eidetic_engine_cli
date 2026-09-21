@@ -5,10 +5,7 @@
     "bead": "bd-17c65.7.4",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "status",
-    "curate disposition"
-  ],
+  "surfaces": ["status", "curate disposition"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "curation_ttl_blocked",
     "severity": "medium",
-    "message_contains": [
-      "could not be evaluated",
-      "TTL policy"
-    ],
+    "message_contains": ["could not be evaluated", "TTL policy"],
     "repair_contains": "ee curate disposition",
     "repair_string": "Run `ee curate disposition --json` for candidate-level errors.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

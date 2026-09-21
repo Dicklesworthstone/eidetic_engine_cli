@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "profile config plan"
-  ],
+  "surfaces": ["profile config plan"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "heavy_gates_skipped",
     "severity": "info",
-    "message_contains": [
-      "heavy verification gate",
-      "skipped by profile"
-    ],
+    "message_contains": ["heavy verification gate", "skipped by profile"],
     "repair_contains": "Run skipped gates manually",
     "repair_string": "Run skipped gates manually or upgrade to a higher-resource profile."
   }

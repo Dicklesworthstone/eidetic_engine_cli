@@ -23,9 +23,7 @@
       "do_not_claim_until_authority_recovers",
       "record_agent_mail_fallback_in_closeout"
     ],
-    "suggestedCommands": [
-      "br show bd-docs.1 --json"
-    ]
+    "suggestedCommands": ["br show bd-docs.1 --json"]
   },
   "candidates": [
     {
@@ -39,7 +37,10 @@
       "editScope": {
         "state": "known",
         "paths": ["README.md", "docs/**"],
-        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+        "sourceRefs": [
+          "swarm_brief.ready_reservation_pressure.likely_surfaces",
+          "work_packet.specialized_title_mapping"
+        ]
       },
       "decision": "stale_or_advisory",
       "collisionRisk": "low",
@@ -49,9 +50,7 @@
         "tracker_not_authoritative",
         "rch_remote_verification_blocked"
       ],
-      "staleReasons": [
-        "agent_mail_degraded_read_only"
-      ],
+      "staleReasons": ["agent_mail_degraded_read_only"],
       "sourceRefs": ["br://bd-docs.1", "agent-mail://degraded_read_only", "rch://topology_blocked"]
     }
   ],

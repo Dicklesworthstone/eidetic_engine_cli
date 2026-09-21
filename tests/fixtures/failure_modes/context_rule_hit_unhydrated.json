@@ -23,9 +23,7 @@
   "expected_emission": {
     "code": "context_rule_hit_unhydrated",
     "severity": "low",
-    "message_contains": [
-      "matched search but has no source memories"
-    ],
+    "message_contains": ["matched search but has no source memories"],
     "repair_contains": "ee index rebuild"
   }
 }

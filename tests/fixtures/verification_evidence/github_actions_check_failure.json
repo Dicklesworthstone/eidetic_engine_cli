@@ -11,9 +11,7 @@
   "command_hash": "blake3:github-actions-verification",
   "elapsed_ms": 91000,
   "degraded_codes": [],
-  "error_codes": [
-    "test_failure"
-  ],
+  "error_codes": ["test_failure"],
   "first_error": {
     "file": "tests/verification_evidence_parsers.rs",
     "line": 144,

@@ -5,9 +5,7 @@
     "bead": "bd-17c65.13.6",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "handoff resume"
-  ],
+  "surfaces": ["handoff resume"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "handoff_capsule_tampered",
     "severity": "high",
-    "message_contains": [
-      "Handoff capsule",
-      "verification failed"
-    ],
+    "message_contains": ["Handoff capsule", "verification failed"],
     "repair_contains": "Discard the capsule",
     "repair_string": "Discard the capsule and recreate it from the source workspace."
   }

@@ -5,9 +5,7 @@
     "bead": "bd-1eq3l.11",
     "epic_letter": "WH"
   },
-  "surfaces": [
-    "workspace hygiene"
-  ],
+  "surfaces": ["workspace hygiene"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "workspace_hygiene_output_truncated",
     "severity": "warning",
-    "message_contains": [
-      "truncated"
-    ],
+    "message_contains": ["truncated"],
     "repair_contains": "limit",
     "repair_string": "Increase the workspace hygiene output limit."
   }

@@ -19,10 +19,7 @@
   "expected_emission": {
     "code": "global_promotion_redaction_refused",
     "severity": "medium",
-    "message_contains": [
-      "Secret-like content blocks promotion",
-      "refuses rather than silently"
-    ],
+    "message_contains": ["Secret-like content blocks promotion", "refuses rather than silently"],
     "repair_contains": "re-remember"
   }
 }

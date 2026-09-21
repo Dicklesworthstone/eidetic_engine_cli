@@ -5,9 +5,7 @@
     "bead": "bd-aunn3.2",
     "epic_letter": "AUNN3"
   },
-  "surfaces": [
-    "diag toolchain-provenance"
-  ],
+  "surfaces": ["diag toolchain-provenance"],
   "severity": "low",
   "repair_present": false,
   "trigger": {
@@ -20,9 +18,6 @@
   "expected_emission": {
     "code": "toolchain_probe_timeout",
     "severity": "low",
-    "message_contains": [
-      "toolchain probe",
-      "bounded timeout"
-    ]
+    "message_contains": ["toolchain probe", "bounded timeout"]
   }
 }

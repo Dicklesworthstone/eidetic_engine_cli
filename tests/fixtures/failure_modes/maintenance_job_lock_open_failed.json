@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The maintenance job lock file cannot be opened.",
-    "setup_commands": [
-      "mkdir -p <workspace>",
-      "printf 'not a directory' > <workspace>/.ee"
-    ],
+    "setup_commands": ["mkdir -p <workspace>", "printf 'not a directory' > <workspace>/.ee"],
     "invocation": "ee job run custom --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "maintenance_job_lock_open_failed",
     "severity": "high",
-    "message_contains": [
-      "lock"
-    ],
+    "message_contains": ["lock"],
     "repair_contains": "ee job run"
   }
 }

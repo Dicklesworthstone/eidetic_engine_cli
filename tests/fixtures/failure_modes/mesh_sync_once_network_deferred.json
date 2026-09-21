@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.2",
     "epic_letter": "SRR6.8"
   },
-  "surfaces": [
-    "mesh sync"
-  ],
+  "surfaces": ["mesh sync"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "mesh_sync_once_network_deferred",
     "severity": "info",
-    "message_contains": [
-      "did not contact peers",
-      "no usable foreground peer transport"
-    ],
+    "message_contains": ["did not contact peers", "no usable foreground peer transport"],
     "repair_contains": "Inspect enrolled peers"
   }
 }

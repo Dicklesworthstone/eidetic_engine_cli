@@ -40,9 +40,7 @@
       "remote": false,
       "deterministic": true,
       "expected_mode": "lexical_fallback",
-      "expected_codes": [
-        "semantic_disabled"
-      ]
+      "expected_codes": ["semantic_disabled"]
     },
     {
       "model_id": "model2vec-8192-local",
@@ -75,20 +73,12 @@
       "remote": true,
       "deterministic": false,
       "expected_mode": "rejected",
-      "expected_codes": [
-        "remote_semantic_model_denied",
-        "semantic_nondeterministic_model"
-      ]
+      "expected_codes": ["remote_semantic_model_denied", "semantic_nondeterministic_model"]
     }
   ],
   "secret_policy": {
     "synthetic_secret_policy": "none",
     "secret_like_values_present": false,
-    "blocked_classes": [
-      "api_token",
-      "github_token",
-      "cloud_access_key",
-      "private_key"
-    ]
+    "blocked_classes": ["api_token", "github_token", "cloud_access_key", "private_key"]
   }
 }

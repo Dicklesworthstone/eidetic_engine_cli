@@ -10,13 +10,8 @@
   "fixture_family": "data_size_tiers",
   "coverage_state": "implemented",
   "journey": "Context packing behavior is exercised against deterministic small, medium, and large memory sets so agents can compare recall, budget pressure, provenance, and degraded retrieval behavior across data sizes.",
-  "owning_bead_ids": [
-    "eidetic_engine_cli-cgqc"
-  ],
-  "owning_gate_ids": [
-    "gate.7.walking_skeleton",
-    "gate.14.executable_claims"
-  ],
+  "owning_bead_ids": ["eidetic_engine_cli-cgqc"],
+  "owning_gate_ids": ["gate.7.walking_skeleton", "gate.14.executable_claims"],
   "deterministic": {
     "fixed_clock": "2026-04-29T12:30:00Z",
     "deterministic_seed": "seed.data_size_tiers.v1",
@@ -90,13 +85,7 @@
   "command_sequence": [
     {
       "step": 1,
-      "argv": [
-        "ee",
-        "init",
-        "--workspace",
-        "<workspace>",
-        "--json"
-      ],
+      "argv": ["ee", "init", "--workspace", "<workspace>", "--json"],
       "cwd": "<repo>",
       "expected_exit_code": 0,
       "stdout_schema": "ee.response.v2",
@@ -217,27 +206,14 @@
     {
       "step": 1,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.workspace"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.workspace"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 2,
       "schema": "ee.response.v2",
-      "required_fields": [
-        "data.command",
-        "data.memory.id",
-        "data.memory.provenanceUri"
-      ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "required_fields": ["data.command", "data.memory.id", "data.memory.provenanceUri"],
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 3,
@@ -249,10 +225,7 @@
         "data.pack.hash",
         "data.pack.tokenBudget.maxTokens"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 4,
@@ -264,10 +237,7 @@
         "data.pack.hash",
         "data.pack.selection.explanations"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 5,
@@ -279,10 +249,7 @@
         "data.pack.hash",
         "data.pack.truncation.reason"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     },
     {
       "step": 6,
@@ -294,10 +261,7 @@
         "data.pack.hash",
         "data.pack.request.queryFile"
       ],
-      "absent_fields": [
-        "secret",
-        "token"
-      ]
+      "absent_fields": ["secret", "token"]
     }
   ],
   "pack_quality_expectations": {
@@ -318,14 +282,8 @@
         ],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 800,
           "expected_used_tokens_max": 760,
@@ -346,18 +304,10 @@
           "mem_00000000000000000000000502",
           "mem_00000000000000000000000504"
         ],
-        "critical_omitted_memory_ids": [
-          "mem_00000000000000000000000505"
-        ],
+        "critical_omitted_memory_ids": ["mem_00000000000000000000000505"],
         "min_provenance_density": 0.8,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 2400,
           "expected_used_tokens_max": 2200,
@@ -378,19 +328,14 @@
           "mem_00000000000000000000000503",
           "mem_00000000000000000000000506"
         ],
-        "critical_omitted_memory_ids": [
-          "mem_00000000000000000000000507"
-        ],
+        "critical_omitted_memory_ids": ["mem_00000000000000000000000507"],
         "min_provenance_density": 0.65,
         "allowed_degradation_codes": [
           "semantic_disabled",
           "pack_budget_exceeded",
           "graph_snapshot_stale"
         ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
           "expected_used_tokens_max": 4000,
@@ -412,18 +357,10 @@
           "mem_00000000000000000000000502",
           "mem_00000000000000000000000503"
         ],
-        "critical_omitted_memory_ids": [
-          "mem_00000000000000000000000507"
-        ],
+        "critical_omitted_memory_ids": ["mem_00000000000000000000000507"],
         "min_provenance_density": 0.9,
-        "allowed_degradation_codes": [
-          "semantic_disabled",
-          "graph_snapshot_stale"
-        ],
-        "forbidden_redaction_leaks": [
-          "secret",
-          "token"
-        ],
+        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 1200,
           "expected_used_tokens_max": 1100,

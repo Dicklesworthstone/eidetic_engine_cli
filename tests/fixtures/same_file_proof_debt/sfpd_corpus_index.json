@@ -13,7 +13,13 @@
     {
       "name": "sfpd_positive_insights_same_file_rch_blocked",
       "kind": "positive",
-      "matrix_requirements": ["SFPD-MUST-001", "SFPD-MUST-002", "SFPD-MUST-003", "SFPD-MUST-004", "SFPD-SHOULD-002"]
+      "matrix_requirements": [
+        "SFPD-MUST-001",
+        "SFPD-MUST-002",
+        "SFPD-MUST-003",
+        "SFPD-MUST-004",
+        "SFPD-SHOULD-002"
+      ]
     },
     {
       "name": "sfpd_positive_multiple_candidates_same_related_debt",
@@ -54,11 +60,27 @@
     }
   ],
   "must_coverage": {
-    "SFPD-MUST-001": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_positive_multiple_candidates_same_related_debt", "sfpd_schema_golden_compat"],
-    "SFPD-MUST-002": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_positive_multiple_candidates_same_related_debt"],
-    "SFPD-MUST-003": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_existing_authority_blockers_preserved"],
-    "SFPD-MUST-004": ["sfpd_positive_insights_same_file_rch_blocked", "sfpd_negative_related_bead_closed_with_rch_verdict"],
-    "SFPD-MUST-005": ["sfpd_redaction_absolute_path_and_logs", "sfpd_positive_multiple_candidates_same_related_debt"],
+    "SFPD-MUST-001": [
+      "sfpd_positive_insights_same_file_rch_blocked",
+      "sfpd_positive_multiple_candidates_same_related_debt",
+      "sfpd_schema_golden_compat"
+    ],
+    "SFPD-MUST-002": [
+      "sfpd_positive_insights_same_file_rch_blocked",
+      "sfpd_positive_multiple_candidates_same_related_debt"
+    ],
+    "SFPD-MUST-003": [
+      "sfpd_positive_insights_same_file_rch_blocked",
+      "sfpd_existing_authority_blockers_preserved"
+    ],
+    "SFPD-MUST-004": [
+      "sfpd_positive_insights_same_file_rch_blocked",
+      "sfpd_negative_related_bead_closed_with_rch_verdict"
+    ],
+    "SFPD-MUST-005": [
+      "sfpd_redaction_absolute_path_and_logs",
+      "sfpd_positive_multiple_candidates_same_related_debt"
+    ],
     "SFPD-MUST-006": ["sfpd_existing_authority_blockers_preserved"],
     "SFPD-SHOULD-001": ["sfpd_existing_authority_blockers_preserved"],
     "SFPD-SHOULD-002": ["sfpd_positive_insights_same_file_rch_blocked"],

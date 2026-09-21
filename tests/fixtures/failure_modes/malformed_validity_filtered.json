@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "search"
-  ],
+  "surfaces": ["search"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "malformed_validity_filtered",
     "severity": "medium",
-    "message_contains": [
-      "malformed validity timestamps"
-    ],
+    "message_contains": ["malformed validity timestamps"],
     "repair_contains": "ee why",
     "repair_string": "Use `ee why <memory-id> --json` or `ee doctor --json` to inspect validity metadata."
   }

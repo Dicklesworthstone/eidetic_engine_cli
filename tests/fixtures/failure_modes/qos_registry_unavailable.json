@@ -5,12 +5,7 @@
     "bead": "bd-1zb7k.20.2",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "qos registry",
-    "status",
-    "doctor",
-    "swarm brief"
-  ],
+  "surfaces": ["qos registry", "status", "doctor", "swarm brief"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -25,10 +20,7 @@
   "expected_emission": {
     "code": "qos_registry_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "QoS active-lane registry",
-      "failed"
-    ],
+    "message_contains": ["QoS active-lane registry", "failed"],
     "repair_contains": ".ee/qos permissions",
     "repair_string": "Inspect workspace .ee/qos permissions or disable QoS registry reads."
   }

@@ -5,9 +5,7 @@
     "bead": "bd-36bbk.1.17",
     "epic_letter": "SRR6.46.17"
   },
-  "surfaces": [
-    "mesh preview-grant"
-  ],
+  "surfaces": ["mesh preview-grant"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "lane_grant_preview_peer_not_in_group",
     "severity": "info",
-    "message_contains": [
-      "peer"
-    ],
+    "message_contains": ["peer"],
     "repair_contains": "ee mesh"
   }
 }

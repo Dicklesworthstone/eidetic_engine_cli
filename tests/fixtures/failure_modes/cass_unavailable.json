@@ -5,12 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "doctor",
-    "import cass",
-    "dependency contract",
-    "focus suggest"
-  ],
+  "surfaces": ["doctor", "import cass", "dependency contract", "focus suggest"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,10 +18,7 @@
   "expected_emission": {
     "code": "cass_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "cass",
-      "unavailable"
-    ],
+    "message_contains": ["cass", "unavailable"],
     "repair_contains": "EE_CASS_BINARY"
   }
 }

@@ -21,9 +21,6 @@
   "expected_emission": {
     "code": "context_evidence_freshness_changed_source",
     "severity": "low",
-    "message_contains": [
-      "evidence",
-      "changed"
-    ]
+    "message_contains": ["evidence", "changed"]
   }
 }

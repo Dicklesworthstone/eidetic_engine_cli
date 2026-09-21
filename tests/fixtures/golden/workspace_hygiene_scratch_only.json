@@ -13,32 +13,23 @@
     }
   ],
   "stagingRecommendations": [],
-  "doNotCommit": [
-    "drift-report.txt",
-    "ubs.json"
-  ],
+  "doNotCommit": ["drift-report.txt", "ubs.json"],
   "needsHumanReview": [],
   "pathClassifications": [
     {
       "path": "drift-report.txt",
       "bucket": "do_not_commit",
       "kind": "scratch",
-      "reasons": [
-        "scratch_root_report"
-      ],
+      "reasons": ["scratch_root_report"],
       "suggestedGroup": "scratch"
     },
     {
       "path": "ubs.json",
       "bucket": "do_not_commit",
       "kind": "scratch",
-      "reasons": [
-        "scratch_root_report"
-      ],
+      "reasons": ["scratch_root_report"],
       "suggestedGroup": "scratch"
     }
   ],
-  "nextActions": [
-    "Leave doNotCommit paths unstaged unless a human explicitly overrides."
-  ]
+  "nextActions": ["Leave doNotCommit paths unstaged unless a human explicitly overrides."]
 }

@@ -5,9 +5,7 @@
     "bead": "bd-1vnvl",
     "epic_letter": "UX"
   },
-  "surfaces": [
-    "reflect result ingest"
-  ],
+  "surfaces": ["reflect result ingest"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "reflect_raw_cot_rejected",
     "severity": "high",
-    "message_contains": [
-      "chain-of-thought",
-      "rejected"
-    ],
+    "message_contains": ["chain-of-thought", "rejected"],
     "repair_contains": "ee reflect propose",
     "repair_string": "Run `ee reflect propose --workspace . --json` and request concise conclusions with cited evidence only.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

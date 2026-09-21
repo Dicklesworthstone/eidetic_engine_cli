@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "analyze drift"
-  ],
+  "surfaces": ["analyze drift"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "Drift analysis cannot run because the science analytics capability is unavailable.",
-    "setup_commands": [
-      "export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"
-    ],
+    "setup_commands": ["export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"],
     "invocation": "EE_SCIENCE_BACKEND_PATH=./missing-science-backend ee analyze drift --workspace . --json"
   },
   "expected_emission": {
     "code": "drift_analysis_unavailable",
     "severity": "high",
-    "message_contains": [
-      "Drift analysis",
-      "unavailable"
-    ],
+    "message_contains": ["Drift analysis", "unavailable"],
     "repair_contains": "science"
   }
 }

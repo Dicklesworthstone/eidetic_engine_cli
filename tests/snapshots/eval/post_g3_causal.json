@@ -15,17 +15,13 @@
     "precisionAt5AllowedDropPp": 5.0
   },
   "metrics": {
-    "ndcgAt10": { "baseline": 0.857, "current": 0.850, "allowedDropPp": 2.0 },
-    "mrr": { "baseline": 0.777, "current": 0.770, "allowedDropPp": 3.0 },
+    "ndcgAt10": { "baseline": 0.857, "current": 0.85, "allowedDropPp": 2.0 },
+    "mrr": { "baseline": 0.777, "current": 0.77, "allowedDropPp": 3.0 },
     "precisionAt5": { "baseline": 0.837, "current": 0.831, "allowedDropPp": 5.0 },
     "packHashStability": {
       "runs": 3,
       "stable": true,
-      "hashes": [
-        "g3-causal-pack-1cf8122e",
-        "g3-causal-pack-1cf8122e",
-        "g3-causal-pack-1cf8122e"
-      ]
+      "hashes": ["g3-causal-pack-1cf8122e", "g3-causal-pack-1cf8122e", "g3-causal-pack-1cf8122e"]
     }
   },
   "regressionProof": {

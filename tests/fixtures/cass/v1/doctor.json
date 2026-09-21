@@ -153,10 +153,7 @@
       "reclaimable_generation_ids": [],
       "fully_retained_generation_ids": [],
       "quarantined_generation_ids": [],
-      "blocker_codes": [
-        "no_reclaimable_candidates",
-        "operator_approval_required"
-      ],
+      "blocker_codes": ["no_reclaimable_candidates", "operator_approval_required"],
       "blocked_reasons": [
         "no reclaimable cleanup candidates",
         "destructive cleanup requires explicit operator approval after dry-run"

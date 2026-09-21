@@ -5,9 +5,7 @@
     "bead": "bd-u875s.3",
     "epic_letter": "RECALL"
   },
-  "surfaces": [
-    "recall"
-  ],
+  "surfaces": ["recall"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "anchor_index_stale",
     "severity": "low",
-    "message_contains": [
-      "behind database generation",
-      "results may miss recent memories"
-    ],
+    "message_contains": ["behind database generation", "results may miss recent memories"],
     "repair_contains": "ee index rebuild"
   }
 }

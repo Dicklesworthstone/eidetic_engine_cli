@@ -5,10 +5,7 @@
     "bead": "bd-17c65.12.6",
     "epic_letter": "L"
   },
-  "surfaces": [
-    "backup verify",
-    "backup restore"
-  ],
+  "surfaces": ["backup verify", "backup restore"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "wal_holds_orphaned",
     "severity": "warning",
-    "message_contains": [
-      "WAL hold state",
-      "restore side path"
-    ],
+    "message_contains": ["WAL hold state", "restore side path"],
     "repair_contains": "ee lab",
     "repair_string": "ee lab list --workspace WS --json shows which episodes have unreachable LSNs; ee lab cleanup-orphaned releases them.",
     "repair_command_regex": "(?P<cmd>ee lab [a-z][a-z0-9-]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.10.1",
     "epic_letter": "O"
   },
-  "surfaces": [
-    "perf explain-latency"
-  ],
+  "surfaces": ["perf explain-latency"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -20,10 +18,7 @@
   "expected_emission": {
     "code": "perf_latency_evidence_missing",
     "severity": "medium",
-    "message_contains": [
-      "J1 command_end timing evidence",
-      "fixture replay stage timings"
-    ],
+    "message_contains": ["J1 command_end timing evidence", "fixture replay stage timings"],
     "repair_contains": "stage timing metrics"
   }
 }

@@ -5,10 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "perf compare",
-    "certificate verify"
-  ],
+  "surfaces": ["perf compare", "certificate verify"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,9 +18,7 @@
   "expected_emission": {
     "code": "tampered_hash",
     "severity": "high",
-    "message_contains": [
-      "hash"
-    ],
+    "message_contains": ["hash"],
     "repair_contains": "Verify artifact integrity",
     "repair_string": "Verify artifact integrity or re-export"
   }

@@ -17,42 +17,463 @@
     "e2e_harness"
   ],
   "coverageMatrix": [
-    {"specSection": "capabilities", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "agent_docs", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "robot_docs", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "help_prelude", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "json_schema", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "schema_drift", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "failure_mode_fixture", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "degraded_taxonomy", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "env_registry", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "determinism", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"},
-    {"specSection": "e2e_harness", "mustClauses": 1, "shouldClauses": 0, "tested": 1, "passing": 1, "divergent": 0, "scoreMilli": 1000, "status": "conformant"}
+    {
+      "specSection": "capabilities",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "agent_docs",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "robot_docs",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "help_prelude",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "json_schema",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "schema_drift",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "failure_mode_fixture",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "degraded_taxonomy",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "env_registry",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "determinism",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    },
+    {
+      "specSection": "e2e_harness",
+      "mustClauses": 1,
+      "shouldClauses": 0,
+      "tested": 1,
+      "passing": 1,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "status": "conformant"
+    }
   ],
   "surfaceCoverageMatrix": [
-    {"surface": "why_not", "bead": "bd-1n0np.1", "status": "in_progress", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 2, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_checked_when_present"},
-    {"surface": "evidence_harvester", "bead": "bd-1n0np.2", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "anchors_freshness", "bead": "bd-1n0np.3", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "error_recall", "bead": "bd-1n0np.4", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "lod_packing", "bead": "bd-1n0np.5", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "gap_honesty", "bead": "bd-1n0np.6", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "contradiction_resolution", "bead": "bd-1n0np.7", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "read_fence", "bead": "bd-1n0np.8", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "provenance_reverification", "bead": "bd-1n0np.9", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "house_rules", "bead": "bd-1n0np.10", "status": "in_progress", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_checked_when_present"},
-    {"surface": "docs_bootstrap", "bead": "bd-1n0np.11", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "typed_memory_kinds", "bead": "bd-1n0np.12", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "feedback_learning", "bead": "bd-1n0np.13", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "rejected_ideas", "bead": "bd-1n0np.14", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "harness_contract", "bead": "bd-1n0np.15", "status": "implemented", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 4, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_required"},
-    {"surface": "memory_sentinels", "bead": "bd-1n0np.16", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "task_lens", "bead": "bd-1n0np.17", "status": "implemented", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 15, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "implemented_artifacts_required"},
-    {"surface": "trauma_guard_loop", "bead": "bd-1n0np.18", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "causal_ppr", "bead": "bd-1n0np.19", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "bridge_exemption", "bead": "bd-1n0np.20", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "memory_sandbox", "bead": "bd-1n0np.21", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "attestation_bundles", "bead": "bd-1n0np.22", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"},
-    {"surface": "cross_cutting_foundations", "bead": "bd-1n0np.23", "status": "planned", "requiredArtifactCount": 11, "declaredRequiredArtifactCount": 11, "implementedArtifactCount": 0, "mustClauses": 11, "tested": 11, "passing": 11, "divergent": 0, "scoreMilli": 1000, "complianceStatus": "declared_conformant", "runtimeEvidenceStatus": "planned_contract_only"}
+    {
+      "surface": "why_not",
+      "bead": "bd-1n0np.1",
+      "status": "in_progress",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 2,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "implemented_artifacts_checked_when_present"
+    },
+    {
+      "surface": "evidence_harvester",
+      "bead": "bd-1n0np.2",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "anchors_freshness",
+      "bead": "bd-1n0np.3",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "error_recall",
+      "bead": "bd-1n0np.4",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "lod_packing",
+      "bead": "bd-1n0np.5",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "gap_honesty",
+      "bead": "bd-1n0np.6",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "contradiction_resolution",
+      "bead": "bd-1n0np.7",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "read_fence",
+      "bead": "bd-1n0np.8",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "provenance_reverification",
+      "bead": "bd-1n0np.9",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "house_rules",
+      "bead": "bd-1n0np.10",
+      "status": "in_progress",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "implemented_artifacts_checked_when_present"
+    },
+    {
+      "surface": "docs_bootstrap",
+      "bead": "bd-1n0np.11",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "typed_memory_kinds",
+      "bead": "bd-1n0np.12",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "feedback_learning",
+      "bead": "bd-1n0np.13",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "rejected_ideas",
+      "bead": "bd-1n0np.14",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "harness_contract",
+      "bead": "bd-1n0np.15",
+      "status": "implemented",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 4,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "implemented_artifacts_required"
+    },
+    {
+      "surface": "memory_sentinels",
+      "bead": "bd-1n0np.16",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "task_lens",
+      "bead": "bd-1n0np.17",
+      "status": "implemented",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 15,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "implemented_artifacts_required"
+    },
+    {
+      "surface": "trauma_guard_loop",
+      "bead": "bd-1n0np.18",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "causal_ppr",
+      "bead": "bd-1n0np.19",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "bridge_exemption",
+      "bead": "bd-1n0np.20",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "memory_sandbox",
+      "bead": "bd-1n0np.21",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "attestation_bundles",
+      "bead": "bd-1n0np.22",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    },
+    {
+      "surface": "cross_cutting_foundations",
+      "bead": "bd-1n0np.23",
+      "status": "planned",
+      "requiredArtifactCount": 11,
+      "declaredRequiredArtifactCount": 11,
+      "implementedArtifactCount": 0,
+      "mustClauses": 11,
+      "tested": 11,
+      "passing": 11,
+      "divergent": 0,
+      "scoreMilli": 1000,
+      "complianceStatus": "declared_conformant",
+      "runtimeEvidenceStatus": "planned_contract_only"
+    }
   ],
   "surfaces": [
     {
@@ -64,8 +485,23 @@
       "schemas": ["docs/schemas/ee.why_not_selected.v1.json"],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
-      "implementedArtifacts": ["docs/schemas/ee.why_not_selected.v1.json", "tests/contracts/why_not_selected_schema.rs"]
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
+      "implementedArtifacts": [
+        "docs/schemas/ee.why_not_selected.v1.json",
+        "tests/contracts/why_not_selected_schema.rs"
+      ]
     },
     {
       "id": "evidence_harvester",
@@ -76,7 +512,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -89,8 +537,23 @@
       "degradedCodes": [],
       "envVars": [],
       "anchorContract": {
-        "allowedKinds": ["path", "symbol", "command", "env_var", "schema", "degraded_code", "dependency", "config_key"],
-        "extractionSources": ["explicit", "remember", "cass_import", "curate_apply", "index_rebuild"],
+        "allowedKinds": [
+          "path",
+          "symbol",
+          "command",
+          "env_var",
+          "schema",
+          "degraded_code",
+          "dependency",
+          "config_key"
+        ],
+        "extractionSources": [
+          "explicit",
+          "remember",
+          "cass_import",
+          "curate_apply",
+          "index_rebuild"
+        ],
         "precisionPolicy": "precision_first_no_adversarial_prose",
         "valueRedaction": "hash_or_redact_anchor_values_keep_kind_and_line",
         "freshnessPolicy": "rank_down_resolved_symbol_drift_never_tombstone",
@@ -101,7 +564,19 @@
           "ee pack <task> --surface <hint> --json"
         ]
       },
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -113,7 +588,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -125,7 +612,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -137,7 +636,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -149,7 +660,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -161,7 +684,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -173,7 +708,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -181,11 +728,27 @@
       "bead": "bd-1n0np.10",
       "status": "in_progress",
       "title": "Cross-workspace global memory tier",
-      "plannedCommands": ["remember --memory-scope global", "search --memory-scope global", "pack --memory-scope global"],
+      "plannedCommands": [
+        "remember --memory-scope global",
+        "search --memory-scope global",
+        "pack --memory-scope global"
+      ],
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -197,7 +760,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -209,7 +784,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -221,7 +808,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -233,7 +832,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -245,8 +856,25 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
-      "implementedArtifacts": ["scripts/lib/e2e_harness.sh", "docs/agent-ux/dueling-wizards/surface-contract.md", "tests/fixtures/contracts/dueling_wizards_surface_contract.json", "tests/contracts/dueling_wizards_surface_contract.rs"]
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
+      "implementedArtifacts": [
+        "scripts/lib/e2e_harness.sh",
+        "docs/agent-ux/dueling-wizards/surface-contract.md",
+        "tests/fixtures/contracts/dueling_wizards_surface_contract.json",
+        "tests/contracts/dueling_wizards_surface_contract.rs"
+      ]
     },
     {
       "id": "memory_sentinels",
@@ -257,7 +885,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -269,7 +909,19 @@
       "schemas": ["ee.response.v2", "ee.pack.v2", "ee.pack.replay.v2"],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": [
         "src/models/task_lens.rs",
         "src/core/agent_docs.rs",
@@ -297,7 +949,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -309,7 +973,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -321,7 +997,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -333,7 +1021,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -345,7 +1045,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     },
     {
@@ -357,7 +1069,19 @@
       "schemas": [],
       "degradedCodes": [],
       "envVars": [],
-      "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],
+      "requiredArtifacts": [
+        "capabilities",
+        "agent_docs",
+        "robot_docs",
+        "help_prelude",
+        "json_schema",
+        "schema_drift",
+        "failure_mode_fixture",
+        "degraded_taxonomy",
+        "env_registry",
+        "determinism",
+        "e2e_harness"
+      ],
       "implementedArtifacts": []
     }
   ]

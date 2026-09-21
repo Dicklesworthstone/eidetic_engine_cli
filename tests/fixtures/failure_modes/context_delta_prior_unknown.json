@@ -5,9 +5,7 @@
     "bead": "bd-muovx.5",
     "epic_letter": "M"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "context_delta_prior_unknown",
     "severity": "low",
-    "message_contains": [
-      "prior pack hash",
-      "not recognized"
-    ],
+    "message_contains": ["prior pack hash", "not recognized"],
     "repair_contains": "same workspace",
     "repair_string": "Run ee context without --since, or pass a pack hash from a prior ee context --json response in the same workspace while the pack record is still retained."
   }

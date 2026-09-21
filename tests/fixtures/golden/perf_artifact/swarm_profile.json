@@ -6,7 +6,7 @@
   "sourcePath": "redacted/swarm.json",
   "contentHash": "swarm123",
   "observedHash": "swarm123",
-  "profile": {"profileName": "swarm", "confidence": "high"},
+  "profile": { "profileName": "swarm", "confidence": "high" },
   "fixtureTier": "smoke",
   "commandFamily": "pack",
   "metrics": {

@@ -5,9 +5,7 @@
     "bead": "bd-f6jfs.2",
     "epic_letter": "SHARD_FANOUT"
   },
-  "surfaces": [
-    "status"
-  ],
+  "surfaces": ["status"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "shard_fanout_workspace_unavailable",
     "severity": "warning",
-    "message_contains": [
-      "no workspace"
-    ],
+    "message_contains": ["no workspace"],
     "repair_contains": "--workspace",
     "repair_string": "Pass --workspace or run ee init --workspace . before relying on shard routing.",
     "repair_command_regex": "(?<cmd>ee init --workspace \\.)"

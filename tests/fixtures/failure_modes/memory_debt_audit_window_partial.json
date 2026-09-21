@@ -5,9 +5,7 @@
     "bead": "bd-3ap2m.2",
     "epic_letter": "memory-debt"
   },
-  "surfaces": [
-    "curate doctor"
-  ],
+  "surfaces": ["curate doctor"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "memory_debt_audit_window_partial",
     "severity": "info",
-    "message_contains": [
-      "audit rows",
-      "older read evidence"
-    ],
+    "message_contains": ["audit rows", "older read evidence"],
     "repair_contains": "ee curate doctor",
     "repair_string": "ee curate doctor --workspace . --json",
     "repair_command_regex": "(?<cmd>ee curate doctor --workspace \\. --json)"

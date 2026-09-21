@@ -1,69 +1,45 @@
 [
   {
     "name": "docs",
-    "paths": [
-      "docs/guide.md"
-    ],
+    "paths": ["docs/guide.md"],
     "pathCount": 1,
     "pathsTruncated": false,
     "omittedPathCount": 0,
-    "kinds": [
-      "docs"
-    ],
-    "reasons": [
-      "docs_dir"
-    ],
+    "kinds": ["docs"],
+    "reasons": ["docs_dir"],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
   },
   {
     "name": "goldens",
-    "paths": [
-      "tests/fixtures/golden/workspace.json"
-    ],
+    "paths": ["tests/fixtures/golden/workspace.json"],
     "pathCount": 1,
     "pathsTruncated": false,
     "omittedPathCount": 0,
-    "kinds": [
-      "test"
-    ],
-    "reasons": [
-      "tests_dir"
-    ],
+    "kinds": ["test"],
+    "reasons": ["tests_dir"],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
   },
   {
     "name": "source",
-    "paths": [
-      "src/core/workspace.rs"
-    ],
+    "paths": ["src/core/workspace.rs"],
     "pathCount": 1,
     "pathsTruncated": false,
     "omittedPathCount": 0,
-    "kinds": [
-      "source"
-    ],
-    "reasons": [
-      "src_rust_source"
-    ],
+    "kinds": ["source"],
+    "reasons": ["src_rust_source"],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
   },
   {
     "name": "tests",
-    "paths": [
-      "tests/workspace_hygiene.rs"
-    ],
+    "paths": ["tests/workspace_hygiene.rs"],
     "pathCount": 1,
     "pathsTruncated": false,
     "omittedPathCount": 0,
-    "kinds": [
-      "test"
-    ],
-    "reasons": [
-      "tests_dir"
-    ],
+    "kinds": ["test"],
+    "reasons": ["tests_dir"],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
   }

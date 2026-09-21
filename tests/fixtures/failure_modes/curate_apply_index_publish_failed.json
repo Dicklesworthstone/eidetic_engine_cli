@@ -5,9 +5,7 @@
     "bead": "bd-index-auto-freshness-m5kwf",
     "epic_letter": "I"
   },
-  "surfaces": [
-    "curate apply"
-  ],
+  "surfaces": ["curate apply"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

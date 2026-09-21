@@ -7,9 +7,7 @@
       "confidence": 0.84,
       "severity": "high",
       "summary": "The failing gate cannot yet be used as a source verdict because source materialization was not proven.",
-      "evidenceRefs": [
-        "bd-ppbue.18:rch"
-      ],
+      "evidenceRefs": ["bd-ppbue.18:rch"],
       "counterEvidence": [
         {
           "sourceId": "git:tree",
@@ -46,9 +44,7 @@
       "confidence": 0.64,
       "severity": "medium",
       "summary": "A known environment or RCH blocker can explain the failing gate independently of source changes.",
-      "evidenceRefs": [
-        "bd-ppbue.18:rch"
-      ],
+      "evidenceRefs": ["bd-ppbue.18:rch"],
       "counterEvidence": [],
       "ownerHints": [
         {
@@ -79,9 +75,7 @@
       "confidence": 0.62,
       "severity": "medium",
       "summary": "Performance evidence indicates a latency or resource-budget regression.",
-      "evidenceRefs": [
-        "perf:latency"
-      ],
+      "evidenceRefs": ["perf:latency"],
       "counterEvidence": [],
       "ownerHints": [
         {
@@ -106,9 +100,7 @@
       "confidence": 0.6,
       "severity": "medium",
       "summary": "Tracker or BV evidence disagrees with the expected owner/dependency state.",
-      "evidenceRefs": [
-        "bd-391ze.3:tracker"
-      ],
+      "evidenceRefs": ["bd-391ze.3:tracker"],
       "counterEvidence": [],
       "ownerHints": [
         {
@@ -139,9 +131,7 @@
       "confidence": 0.58,
       "severity": "medium",
       "summary": "One or more derived artifacts are stale and should be refreshed before blaming source code.",
-      "evidenceRefs": [
-        "bd-391ze.3:tracker"
-      ],
+      "evidenceRefs": ["bd-391ze.3:tracker"],
       "counterEvidence": [],
       "ownerHints": [
         {
@@ -166,9 +156,7 @@
       "confidence": 0.58,
       "severity": "medium",
       "summary": "Pack replay or diff evidence indicates that context selection changed.",
-      "evidenceRefs": [
-        "pack:diff"
-      ],
+      "evidenceRefs": ["pack:diff"],
       "counterEvidence": [],
       "ownerHints": [
         {
@@ -193,9 +181,7 @@
       "confidence": 0.56,
       "severity": "medium",
       "summary": "The failure-mode fixture catalog appears incomplete for this regression shape.",
-      "evidenceRefs": [
-        "fixture:missing"
-      ],
+      "evidenceRefs": ["fixture:missing"],
       "counterEvidence": [],
       "ownerHints": [
         {

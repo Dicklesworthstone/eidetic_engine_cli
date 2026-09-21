@@ -5,9 +5,7 @@
     "bead": "bd-2bbtw",
     "epic_letter": "E"
   },
-  "surfaces": [
-    "init"
-  ],
+  "surfaces": ["init"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "workspace_symlink_refused",
     "severity": "medium",
-    "message_contains": [
-      "Init refused path",
-      "symlink"
-    ],
+    "message_contains": ["Init refused path", "symlink"],
     "repair_contains": "realpath",
     "repair_strings": [
       "Resolve the workspace path with realpath and retry ee init, or pass --allow-symlink only after confirming the target is safe."

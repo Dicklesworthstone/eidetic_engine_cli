@@ -29,10 +29,7 @@
   "expected_emission": {
     "code": "output_truncated_budget",
     "severity": "info",
-    "message_contains": [
-      "trailing element(s)",
-      "declared truncation point"
-    ],
+    "message_contains": ["trailing element(s)", "declared truncation point"],
     "repair_contains": "Resume with --cursor"
   }
 }

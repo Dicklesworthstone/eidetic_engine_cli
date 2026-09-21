@@ -5,9 +5,7 @@
     "bead": "bd-2tehh.2",
     "epic_letter": "SHADOW"
   },
-  "surfaces": [
-    "shadow"
-  ],
+  "surfaces": ["shadow"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -23,17 +21,8 @@
   "expected_emission": {
     "code": "insufficient_outcome_evidence",
     "severity": "info",
-    "message_contains": [
-      "below the tuning evidence gate",
-      "abstained"
-    ],
-    "details_contains": [
-      "triples",
-      "distinctQueries",
-      "minTriples",
-      "minQueries",
-      "reportHash"
-    ],
+    "message_contains": ["below the tuning evidence gate", "abstained"],
+    "details_contains": ["triples", "distinctQueries", "minTriples", "minQueries", "reportHash"],
     "repair_contains": "ee outcome"
   }
 }

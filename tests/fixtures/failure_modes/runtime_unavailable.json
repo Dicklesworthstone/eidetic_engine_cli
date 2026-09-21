@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "status",
-    "doctor"
-  ],
+  "surfaces": ["status", "doctor"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The diagnostics capability-gap override forces the runtime probe to report unavailable.",
-    "setup_commands": [
-      "export EE_DIAG_FORCE_CAPABILITY_GAP=runtime"
-    ],
+    "setup_commands": ["export EE_DIAG_FORCE_CAPABILITY_GAP=runtime"],
     "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=runtime ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "runtime_unavailable",
     "severity": "high",
-    "message_contains": [
-      "runtime",
-      "failed"
-    ],
+    "message_contains": ["runtime", "failed"],
     "repair_contains": "doctor",
     "repair_string": "Run `ee doctor --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"

@@ -5,10 +5,7 @@
     "bead": "bd-3usjw.57",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "remember",
-    "diag advisory-lock"
-  ],
+  "surfaces": ["remember", "diag advisory-lock"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,10 +19,7 @@
   "expected_emission": {
     "code": "advisory_lock_timeout",
     "severity": "medium",
-    "message_contains": [
-      "advisory lock",
-      "timeout"
-    ],
+    "message_contains": ["advisory lock", "timeout"],
     "repair_contains": "ee diag advisory-lock --workspace . --resource-type workspace --release --json"
   }
 }

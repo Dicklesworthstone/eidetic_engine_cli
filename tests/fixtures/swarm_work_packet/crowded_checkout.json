@@ -65,16 +65,11 @@
         "wait_for_reservation_or_pick_non_overlapping_slice",
         "use_rch_for_cargo_verification"
       ],
-      "evidenceCaveats": [
-        "dirty_paths_redacted"
-      ]
+      "evidenceCaveats": ["dirty_paths_redacted"]
     },
     "coordination": {
       "activeReservationCount": 2,
-      "holderAgents": [
-        "GreenMoose",
-        "CalmHeron"
-      ],
+      "holderAgents": ["GreenMoose", "CalmHeron"],
       "inboxUnavailable": false,
       "unreadInboxCount": 1,
       "ackRequiredCount": 0,
@@ -98,11 +93,7 @@
     },
     "checkout": {
       "dirtyPathCount": 3,
-      "dirtyPathsRedacted": [
-        "src/cass/process.rs",
-        "src/cass/import.rs",
-        ".beads/issues.jsonl"
-      ],
+      "dirtyPathsRedacted": ["src/cass/process.rs", "src/cass/import.rs", ".beads/issues.jsonl"],
       "collisionRisk": "high"
     },
     "verification": {
@@ -127,10 +118,7 @@
         "why": "The lane overlaps active CASS work."
       }
     ],
-    "doNotProceedBecause": [
-      "active_owner_or_reservation_present",
-      "dirty_path_overlap"
-    ],
+    "doNotProceedBecause": ["active_owner_or_reservation_present", "dirty_path_overlap"],
     "safeToClaim": false,
     "degraded": []
   },

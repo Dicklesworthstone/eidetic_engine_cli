@@ -5,9 +5,7 @@
     "bead": "bd-17c65.7.3",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "remember"
-  ],
+  "surfaces": ["remember"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -23,10 +21,7 @@
   "expected_emission": {
     "code": "auto_propose_skipped_existing_rule_covers",
     "severity": "info",
-    "message_contains": [
-      "existing procedural rule",
-      "covers"
-    ],
+    "message_contains": ["existing procedural rule", "covers"],
     "repair_contains": "ee rule show",
     "repair_string": "Review the existing rule with `ee rule show <rule-id> --json` before proposing another candidate."
   }

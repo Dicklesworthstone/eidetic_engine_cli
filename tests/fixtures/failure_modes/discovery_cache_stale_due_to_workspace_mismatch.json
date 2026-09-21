@@ -5,10 +5,7 @@
     "bead": "bd-36bbk.1.13",
     "epic_letter": "SRR6.46"
   },
-  "surfaces": [
-    "mesh status",
-    "mesh sync --once"
-  ],
+  "surfaces": ["mesh status", "mesh sync --once"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -23,11 +20,7 @@
   "expected_emission": {
     "code": "discovery_cache_stale_due_to_workspace_mismatch",
     "severity": "info",
-    "message_contains": [
-      "workspace",
-      "mismatch",
-      "discovery cache"
-    ],
+    "message_contains": ["workspace", "mismatch", "discovery cache"],
     "repair_contains": "ee mesh sync --once"
   }
 }

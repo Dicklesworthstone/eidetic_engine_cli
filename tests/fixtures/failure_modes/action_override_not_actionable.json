@@ -5,23 +5,17 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "causal promote-plan"
-  ],
+  "surfaces": ["causal promote-plan"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
     "description": "A causal promotion plan requests a non-hold action even though evidence is underpowered.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee causal promote-plan --artifact-id artifact-1 --action promote --workspace . --json"
   },
   "expected_emission": {
     "code": "action_override_not_actionable",
     "severity": "warning",
-    "message_contains": [
-      "underpowered evidence cannot"
-    ]
+    "message_contains": ["underpowered evidence cannot"]
   }
 }

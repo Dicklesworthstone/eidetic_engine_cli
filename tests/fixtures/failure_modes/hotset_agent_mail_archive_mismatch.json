@@ -5,9 +5,7 @@
     "bead": "bd-ty3pl.2",
     "epic_letter": "T"
   },
-  "surfaces": [
-    "cache"
-  ],
+  "surfaces": ["cache"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -20,9 +18,7 @@
   "expected_emission": {
     "code": "hotset_agent_mail_archive_mismatch",
     "severity": "medium",
-    "message_contains": [
-      "archive/database parity drift"
-    ],
+    "message_contains": ["archive/database parity drift"],
     "repair_contains": "Run `am doctor check`"
   }
 }

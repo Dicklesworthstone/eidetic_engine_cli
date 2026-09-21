@@ -5,9 +5,7 @@
     "bead": "bd-1x87h",
     "epic_letter": "SRR6.24"
   },
-  "surfaces": [
-    "mesh peer rotate"
-  ],
+  "surfaces": ["mesh peer rotate"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "mesh_peer_key_rotation_revoked",
     "severity": "medium",
-    "message_contains": [
-      "revoked"
-    ],
+    "message_contains": ["revoked"],
     "repair_contains": "ee mesh peer add"
   }
 }

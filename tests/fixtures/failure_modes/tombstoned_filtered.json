@@ -5,9 +5,7 @@
     "bead": "bd-17c65.2.8",
     "epic_letter": "B"
   },
-  "surfaces": [
-    "search"
-  ],
+  "surfaces": ["search"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -22,10 +20,7 @@
   "expected_emission": {
     "code": "tombstoned_filtered",
     "severity": "low",
-    "message_contains": [
-      "Excluded",
-      "tombstoned"
-    ],
+    "message_contains": ["Excluded", "tombstoned"],
     "repair_contains": "--include-tombstoned"
   }
 }

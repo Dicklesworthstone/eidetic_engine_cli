@@ -5,10 +5,7 @@
     "bead": "bd-2glil",
     "epic_letter": "C"
   },
-  "surfaces": [
-    "swarm brief",
-    "swarm work-packet"
-  ],
+  "surfaces": ["swarm brief", "swarm work-packet"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -43,12 +40,8 @@
         "ruleId": "repair_safety:mutating_external_coordination_repair",
         "source": "repair_action_safety",
         "reasonCode": "external_coordination_repair_command",
-        "evidence": [
-          "beads_mutation_command"
-        ],
-        "preconditions": [
-          "shared_state_coordination_required"
-        ],
+        "evidence": ["beads_mutation_command"],
+        "preconditions": ["shared_state_coordination_required"],
         "manualStep": "Coordinate before mutating shared tracker state."
       }
     ]

@@ -5,24 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "science status"
-  ],
+  "surfaces": ["science status"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "Science analytics were compiled, but the backend dependency is unavailable.",
-    "setup_commands": [
-      "export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"
-    ],
+    "setup_commands": ["export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"],
     "invocation": "EE_SCIENCE_BACKEND_PATH=./missing-science-backend ee analyze science-status --json"
   },
   "expected_emission": {
     "code": "science_backend_unavailable",
     "severity": "high",
-    "message_contains": [
-      "Science analytics backend is unavailable"
-    ],
+    "message_contains": ["Science analytics backend is unavailable"],
     "repair_contains": "ee doctor"
   }
 }

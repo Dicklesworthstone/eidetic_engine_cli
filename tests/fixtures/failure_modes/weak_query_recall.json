@@ -16,9 +16,6 @@
   "expected_emission": {
     "code": "weak_query_recall",
     "severity": "low",
-    "message_contains": [
-      "Top score",
-      "below"
-    ]
+    "message_contains": ["Top score", "below"]
   }
 }

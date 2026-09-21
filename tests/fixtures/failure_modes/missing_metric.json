@@ -5,25 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "perf artifact summary",
-    "perf budget check"
-  ],
+  "surfaces": ["perf artifact summary", "perf budget check"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "A performance artifact or budget check has no comparable measured metrics.",
-    "setup_commands": [
-      "# use a normalized perf artifact whose metrics object is empty"
-    ],
+    "setup_commands": ["# use a normalized perf artifact whose metrics object is empty"],
     "invocation": "ee perf budget check --profile workstation artifact.json --json"
   },
   "expected_emission": {
     "code": "missing_metric",
     "severity": "medium",
-    "message_contains": [
-      "measured metrics"
-    ],
+    "message_contains": ["measured metrics"],
     "repair_contains": "performance metric collection"
   }
 }

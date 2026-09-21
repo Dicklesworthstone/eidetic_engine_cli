@@ -5,9 +5,7 @@
     "bead": "bd-1zb7k.9",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "context"
-  ],
+  "surfaces": ["context"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -23,9 +21,7 @@
   "expected_emission": {
     "code": "conflict_direct",
     "severity": "medium",
-    "message_contains": [
-      "directly conflicting claims"
-    ],
+    "message_contains": ["directly conflicting claims"],
     "repair_contains": "Review the conflicting memory IDs",
     "repair_string": "Review the conflicting memory IDs before acting on either claim."
   }

@@ -12,35 +12,35 @@
     "forbidden dependencies": {
       "expected_top_content_phrase": "forbidden deps",
       "expected_source_at_least_one_of": ["lexical", "hybrid"],
-      "expected_min_top_score": 0.10,
+      "expected_min_top_score": 0.1,
       "expected_degraded_absent": ["no_relevant_results"],
       "rationale": "Literal lexical overlap with stored memory 3. Pre-overhaul: 10 results, all score 0.000, top result is unrelated. Post-B1+B2: literal-match memory ranks top with non-zero score and source=lexical or hybrid.",
       "tests": ["B1", "B2", "B5"]
     },
     "how do I cut a release safely": {
       "expected_top_kinds": ["procedural/rule"],
-      "expected_min_top_score": 0.10,
+      "expected_min_top_score": 0.1,
       "expected_top_n_contains_phrases": ["cargo fmt", "cargo clippy"],
       "rationale": "Semantic match to release procedural rules. Pre-overhaul: returned 10 hits, top was clippy rule (correct). Post-overhaul: same shape but with relevance floor honored.",
       "tests": ["B1"]
     },
     "where does JSON go on stdout": {
       "expected_top_content_phrase": "json output goes to stdout",
-      "expected_min_top_score": 0.10,
+      "expected_min_top_score": 0.1,
       "expected_top_kinds": ["semantic/fact"],
       "rationale": "Strong semantic match to CLI conventions memory.",
       "tests": ["B1"]
     },
     "what runtime are we on": {
       "expected_top_content_phrase": "asupersync",
-      "expected_min_top_score": 0.10,
+      "expected_min_top_score": 0.1,
       "rationale": "Pre-overhaul top result was FrankenSQLite (storage layer; wrong domain). The expectation is that semantic match should prefer the Asupersync runtime memory; if embed-fast can't distinguish, B5 (synonym blind spots) documents this and emits degraded.weak_query_recall.",
       "tests": ["B5"],
       "known_blindspot": true
     },
     "what broke in the last release": {
       "expected_top_kinds": ["episodic/failure"],
-      "expected_min_top_score": 0.10,
+      "expected_min_top_score": 0.1,
       "rationale": "Pre-overhaul top was Asupersync runtime fact (irrelevant). Post-overhaul: failure-type memories should rank top OR weak_query_recall surfaces.",
       "tests": ["B5"],
       "known_blindspot": true
@@ -65,18 +65,48 @@
     }
   ],
   "policy_tag_acceptance": [
-    {"tag": "release", "should_accept": true, "tests": ["C3"]},
-    {"tag": "v0.1.0", "should_accept": true, "rationale": "Version-string tag must be accepted post-C3.", "tests": ["C3"]},
-    {"tag": "v0.2.0", "should_accept": true, "tests": ["C3"]},
-    {"tag": "release:0.1.0", "should_accept": true, "tests": ["C3"]},
-    {"tag": "policy.detector", "should_accept": true, "rationale": "Namespace-dot tag must be accepted post-C3.", "tests": ["C3"]},
-    {"tag": "test", "should_accept": true, "tests": ["C3"]},
-    {"tag": "with space", "should_accept": false, "rationale": "Spaces are delimiters and remain rejected.", "tests": ["C3"]},
-    {"tag": "a,b", "should_accept": false, "rationale": "Comma is the tag-list delimiter, rejected.", "tests": ["C3"]},
-    {"tag": "a=b", "should_accept": false, "tests": ["C3"]},
-    {"tag": "a/b", "should_accept": false, "rationale": "Slash is path separator in storage, rejected.", "tests": ["C3"]},
-    {"tag": "", "should_accept": false, "rationale": "Empty tag is invalid.", "tests": ["C3"]},
-    {"tag": "mémoire", "should_accept": true, "rationale": "Unicode letter is acceptable after NFC normalize.", "tests": ["C3"]}
+    { "tag": "release", "should_accept": true, "tests": ["C3"] },
+    {
+      "tag": "v0.1.0",
+      "should_accept": true,
+      "rationale": "Version-string tag must be accepted post-C3.",
+      "tests": ["C3"]
+    },
+    { "tag": "v0.2.0", "should_accept": true, "tests": ["C3"] },
+    { "tag": "release:0.1.0", "should_accept": true, "tests": ["C3"] },
+    {
+      "tag": "policy.detector",
+      "should_accept": true,
+      "rationale": "Namespace-dot tag must be accepted post-C3.",
+      "tests": ["C3"]
+    },
+    { "tag": "test", "should_accept": true, "tests": ["C3"] },
+    {
+      "tag": "with space",
+      "should_accept": false,
+      "rationale": "Spaces are delimiters and remain rejected.",
+      "tests": ["C3"]
+    },
+    {
+      "tag": "a,b",
+      "should_accept": false,
+      "rationale": "Comma is the tag-list delimiter, rejected.",
+      "tests": ["C3"]
+    },
+    { "tag": "a=b", "should_accept": false, "tests": ["C3"] },
+    {
+      "tag": "a/b",
+      "should_accept": false,
+      "rationale": "Slash is path separator in storage, rejected.",
+      "tests": ["C3"]
+    },
+    { "tag": "", "should_accept": false, "rationale": "Empty tag is invalid.", "tests": ["C3"] },
+    {
+      "tag": "mémoire",
+      "should_accept": true,
+      "rationale": "Unicode letter is acceptable after NFC normalize.",
+      "tests": ["C3"]
+    }
   ],
   "pack_expectations": {
     "for_query": "prepare release v0.2.0",

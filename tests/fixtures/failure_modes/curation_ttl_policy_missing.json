@@ -5,9 +5,7 @@
     "bead": "bd-17c65.7.4",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "curate disposition"
-  ],
+  "surfaces": ["curate disposition"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
@@ -22,9 +20,7 @@
   "expected_emission": {
     "code": "curation_ttl_policy_missing",
     "severity": "medium",
-    "message_contains": [
-      "references missing TTL policy"
-    ],
+    "message_contains": ["references missing TTL policy"],
     "repair_contains": "ee migrate run",
     "repair_string": "Run `ee migrate run --workspace . --json`, or recreate the curation policy table."
   }

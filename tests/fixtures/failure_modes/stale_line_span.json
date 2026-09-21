@@ -5,11 +5,7 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "symbol evidence links",
-    "context",
-    "why"
-  ],
+  "surfaces": ["symbol evidence links", "context", "why"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
@@ -24,9 +20,6 @@
   "expected_emission": {
     "code": "stale_line_span",
     "severity": "warning",
-    "message_contains": [
-      "line span",
-      "stale"
-    ]
+    "message_contains": ["line span", "stale"]
   }
 }

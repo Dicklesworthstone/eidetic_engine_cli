@@ -5,27 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "diag dependencies",
-    "dependency contract",
-    "focus suggest"
-  ],
+  "surfaces": ["diag dependencies", "dependency contract", "focus suggest"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
     "description": "Graph analytics are feature-gated or the FrankenNetworkX projection cannot be built for the workspace.",
-    "setup_commands": [
-      "ee diag dependencies --workspace . --json"
-    ],
+    "setup_commands": ["ee diag dependencies --workspace . --json"],
     "invocation": "ee diag dependencies --workspace . --json"
   },
   "expected_emission": {
     "code": "graph_unavailable",
     "severity": "medium",
-    "message_contains": [
-      "graph",
-      "unavailable"
-    ],
+    "message_contains": ["graph", "unavailable"],
     "repair_contains": "graph"
   }
 }

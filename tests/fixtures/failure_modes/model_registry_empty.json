@@ -5,26 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "model status",
-    "model list"
-  ],
+  "surfaces": ["model status", "model list"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "A workspace has no persisted model registry entries, so model status reports deterministic fallback.",
-    "setup_commands": [
-      "ee init --workspace ."
-    ],
+    "setup_commands": ["ee init --workspace ."],
     "invocation": "ee model status --workspace . --json"
   },
   "expected_emission": {
     "code": "model_registry_empty",
     "severity": "low",
-    "message_contains": [
-      "No models are registered",
-      "deterministic hash fallback"
-    ],
+    "message_contains": ["No models are registered", "deterministic hash fallback"],
     "repair_contains": "ee index reembed",
     "repair_string": "ee index reembed --workspace .",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

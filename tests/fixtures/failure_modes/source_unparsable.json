@@ -5,27 +5,17 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "symbol snapshot",
-    "context",
-    "why"
-  ],
+  "surfaces": ["symbol snapshot", "context", "why"],
   "severity": "medium",
   "repair_present": false,
   "trigger": {
     "description": "The symbol extractor can read a Rust source file but cannot construct a balanced lexical symbol snapshot from it.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "printf 'pub fn broken() {\\n' > src/lib.rs"
-    ],
+    "setup_commands": ["ee init --workspace .", "printf 'pub fn broken() {\\n' > src/lib.rs"],
     "invocation": "ee symbol snapshot --workspace . --path src/lib.rs --json"
   },
   "expected_emission": {
     "code": "source_unparsable",
     "severity": "medium",
-    "message_contains": [
-      "symbol extraction",
-      "unparsable"
-    ]
+    "message_contains": ["symbol extraction", "unparsable"]
   }
 }

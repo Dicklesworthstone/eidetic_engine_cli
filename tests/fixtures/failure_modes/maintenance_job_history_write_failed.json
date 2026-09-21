@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "job run"
-  ],
+  "surfaces": ["job run"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -21,9 +19,7 @@
   "expected_emission": {
     "code": "maintenance_job_history_write_failed",
     "severity": "high",
-    "message_contains": [
-      "history"
-    ],
+    "message_contains": ["history"],
     "repair_contains": "Check workspace .ee directory permissions"
   }
 }

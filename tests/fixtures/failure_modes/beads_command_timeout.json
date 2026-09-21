@@ -5,10 +5,7 @@
     "bead": "bd-2z5ly.9.3",
     "epic_letter": "S"
   },
-  "surfaces": [
-    "swarm brief",
-    "swarm work-packet"
-  ],
+  "surfaces": ["swarm brief", "swarm work-packet"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -21,10 +18,7 @@
   "expected_emission": {
     "code": "beads_command_timeout",
     "severity": "warning",
-    "message_contains": [
-      "timed out",
-      "advisory only"
-    ],
+    "message_contains": ["timed out", "advisory only"],
     "repair_contains": "br",
     "repair_string": "br ready --json",
     "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

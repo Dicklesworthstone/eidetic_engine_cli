@@ -5,9 +5,7 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "why"
-  ],
+  "surfaces": ["why"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
@@ -21,10 +19,7 @@
   "expected_emission": {
     "code": "graph_query_relative_features_unavailable",
     "severity": "low",
-    "message_contains": [
-      "Community and query-seed graph features",
-      "unavailable"
-    ],
+    "message_contains": ["Community and query-seed graph features", "unavailable"],
     "repair_contains": "ee graph communities",
     "repair_string": "ee graph communities && ee search --explain",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"

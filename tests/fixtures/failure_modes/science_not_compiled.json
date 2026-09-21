@@ -5,27 +5,18 @@
     "bead": "bd-17c65.10.6",
     "epic_letter": "J"
   },
-  "surfaces": [
-    "science status",
-    "analyze drift",
-    "analyze clustering"
-  ],
+  "surfaces": ["science status", "analyze drift", "analyze clustering"],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "The diagnostics capability-gap override forces science analytics to report as not compiled.",
-    "setup_commands": [
-      "export EE_DIAG_FORCE_CAPABILITY_GAP=science"
-    ],
+    "setup_commands": ["export EE_DIAG_FORCE_CAPABILITY_GAP=science"],
     "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=science ee analyze science-status --json"
   },
   "expected_emission": {
     "code": "science_not_compiled",
     "severity": "high",
-    "message_contains": [
-      "Science analytics",
-      "not compiled"
-    ],
+    "message_contains": ["Science analytics", "not compiled"],
     "repair_contains": "science-analytics"
   }
 }

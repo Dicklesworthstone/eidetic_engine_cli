@@ -19,10 +19,7 @@
   "expected_emission": {
     "code": "redaction_round_trip_marker_preserved",
     "severity": "info",
-    "message_contains": [
-      "redaction",
-      "preserved"
-    ]
+    "message_contains": ["redaction", "preserved"]
   },
   "notes": "Severity is info because the round-trip is a SUCCESS path — the property the K6 spec calls for. The signal just confirms the markers are intact for any future un-redaction step."
 }

@@ -5,10 +5,7 @@
     "bead": "bd-f6jfs.5",
     "epic_letter": "SHARD_FANOUT"
   },
-  "surfaces": [
-    "search",
-    "context"
-  ],
+  "surfaces": ["search", "context"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
@@ -23,10 +20,7 @@
   "expected_emission": {
     "code": "shard_attach_failed",
     "severity": "warning",
-    "message_contains": [
-      "peer workspace shard",
-      "read fan-out"
-    ],
+    "message_contains": ["peer workspace shard", "read fan-out"],
     "repair_contains": "ee migrate shard-fanout",
     "repair_string": "Verify the peer shard exists or run ee migrate shard-fanout --workspace . --dry-run --json.",
     "repair_command_regex": "(?<cmd>ee migrate shard-fanout --workspace \\. --dry-run --json)"

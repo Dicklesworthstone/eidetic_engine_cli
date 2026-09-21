@@ -5,9 +5,7 @@
     "bead": "bd-1idcb",
     "epic_letter": "G"
   },
-  "surfaces": [
-    "focus suggest"
-  ],
+  "surfaces": ["focus suggest"],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -22,11 +20,7 @@
   "expected_emission": {
     "code": "task_frame_intersect_empty",
     "severity": "info",
-    "message_contains": [
-      "Task frame",
-      "evidence",
-      "hour(s)"
-    ],
+    "message_contains": ["Task frame", "evidence", "hour(s)"],
     "repair_contains": "--task-frame"
   }
 }
