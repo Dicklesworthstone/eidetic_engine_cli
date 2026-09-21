@@ -354,7 +354,7 @@ fn foreign_scope_source_and_duplicate_inputs_never_mutate_the_session() {
 #[test]
 fn refresh_revision_is_input_order_independent_and_binds_metadata() {
     let session = discovered(3);
-    let spans = vec![
+    let spans = [
         span(&session, 1, "One observation."),
         span(&session, 2, "Two observations."),
         span(&session, 3, "Three observations."),

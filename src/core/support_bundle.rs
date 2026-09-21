@@ -9519,7 +9519,7 @@ mod tests {
         // builds the same workspace WITH a .git and asserts tracked/probe
         // present, so the two together show the branch actually switches.
         ensure(
-            workspace_git_repository_present(&workspace) == false,
+            !workspace_git_repository_present(&workspace),
             "control: this workspace must genuinely have no repository".to_owned(),
         )?;
         let _ = fs::remove_dir_all(&workspace);
