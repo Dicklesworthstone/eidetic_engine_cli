@@ -66,7 +66,7 @@ pub struct CassImportOptions {
     pub since: Option<DateTime<Utc>>,
     /// If true, query CASS but do not create files or write the DB.
     pub dry_run: bool,
-    /// If true, import first-window evidence spans through `cass view`.
+    /// If true, capture the complete bounded transcript and refresh known sessions.
     pub include_spans: bool,
 }
 
@@ -700,31 +700,6 @@ pub fn import_cass_sessions(
     let import_result: Result<(), CassImportError> = (|| {
         for session in sessions {
             cursor.record_discovered();
-            if let Some(existing) =
-                connection.get_session_by_cass_id(&workspace_id, &session.source_path)?
-            {
-                let index_job_id = existing_session_index_job_for_reconciliation(
-                    &connection,
-                    &workspace_id,
-                    &existing.id,
-                )?;
-                if index_job_id.is_some() {
-                    index_jobs_queued = index_jobs_queued.saturating_add(1);
-                }
-                cursor.record_skipped();
-                skipped = skipped.saturating_add(1);
-                session_reports.push(ImportedCassSession {
-                    source_path: session.source_path,
-                    session_id: Some(existing.id),
-                    index_job_id,
-                    status: ImportSessionStatus::Skipped,
-                    spans_imported: 0,
-                    message_count: session.message_count,
-                    missing_metadata: session.missing_metadata,
-                });
-                continue;
-            }
-
             let spans = if options.include_spans {
                 view_session_spans(client, &session.source_path)?
             } else {
@@ -733,22 +708,56 @@ pub fn import_cass_sessions(
 
             match persist_session_import_if_absent(&connection, &workspace_id, &session, &spans)? {
                 SessionImportPersistResult::Skipped { session_id } => {
-                    let index_job_id = existing_session_index_job_for_reconciliation(
-                        &connection,
-                        &workspace_id,
-                        &session_id,
-                    )?;
+                    // A known session may have grown, or its first import may
+                    // have omitted evidence. Revisit only when the caller has
+                    // explicitly requested spans and obtained a complete view.
+                    let refreshed = if options.include_spans {
+                        Some(refresh::refresh_session(
+                            &connection,
+                            &workspace_id,
+                            &session_id,
+                            &session,
+                            &spans,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let changed = refreshed.as_ref().is_some_and(|report| report.changed);
+                    let mut session_spans = 0;
+                    let index_job_id = if let Some(report) = refreshed {
+                        session_spans = saturating_len(report.added_lines.len());
+                        for line in report.added_lines {
+                            cursor.record_span(&session.source_path, line);
+                        }
+                        report.index_job_id
+                    } else {
+                        existing_session_index_job_for_reconciliation(
+                            &connection,
+                            &workspace_id,
+                            &session_id,
+                        )?
+                    };
                     if index_job_id.is_some() {
                         index_jobs_queued = index_jobs_queued.saturating_add(1);
                     }
-                    cursor.record_skipped();
-                    skipped = skipped.saturating_add(1);
+                    if changed {
+                        cursor.record_imported(&session.source_path);
+                        imported = imported.saturating_add(1);
+                        spans_imported = spans_imported.saturating_add(session_spans);
+                    } else {
+                        cursor.record_skipped();
+                        skipped = skipped.saturating_add(1);
+                    }
                     session_reports.push(ImportedCassSession {
                         source_path: session.source_path,
                         session_id: Some(session_id),
                         index_job_id,
-                        status: ImportSessionStatus::Skipped,
-                        spans_imported: 0,
+                        status: if changed {
+                            ImportSessionStatus::Imported
+                        } else {
+                            ImportSessionStatus::Skipped
+                        },
+                        spans_imported: session_spans,
                         message_count: session.message_count,
                         missing_metadata: session.missing_metadata,
                     });
@@ -1506,6 +1515,9 @@ fn validate_reported_session_path(path: &str) -> Result<(), CassImportError> {
 
 #[path = "ingestion.rs"]
 mod ingestion;
+
+#[path = "refresh.rs"]
+mod refresh;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CassViewSpanForImport {

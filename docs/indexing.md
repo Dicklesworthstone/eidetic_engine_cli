@@ -103,6 +103,42 @@ The CASS CLI path is `scripts/e2e_capture.sh`. Direct `EvidenceSpan` packing
 is owned by `bd-16imy`; remaining `bd-3k1mg` follow-up is the
 failure-retry-crash matrix for the attachment job itself.
 
+## Refreshing Previously Imported Sessions
+
+A known CASS session is not assumed to be finished. With evidence capture
+selected, `ee import cass` reads the complete bounded transcript on subsequent
+imports and extends the same stored `SessionId`. This also backfills a session
+that was first imported without spans or by an older first-window importer.
+
+Refresh preserves every retained CASS evidence ID, memory attachment, redaction
+record, and search/pack admission decision. New spans pass through the normal
+screening and insertion path. Missing or changed retained excerpts, conflicting
+references, and scope mismatches refuse the entire session refresh rather than
+rewriting historical pack provenance or silently choosing an upstream version.
+This checks retained screened excerpts, not the omitted tails of truncated raw
+lines; it is not an authenticated upstream snapshot protocol.
+
+Session metadata, additional spans, redaction/refresh audits, and the new
+revision-specific index job commit together under the import writer fence.
+The existing complete-corpus publisher consumes that job, so newly captured
+conversation evidence does not require a manual rebuild. Repeating the same
+snapshot writes no new evidence or refresh audit and returns any unfinished
+publication job for that revision. A completed original-import job cannot hide
+a later refresh whose publication failed.
+
+The existing response schema and status vocabulary are retained:
+`sessionsImported` includes sessions whose stored snapshot materially changed,
+`sessionsSkipped` counts unchanged sessions, and `spansImported` counts only
+newly captured spans. Metadata-only refresh can therefore report one imported
+session and zero new spans. Imports without evidence capture retain their
+existing skip/reconciliation behavior. Dry-run still performs no view capture
+or database mutation.
+
+Database regression coverage lives in `src/cass/refresh_tests.rs`. It covers
+growth, backfill, unchanged/reordered retries, failed publication reconciliation,
+metadata-only changes, history rewrites/truncation, denied evidence, redaction,
+scope isolation, and rollback when index-job insertion fails.
+
 ## E2E And Perf Proof
 
 `scripts/e2e_incremental_index.sh` exercises the real CLI intake path (the
