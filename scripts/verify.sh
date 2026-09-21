@@ -1331,7 +1331,33 @@ run_stage() {
     local output_file
     output_file=$(mktemp)
 
-    if eval "$cmd" 2>&1 | tee "$output_file"; then
+    # `set +e` INSIDE THE GROUP, AND IT IS NOT OPTIONAL (bd-zu099).
+    #
+    # This line used to be `if eval "$cmd" 2>&1 | tee "$output_file"`. The left
+    # side of a pipe runs in a subshell, this file sets `-e` at :2, and when a
+    # stage failed errexit fired IN THAT SUBSHELL and exited it with 1 rather
+    # than the command's status. So every real stage's exit code arrived here as
+    # 1, and stage_status_for_exit_code -- which classifies by code -- could
+    # only ever answer FAIL.
+    #
+    # Four branches were unreachable in production, measured one real
+    # --plan-doc-smoke run each, all four now firing:
+    #     124 TIMEOUT      137 INFRA_ERROR      130/143 CANCELLED      75 SKIP
+    # The 75 one cascaded: STAGE_SKIPPED_CONTENTION could never increment, so
+    # verification_exit_status never returned VERIFY_EXIT_INCOMPLETE and the
+    # banner's "INCOMPLETE ... did NOT run (lock contention)" branch was dead
+    # with it. A contended skip -- designed to be retryable -- was reported as a
+    # hard failure.
+    #
+    # WHY IT LOOKED FINE: a stage string containing a literal `exit 137` sets the
+    # status explicitly and SURVIVES, so the classifier demonstrably worked when
+    # probed that way. Every real stage is a script or a function, which does
+    # not. That inline-vs-script pair is the control for any future change here.
+    #
+    # The group is not a subshell; the PIPE provides the subshell, so `set +e`
+    # is scoped to it. Verified: errexit reads ON in the parent immediately after
+    # a stage runs.
+    if { set +e; eval "$cmd"; } 2>&1 | tee "$output_file"; then
         local end_time
         end_time=$(date +%s)
         local duration=$((end_time - start_time))
