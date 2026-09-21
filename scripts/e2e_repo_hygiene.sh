@@ -122,10 +122,32 @@ done
 for index in "${!paths[@]}"; do
     path="${paths[$index]}"
     expected_pattern="${patterns[$index]}"
-    if ! output="$(printf '%s\n' "$path" | git -C "$REPO_ROOT" check-ignore --no-index -v --stdin 2>&1)"; then
-        failures+=("$path did not match any gitignore rule; stderr/stdout: $output")
-        continue
-    fi
+    # EXIT 1 AND EXIT 128 ARE DIFFERENT ANSWERS (bd-13y74). `git check-ignore`
+    # returns 1 for "this path is NOT ignored" -- a real hygiene failure -- and
+    # 128 for "not a git repository", which says nothing about hygiene at all.
+    # Conflating them made this script report
+    #     "<path> did not match any gitignore rule"
+    # on the RCH clean-overlay tree, which is SYNCED rather than cloned and has
+    # no .git (measured HAS_DOT_GIT=no). That is a misattributed failure: it
+    # reads as a repo-hygiene defect when the truth is that the instrument could
+    # not run. A reader chases the wrong thing, and the stage fails in 0s for a
+    # reason its own message denies.
+    output="$(printf '%s\n' "$path" | git -C "$REPO_ROOT" check-ignore --no-index -v --stdin 2>&1)"
+    case "$?" in
+        0) ;;
+        1)
+            failures+=("$path did not match any gitignore rule; stderr/stdout: $output")
+            continue
+            ;;
+        *)
+            printf 'repo_hygiene: CANNOT RUN -- `git check-ignore` failed in %s: %s\n' \
+                "$REPO_ROOT" "$output" >&2
+            printf 'repo_hygiene: this is an ENVIRONMENT error, not a hygiene failure.\n' >&2
+            printf 'repo_hygiene: the check needs a git repository; this tree has none.\n' >&2
+            emit_event "pattern_check" "unrunnable" 3 "git check-ignore unavailable: $output" "${#patterns[@]}"
+            exit 3
+            ;;
+    esac
     if ! grep -Fq -- "$expected_pattern" <<<"$output"; then
         failures+=("$path matched a different gitignore rule; expected $expected_pattern; output: $output")
     fi
