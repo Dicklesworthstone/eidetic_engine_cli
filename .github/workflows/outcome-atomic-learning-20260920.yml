@@ -1,0 +1,542 @@
+name: Atomic outcome learning
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/outcome-atomic-learning-20260920.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: outcome-atomic-learning-delivery
+  cancel-in-progress: false
+jobs:
+  implement-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply reviewed atomic memory learning and real-store regressions
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+
+          path = Path("src/core/outcome.rs")
+          raw = path.read_bytes()
+          blob = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+          assert blob == "cb4e32bba29e76865d7382bc2438b18bf891e568", (
+              "Outcome source changed since review; refusing to overwrite concurrent work", blob
+          )
+          source = raw.decode()
+          old_call = r"""    let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+                  outcome_write_intake_workspace_path(options.database_path),
+                  &write_operation,
+                  || {
+                      connection
+                          .with_transaction(|| {
+                              record_outcome_in_txn(
+                                  &connection,
+                                  OutcomeRecordInTxn::Feedback {
+                                      event_id: &event_id,
+                                      input: &audited_feedback,
+                                      audit_id: id_source.next_audit_id(),
+                                      sprt_audit,
+                                  },
+                              )
+                          })
+                          .map_err(|error| DomainError::Storage {
+                              message: format!("Failed to record feedback event: {error}"),
+                              repair: Some("ee doctor".to_string()),
+                          })
+                  },
+              )?;
+          """
+          new_call = r"""    let (audit_id, confidence) = crate::core::write_owner::run_one_shot_write_intake(
+                  outcome_write_intake_workspace_path(options.database_path),
+                  &write_operation,
+                  || {
+                      connection
+                          .with_transaction(|| {
+                              let audit_id = record_outcome_in_txn(
+                                  &connection,
+                                  OutcomeRecordInTxn::Feedback {
+                                      event_id: &event_id,
+                                      input: &audited_feedback,
+                                      audit_id: id_source.next_audit_id(),
+                                      sprt_audit,
+                                  },
+                              )?;
+                              let confidence = apply_memory_outcome_in_txn(
+                                  &connection,
+                                  &feedback_input,
+                                  &event_id,
+                                  options.actor.as_deref(),
+                                  explicit_human_promotion,
+                                  id_source,
+                              )?;
+                              Ok((audit_id, confidence))
+                          })
+                          .map_err(|error| DomainError::Storage {
+                              message: format!("Failed to record feedback event: {error}"),
+                              repair: Some("ee doctor".to_string()),
+                          })
+                  },
+              )?;
+          """
+          helper = r"""/// Apply memory learning inside the transaction that records its evidence.
+          ///
+          /// The caller owns both the write-intake fence and transaction. An accepted
+          /// feedback event must never survive without its posterior and trust changes:
+          /// retries use that event as their idempotency key and will not learn it again.
+          fn apply_memory_outcome_in_txn(
+              connection: &DbConnection,
+              feedback: &CreateFeedbackEventInput,
+              event_id: &str,
+              actor: Option<&str>,
+              explicit_human_promotion: bool,
+              id_source: &mut OutcomeIdSource<'_>,
+          ) -> crate::db::Result<Option<(f32, f32)>> {
+              if feedback.target_type != "memory" {
+                  return Ok(None);
+              }
+              let missing_target = || crate::db::DbError::MalformedRow {
+                  operation: crate::db::DbOperation::Execute,
+                  message: "Outcome memory disappeared before learning could commit".to_owned(),
+              };
+              let (current_alpha, current_beta) = connection
+                  .get_memory_bayes_posterior(&feedback.target_id)?
+                  .ok_or_else(missing_target)?;
+              let prior = BetaPosterior::new(current_alpha, current_beta)
+                  .unwrap_or_else(BetaPosterior::jeffreys);
+              // Preserve the established signal model. Event-weight calibration is a
+              // separate policy decision, not part of repairing commit atomicity.
+              let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&feedback.signal) {
+                  FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
+                  FeedbackSignal::Harmful => (
+                      prior.update_harmful(DEFAULT_HARMFUL_WEIGHT),
+                      DEFAULT_HARMFUL_WEIGHT,
+                  ),
+                  FeedbackSignal::Neutral => (prior, 0.0),
+              };
+              if posterior != prior {
+                  tracing::debug!(
+                      target: "ee::trust::bayes",
+                      memory_id = %feedback.target_id,
+                      signal = %feedback.signal,
+                      prior_alpha = prior.alpha(),
+                      prior_beta = prior.beta(),
+                      posterior_alpha = posterior.alpha(),
+                      posterior_beta = posterior.beta(),
+                      harmful_weight = DEFAULT_HARMFUL_WEIGHT,
+                      applied_weight,
+                      "applying Bayesian posterior outcome update"
+                  );
+                  if !connection.update_memory_bayes_posterior(
+                      &feedback.target_id,
+                      posterior.alpha(),
+                      posterior.beta(),
+                  )? {
+                      return Err(missing_target());
+                  }
+                  let details = serde_json::json!({
+                      "schema": "ee.audit.bayes_posterior_updated.v1",
+                      "feedbackEventId": event_id,
+                      "signal": &feedback.signal,
+                      "appliedWeight": applied_weight,
+                      "priorAlpha": prior.alpha(),
+                      "priorBeta": prior.beta(),
+                      "posteriorAlpha": posterior.alpha(),
+                      "posteriorBeta": posterior.beta(),
+                      "priorMean": prior.mean(),
+                      "posteriorMean": posterior.mean(),
+                  })
+                  .to_string();
+                  connection.insert_audit(
+                      &id_source.next_audit_id(),
+                      &CreateAuditInput {
+                          workspace_id: Some(feedback.workspace_id.clone()),
+                          actor: actor.map(ToOwned::to_owned),
+                          action: audit_actions::OUTCOME_BAYES_UPDATE.to_owned(),
+                          target_type: Some("memory".to_owned()),
+                          target_id: Some(feedback.target_id.clone()),
+                          details: Some(details),
+                      },
+                  )?;
+                  // This count includes the event inserted in the same transaction.
+                  // Family-completeness admission, trust CAS and their audits therefore
+                  // cannot observe a different evidence state from the posterior.
+                  let validation_events = connection
+                      .count_feedback_by_signal("memory", &feedback.target_id)?
+                      .positive_count;
+                  apply_memory_trust_class_transition_in_transaction(
+                      connection,
+                      &feedback.workspace_id,
+                      &feedback.target_id,
+                      event_id,
+                      &posterior,
+                      u64::from(validation_events),
+                      explicit_human_promotion,
+                      feedback.reason.as_deref(),
+                      actor,
+                      id_source,
+                  )?;
+              }
+              Ok(Some((prior.mean() as f32, posterior.mean() as f32)))
+          }
+
+          """
+          tests = r"""//! Real-store rollback and retry tests for outcome evidence and memory learning.
+          #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+          use super::*;
+          use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+          use std::path::PathBuf;
+
+          const WORKSPACE: &str = "wsp_00000000000000000000000071";
+          const MEMORY: &str = "mem_00000000000000000000000071";
+          const EVENT: &str = "fb_00000000000000000000000071";
+          const SEED: u64 = 0x4154_4f4d_4943;
+
+          struct Fixture {
+              _root: tempfile::TempDir,
+              database: PathBuf,
+              db: DbConnection,
+          }
+
+          impl Fixture {
+              fn new() -> Self {
+                  let root = tempfile::tempdir().unwrap();
+                  let workspace = root.path().canonicalize().unwrap();
+                  std::fs::create_dir_all(workspace.join(".ee")).unwrap();
+                  let database = workspace.join(".ee/ee.db");
+                  let db = DbConnection::open_file(&database).unwrap();
+                  db.migrate().unwrap();
+                  db.insert_workspace(
+                      WORKSPACE,
+                      &CreateWorkspaceInput {
+                          path: workspace.to_string_lossy().into_owned(),
+                          name: None,
+                      },
+                  )
+                  .unwrap();
+                  db.insert_memory(
+                      MEMORY,
+                      &CreateMemoryInput {
+                          workspace_id: WORKSPACE.to_owned(),
+                          level: "semantic".to_owned(),
+                          kind: "note".to_owned(),
+                          content: "Release validation requires the integration test suite.".to_owned(),
+                          workflow_id: None,
+                          confidence: 0.5,
+                          utility: 0.5,
+                          importance: 0.5,
+                          provenance_uri: None,
+                          trust_class: "agent_assertion".to_owned(),
+                          trust_subclass: None,
+                          tags: Vec::new(),
+                          valid_from: None,
+                          valid_to: None,
+                      },
+                  )
+                  .unwrap();
+                  Self { _root: root, database, db }
+              }
+
+              fn options(&self) -> OutcomeRecordOptions<'_> {
+                  OutcomeRecordOptions {
+                      database_path: &self.database,
+                      target_type: "memory".to_owned(),
+                      target_id: MEMORY.to_owned(),
+                      workspace_id: Some(WORKSPACE.to_owned()),
+                      signal: "helpful".to_owned(),
+                      weight: None,
+                      source_type: "outcome_observed".to_owned(),
+                      // No source => no SPRT audit. With an explicit event ID, the
+                      // seeded stream begins at the primary feedback audit.
+                      source_id: None,
+                      reason: Some("Integration checks passed.".to_owned()),
+                      evidence_json: None,
+                      session_id: None,
+                      event_id: Some(EVENT.to_owned()),
+                      actor: Some("atomic-learning-test".to_owned()),
+                      agent_name: None,
+                      dry_run: false,
+                      harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                      harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                      prompt_injection_guard: true,
+                  }
+              }
+
+              fn posterior(&self) -> (f64, f64) {
+                  self.db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap()
+              }
+
+              fn audit_count(&self) -> u64 {
+                  self.db.count_table_rows("audit_log").unwrap() as u64
+              }
+
+              fn collide_audit(&self, ordinal: usize) {
+                  let mut ids = Deterministic::from_seed(SEED);
+                  let id = (0..ordinal)
+                      .map(|_| generate_audit_id_seeded(&mut ids))
+                      .last()
+                      .unwrap();
+                  self.db.insert_audit(
+                      &id,
+                      &CreateAuditInput {
+                          workspace_id: Some(WORKSPACE.to_owned()),
+                          actor: Some("atomic-learning-test".to_owned()),
+                          action: "atomic_learning_failure_control".to_owned(),
+                          target_type: Some("memory".to_owned()),
+                          target_id: Some(MEMORY.to_owned()),
+                          details: None,
+                      },
+                  )
+                  .unwrap();
+              }
+
+              fn assert_unrecorded(&self, posterior: (f64, f64), audits: u64) {
+                  assert!(get_existing_event(&self.db, EVENT).unwrap().is_none());
+                  assert_eq!(self.posterior(), posterior);
+                  assert_eq!(
+                      self.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
+                      Some("agent_assertion")
+                  );
+                  assert_eq!(
+                      self.db.count_feedback_by_signal("memory", MEMORY).unwrap().total_count(),
+                      0
+                  );
+                  assert_eq!(self.audit_count(), audits);
+              }
+          }
+
+          #[test]
+          fn posterior_audit_failure_rolls_back_the_feedback_idempotency_key() {
+              let fixture = Fixture::new();
+              fixture.collide_audit(2);
+              let prior = fixture.posterior();
+              let audits = fixture.audit_count();
+              let result = record_outcome_seeded(
+                  &fixture.options(),
+                  &mut Deterministic::from_seed(SEED),
+              );
+              assert!(matches!(result, Err(DomainError::Storage { .. })));
+              fixture.assert_unrecorded(prior, audits);
+          }
+
+          #[test]
+          fn trust_audit_failure_rolls_back_posterior_event_and_all_new_audits() {
+              let fixture = Fixture::new();
+              fixture.collide_audit(3);
+              let prior = fixture.posterior();
+              let audits = fixture.audit_count();
+              let mut options = fixture.options();
+              options.source_type = "human_explicit".to_owned();
+              let result = record_outcome_seeded(&options, &mut Deterministic::from_seed(SEED));
+              assert!(matches!(result, Err(DomainError::Storage { .. })));
+              fixture.assert_unrecorded(prior, audits);
+          }
+
+          #[test]
+          fn retry_after_learning_failure_records_and_learns_exactly_once() {
+              let fixture = Fixture::new();
+              fixture.collide_audit(2);
+              let prior = fixture.posterior();
+              assert!(record_outcome_seeded(
+                  &fixture.options(), &mut Deterministic::from_seed(SEED)
+              ).is_err());
+              // A fresh ID stream removes the injected audit collision, but the caller
+              // deliberately retries the SAME feedback event ID and payload.
+              let report = record_outcome_seeded(
+                  &fixture.options(), &mut Deterministic::from_seed(SEED + 1)
+              ).unwrap();
+              assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+              assert_eq!(fixture.posterior(), (prior.0 + 1.0, prior.1));
+              assert_eq!(report.confidence_before, Some((prior.0 / (prior.0 + prior.1)) as f32));
+              let learned = fixture.posterior();
+              let audits = fixture.audit_count();
+              let replay = record_outcome_seeded(
+                  &fixture.options(), &mut Deterministic::from_seed(SEED + 2)
+              ).unwrap();
+              assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+              assert_eq!(fixture.posterior(), learned);
+              assert_eq!(fixture.audit_count(), audits);
+              assert_eq!(fixture.db.count_feedback_by_signal("memory", MEMORY).unwrap().total_count(), 1);
+          }
+
+          #[test]
+          fn primary_audit_failure_never_applies_learning() {
+              let fixture = Fixture::new();
+              fixture.collide_audit(1);
+              let prior = fixture.posterior();
+              let audits = fixture.audit_count();
+              assert!(record_outcome_seeded(
+                  &fixture.options(), &mut Deterministic::from_seed(SEED)
+              ).is_err());
+              fixture.assert_unrecorded(prior, audits);
+          }
+
+          #[test]
+          fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
+              for signal in ["helpful", "positive", "confirmation", "harmful", "negative", "inaccurate", "neutral", "stale"] {
+                  let fixture = Fixture::new();
+                  let prior = fixture.posterior();
+                  let mut options = fixture.options();
+                  options.signal = signal.to_owned();
+                  let report = record_outcome(&options).unwrap();
+                  assert_eq!(report.status, OutcomeRecordStatus::Recorded, "{signal}");
+                  let expected = match FeedbackSignal::from_signal_str(signal) {
+                      FeedbackSignal::Helpful => (prior.0 + 1.0, prior.1),
+                      FeedbackSignal::Harmful => (prior.0, prior.1 + DEFAULT_HARMFUL_WEIGHT),
+                      FeedbackSignal::Neutral => prior,
+                  };
+                  assert_eq!(fixture.posterior(), expected, "{signal}");
+                  assert_eq!(report.confidence_after, Some((expected.0 / (expected.0 + expected.1)) as f32));
+                  assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
+              }
+          }
+
+          #[test]
+          fn dry_run_does_not_reserve_the_event_or_change_learning() {
+              let fixture = Fixture::new();
+              let prior = fixture.posterior();
+              let audits = fixture.audit_count();
+              let mut options = fixture.options();
+              options.dry_run = true;
+              let report = record_outcome(&options).unwrap();
+              assert_eq!(report.status, OutcomeRecordStatus::DryRun);
+              fixture.assert_unrecorded(prior, audits);
+              options.dry_run = false;
+              assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::Recorded);
+          }
+
+          #[test]
+          fn quarantine_does_not_learn_or_install_a_live_feedback_event() {
+              let fixture = Fixture::new();
+              let mut options = fixture.options();
+              options.signal = "harmful".to_owned();
+              options.source_id = Some("atomic-learning-burst".to_owned());
+              options.harmful_per_source_per_hour = 1;
+              assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::Recorded);
+              let prior = fixture.posterior();
+              let second = "fb_00000000000000000000000072";
+              options.event_id = Some(second.to_owned());
+              let report = record_outcome(&options).unwrap();
+              assert_eq!(report.status, OutcomeRecordStatus::Quarantined);
+              assert_eq!(fixture.posterior(), prior);
+              assert!(get_existing_event(&fixture.db, second).unwrap().is_none());
+              assert_eq!(fixture.db.count_feedback_by_signal("memory", MEMORY).unwrap().total_count(), 1);
+              assert_eq!(report.confidence_before, None);
+              assert_eq!(report.confidence_after, None);
+          }
+
+          #[test]
+          fn successful_human_promotion_and_its_feedback_commit_together() {
+              let fixture = Fixture::new();
+              let mut options = fixture.options();
+              options.source_type = "human_explicit".to_owned();
+              let report = record_outcome(&options).unwrap();
+              assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+              assert_eq!(fixture.db.get_memory_trust_class(MEMORY).unwrap().as_deref(), Some("human_explicit"));
+              assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
+              assert!(report.confidence_after.unwrap() > report.confidence_before.unwrap());
+          }
+          """
+          assert source.count(old_call) == 1
+          source = source.replace(old_call, new_call, 1)
+          start_marker = "    // Bayesian (alpha, beta) posterior update — N7.1 / ADR 0032.\n"
+          end_marker = '    let mut degraded = Vec::new();\n    if target_type == "memory" && is_harmful_signal(&signal) {'
+          assert source.count(start_marker) == source.count(end_marker) == 1
+          start = source.index(start_marker)
+          end = source.index(end_marker, start)
+          old_learning = source[start:end]
+          assert old_learning.count(".with_transaction(|| {") == 1
+          assert old_learning.count("apply_memory_trust_class_transition_in_transaction(") == 1
+          assert "posterior update was best-effort." in old_learning
+          source = source[:start] + """    // These values describe the learning committed with the event, never a
+              // second best-effort transaction that an idempotent retry could skip.
+              let (confidence_before, confidence_after) = confidence
+                  .map_or((None, None), |(before, after)| (Some(before), Some(after)));
+
+          """ + source[end:]
+          anchor = "fn outcome_quarantine_with_cause(\n"
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, helper + anchor, 1)
+          module = '\n#[cfg(test)]\n#[path = "outcome_atomic_learning_tests.rs"]\nmod atomic_learning_tests;\n'
+          assert "mod atomic_learning_tests;" not in source
+          source += module
+          test_path = Path("src/core/outcome_atomic_learning_tests.rs")
+          assert not test_path.exists(), "Refusing to replace an unreviewed test file"
+          path.write_text(source)
+          test_path.write_text(tests)
+          assert source.count("fn apply_memory_outcome_in_txn(") == 1
+          assert source.count("applying Bayesian posterior outcome update") == 1
+          print("Applied atomic memory feedback, posterior and trust transition delivery")
+          PYCODE
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Parse, format and publish the source increment directly to main
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --config skip_children=true src/core/outcome.rs src/core/outcome_atomic_learning_tests.rs
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/outcome.rs src/core/outcome_atomic_learning_tests.rs
+          git commit -m 'fix(outcome): commit feedback evidence and memory learning atomically' -m 'Keep feedback, its audit, Bayesian posterior, trust transition and transition audits under one transaction and write-intake fence. A learning failure rolls back the event idempotency key so a retry can actually learn; missing targets fail instead of preserving an unlearned event. Preserve signal policy, dry-run, quarantine and non-memory behavior. Add eight real-store regressions using deterministic audit collisions, retry/replay, neutral and harmful signals, and explicit promotion. Rustfmt parsing and git diff checks passed; runtime tests follow in this workflow and are not claimed by this commit.'
+          published=false
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              published=true
+              break
+            fi
+            git fetch origin main
+            git rebase origin/main
+          done
+          test "$published" = true
+          git rev-parse HEAD | tee "$RUNNER_TEMP/outcome-atomic-source-sha.txt"
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: outcome-atomic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            resume-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Run fault-injection and compatibility regressions
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib atomic_learning_tests -- --test-threads=1 > "$RUNNER_TEMP/outcome-atomic-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-atomic-tests.log"; exit 1; }
+          tail -n 100 "$RUNNER_TEMP/outcome-atomic-tests.log"
+      - name: Run the existing outcome suite and check production Clippy
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib core::outcome:: -- --test-threads=1 > "$RUNNER_TEMP/outcome-all-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-all-tests.log"; exit 1; }
+          tail -n 100 "$RUNNER_TEMP/outcome-all-tests.log"
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/outcome-atomic-clippy.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-atomic-clippy.log"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: outcome-atomic-learning-source-and-verification
+          path: |
+            ${{ runner.temp }}/outcome-*.log
+            ${{ runner.temp }}/outcome-atomic-source-sha.txt
+            src/core/outcome.rs
+            src/core/outcome_atomic_learning_tests.rs
+          retention-days: 7
