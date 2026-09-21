@@ -1,0 +1,82 @@
+name: Global promotion recovery regressions
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/global_promotion.rs
+      - src/core/global_promotion_admission.rs
+      - src/core/search_revision_admission.rs
+      - .github/workflows/promotion-recovery.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: promotion-recovery-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: promotion-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            promotion-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            live-seals-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            roster-ownership-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-retrieval-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Record the exact tested source
+        run: |
+          mkdir -p "$RUNNER_TEMP/promotion-recovery"
+          git rev-parse HEAD > "$RUNNER_TEMP/promotion-recovery/source.txt"
+          rustc --version --verbose > "$RUNNER_TEMP/promotion-recovery/toolchain.txt"
+      - name: Exercise recovery and all existing global promotion contracts
+        run: |
+          set -uo pipefail
+          failed=0
+          while read -r expected filter; do
+            log="$RUNNER_TEMP/promotion-recovery/${filter//:/_}.log"
+            status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
+            tail -n 120 "$log"
+            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$log"; then failed=1; fi
+          done <<'CASES'
+          55 core::global_promotion::
+          8 core::search::rule_admission::memory_revisions::seal_tests::
+          CASES
+          exit "$failed"
+      - name: Record production check and edited-file formatting
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/promotion-recovery"
+          failed=0
+          cargo check --locked --lib > "$RUNNER_TEMP/promotion-recovery/check.log" 2>&1 || failed=1
+          rustfmt --edition 2024 --config skip_children=true --check src/core/global_promotion.rs src/core/search_revision_admission.rs > "$RUNNER_TEMP/promotion-recovery/fmt.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/promotion-recovery/check.log"
+          tail -n 80 "$RUNNER_TEMP/promotion-recovery/fmt.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: promotion-recovery-${{ github.sha }}
+          path: ${{ runner.temp }}/promotion-recovery/
+          retention-days: 7

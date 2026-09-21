@@ -542,7 +542,9 @@ mod seal_tests {
     fn malformed_reveal_metadata_fails_closed_without_echoing_values() -> TestResult {
         let (_temp, options, db) = fixture()?;
         seal(&db, HIDDEN)?;
-        db.execute_raw("UPDATE memory_seals SET revealed_at = X'50524956415445'")
+        // Preserve the schema's null-pair invariant so the malformed value
+        // reaches admission, rather than failing the fixture's own write.
+        db.execute_raw("UPDATE memory_seals SET revealed_at = X'50524956415445', reveal_verified = 1")
             .map_err(|error| error.to_string())?;
         let mut degraded = Vec::new();
         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut degraded, None).is_empty());

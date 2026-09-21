@@ -351,10 +351,10 @@ pub struct PromotionReport {
     /// promotion is a no-op re-promotion (idempotence == merge for the
     /// exact-match case).
     pub already_promoted: bool,
-    /// Derived-index job queued for a newly inserted global row.
+    /// New index job or unfinished receipt recovered for an existing global row.
     pub index_job_id: Option<String>,
     /// Honest derived-index posture: `indexed`, `queued`, `failed`, or
-    /// `not_applicable` for refusal, dry-run, and idempotent merge paths.
+    /// `not_applicable` for refusal, dry-run, or a merge with no outstanding job.
     pub index_status: String,
     /// Derived-index error detail when immediate reconciliation did not
     /// converge. The durable global memory remains committed.
@@ -392,6 +392,50 @@ fn promotion_audit_details(
     .to_string()
 }
 
+/// A durable twin does not prove its derived index was published. Recover the
+/// oldest unfinished receipt for this exact entity while holding the same
+/// transaction as duplicate selection. Never create a second job just because
+/// the original publisher crashed or its separate origin audit failed.
+///
+/// Selection does not steal a running publisher or erase failure evidence.
+/// After commit, the existing memory reconciler owns lease-aware recovery,
+/// failed/cancelled retries, and authoritative index-status reporting.
+fn unfinished_promotion_index_job(
+    connection: &DbConnection,
+    workspace: &str,
+    memory_id: &str,
+) -> crate::db::Result<Option<String>> {
+    use sqlmodel_core::Value;
+
+    let rows = connection.query(
+        "SELECT id, status FROM search_index_jobs WHERE workspace_id = ?1 AND job_type = ?2 AND document_source = ?3 AND document_id = ?4 AND status != ?5 ORDER BY created_at ASC, id ASC LIMIT 1",
+        &[
+            Value::Text(workspace.to_owned()),
+            Value::Text(SearchIndexJobType::SingleDocument.as_str().to_owned()),
+            Value::Text("memory".to_owned()),
+            Value::Text(memory_id.to_owned()),
+            Value::Text(crate::db::SearchIndexJobStatus::Completed.as_str().to_owned()),
+        ],
+    )?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let (Some(Value::Text(id)), Some(Value::Text(status))) = (row.get(0), row.get(1)) else {
+        return Err(promotion_index_receipt_error());
+    };
+    if crate::db::SearchIndexJobStatus::parse(status).is_none() {
+        return Err(promotion_index_receipt_error());
+    }
+    Ok(Some(id.clone()))
+}
+
+fn promotion_index_receipt_error() -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not verify the existing global promotion index receipt".to_owned(),
+    }
+}
+
 /// Publish all destination obligations under one transaction. The caller has
 /// already admitted a coherent source snapshot; these are separate databases,
 /// not a distributed transaction. Index reconciliation happens after commit.
@@ -407,7 +451,10 @@ fn persist_global_promotion(
         // released before publication. Never trust a stale preview decision.
         let twin = admission::find_twin(connection, workspace, memory, reference)?;
         let (id, already_promoted, job) = match twin {
-            Some(id) => (id, true, None),
+            Some(id) => {
+                let job = unfinished_promotion_index_job(connection, workspace, &id)?;
+                (id, true, job)
+            }
             None => {
                 let id = crate::models::MemoryId::now().to_string();
                 let job = promotion_index_job_id();
@@ -516,7 +563,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     // Separate databases cannot share this transaction. Report committed state
     // explicitly if the origin audit fails; a compatible retry repairs the
     // audit without inserting another destination memory or index job.
-    workspace_connection
+    let origin_audit = workspace_connection
         .insert_audit(
             &generate_audit_id(),
             &CreateAuditInput {
@@ -536,7 +583,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
             format!(
                 "global_promotion_origin_audit_pending: global memory {global_memory_id} is committed; retry promotion to repair the origin audit"
             )
-        })?;
+        });
     let (index_status, index_error) = index_job_id.as_ref().map_or_else(
         || ("not_applicable".to_owned(), None),
         |index_job_id| {
@@ -558,8 +605,12 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
             (status, report.error)
         },
     );
+    // The destination has committed. Its index publication and connection
+    // cleanup remain obligations even when the separate origin audit failed.
+    // A later retry also recovers this same receipt if publication is deferred.
     let _ = global_connection.close();
     let _ = workspace_connection.close();
+    origin_audit?;
 
     Ok(PromotionReport {
         plan,
@@ -1191,6 +1242,7 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::CreateWorkspaceInput;
 
     fn candidate(trust_class: &str) -> PromotionCandidate {
         PromotionCandidate {
@@ -1676,6 +1728,17 @@ mod tests {
                 .count_table_rows(table)
                 .expect("durable count")
         }
+
+        fn options(&self, dry_run: bool) -> PromoteGlobalOptions<'_> {
+            PromoteGlobalOptions {
+                workspace_database_path: &self.source_path,
+                memory_id: &self.memory.id,
+                global_paths: &self.paths,
+                global_lane_available: true,
+                actor: Some("publication-retry"),
+                dry_run,
+            }
+        }
     }
 
     #[test]
@@ -1716,16 +1779,17 @@ mod tests {
             .destination
             .query(
                 "SELECT document_id FROM search_index_jobs WHERE id = ?1",
-                &[sqlmodel_core::Value::Text(job.expect("job id"))],
+                &[sqlmodel_core::Value::Text(job.clone().expect("job id"))],
             )
             .expect("durable repair job");
         assert!(matches!(
             rows[0].get(0),
             Some(sqlmodel_core::Value::Text(target)) if target == &id
         ));
-        let (again, already, job) = f.publish().expect("idempotent retry");
+        let (again, already, retry_job) = f.publish().expect("idempotent retry");
         assert_eq!(again, id);
-        assert!(already && job.is_none());
+        assert!(already);
+        assert_eq!(retry_job, job, "retry must retain the unpublished receipt");
         assert_eq!(f.count("memories"), before.0 + 1);
         assert_eq!(f.count("search_index_jobs"), before.1 + 1);
     }
@@ -1796,6 +1860,7 @@ mod tests {
         source
             .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_origin_audit")
             .expect("plant origin failure");
+        source.close().expect("release schema-fixture connection");
         let options = PromoteGlobalOptions {
             workspace_database_path: &f.source_path,
             memory_id: &f.memory.id,
@@ -1813,6 +1878,10 @@ mod tests {
             .expect("committed destination");
         assert!(error.contains(&copy.id));
         assert_eq!(f.count("search_index_jobs"), 1);
+        let jobs = f.destination.list_search_index_jobs(&f.workspace, None).unwrap();
+        assert_eq!(jobs[0].status_enum(), Some(crate::db::SearchIndexJobStatus::Completed),
+            "origin-audit failure must not strand a committed destination's index job");
+        let source = DbConnection::open_file(&f.source_path).expect("fresh repair connection");
         source
             .execute_raw("ALTER TABLE unavailable_origin_audit RENAME TO audit_log")
             .expect("repair origin audit");
@@ -1844,14 +1913,184 @@ mod tests {
             .get_memory(&f.memory.id)
             .expect("read")
             .expect("source row");
-        let (id, already, _) = f.publish().expect("publish unbounded start");
+        let (id, already, first_job) = f.publish().expect("publish unbounded start");
         assert!(!already);
         let copy = f.destination.get_memory(&id).expect("read").expect("copy");
         assert_eq!(copy.valid_from, None);
         assert_eq!(copy.valid_to, f.memory.valid_to);
         let (again, already, job) = f.publish().expect("idempotent unbounded start");
         assert_eq!(again, id);
-        assert!(already && job.is_none());
+        assert!(already);
+        assert_eq!(job, first_job, "retry keeps the same unpublished job");
+    }
+
+    fn set_retry_job_state(
+        f: &PublicationFixture,
+        job: &str,
+        status: crate::db::SearchIndexJobStatus,
+    ) {
+        use crate::db::SearchIndexJobStatus;
+
+        match status {
+            SearchIndexJobStatus::Pending => {}
+            SearchIndexJobStatus::Running => {
+                assert!(f.destination.start_search_index_job(job).unwrap());
+            }
+            SearchIndexJobStatus::Failed => {
+                assert!(f.destination.start_search_index_job(job).unwrap());
+                assert!(f.destination.fail_search_index_job(job, "interrupted publication").unwrap());
+            }
+            SearchIndexJobStatus::Cancelled => {
+                assert!(f.destination.cancel_search_index_job(job).unwrap());
+            }
+            SearchIndexJobStatus::Completed => {
+                assert!(f.destination.start_search_index_job(job).unwrap());
+                assert!(f.destination.complete_search_index_job(job, 1).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn promotion_retry_retains_each_unfinished_receipt_without_stealing_its_state() {
+        use crate::db::SearchIndexJobStatus;
+
+        for status in [
+            SearchIndexJobStatus::Pending,
+            SearchIndexJobStatus::Running,
+            SearchIndexJobStatus::Failed,
+            SearchIndexJobStatus::Cancelled,
+        ] {
+            let f = PublicationFixture::new();
+            let (id, _, job) = f.publish().unwrap();
+            let job = job.unwrap();
+            set_retry_job_state(&f, &job, status);
+            let before = f.destination.get_search_index_job(&job).unwrap().unwrap();
+            let copy = f.destination.get_memory(&id).unwrap().unwrap();
+            let (again, already, receipt) = f.publish().unwrap();
+            assert!(already);
+            assert_eq!(again, id);
+            assert_eq!(receipt.as_deref(), Some(job.as_str()));
+            assert_eq!(f.destination.get_search_index_job(&job).unwrap().unwrap(), before);
+            assert_eq!(f.destination.get_memory(&id).unwrap().unwrap(), copy);
+            assert_eq!(f.count("search_index_jobs"), 1);
+            assert_eq!(f.count("memories"), 1);
+        }
+    }
+
+    #[test]
+    fn promotion_retry_publication_recovers_the_original_receipt_after_interruption() {
+        use crate::db::SearchIndexJobStatus;
+
+        for status in [
+            SearchIndexJobStatus::Pending,
+            SearchIndexJobStatus::Running,
+            SearchIndexJobStatus::Failed,
+            SearchIndexJobStatus::Cancelled,
+        ] {
+            let f = PublicationFixture::new();
+            // Model the crash boundary: durable memory/audit/job, no index.
+            let (id, _, job) = f.publish().unwrap();
+            let job = job.unwrap();
+            set_retry_job_state(&f, &job, status);
+            assert!(!f.paths.index_dir.exists());
+            let report = promote_global(&f.options(false)).unwrap();
+            assert!(report.executed && report.already_promoted);
+            assert_eq!(report.global_memory_id.as_deref(), Some(id.as_str()));
+            assert_eq!(report.index_job_id.as_deref(), Some(job.as_str()));
+            assert_eq!(report.index_status, "indexed");
+            assert!(report.index_error.is_none());
+            let stored = f.destination.get_search_index_job(&job).unwrap().unwrap();
+            assert_eq!(stored.status_enum(), Some(SearchIndexJobStatus::Completed));
+            assert_eq!(stored.document_id.as_deref(), Some(id.as_str()));
+            assert_eq!(f.count("memories"), 1);
+            assert_eq!(f.count("search_index_jobs"), 1);
+            let again = promote_global(&f.options(false)).unwrap();
+            assert!(again.executed && again.already_promoted);
+            assert!(again.index_job_id.is_none());
+            assert_eq!(again.index_status, "not_applicable");
+            assert_eq!(f.count("search_index_jobs"), 1);
+        }
+    }
+
+    #[test]
+    fn promotion_retry_preview_does_not_rearm_failed_publication_or_mutate_either_store() {
+        let f = PublicationFixture::new();
+        let (id, _, job) = f.publish().unwrap();
+        let job = job.unwrap();
+        set_retry_job_state(&f, &job, crate::db::SearchIndexJobStatus::Failed);
+        let before = f.destination.get_search_index_job(&job).unwrap();
+        let audits = f.count("audit_log");
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let source_audits = source.count_table_rows("audit_log").unwrap();
+        let report = promote_global(&f.options(true)).unwrap();
+        assert!(!report.executed && report.already_promoted);
+        assert_eq!(report.global_memory_id.as_deref(), Some(id.as_str()));
+        assert!(report.index_job_id.is_none());
+        assert_eq!(f.destination.get_search_index_job(&job).unwrap(), before);
+        assert_eq!(f.count("audit_log"), audits);
+        assert_eq!(source.count_table_rows("audit_log").unwrap(), source_audits);
+        assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
+        assert!(!f.paths.index_dir.exists());
+    }
+
+    #[test]
+    fn promotion_retry_receipt_selection_is_entity_specific_and_deterministic() {
+        let f = PublicationFixture::new();
+        let (id, _, completed) = f.publish().unwrap();
+        let completed = completed.unwrap();
+        set_retry_job_state(&f, &completed, crate::db::SearchIndexJobStatus::Completed);
+        let other = "wsp_00000000000000000000000098";
+        f.destination.insert_workspace(other, &CreateWorkspaceInput {
+            path: f.paths.root.join("other").to_string_lossy().into_owned(),
+            name: None,
+        }).unwrap();
+        let mut valid = Vec::new();
+        for (workspace, source, target, job_type) in [
+            (other, "memory", id.as_str(), SearchIndexJobType::SingleDocument),
+            (f.workspace.as_str(), "session", id.as_str(), SearchIndexJobType::SingleDocument),
+            (f.workspace.as_str(), "memory", "mem_other", SearchIndexJobType::SingleDocument),
+            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::FullRebuild),
+            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::SingleDocument),
+            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::SingleDocument),
+        ] {
+            let job = promotion_index_job_id();
+            f.destination.insert_search_index_job(&job, &CreateSearchIndexJobInput {
+                workspace_id: workspace.to_owned(),
+                job_type,
+                document_source: Some(source.to_owned()),
+                document_id: Some(target.to_owned()),
+                documents_total: 1,
+            }).unwrap();
+            if workspace == f.workspace.as_str() && source == "memory" && target == id.as_str()
+                && job_type == SearchIndexJobType::SingleDocument
+            {
+                valid.push(job);
+            }
+        }
+        // Equal clocks must be resolved by stable ID order, not row insertion.
+        f.destination.execute_raw("UPDATE search_index_jobs SET created_at = '2026-09-17T00:00:00Z'").unwrap();
+        valid.sort();
+        let before = f.destination.list_search_index_jobs(&f.workspace, None).unwrap();
+        assert_eq!(unfinished_promotion_index_job(&f.destination, &f.workspace, &id).unwrap(), Some(valid[0].clone()));
+        assert!(unfinished_promotion_index_job(&f.destination, &f.workspace, "' OR 1 = 1 --").unwrap().is_none());
+        let (again, already, receipt) = f.publish().unwrap();
+        assert!(already && again == id);
+        assert_eq!(receipt, Some(valid[0].clone()));
+        assert_eq!(f.destination.list_search_index_jobs(&f.workspace, None).unwrap(), before);
+    }
+
+    #[test]
+    fn promotion_retry_missing_receipt_storage_cannot_commit_a_false_duplicate_success() {
+        let f = PublicationFixture::new();
+        let (id, _, job) = f.publish().unwrap();
+        let before = (f.count("audit_log"), f.count("memories"));
+        f.destination.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_retry_jobs").unwrap();
+        assert!(f.publish().is_err());
+        assert_eq!((f.count("audit_log"), f.count("memories")), before);
+        f.destination.execute_raw("ALTER TABLE unavailable_retry_jobs RENAME TO search_index_jobs").unwrap();
+        let (again, already, receipt) = f.publish().unwrap();
+        assert!(already && again == id);
+        assert_eq!(receipt, job);
     }
 
     #[test]
