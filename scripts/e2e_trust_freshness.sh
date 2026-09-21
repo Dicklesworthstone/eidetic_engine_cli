@@ -28,7 +28,12 @@ if [ -z "$EE_BIN" ]; then
     exit 2
 fi
 export EE_BIN
-if [ -d /private/tmp ]; then
+# bd-mfqa2: gate on the PLATFORM, not on the directory existing. /private/tmp
+# is a macOS convention that also EXISTS on the Linux fleet, root-owned and
+# unwritable, so `-d` was true exactly where this path cannot be used and the
+# suite died at its first mktemp having asserted nothing. Matches the condition
+# scripts/e2e_field_report_suite.sh already uses.
+if [ "$(uname -s)" = "Darwin" ] && [ -d /private/tmp ]; then
     EE_E2E_TMPDIR="${EE_E2E_TMPDIR:-/private/tmp}"
     export EE_E2E_TMPDIR
 fi
