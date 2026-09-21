@@ -1512,7 +1512,26 @@ run_stage "Untracked Work Audit Contract" "./scripts/untracked-work-audit.sh --s
 
 # Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
 # multi-agent sessions routinely carry unrelated in-flight changes.
-run_stage "Untracked Work Audit (advisory)" "untracked_work_audit_advisory"
+# GUARDED AT THE CALL SITE, NOT INSIDE THE WRAPPER (bd-ogtco), for the reason
+# the bd-ruby-gate-skip-counts-as-passed-jb56c note above records: run_stage
+# executes its command in a pipeline, so a record_gated_off from inside the
+# wrapper has its counter increments discarded by the subshell.
+#
+# WHY THIS STAGE NEEDED IT. The wrapper already detects a tree with no Git
+# metadata -- the rsync verification mirror -- and returns 0. That made a
+# REQUIRED stage report PASS having executed nothing, which is exactly the
+# shape jb56c removed next door. The stage is NAMED "(advisory)" but
+# verify-budget.toml declares it required, so the name did not save it either.
+#
+# On the RCH clean-overlay tree (measured HAS_DOT_GIT=no) this stage cannot
+# run. Saying so as NOT-APPLICABLE keeps it out of the passed count instead of
+# inflating a green with a stage that was structurally incapable of failing.
+if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    run_stage "Untracked Work Audit (advisory)" "untracked_work_audit_advisory"
+else
+    record_gated_off "Untracked Work Audit (advisory)" \
+        "no Git metadata in this tree (rsync verification mirror)"
+fi
 
 # Gate 3.59: Bridge staleness contract. This no-Cargo fixture harness proves
 # signal classifications before the live advisory scan reads Beads state.

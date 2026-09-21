@@ -165,6 +165,46 @@ snapshot_workspace_files() {
     fi
 }
 
+# capture_worktrees <output_path> — snapshot `git worktree list`, or REFUSE.
+#
+# AN EMPTY SNAPSHOT IS NOT "NO WORKTREES" (bd-ogtco). These files are compared
+# before/after at :222-231 via stable_worktree_snapshot(), and the assertion is
+# that the migration created no worktree -- the gate for AGENTS.md RULE 2, "NO
+# WORKTREES. EVER." Two empty snapshots compare EQUAL and satisfy it having
+# observed nothing.
+#
+# WHAT ACTUALLY HAPPENS TODAY, measured rather than assumed: this script sets
+# `set -euo pipefail` at :20 and these calls sit at statement position inside
+# plainly-invoked functions, so on a tree with no .git the script ABORTS at the
+# failing git command with exit 128. It does NOT reach the comparison. I first
+# recorded this as a live false green and that was WRONG -- verified by running
+# the same shape under `set -euo pipefail`, which exits 128 and never reaches
+# the next statement.
+#
+# SO THIS HELPER BUYS TWO THINGS, neither of them "fixes a false green":
+#   1. A DIAGNOSIS. The bare abort gives exit 128 and no statement of which
+#      step failed or why. On the RCH clean-overlay mirror (HAS_DOT_GIT=no)
+#      that reads as an unexplained crash in a boundary-migration test. This
+#      says CANNOT RUN, names git, and exits 3 -- distinct from the harness's
+#      own failure codes.
+#   2. THE VACUITY STAYS CLOSED UNDER REFACTOR. The empty==empty pass is real
+#      but currently unreachable, held off ONLY by set -e remaining in force
+#      and these calls staying out of conditional context. Move one into an
+#      `if` or a `||` chain and set -e is suppressed there, the empty file is
+#      written, and the NO-WORKTREES assertion starts passing vacuously. An
+#      explicit check does not depend on that invariant holding.
+capture_worktrees() {
+    local output_path="$1" err
+    err="$(git -C "${REPO_ROOT}" worktree list --porcelain >"${output_path}" 2>&1)" || {
+        printf 'boundary_migration: CANNOT RUN -- `git worktree list` failed in %s: %s\n' \
+            "${REPO_ROOT}" "${err}" >&2
+        printf 'boundary_migration: this is an ENVIRONMENT error, not a worktree finding.\n' >&2
+        printf 'boundary_migration: an empty snapshot would compare equal to another empty\n' >&2
+        printf 'boundary_migration: snapshot and pass the NO-WORKTREES assertion vacuously.\n' >&2
+        exit 3
+    }
+}
+
 write_boundary_log() {
     local step_dir="$1"
     local case_id="$2"
@@ -440,7 +480,7 @@ run_ee_case() {
     write_command_file "${step_dir}/command.txt" "${EE_BINARY}" "${argv[@]}"
     printf '%s\n' "${REPO_ROOT}" >"${step_dir}/cwd.txt"
     printf '%s\n' "${WORKSPACE}" >"${step_dir}/workspace.txt"
-    git -C "${REPO_ROOT}" worktree list --porcelain >"${step_dir}/git-worktrees.before"
+    capture_worktrees "${step_dir}/git-worktrees.before"
     snapshot_workspace_files "${step_dir}/workspace-files.before"
 
     local started_ms
@@ -451,7 +491,7 @@ run_ee_case() {
         "${EE_BINARY}" "${argv[@]}" >"${step_dir}/stdout" 2>"${step_dir}/stderr" || exit_code=$?
     ended_ms=$(ms_now)
 
-    git -C "${REPO_ROOT}" worktree list --porcelain >"${step_dir}/git-worktrees.after"
+    capture_worktrees "${step_dir}/git-worktrees.after"
     snapshot_workspace_files "${step_dir}/workspace-files.after"
     write_boundary_log \
         "${step_dir}" "${case_id}" "${command_family}" "${matrix_row}" "${workflow_row}" \
@@ -479,7 +519,7 @@ run_skill_handoff_case() {
     write_command_file "${step_dir}/command.txt" "skill-handoff-fixture" "boundary.prompt_injection_session.v1"
     printf '%s\n' "${REPO_ROOT}" >"${step_dir}/cwd.txt"
     printf '%s\n' "${WORKSPACE}" >"${step_dir}/workspace.txt"
-    git -C "${REPO_ROOT}" worktree list --porcelain >"${step_dir}/git-worktrees.before"
+    capture_worktrees "${step_dir}/git-worktrees.before"
     snapshot_workspace_files "${step_dir}/workspace-files.before"
 
     local bundle_path="${step_dir}/skill-evidence-bundle.json"
@@ -521,7 +561,7 @@ PY
 )
     cp "${bundle_path}" "${step_dir}/stdout"
     : >"${step_dir}/stderr"
-    git -C "${REPO_ROOT}" worktree list --porcelain >"${step_dir}/git-worktrees.after"
+    capture_worktrees "${step_dir}/git-worktrees.after"
     snapshot_workspace_files "${step_dir}/workspace-files.after"
 
     local started_ms
