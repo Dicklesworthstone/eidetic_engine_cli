@@ -72,6 +72,17 @@ pub(super) fn refresh_session(
         let mut by_stored_reference = BTreeMap::new();
         let mut lines = BTreeSet::new();
         for span in spans {
+            // Reconciliation is a persistence boundary too. Do not let an
+            // inconsistent source locator or payload create an unrefreshable
+            // checkpoint, even when a future caller bypasses the view parser.
+            if span.start_line == 0
+                || span.end_line != span.start_line
+                || span.cass_span_id != format!("{}:{}", discovered.source_path, span.start_line)
+                || span.content_hash
+                    != format!("blake3:{}", blake3::hash(span.excerpt.as_bytes()).to_hex())
+            {
+                return Err(refusal("cass_refresh_invalid_span"));
+            }
             let stored_reference = format!(
                 "blake3:{}",
                 blake3::hash(span.cass_span_id.as_bytes()).to_hex()
@@ -89,12 +100,22 @@ pub(super) fn refresh_session(
             if row.workspace_id != workspace_id || row.session_id != session_id {
                 return Err(refusal("cass_refresh_scope_mismatch"));
             }
-            if row.producer_kind != "cass_import" {
+            // Existing databases may retain the original locator rather than
+            // its privacy projection. Match either representation to the raw
+            // incoming identity without rewriting or re-admitting the row.
+            let observed = by_stored_reference
+                .get(row.cass_span_id.as_str())
+                .or_else(|| incoming.get(row.cass_span_id.as_str()));
+            if !matches!(row.producer_kind.as_str(), "cass_import" | "legacy_unknown") {
                 // Other producers may attach their own evidence to a session.
-                // An upstream transcript cannot replace or remove those rows.
+                // They cannot confer authority on a second interpretation of
+                // an occupied CASS source slot, even under a different row ID.
+                if observed.is_some() {
+                    return Err(refusal("cass_refresh_producer_conflict"));
+                }
                 continue;
             }
-            let Some(span) = by_stored_reference.get(row.cass_span_id.as_str()) else {
+            let Some(span) = observed else {
                 return Err(refusal("cass_refresh_history_missing"));
             };
             // Retention membership is still in the raw incoming identity space,
@@ -603,5 +624,234 @@ mod canonical_reference_tests {
         assert!(!error.to_string().contains(&session.source_path));
         assert_eq!(db.get_session(&id).unwrap().unwrap(), before);
         assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 2);
+    }
+
+    fn row_counts(db: &DbConnection) -> [i64; 4] {
+        ["sessions", "evidence_spans", "search_index_jobs", "audit_log"]
+            .map(|table| db.count_table_rows(table).unwrap())
+    }
+
+    fn assert_refresh_refused_without_writes(
+        db: &DbConnection,
+        workspace: &str,
+        id: &str,
+        session: &CassSessionInfo,
+        spans: &[CassViewSpanForImport],
+        code: &str,
+    ) {
+        let before_counts = row_counts(db);
+        let before_session = db.get_session(id).unwrap();
+        let before_evidence = db.list_evidence_spans_for_session(id).unwrap();
+        let error = refresh_session(db, workspace, id, session, spans)
+            .err()
+            .expect("invalid retained history must refuse refresh")
+            .to_string();
+        assert!(error.contains(code), "{error}");
+        assert!(!error.contains(&session.source_path), "{error}");
+        assert!(!error.contains("PRIVATE_PAYLOAD_SENTINEL"), "{error}");
+        assert_eq!(row_counts(db), before_counts);
+        assert_eq!(db.get_session(id).unwrap(), before_session);
+        assert_eq!(
+            db.list_evidence_spans_for_session(id).unwrap(),
+            before_evidence
+        );
+    }
+
+    #[test]
+    fn migrated_history_can_grow_without_regaining_admission_or_changing_ids() {
+        for producer in ["cass_import", "legacy_unknown"] {
+            for raw_reference in [false, true] {
+                let (db, workspace, id, session) = fixture("/private/migrated.jsonl", 2);
+                let first = span(&session, 1);
+                let first_id = stable_evidence_id(&id, &first.cass_span_id);
+                db.execute_raw(&format!(
+                    "UPDATE evidence_spans SET producer_kind = {}, search_eligibility = 'denied', pack_eligibility = 'denied' WHERE id = {}",
+                    sql_text(producer),
+                    sql_text(&first_id),
+                ))
+                .unwrap();
+                if raw_reference {
+                    db.execute_raw(&format!(
+                        "UPDATE evidence_spans SET cass_span_id = {} WHERE id = {}",
+                        sql_text(&first.cass_span_id),
+                        sql_text(&first_id),
+                    ))
+                    .unwrap();
+                }
+                let retained = db.list_evidence_spans_for_session(&id).unwrap();
+                db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+                    .unwrap();
+                let old_job = stable_search_index_job_id(&workspace, &id);
+                let mut incoming: Vec<_> = (1..=4).map(|line| span(&session, line)).collect();
+                let grown = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+                assert!(grown.changed);
+                assert_eq!(grown.added_lines, vec![3, 4]);
+                let job = grown.index_job_id.unwrap();
+                assert_ne!(job, old_job);
+                assert_eq!(
+                    db.get_search_index_job(&job).unwrap().unwrap().status_enum(),
+                    Some(SearchIndexJobStatus::Pending)
+                );
+                for row in &retained {
+                    assert_eq!(db.get_evidence_span(&row.id).unwrap().as_ref(), Some(row));
+                }
+                assert!(
+                    db.get_search_admitted_evidence_span(&first_id, &workspace)
+                        .unwrap()
+                        .is_none()
+                );
+                for fresh in &incoming[2..] {
+                    let fresh_id = stable_evidence_id(&id, &fresh.cass_span_id);
+                    let row = db
+                        .get_search_admitted_evidence_span(&fresh_id, &workspace)
+                        .unwrap()
+                        .expect("only newly captured evidence receives normal admission");
+                    assert_eq!(row.excerpt, fresh.excerpt);
+                }
+                let before_retry = row_counts(&db);
+                let saved = db.get_session(&id).unwrap();
+                incoming.reverse();
+                let retry = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+                assert!(!retry.changed);
+                assert!(retry.added_lines.is_empty());
+                assert_eq!(retry.index_job_id.as_deref(), Some(job.as_str()));
+                assert_eq!(row_counts(&db), before_retry);
+                assert_eq!(db.get_session(&id).unwrap(), saved);
+                db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+                    .unwrap();
+                let completed =
+                    refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+                assert!(!completed.changed);
+                assert!(completed.index_job_id.is_none());
+                assert_eq!(row_counts(&db), before_retry);
+                for row in retained {
+                    assert_eq!(db.get_evidence_span(&row.id).unwrap(), Some(row));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migrated_history_cannot_be_truncated_or_rewritten_during_growth() {
+        let (db, workspace, id, session) = fixture("/private/migrated-history.jsonl", 2);
+        db.execute_raw(
+            "UPDATE evidence_spans SET producer_kind = 'legacy_unknown', search_eligibility = 'denied', pack_eligibility = 'denied'",
+        )
+        .unwrap();
+        let mut incoming: Vec<_> = (1..=3).map(|line| span(&session, line)).collect();
+        let mut missing = incoming.clone();
+        missing.remove(0);
+        assert_refresh_refused_without_writes(
+            &db,
+            &workspace,
+            &id,
+            &session,
+            &missing,
+            "cass_refresh_history_missing",
+        );
+        incoming[0] = super::super::parse_view_line_value(
+            &json!({"line": 1, "content": "PRIVATE_PAYLOAD_SENTINEL changed history"}),
+            &session.source_path,
+        )
+        .unwrap();
+        assert_refresh_refused_without_writes(
+            &db,
+            &workspace,
+            &id,
+            &session,
+            &incoming,
+            "cass_refresh_history_changed",
+        );
+    }
+
+    #[test]
+    fn other_producer_cannot_be_reimported_under_a_fresh_cass_identity() {
+        let (db, workspace, id, session) = fixture("/private/producer-conflict.jsonl", 1);
+        let other_id = stable_evidence_id(&id, "other-producer-identity");
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET id = {}, producer_kind = 'journal_distill', search_eligibility = 'denied', pack_eligibility = 'denied'",
+            sql_text(&other_id),
+        ))
+        .unwrap();
+        let incoming = [span(&session, 1), span(&session, 2)];
+        assert_refresh_refused_without_writes(
+            &db,
+            &workspace,
+            &id,
+            &session,
+            &incoming,
+            "cass_refresh_producer_conflict",
+        );
+    }
+
+    #[test]
+    fn migrated_evidence_keeps_its_historical_identity_during_growth() {
+        let (db, workspace, id, session) = fixture("/private/historical-identity.jsonl", 1);
+        let original = span(&session, 1);
+        let current_id = stable_evidence_id(&id, &original.cass_span_id);
+        let historical_id = stable_evidence_id(&id, "historical-evidence-identity");
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET id = {}, producer_kind = 'legacy_unknown', cass_span_id = {}, search_eligibility = 'denied', pack_eligibility = 'denied'",
+            sql_text(&historical_id),
+            sql_text(&original.cass_span_id),
+        ))
+        .unwrap();
+        let retained = db.get_evidence_span(&historical_id).unwrap().unwrap();
+        let incoming = [original, span(&session, 2)];
+        let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert_eq!(report.added_lines, vec![2]);
+        assert_eq!(
+            db.get_evidence_span(&historical_id).unwrap(),
+            Some(retained)
+        );
+        assert!(db.get_evidence_span(&current_id).unwrap().is_none());
+        assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 2);
+        let again = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert!(!again.changed);
+        assert!(again.added_lines.is_empty());
+        assert_eq!(again.index_job_id, report.index_job_id);
+    }
+
+    #[test]
+    fn unrelated_producer_evidence_is_preserved_without_blocking_cass_growth() {
+        let (db, workspace, id, session) = fixture("/private/mixed-producers.jsonl", 1);
+        let other_id = stable_evidence_id(&id, "journal-entry-identity");
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET id = {}, producer_kind = 'journal_distill', cass_span_id = 'journal:unrelated-entry', search_eligibility = 'denied', pack_eligibility = 'denied'",
+            sql_text(&other_id),
+        ))
+        .unwrap();
+        let retained = db.get_evidence_span(&other_id).unwrap().unwrap();
+        let incoming = [span(&session, 1), span(&session, 2)];
+        let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert_eq!(report.added_lines, vec![1, 2]);
+        assert_eq!(db.get_evidence_span(&other_id).unwrap(), Some(retained));
+        assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 3);
+        let again = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert!(!again.changed);
+        assert!(again.added_lines.is_empty());
+    }
+
+    #[test]
+    fn invalid_new_evidence_cannot_poison_a_durable_refresh_checkpoint() {
+        let (db, workspace, id, session) = fixture("/private/invalid-refresh.jsonl", 1);
+        for malformed in 0..5 {
+            let mut incoming = vec![span(&session, 1), span(&session, 2)];
+            match malformed {
+                0 => incoming[1].start_line = 0,
+                1 => incoming[1].end_line = 3,
+                2 => incoming[1].cass_span_id = "/private/other-session.jsonl:2".to_owned(),
+                3 => incoming[1].content_hash = "not-the-excerpt-digest".to_owned(),
+                _ => incoming[1].excerpt = "PRIVATE_PAYLOAD_SENTINEL substituted".to_owned(),
+            }
+            assert_refresh_refused_without_writes(
+                &db,
+                &workspace,
+                &id,
+                &session,
+                &incoming,
+                "cass_refresh_invalid_span",
+            );
+        }
     }
 }
