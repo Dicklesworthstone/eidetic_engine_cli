@@ -92,29 +92,99 @@ fn projections(
         })
         .collect();
     after_rule_rows();
+    let rule_ids: Vec<_> = rules.iter().map(|(id, _)| id.as_str()).collect();
+    let Ok(mut relations) = load_relations(connection, &rule_ids, &workspace.id) else {
+        // A broken shared authority read withholds rules, not unrelated memory
+        // or evidence hits. Never fall back to indexed tags or source IDs.
+        return BTreeMap::new();
+    };
     rules
         .into_iter()
         .filter_map(|(canonical, rule)| {
-            let tags = connection.get_rule_tags(&canonical).ok()?;
-            let sources = connection.get_rule_source_memory_ids(&canonical).ok()?;
-            // Provenance cannot borrow identities from another workspace either.
-            // Source-less rules are legitimate searchable entities, not fake memories.
-            if !sources.is_empty() {
-                let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-                let rows = connection.get_memories_batch(&refs).ok()?;
-                if sources.iter().any(|source| {
-                    rows.get(source)
-                        .is_none_or(|row| row.workspace_id != workspace.id)
-                }) {
-                    return None;
-                }
+            if relations.invalid_lineage.contains(&canonical) {
+                return None;
             }
+            let tags = relations.tags.remove(&canonical).unwrap_or_default();
+            let sources = relations.sources.remove(&canonical).unwrap_or_default();
             let projection = RuleIndexProjection::new(rule, &workspace.path, tags, sources);
             projection
                 .is_search_indexable()
                 .then_some((canonical, projection))
         })
         .collect()
+}
+
+const RULE_RELATION_PAGE_SIZE: usize = 256;
+
+#[derive(Default)]
+struct RuleRelations {
+    tags: BTreeMap<String, Vec<String>>,
+    sources: BTreeMap<String, Vec<String>>,
+    invalid_lineage: BTreeSet<String>,
+}
+
+fn malformed_relation() -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not read native rule relations".to_owned(),
+    }
+}
+
+/// Read only candidate relationships, in bind-safe pages. Lineage authority
+/// needs the parent's identity/workspace, not its potentially large or sealed
+/// body. A LEFT JOIN is deliberate: an absent parent must invalidate its rule,
+/// not vanish from an INNER JOIN and turn broken lineage into a source-less rule.
+fn load_relations(
+    connection: &DbConnection,
+    ids: &[&str],
+    workspace_id: &str,
+) -> Result<RuleRelations, crate::db::DbError> {
+    use sqlmodel_core::Value;
+
+    let mut relations = RuleRelations::default();
+    for page in ids.chunks(RULE_RELATION_PAGE_SIZE) {
+        let placeholders = (1..=page.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let parameters: Vec<_> = page
+            .iter()
+            .map(|id| Value::Text((*id).to_owned()))
+            .collect();
+        let tags_sql = format!(
+            "SELECT rule_id, tag FROM rule_tags WHERE rule_id IN ({placeholders}) ORDER BY rule_id ASC, tag ASC"
+        );
+        for row in connection.query(&tags_sql, &parameters)? {
+            let (Some(Value::Text(rule_id)), Some(Value::Text(tag))) = (row.get(0), row.get(1))
+            else {
+                return Err(malformed_relation());
+            };
+            relations
+                .tags
+                .entry(rule_id.clone())
+                .or_default()
+                .push(tag.clone());
+        }
+        let sources_sql = format!(
+            "SELECT rsm.rule_id, rsm.memory_id, m.workspace_id FROM rule_source_memories AS rsm LEFT JOIN memories AS m ON m.id = rsm.memory_id WHERE rsm.rule_id IN ({placeholders}) ORDER BY rsm.rule_id ASC, rsm.memory_id ASC"
+        );
+        for row in connection.query(&sources_sql, &parameters)? {
+            let (Some(Value::Text(rule_id)), Some(Value::Text(memory_id))) =
+                (row.get(0), row.get(1))
+            else {
+                return Err(malformed_relation());
+            };
+            if !matches!(row.get(2), Some(Value::Text(owner)) if owner == workspace_id) {
+                relations.invalid_lineage.insert(rule_id.clone());
+            }
+            relations
+                .sources
+                .entry(rule_id.clone())
+                .or_default()
+                .push(memory_id.clone());
+        }
+    }
+    Ok(relations)
 }
 
 fn canonical_metadata(projection: &RuleIndexProjection) -> serde_json::Value {
@@ -651,6 +721,134 @@ mod tests {
         assert_eq!(db.count_table_rows("audit_log").map_err(|e| e.to_string())?, audits);
         assert!(!options.workspace_path.join("index").exists());
         assert!(!options.workspace_path.join(".ee").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn paged_relations_match_the_existing_native_projection_contract() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        let source = "mem_00000000000000000000000072";
+        seed_lineage(&db, source, WORKSPACE)?;
+        let ids: Vec<_> = (100..100 + RULE_RELATION_PAGE_SIZE + 1)
+            .map(|index| format!("rule_{index:026}"))
+            .collect();
+        for id in &ids {
+            insert_sourced(&db, id, source)?;
+        }
+        let refs: Vec<_> = ids.iter().map(String::as_str).collect();
+        let relations = load_relations(&db, &refs, WORKSPACE).map_err(|e| e.to_string())?;
+        assert_eq!(relations.sources.len(), RULE_RELATION_PAGE_SIZE + 1);
+        assert!(relations.invalid_lineage.is_empty());
+        let candidates = refs.iter().copied().collect::<BTreeSet<_>>();
+        let actual = load_projections(&options, &candidates, None, || {});
+        assert_eq!(actual.len(), ids.len());
+        for id in &ids {
+            let tags = db.get_rule_tags(id).map_err(|e| e.to_string())?;
+            let sources = db.get_rule_source_memory_ids(id).map_err(|e| e.to_string())?;
+            assert_eq!(relations.tags.get(id), Some(&tags));
+            assert_eq!(relations.sources.get(id), Some(&sources));
+            let rule = db
+                .get_procedural_rule(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing fixture rule")?;
+            let expected = RuleIndexProjection::new(
+                rule,
+                &options.workspace_path.to_string_lossy(),
+                tags,
+                sources,
+            );
+            assert_eq!(canonical_metadata(&actual[id]), canonical_metadata(&expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relation_pages_never_pull_in_unrequested_rules_or_source_bodies() -> TestResult {
+        let (_temp, _options, db) = fixture()?;
+        let source = "mem_00000000000000000000000073";
+        let other_source = "mem_00000000000000000000000074";
+        seed_lineage(&db, source, WORKSPACE)?;
+        seed_lineage(&db, other_source, WORKSPACE)?;
+        insert_sourced(&db, RULE, source)?;
+        insert_sourced(&db, SECOND, other_source)?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET content = 'PRIVATE-LINEAGE-CANARY', workspace_id = '{OTHER}' WHERE id = '{other_source}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        let selected = load_relations(&db, &[RULE], WORKSPACE).map_err(|e| e.to_string())?;
+        assert_eq!(selected.sources.len(), 1);
+        assert_eq!(selected.sources[RULE], vec![source.to_owned()]);
+        assert_eq!(selected.tags.len(), 1);
+        assert!(!selected.tags.contains_key(SECOND));
+        assert!(selected.invalid_lineage.is_empty());
+        let both = load_relations(&db, &[RULE, SECOND], WORKSPACE).map_err(|e| e.to_string())?;
+        assert_eq!(both.invalid_lineage, BTreeSet::from([SECOND.to_owned()]));
+        Ok(())
+    }
+
+    #[test]
+    fn rule_lifecycle_is_independent_of_its_source_memory_lifecycle() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        let source = "mem_00000000000000000000000075";
+        seed_lineage(&db, source, WORKSPACE)?;
+        insert_sourced(&db, RULE, source)?;
+        let before = revision_values(&load_projections(
+            &options,
+            &BTreeSet::from([RULE]),
+            None,
+            || {},
+        ));
+        assert_eq!(before.len(), 1);
+        db.execute_raw(&format!(
+            "UPDATE memories SET valid_to = '2021-01-01T00:00:00Z', tombstoned_at = '2021-01-01T00:00:00Z', superseded_at = '2021-01-01T00:00:00Z' WHERE id = '{source}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        let after = revision_values(&load_projections(
+            &options,
+            &BTreeSet::from([RULE]),
+            None,
+            || {},
+        ));
+        assert_eq!(after, before);
+        let public = serde_json::to_string(&after).map_err(|e| e.to_string())?;
+        assert!(!public.contains("Source observation, not the rule body."));
+        assert_eq!(after[RULE]["content"], BODY);
+        Ok(())
+    }
+
+    #[test]
+    fn broken_relation_storage_withholds_rules_but_keeps_unrelated_evidence() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        insert(&db, RULE, WORKSPACE, "validated")?;
+        db.execute_raw("ALTER TABLE rule_tags RENAME TO unavailable_rule_tags")
+            .map_err(|e| e.to_string())?;
+        let mut degraded = Vec::new();
+        let hits = admit_hits(
+            &options,
+            vec![hit(RULE), hit("evidence-unrelated")],
+            &mut degraded,
+            None,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, "evidence-unrelated");
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "rule_live_admission_filtered");
+        assert!(!degraded[0].message.contains("unavailable_rule_tags"));
+        db.execute_raw("ALTER TABLE unavailable_rule_tags RENAME TO rule_tags")
+            .map_err(|e| e.to_string())?;
+        assert_eq!(admit_hits(&options, vec![hit(RULE)], &mut Vec::new(), None).len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_relation_set_does_not_consult_storage() -> TestResult {
+        let (_temp, _options, db) = fixture()?;
+        db.execute_raw("ALTER TABLE rule_tags RENAME TO unavailable_rule_tags")
+            .map_err(|e| e.to_string())?;
+        let relations = load_relations(&db, &[], WORKSPACE).map_err(|e| e.to_string())?;
+        assert!(relations.tags.is_empty());
+        assert!(relations.sources.is_empty());
+        assert!(relations.invalid_lineage.is_empty());
         Ok(())
     }
 }
