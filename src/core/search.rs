@@ -13322,8 +13322,32 @@ fn apply_memory_scope_visibility_with_connection(
         }
     }
 
+    // Native rules are not memory rows. Their own trust/scope and complete
+    // source attribution decide inclusion before the shared strict-scope gate.
+    let scoped_rules = if passthrough_scope {
+        BTreeMap::new()
+    } else {
+        match rule_admission::scoped_metadata(options, &hits, scope_context, connection) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(
+                    "Could not verify native-rule scope attribution",
+                ));
+                BTreeMap::new()
+            }
+        }
+    };
     let mut scoped_hits = Vec::with_capacity(hits.len());
     for mut hit in hits {
+        if !passthrough_scope && rule_admission::is_rule_hit(&hit) {
+            let metadata = scoped_rules.get(&hit.doc_id);
+            stats.record_candidate_id(metadata.is_some(), Some(&hit.doc_id));
+            if let Some(metadata) = metadata {
+                hit.metadata = Some(metadata.clone());
+                scoped_hits.push(hit);
+            }
+            continue;
+        }
         let metadata_tags = search_hit_metadata_tags(&hit);
         match scope_memories.get(&hit.doc_id) {
             Some(memory) => {

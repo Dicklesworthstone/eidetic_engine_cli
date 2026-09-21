@@ -9,6 +9,10 @@
 //! Rule bodies, tags, lineage and workspace binding must describe one snapshot;
 //! a revision assembled from independently current reads is not a real revision.
 
+#[path = "search_rule_scope.rs"]
+mod scope;
+pub(super) use scope::scoped_metadata;
+
 #[path = "search_revision_admission.rs"]
 pub(super) mod memory_revisions;
 
