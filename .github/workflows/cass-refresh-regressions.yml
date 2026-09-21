@@ -1,0 +1,80 @@
+name: CASS refresh regressions
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/cass/**
+      - src/db/**
+      - src/policy/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/cass-refresh-regressions.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cass-refresh-regressions-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  retained-session-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Record exact source and toolchain
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            rustc --version
+            cargo --version
+            sha256sum Cargo.lock
+          } | tee "$RUNNER_TEMP/cass-refresh-source.log"
+      - name: Check refresh formatting without rewriting source
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --config skip_children=true --check \
+            src/cass/refresh.rs src/cass/refresh_tests.rs \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-format.log"
+      - name: Exercise all retained-session refresh regressions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib cass::import::refresh:: -- --test-threads=2 \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-tests.log"
+          python3 - <<'PY'
+          import os, pathlib, re
+          log = pathlib.Path(os.environ['RUNNER_TEMP'], 'cass-refresh-tests.log').read_text()
+          results = re.findall(r'test result: ok\. (\d+) passed; 0 failed; 0 ignored;', log)
+          if not results or int(results[-1]) < 21:
+              raise SystemExit('Expected at least 21 executed refresh regressions, with none ignored')
+          PY
+      - name: Exercise the existing public import and subprocess paths
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib cass::import:: -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' \
+            "$RUNNER_TEMP/cass-refresh-import.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: cass-refresh-regression-results
+          path: ${{ runner.temp }}/cass-refresh-*.log
+          retention-days: 7
+          if-no-files-found: warn
