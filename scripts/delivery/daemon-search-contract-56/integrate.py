@@ -80,7 +80,12 @@ def updated_global_promotion(text: str) -> str:
         }'''
     new = old.replace('.expect("durable count")',
                       '.expect("durable count")\n                .try_into()\n                .expect("non-negative row count")')
-    if old in text:
+    # Another main-branch change may already have kept the native i64 return
+    # type instead. Preserve that equally valid repair; do not overwrite it.
+    signed = old.replace("-> u64", "-> i64")
+    if normalized(signed) in normalized(text):
+        pass
+    elif old in text:
         text = replace_once(text, old, new, "test fixture count conversion")
     else:
         require(normalized(new) in normalized(text), "test fixture count changed")

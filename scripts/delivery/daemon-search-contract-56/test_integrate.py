@@ -98,6 +98,10 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(result.count('i64::try_from(successes)'), 2)
         self.assertEqual(result, m.updated_global_promotion(result))
 
+    def test_concurrent_signed_count_repair_is_preserved_verbatim(self):
+        signed = GLOBAL.replace("-> u64", "-> i64").replace("u64::try_from", "i64::try_from")
+        self.assertEqual(signed, m.updated_global_promotion(signed))
+
     def test_concurrent_test_fixture_changes_are_not_overwritten(self):
         with self.assertRaisesRegex(RuntimeError, 'test fixture count changed'):
             m.updated_global_promotion(GLOBAL.replace('"durable count"', '"changed count"'))
