@@ -144,9 +144,19 @@ jobs:
       # bd-reality-core-convergence-1azkt.18: was `check advisories` only, so
       # deny.toml's [bans] list was configured and never enforced and there
       # was no [sources] constraint at all. Both measured green locally
-      # against this Cargo.lock before being enabled. `licenses` stays off --
-      # it fails today on an unmatched allow entry and deny.toml states
-      # license posture is owned elsewhere.
+      # against this Cargo.lock before being enabled. `licenses` stays off,
+      # and bd-evuxo corrected why: the old wording cited "an unmatched allow
+      # entry", which is one of 46 findings, not the blocker.
+      # `cargo deny check licenses` -> EXIT 4, re-measured 2026-09-21:
+      #   35 error[unlicensed]  siblings with no license field
+      #                         (fsqlite 17, frankensearch 8, frankentorch 6, fnx 4)
+      #   10 error[rejected]    LicenseRef-MIT-OpenAI-Anthropic-Rider x7,
+      #                         MPL-2.0, CDLA-Permissive-2.0, BSL-1.0
+      #    1 warning            unmatched allowance "Unicode-DFS-2016"
+      # This matters MORE on the release path than in CI: the 10 rejected
+      # licenses are carried by crates linked into the signed binary this
+      # workflow ships. Whether that is acceptable is a licensing-policy
+      # ruling, not an engineering one, and it is unmade.
       - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
         with:

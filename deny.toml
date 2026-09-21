@@ -37,6 +37,23 @@ deny = [
 [licenses]
 # License posture is owned elsewhere; this file is scoped to `bans` only.
 # Run `cargo deny check bans` (not `cargo deny check`) to use this config.
+#
+# bd-evuxo: "owned elsewhere" is accurate but says nothing about SIZE, and
+# the CI/release notes that pointed here cited a single unmatched allow-list
+# entry -- 1 of 46 findings. What `cargo deny check licenses` actually
+# reports (EXIT 4, re-measured 2026-09-21):
+#
+#   35  error[unlicensed]  fsqlite 17, frankensearch 8, frankentorch 6, fnx 4
+#                          -- first-party siblings declaring NO license field
+#   10  error[rejected]    LicenseRef-MIT-OpenAI-Anthropic-Rider x7,
+#                          MPL-2.0, CDLA-Permissive-2.0, BSL-1.0
+#    1  warning            unmatched allowance "Unicode-DFS-2016"
+#
+# The allow list below is therefore NOT the thing standing between this repo
+# and a green licenses check. Editing it cannot fix 35 missing license
+# fields, which live in other trees, and must not be widened to swallow the
+# 10 rejected licenses without a policy ruling -- widening `allow` is how a
+# licensing decision gets made by accident in a config file.
 allow = [
     "MIT",
     "Apache-2.0",

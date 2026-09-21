@@ -265,9 +265,24 @@ jobs:
       # enabled here, so this activates two dormant gates without changing
       # what passes today.
       #
-      # `licenses` is deliberately NOT enabled: it fails today on an unmatched
-      # allow-list entry, and deny.toml states license posture is owned
-      # elsewhere. Enabling it is a separate decision, not a drive-by.
+      # `licenses` is deliberately NOT enabled, and the reason is BIGGER than
+      # this note used to say. bd-evuxo: the previous wording cited "an
+      # unmatched allow-list entry", which is true and is ONE of 46 findings.
+      # Re-measured 2026-09-21, `cargo deny check licenses` -> EXIT 4:
+      #
+      #   35  error[unlicensed]  first-party siblings with NO license field:
+      #                          fsqlite 17, frankensearch 8, frankentorch 6,
+      #                          fnx 4
+      #   10  error[rejected]    LicenseRef-MIT-OpenAI-Anthropic-Rider x7,
+      #                          MPL-2.0, CDLA-Permissive-2.0, BSL-1.0
+      #    1  warning            unmatched allowance "Unicode-DFS-2016"
+      #                          <- the only part the old note described
+      #
+      # Enabling this is blocked on two decisions that are NOT this repo's:
+      # the 35 need license fields added UPSTREAM in the sibling crates, and
+      # the 10 need a LICENSING POLICY ruling on whether those licenses are
+      # acceptable in a shipped binary. A one-line allow-list edit does not
+      # fix it, which is what the old note implied.
       - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
