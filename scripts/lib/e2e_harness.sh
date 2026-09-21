@@ -298,7 +298,7 @@ log_drop() {
 
 # e2e_temp_root — THE one place the e2e temp root is resolved (bd-mfqa2).
 #
-# It exists as a function because two call sites need the SAME answer: the
+# It exists as a function because two call sites here need the SAME answer: the
 # workspace creator below, and the cleanup guard in end_temp_workspace. They
 # used to interpolate `${EE_E2E_TMPDIR}` and `${TMPDIR}` independently, and the
 # guard's copy degenerated when they were unset -- `"${EE_E2E_TMPDIR%/}"/*`
@@ -313,14 +313,13 @@ log_drop() {
 # bug -- but the defence was absent exactly where the suites run, and it is the
 # only thing standing between a mis-resolved root and a recursive delete of it.
 #
-# The trailing-slash strip and the non-empty floor are both load-bearing: an
-# empty root is what produced the `/*` pattern in the first place.
-e2e_temp_root() {
-    local root="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
-    root="${root%/}"
-    [ -n "$root" ] || root="/tmp"
-    printf '%s' "$root"
-}
+# IT NOW LIVES IN ITS OWN FILE so the twelve standalone e2e scripts can use it
+# without adopting this whole harness -- logging, counters, traps and all. That
+# was the real reason they each re-implemented the default instead of reusing
+# this one. One implementation, two entry points.
+# shellcheck source=scripts/lib/e2e_tmproot.sh
+# shellcheck disable=SC1091
+source "$E2E_HARNESS_DIR/e2e_tmproot.sh"
 
 # with_temp_workspace <var> — assign an isolated workspace dir (own DB + index)
 # to <var>. Pair with end_temp_workspace. Cleaned up unless EE_E2E_KEEP=1.
