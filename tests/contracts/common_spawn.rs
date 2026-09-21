@@ -93,15 +93,47 @@ fn acquire_spawn_permit() -> SpawnPermit {
 /// Poisoning was already handled: the permit gate recovers from a PANICKED
 /// peer, and `SpawnPermit`'s `Drop` returns capacity even on unwind. A HANGING
 /// child was the remaining hole, and it is the worse one, because `ee`'s
-/// database write lock is an OS flock with `busy_timeout 0` -- a spawn blocked
-/// there while holding a permit is a cross-layer deadlock with no timeout on
-/// either layer.
+/// database write lock is an OS flock -- a spawn blocked there while holding a
+/// permit is a cross-layer stall.
 ///
-/// 120s is deliberately far above the observed per-spawn cost (~2s, with `init`
+/// This is deliberately far above the observed per-spawn cost (~2s, with `init`
 /// and migrate operations heavier). It is a deadlock bound, not a budget: a
 /// value tight enough to catch slowness would make the suite flaky under swarm
 /// load, which is the failure mode this whole module was written to avoid.
-const REAL_EE_SPAWN_TIMEOUT_SECS: u64 = 120;
+///
+/// 420 = 300 + 120, AND BOTH TERMS ARE LOAD-BEARING (bd-ykuwq).
+///
+/// The 120 came first and was chosen under a premise that has since stopped
+/// being true. This comment used to end "...with no timeout on either layer",
+/// and the flock layer now HAS one:
+///
+///     src/db/mod.rs:603  FLOCK_GATE_MAX_WAIT          = 300s
+///     src/db/mod.rs:601  FLOCK_GATE_STAGNANT_MAX_WAIT =  38s
+///     src/db/mod.rs:878  lock_database_write_file() passes BOTH
+///
+/// The 38s window does NOT cap the total wait -- it bounds one STAGNANT holder
+/// and resets whenever the holder epoch turns over, so while the queue makes
+/// progress a waiter blocks up to the 300s absolute ceiling. `busy_timeout 0`
+/// is SQLite-level and sits underneath that gate; it never bounded this.
+///
+/// So a deadline of 120 was 2.5x BELOW the longest wait the product explicitly
+/// sanctions. That does not make the guard tight, it makes it WRONG: it fires
+/// on a child that is neither slow nor hung, but waiting exactly as designed,
+/// and it converts the author's stated deadlock bound into precisely the
+/// slowness bound they said it must never become.
+///
+/// 300 is therefore the floor, taken from the ceiling above rather than from
+/// any failure. The original 120 is preserved on top of it as the deadlock
+/// margin it was always meant to be -- the time a child may take AFTER it stops
+/// waiting. If `FLOCK_GATE_MAX_WAIT` moves, this must move with it.
+///
+/// WHAT THIS NO LONGER CATCHES, stated rather than absorbed: a spawn that burns
+/// 200s of real work with no lock contention used to fail here and now passes.
+/// Nothing else asserts a per-spawn cost, so that regression class is currently
+/// UNGUARDED. If it is worth catching it needs its own assertion against
+/// measured work time -- not a deadlock bound doing two jobs badly, which is
+/// how this constant came to be wrong in the first place.
+const REAL_EE_SPAWN_TIMEOUT_SECS: u64 = 420;
 
 fn spawn_timeout() -> Duration {
     std::env::var("EE_CONTRACTS_SPAWN_TIMEOUT_SECS")
