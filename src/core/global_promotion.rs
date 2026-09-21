@@ -718,12 +718,14 @@ fn audit_demotion_origin(
     let error = || "Could not record the demotion origin audit".to_owned();
     if workspace.parse::<crate::models::WorkspaceId>().is_err()
         || id.parse::<crate::models::MemoryId>().is_err()
-        || !options.workspace_database_path.try_exists().map_err(|_| error())?
+        || !options
+            .workspace_database_path
+            .try_exists()
+            .map_err(|_| error())?
     {
         return Err(error());
     }
-    let source = DbConnection::open_file(options.workspace_database_path)
-        .map_err(|_| error())?;
+    let source = DbConnection::open_file(options.workspace_database_path).map_err(|_| error())?;
     source
         .with_transaction(|| {
             global_mutation_target(&source, &workspace, &id)?;
@@ -764,8 +766,13 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
             options.global_memory_id,
         )
         .map_err(|_| "Could not verify global demotion target".to_owned())?;
-        let origin = row.provenance_uri.as_deref().and_then(parse_promotion_provenance);
-        snapshot.finish().map_err(|_| "Could not release global demotion preview".to_owned())?;
+        let origin = row
+            .provenance_uri
+            .as_deref()
+            .and_then(parse_promotion_provenance);
+        snapshot
+            .finish()
+            .map_err(|_| "Could not release global demotion preview".to_owned())?;
         return Ok(DemotionReport {
             global_memory_id: row.id,
             executed: false,
@@ -783,8 +790,13 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
         options.global_memory_id,
         options.actor,
     )
-    .map_err(|_| "Global demotion transaction failed; inspect the destination before retrying".to_owned())?;
-    let origin = row.provenance_uri.as_deref().and_then(parse_promotion_provenance);
+    .map_err(|_| {
+        "Global demotion transaction failed; inspect the destination before retrying".to_owned()
+    })?;
+    let origin = row
+        .provenance_uri
+        .as_deref()
+        .and_then(parse_promotion_provenance);
     let origin_audit = audit_demotion_origin(options, &row);
     // Withdrawal must reach retrieval even when its separate origin audit is
     // unavailable. The durable queue also survives a crash or index failure.
@@ -912,7 +924,9 @@ fn backflow_target_is_current(
             sqlmodel_core::Value::Text(memory.workspace_id.clone()),
         ],
     )?;
-    let row = rows.first().filter(|_| rows.len() == 1)
+    let row = rows
+        .first()
+        .filter(|_| rows.len() == 1)
         .ok_or_else(|| global_mutation_error("Feedback source identity changed"))?;
     let superseded = match row.get(0) {
         Some(sqlmodel_core::Value::Null) => false,
@@ -936,7 +950,11 @@ fn backflow_target_is_current(
 fn verified_backflow_origin(
     memory: &crate::db::StoredMemory,
 ) -> crate::db::Result<Option<(String, String)>> {
-    let Some(uri) = memory.provenance_uri.as_deref().filter(|uri| uri.starts_with("ee-mem://")) else {
+    let Some(uri) = memory
+        .provenance_uri
+        .as_deref()
+        .filter(|uri| uri.starts_with("ee-mem://"))
+    else {
         return Ok(None);
     };
     let (workspace, id) = parse_promotion_provenance(uri)
@@ -1030,17 +1048,20 @@ fn persist_origin_backflow(
                 action: "memory.global_feedback_backflow".to_owned(),
                 target_type: Some("memory".to_owned()),
                 target_id: Some(id.clone()),
-                details: Some(json!({
-                    "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
-                    "globalMemoryId": global.id,
-                    "feedbackEventId": feedback_id,
-                    "signal": options.signal.as_str(),
-                    "requestedDelta": requested,
-                    "appliedDelta": after - before,
-                    "confidenceBefore": before,
-                    "confidenceAfter": after,
-                    "indexJobId": job,
-                }).to_string()),
+                details: Some(
+                    json!({
+                        "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+                        "globalMemoryId": global.id,
+                        "feedbackEventId": feedback_id,
+                        "signal": options.signal.as_str(),
+                        "requestedDelta": requested,
+                        "appliedDelta": after - before,
+                        "confidenceBefore": before,
+                        "confidenceAfter": after,
+                        "indexJobId": job,
+                    })
+                    .to_string(),
+                ),
             },
         )?;
         Ok(Some((before, after)))
@@ -1072,11 +1093,17 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
     if options.dry_run {
         let snapshot = admission::ReadSnapshot::begin(&global_connection)
             .map_err(|_| "Could not begin global feedback preview".to_owned())?;
-        let row = global_mutation_target(&global_connection, &global_workspace_id, options.global_memory_id)
-            .map_err(|_| "Could not verify global feedback target".to_owned())?;
+        let row = global_mutation_target(
+            &global_connection,
+            &global_workspace_id,
+            options.global_memory_id,
+        )
+        .map_err(|_| "Could not verify global feedback target".to_owned())?;
         let origin = verified_backflow_origin(&row)
             .map_err(|_| "Could not verify global feedback origin".to_owned())?;
-        snapshot.finish().map_err(|_| "Could not release global feedback preview".to_owned())?;
+        snapshot
+            .finish()
+            .map_err(|_| "Could not release global feedback preview".to_owned())?;
         return Ok(BackflowReport {
             global_memory_id: row.id,
             origin,
@@ -1088,13 +1115,19 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
     }
 
     let feedback_id = promotion_feedback_event_id();
-    let (row, origin, current) = global_connection.with_transaction(|| {
-        let row = global_mutation_target(&global_connection, &global_workspace_id, options.global_memory_id)?;
-        let origin = verified_backflow_origin(&row)?;
-        let current = backflow_target_is_current(&global_connection, &row, reference)?;
-        // Feedback about retired knowledge remains useful historical evidence;
-        // it must not silently alter an otherwise current origin memory.
-        global_connection.insert_feedback_event(
+    let (row, origin, current) =
+        global_connection
+            .with_transaction(|| {
+                let row = global_mutation_target(
+                    &global_connection,
+                    &global_workspace_id,
+                    options.global_memory_id,
+                )?;
+                let origin = verified_backflow_origin(&row)?;
+                let current = backflow_target_is_current(&global_connection, &row, reference)?;
+                // Feedback about retired knowledge remains useful historical evidence;
+                // it must not silently alter an otherwise current origin memory.
+                global_connection.insert_feedback_event(
             &feedback_id,
             &crate::db::CreateFeedbackEventInput {
                 workspace_id: global_workspace_id.clone(),
@@ -1115,12 +1148,18 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
                 session_id: None,
             },
         )?;
-        Ok((row, origin, current))
-    }).map_err(|_| "Could not commit global feedback; inspect the global store before retrying".to_owned())?;
+                Ok((row, origin, current))
+            })
+            .map_err(|_| {
+                "Could not commit global feedback; inspect the global store before retrying"
+                    .to_owned()
+            })?;
 
     let adjustment = if current && let Some(origin) = &origin {
         let result = (|| -> Result<Option<(f32, f32)>, String> {
-            if !options.workspace_database_path.try_exists()
+            if !options
+                .workspace_database_path
+                .try_exists()
                 .map_err(|_| "Could not inspect origin store".to_owned())?
             {
                 return Err("Origin store does not exist".to_owned());
@@ -1136,10 +1175,9 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
     } else {
         None
     };
-    let (before, after, applied_delta) = adjustment.map_or(
-        (None, None, 0.0),
-        |(before, after)| (Some(before), Some(after), after - before),
-    );
+    let (before, after, applied_delta) = adjustment.map_or((None, None, 0.0), |(before, after)| {
+        (Some(before), Some(after), after - before)
+    });
     Ok(BackflowReport {
         global_memory_id: row.id,
         origin,
@@ -1633,7 +1671,7 @@ mod tests {
             )
         }
 
-        fn count(&self, table: &str) -> u64 {
+        fn count(&self, table: &str) -> i64 {
             self.destination
                 .count_table_rows(table)
                 .expect("durable count")
@@ -1661,7 +1699,10 @@ mod tests {
         assert_eq!(copy.trust_class, f.memory.trust_class);
         assert_eq!(
             copy.provenance_uri,
-            Some(promotion_provenance_uri(&f.memory.workspace_id, &f.memory.id))
+            Some(promotion_provenance_uri(
+                &f.memory.workspace_id,
+                &f.memory.id
+            ))
         );
         assert_eq!(
             (
@@ -1818,20 +1859,29 @@ mod tests {
         let f = PublicationFixture::new();
         let (id, _, _) = f.publish().expect("publish");
         let before = (f.count("search_index_jobs"), f.count("audit_log"));
-        let (_, changed, job) = persist_global_demotion(
-            &f.destination, &f.workspace, &id, Some("withdrawal-test"),
-        ).expect("withdraw");
+        let (_, changed, job) =
+            persist_global_demotion(&f.destination, &f.workspace, &id, Some("withdrawal-test"))
+                .expect("withdraw");
         assert!(changed);
         let row = f.destination.get_memory(&id).unwrap().unwrap();
         assert!(row.tombstoned_at.is_some());
         assert_eq!(row.content, f.memory.content);
-        assert_eq!((f.count("search_index_jobs"), f.count("audit_log")), (before.0 + 1, before.1 + 1));
-        let jobs = f.destination.query(
-            "SELECT document_id FROM search_index_jobs WHERE id = ?1",
-            &[sqlmodel_core::Value::Text(job)],
-        ).unwrap();
-        assert!(matches!(jobs[0].get(0), Some(sqlmodel_core::Value::Text(target)) if target == &id));
-        let visible = super::super::global_store::read_global_store_memories(&f.paths, false).unwrap();
+        assert_eq!(
+            (f.count("search_index_jobs"), f.count("audit_log")),
+            (before.0 + 1, before.1 + 1)
+        );
+        let jobs = f
+            .destination
+            .query(
+                "SELECT document_id FROM search_index_jobs WHERE id = ?1",
+                &[sqlmodel_core::Value::Text(job)],
+            )
+            .unwrap();
+        assert!(
+            matches!(jobs[0].get(0), Some(sqlmodel_core::Value::Text(target)) if target == &id)
+        );
+        let visible =
+            super::super::global_store::read_global_store_memories(&f.paths, false).unwrap();
         assert!(visible.iter().all(|memory| memory.id != id));
         let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
         assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
@@ -1843,12 +1893,20 @@ mod tests {
         let (id, _, _) = f.publish().unwrap();
         let before = f.destination.get_memory(&id).unwrap();
         let audits = f.count("audit_log");
-        f.destination.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_demotion_jobs").unwrap();
+        f.destination
+            .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_demotion_jobs")
+            .unwrap();
         assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).is_err());
         assert_eq!(f.destination.get_memory(&id).unwrap(), before);
         assert_eq!(f.count("audit_log"), audits);
-        f.destination.execute_raw("ALTER TABLE unavailable_demotion_jobs RENAME TO search_index_jobs").unwrap();
-        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap().1);
+        f.destination
+            .execute_raw("ALTER TABLE unavailable_demotion_jobs RENAME TO search_index_jobs")
+            .unwrap();
+        assert!(
+            persist_global_demotion(&f.destination, &f.workspace, &id, None)
+                .unwrap()
+                .1
+        );
     }
 
     #[test]
@@ -1857,22 +1915,32 @@ mod tests {
         let (id, _, _) = f.publish().unwrap();
         let before = f.destination.get_memory(&id).unwrap();
         let jobs = f.count("search_index_jobs");
-        f.destination.execute_raw("ALTER TABLE audit_log RENAME TO unavailable_demotion_audit").unwrap();
+        f.destination
+            .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_demotion_audit")
+            .unwrap();
         assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).is_err());
         assert_eq!(f.destination.get_memory(&id).unwrap(), before);
         assert_eq!(f.count("search_index_jobs"), jobs);
-        f.destination.execute_raw("ALTER TABLE unavailable_demotion_audit RENAME TO audit_log").unwrap();
-        assert!(persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap().1);
+        f.destination
+            .execute_raw("ALTER TABLE unavailable_demotion_audit RENAME TO audit_log")
+            .unwrap();
+        assert!(
+            persist_global_demotion(&f.destination, &f.workspace, &id, None)
+                .unwrap()
+                .1
+        );
     }
 
     #[test]
     fn demotion_retries_preserve_original_tombstone_and_queue_fresh_index_repair() {
         let f = PublicationFixture::new();
         let (id, _, _) = f.publish().unwrap();
-        let (_, changed, first_job) = persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+        let (_, changed, first_job) =
+            persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
         assert!(changed);
         let first = f.destination.get_memory(&id).unwrap();
-        let (_, changed, next_job) = persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+        let (_, changed, next_job) =
+            persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
         assert!(!changed);
         assert_ne!(first_job, next_job);
         assert_eq!(f.destination.get_memory(&id).unwrap(), first);
@@ -1884,8 +1952,13 @@ mod tests {
         let (id, _, _) = f.publish().unwrap();
         let before = f.destination.get_memory(&id).unwrap();
         let counts = (f.count("search_index_jobs"), f.count("audit_log"));
-        assert!(persist_global_demotion(&f.destination, &f.memory.workspace_id, &id, None).is_err());
-        assert!(persist_global_demotion(&f.destination, &f.workspace, "PRIVATE_TARGET_CANARY", None).is_err());
+        assert!(
+            persist_global_demotion(&f.destination, &f.memory.workspace_id, &id, None).is_err()
+        );
+        assert!(
+            persist_global_demotion(&f.destination, &f.workspace, "PRIVATE_TARGET_CANARY", None)
+                .is_err()
+        );
         assert_eq!(f.destination.get_memory(&id).unwrap(), before);
         assert_eq!((f.count("search_index_jobs"), f.count("audit_log")), counts);
     }
@@ -1921,16 +1994,25 @@ mod tests {
         let f = PublicationFixture::new();
         let (id, _, _) = f.publish().unwrap();
         let mut row = f.destination.get_memory(&id).unwrap().unwrap();
-        row.provenance_uri = Some(promotion_provenance_uri("wsp_00000000000000000000000091", &f.memory.id));
+        row.provenance_uri = Some(promotion_provenance_uri(
+            "wsp_00000000000000000000000091",
+            &f.memory.id,
+        ));
         let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
         let before = source.count_table_rows("audit_log").unwrap();
-        assert!(audit_demotion_origin(&DemoteGlobalOptions {
-            workspace_database_path: &f.source_path,
-            global_memory_id: &id,
-            global_paths: &f.paths,
-            actor: None,
-            dry_run: false,
-        }, &row).is_err());
+        assert!(
+            audit_demotion_origin(
+                &DemoteGlobalOptions {
+                    workspace_database_path: &f.source_path,
+                    global_memory_id: &id,
+                    global_paths: &f.paths,
+                    actor: None,
+                    dry_run: false,
+                },
+                &row
+            )
+            .is_err()
+        );
         assert_eq!(source.count_table_rows("audit_log").unwrap(), before);
         assert_eq!(source.get_memory(&f.memory.id).unwrap().unwrap(), f.memory);
     }
@@ -1958,18 +2040,36 @@ mod tests {
         let memory = source.get_memory(&f.memory.id).unwrap().unwrap();
         assert_eq!(report.origin_confidence_before, Some(f.memory.confidence));
         assert_eq!(report.origin_confidence_after, Some(memory.confidence));
-        assert_eq!(report.applied_delta, memory.confidence - f.memory.confidence);
+        assert_eq!(
+            report.applied_delta,
+            memory.confidence - f.memory.confidence
+        );
         assert_eq!(memory.content, f.memory.content);
-        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), before_jobs + 1);
-        assert_eq!(source.count_table_rows("audit_log").unwrap(), before_audits + 1);
-        let audit = source.query(
-            "SELECT details FROM audit_log WHERE action = 'memory.global_feedback_backflow'",
-            &[],
-        ).unwrap();
-        let Some(sqlmodel_core::Value::Text(details)) = audit[0].get(0) else { panic!("audit details"); };
+        assert_eq!(
+            source.count_table_rows("search_index_jobs").unwrap(),
+            before_jobs + 1
+        );
+        assert_eq!(
+            source.count_table_rows("audit_log").unwrap(),
+            before_audits + 1
+        );
+        let audit = source
+            .query(
+                "SELECT details FROM audit_log WHERE action = 'memory.global_feedback_backflow'",
+                &[],
+            )
+            .unwrap();
+        let Some(sqlmodel_core::Value::Text(details)) = audit[0].get(0) else {
+            panic!("audit details");
+        };
         let details: Value = serde_json::from_str(details).unwrap();
         assert_eq!(details["globalMemoryId"], id);
-        assert!(details["feedbackEventId"].as_str().unwrap().starts_with("fb_"));
+        assert!(
+            details["feedbackEventId"]
+                .as_str()
+                .unwrap()
+                .starts_with("fb_")
+        );
         assert!(details["indexJobId"].as_str().unwrap().starts_with("sidx_"));
     }
 
@@ -1980,7 +2080,9 @@ mod tests {
         let source = DbConnection::open_file(&f.source_path).unwrap();
         let before = source.get_memory(&f.memory.id).unwrap();
         let jobs = source.count_table_rows("search_index_jobs").unwrap();
-        source.execute_raw("ALTER TABLE audit_log RENAME TO unavailable_backflow_audit").unwrap();
+        source
+            .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_backflow_audit")
+            .unwrap();
         let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
         assert!(error.contains("global_feedback_origin_pending"));
         assert!(error.contains("feedback fb_") && error.contains("do not blindly"));
@@ -1997,7 +2099,9 @@ mod tests {
         let source = DbConnection::open_file(&f.source_path).unwrap();
         let before = source.get_memory(&f.memory.id).unwrap();
         let audits = source.count_table_rows("audit_log").unwrap();
-        source.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_backflow_jobs").unwrap();
+        source
+            .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_backflow_jobs")
+            .unwrap();
         assert!(backflow_global_feedback(&backflow_options(&f, &id)).is_err());
         assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
         assert_eq!(source.count_table_rows("audit_log").unwrap(), audits);
@@ -2017,17 +2121,37 @@ mod tests {
             let f = PublicationFixture::new();
             let (id, _, _) = f.publish().unwrap();
             let source = DbConnection::open_file(&f.source_path).unwrap();
-            source.execute_raw(&format!("UPDATE memories SET {update} WHERE id = '{}'", f.memory.id)).unwrap();
+            source
+                .execute_raw(&format!(
+                    "UPDATE memories SET {update} WHERE id = '{}'",
+                    f.memory.id
+                ))
+                .unwrap();
             if update == "confidence = confidence" {
-                source.insert_memory_seal(&f.memory.id, &crate::models::memory_seal_commitment(f.memory.content.as_bytes()), "2020-01-01T00:00:00Z").unwrap();
+                source
+                    .insert_memory_seal(
+                        &f.memory.id,
+                        &crate::models::memory_seal_commitment(f.memory.content.as_bytes()),
+                        "2020-01-01T00:00:00Z",
+                    )
+                    .unwrap();
             }
             let before = source.get_memory(&f.memory.id).unwrap();
-            let counts = (source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap());
+            let counts = (
+                source.count_table_rows("audit_log").unwrap(),
+                source.count_table_rows("search_index_jobs").unwrap(),
+            );
             let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
             assert!(report.executed && report.origin_confidence_after.is_none());
             assert_eq!(report.applied_delta, 0.0, "{update}");
             assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
-            assert_eq!((source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap()), counts);
+            assert_eq!(
+                (
+                    source.count_table_rows("audit_log").unwrap(),
+                    source.count_table_rows("search_index_jobs").unwrap()
+                ),
+                counts
+            );
             assert_eq!(f.count("feedback_events"), 1);
         }
     }
@@ -2037,16 +2161,34 @@ mod tests {
         let f = PublicationFixture::new();
         let (id, _, _) = f.publish().unwrap();
         let source = DbConnection::open_file(&f.source_path).unwrap();
-        source.execute_raw(&format!("UPDATE memories SET confidence = 0.99 WHERE id = '{}'", f.memory.id)).unwrap();
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET confidence = 0.99 WHERE id = '{}'",
+                f.memory.id
+            ))
+            .unwrap();
         let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
         assert_eq!(report.origin_confidence_after, Some(1.0));
         assert!((report.applied_delta - 0.01).abs() < 0.000001);
-        let counts = (source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap());
+        let counts = (
+            source.count_table_rows("audit_log").unwrap(),
+            source.count_table_rows("search_index_jobs").unwrap(),
+        );
         let saturated = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
         assert_eq!(saturated.applied_delta, 0.0);
         assert_eq!(saturated.origin_confidence_after, Some(1.0));
-        assert_eq!((source.count_table_rows("audit_log").unwrap(), source.count_table_rows("search_index_jobs").unwrap()), counts);
-        f.destination.execute_raw(&format!("UPDATE memories SET provenance_uri = NULL WHERE id = '{id}'")).unwrap();
+        assert_eq!(
+            (
+                source.count_table_rows("audit_log").unwrap(),
+                source.count_table_rows("search_index_jobs").unwrap()
+            ),
+            counts
+        );
+        f.destination
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_uri = NULL WHERE id = '{id}'"
+            ))
+            .unwrap();
         let direct = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
         assert!(direct.origin.is_none() && direct.origin_confidence_after.is_none());
         assert_eq!(direct.applied_delta, 0.0);
@@ -2131,37 +2273,58 @@ mod tests {
         let before_jobs = source.count_table_rows("search_index_jobs").unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let successes = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..2).map(|_| {
-                let path = f.source_path.clone();
-                let paths = f.paths.clone();
-                let global = global.clone();
-                let origin = origin.clone();
-                let barrier = barrier.clone();
-                scope.spawn(move || {
-                    let db = DbConnection::open_file(&path);
-                    let options = BackflowOptions {
-                        workspace_database_path: &path,
-                        global_memory_id: &global.id,
-                        global_paths: &paths,
-                        signal: BackflowSignal::Helpful,
-                        weight: 0.01,
-                        actor: None,
-                        dry_run: false,
-                    };
-                    barrier.wait();
-                    let Ok(db) = db else { return false; };
-                    persist_origin_backflow(&db, &options, &global, &origin, &promotion_feedback_event_id(), chrono::Utc::now())
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = f.source_path.clone();
+                    let paths = f.paths.clone();
+                    let global = global.clone();
+                    let origin = origin.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        let db = DbConnection::open_file(&path);
+                        let options = BackflowOptions {
+                            workspace_database_path: &path,
+                            global_memory_id: &global.id,
+                            global_paths: &paths,
+                            signal: BackflowSignal::Helpful,
+                            weight: 0.01,
+                            actor: None,
+                            dry_run: false,
+                        };
+                        barrier.wait();
+                        let Ok(db) = db else {
+                            return false;
+                        };
+                        persist_origin_backflow(
+                            &db,
+                            &options,
+                            &global,
+                            &origin,
+                            &promotion_feedback_event_id(),
+                            chrono::Utc::now(),
+                        )
                         .is_ok_and(|change| change.is_some())
+                    })
                 })
-            }).collect();
-            handles.into_iter().map(|handle| handle.join().unwrap()).filter(|success| *success).count()
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|success| *success)
+                .count()
         });
         assert!(successes > 0);
         let current = source.get_memory(&f.memory.id).unwrap().unwrap();
         let expected = (0..successes).fold(f.memory.confidence, |value, _| value + 0.01);
         assert!((current.confidence - expected).abs() < 0.000001);
-        assert_eq!(source.count_table_rows("audit_log").unwrap(), before_audits + u64::try_from(successes).unwrap());
-        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), before_jobs + u64::try_from(successes).unwrap());
+        assert_eq!(
+            source.count_table_rows("audit_log").unwrap(),
+            before_audits + i64::try_from(successes).unwrap()
+        );
+        assert_eq!(
+            source.count_table_rows("search_index_jobs").unwrap(),
+            before_jobs + i64::try_from(successes).unwrap()
+        );
     }
 
     #[test]
@@ -2181,7 +2344,12 @@ mod tests {
         let f = PublicationFixture::new();
         let (id, _, _) = f.publish().unwrap();
         let source = DbConnection::open_file(&f.source_path).unwrap();
-        source.execute_raw(&format!("UPDATE memories SET valid_to = 'PRIVATE_VALIDITY_CANARY' WHERE id = '{}'", f.memory.id)).unwrap();
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET valid_to = 'PRIVATE_VALIDITY_CANARY' WHERE id = '{}'",
+                f.memory.id
+            ))
+            .unwrap();
         let before = source.get_memory(&f.memory.id).unwrap();
         let jobs = source.count_table_rows("search_index_jobs").unwrap();
         let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
@@ -2196,13 +2364,39 @@ mod tests {
         let (id, _, _) = f.publish().unwrap();
         let source = DbConnection::open_file(&f.source_path).unwrap();
         let commitment = crate::models::memory_seal_commitment(f.memory.content.as_bytes());
-        f.destination.insert_memory_seal(&id, &commitment, "2020-01-01T00:00:00Z").unwrap();
-        source.insert_memory_seal(&f.memory.id, &commitment, "2020-01-01T00:00:00Z").unwrap();
-        assert_eq!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta, 0.0);
-        assert!(f.destination.mark_memory_seal_revealed(&id, "2020-01-02T00:00:00Z").unwrap());
-        assert_eq!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta, 0.0);
-        assert!(source.mark_memory_seal_revealed(&f.memory.id, "2020-01-02T00:00:00Z").unwrap());
-        assert!(backflow_global_feedback(&backflow_options(&f, &id)).unwrap().applied_delta > 0.0);
+        f.destination
+            .insert_memory_seal(&id, &commitment, "2020-01-01T00:00:00Z")
+            .unwrap();
+        source
+            .insert_memory_seal(&f.memory.id, &commitment, "2020-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            backflow_global_feedback(&backflow_options(&f, &id))
+                .unwrap()
+                .applied_delta,
+            0.0
+        );
+        assert!(
+            f.destination
+                .mark_memory_seal_revealed(&id, "2020-01-02T00:00:00Z")
+                .unwrap()
+        );
+        assert_eq!(
+            backflow_global_feedback(&backflow_options(&f, &id))
+                .unwrap()
+                .applied_delta,
+            0.0
+        );
+        assert!(
+            source
+                .mark_memory_seal_revealed(&f.memory.id, "2020-01-02T00:00:00Z")
+                .unwrap()
+        );
+        assert!(
+            backflow_global_feedback(&backflow_options(&f, &id))
+                .unwrap()
+                .applied_delta
+                > 0.0
+        );
     }
-
 }
