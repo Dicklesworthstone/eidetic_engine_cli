@@ -349,8 +349,17 @@ fi
 #                                         the same binary, because no declared
 #                                         expected digest exists or can: the
 #                                         binary is built per run.
-#   TARGET TRIPLE                         still NOT checked. The one property
-#                                         of the five left open.
+#   TARGET TRIPLE                         checked below, against `rustc -vV`'s
+#                                         host line, via
+#                                         ee_assert_target_triple_matches_host.
+#                                         "unknown" is kept distinct from a
+#                                         mismatch: it is a missing fact, not a
+#                                         conflict.
+#
+# All five properties bullet 5 names are now verified. This list is the sentence
+# the next reader believes, so it enumerates rather than generalises -- and it
+# has already been wrong twice by describing FEWER checks than exist. If you add
+# or remove one, change this list in the same commit.
 #
 # The hash check has to sit after the last stage that can rebuild -- "Write
 # Contention E2E" at :1923 runs `cargo build --locked --bin ee` -- or it compares
