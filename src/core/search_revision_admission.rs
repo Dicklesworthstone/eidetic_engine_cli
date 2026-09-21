@@ -292,20 +292,30 @@ mod seal_tests {
 
     fn fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let root = temp.path().canonicalize().map_err(|error| error.to_string())?;
-        std::fs::create_dir(root.join(".ee")).map_err(|error| error.to_string())?;
-        std::fs::write(root.join(".ee/config.toml"), "[memory]\ninclude_global = false\n")
+        let root = temp
+            .path()
+            .canonicalize()
             .map_err(|error| error.to_string())?;
+        std::fs::create_dir(root.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            root.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
         let database = root.join("seals.db");
         let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         db.migrate().map_err(|error| error.to_string())?;
         db.insert_workspace(
             WORKSPACE,
-            &CreateWorkspaceInput { path: root.to_string_lossy().into_owned(), name: None },
+            &CreateWorkspaceInput {
+                path: root.to_string_lossy().into_owned(),
+                name: None,
+            },
         )
         .map_err(|error| error.to_string())?;
         for id in [HIDDEN, PUBLIC] {
-            db.insert_memory(id, &input()).map_err(|error| error.to_string())?;
+            db.insert_memory(id, &input())
+                .map_err(|error| error.to_string())?;
         }
         let options = SearchOptions {
             workspace_path: root.clone(),
@@ -366,8 +376,10 @@ mod seal_tests {
             options.as_of = Some(instant(reference)?);
             let mut degraded = Vec::new();
             let visible = admit_hits(
-                &options, vec![hit(HIDDEN), hit(PUBLIC), hit("evd_other")],
-                &mut degraded, None,
+                &options,
+                vec![hit(HIDDEN), hit(PUBLIC), hit("evd_other")],
+                &mut degraded,
+                None,
             );
             assert_eq!(ids(&visible), vec![PUBLIC, "evd_other"]);
             assert_eq!(visible[0].score.to_bits(), 0.9_f32.to_bits());
@@ -376,8 +388,10 @@ mod seal_tests {
             assert!(!degraded[0].message.contains(HIDDEN));
             assert!(!degraded[0].message.contains(BODY));
             assert!(degraded[0].repair.is_none());
-            assert!(!seed_is_visible(&db, HIDDEN, instant(reference)?)
-                .map_err(|error| error.to_string())?);
+            assert!(
+                !seed_is_visible(&db, HIDDEN, instant(reference)?)
+                    .map_err(|error| error.to_string())?
+            );
         }
         Ok(())
     }
@@ -387,15 +401,40 @@ mod seal_tests {
         let (_temp, options, db) = fixture()?;
         seal(&db, HIDDEN)?;
         let before = db.get_memory(HIDDEN).map_err(|error| error.to_string())?;
-        let audits = db.count_table_rows("audit_log").map_err(|error| error.to_string())?;
+        let audits = db
+            .count_table_rows("audit_log")
+            .map_err(|error| error.to_string())?;
         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None).is_empty());
-        assert_eq!(db.get_memory(HIDDEN).map_err(|error| error.to_string())?, before);
-        assert_eq!(db.count_table_rows("audit_log").map_err(|error| error.to_string())?, audits);
-        assert!(db.mark_memory_seal_revealed(HIDDEN, TIME).map_err(|error| error.to_string())?);
-        assert_eq!(ids(&admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None)), vec![HIDDEN]);
-        assert!(seed_is_visible(&db, HIDDEN, instant("2030-01-01T00:00:00Z")?)
-            .map_err(|error| error.to_string())?);
-        assert!(db.restore_imported_memory_supersession(HIDDEN, TIME).map_err(|error| error.to_string())?);
+        assert_eq!(
+            db.get_memory(HIDDEN).map_err(|error| error.to_string())?,
+            before
+        );
+        assert_eq!(
+            db.count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?,
+            audits
+        );
+        assert!(
+            db.mark_memory_seal_revealed(HIDDEN, TIME)
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                vec![hit(HIDDEN)],
+                &mut Vec::new(),
+                None
+            )),
+            vec![HIDDEN]
+        );
+        assert!(
+            seed_is_visible(&db, HIDDEN, instant("2030-01-01T00:00:00Z")?)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            db.restore_imported_memory_supersession(HIDDEN, TIME)
+                .map_err(|error| error.to_string())?
+        );
         let mut degraded = Vec::new();
         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut degraded, None).is_empty());
         assert_eq!(degraded[0].code, FILTERED);
@@ -406,21 +445,34 @@ mod seal_tests {
     fn seal_transitions_obey_the_callers_snapshot_in_both_directions() -> TestResult {
         for initially_closed in [false, true] {
             let (_temp, options, writer) = fixture()?;
-            if initially_closed { seal(&writer, HIDDEN)?; }
+            if initially_closed {
+                seal(&writer, HIDDEN)?;
+            }
             let reader = DbConnection::open_file_read_only(&options.resolve_database_path())
                 .map_err(|error| error.to_string())?;
-            reader.begin_read_snapshot().map_err(|error| error.to_string())?;
+            reader
+                .begin_read_snapshot()
+                .map_err(|error| error.to_string())?;
             let before = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
             assert_eq!(before.is_empty(), initially_closed);
             if initially_closed {
-                assert!(writer.mark_memory_seal_revealed(HIDDEN, TIME).map_err(|error| error.to_string())?);
+                assert!(
+                    writer
+                        .mark_memory_seal_revealed(HIDDEN, TIME)
+                        .map_err(|error| error.to_string())?
+                );
             } else {
                 seal(&writer, HIDDEN)?;
             }
             let captured = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
             assert_eq!(ids(&captured), ids(&before));
-            assert!(reader.begin_read_snapshot().is_err(), "caller still owns the snapshot");
-            reader.rollback_read_snapshot().map_err(|error| error.to_string())?;
+            assert!(
+                reader.begin_read_snapshot().is_err(),
+                "caller still owns the snapshot"
+            );
+            reader
+                .rollback_read_snapshot()
+                .map_err(|error| error.to_string())?;
             let next = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
             assert_eq!(next.is_empty(), !initially_closed);
         }
@@ -444,14 +496,18 @@ mod seal_tests {
                 candidates.push(hit(&id));
             }
             Ok(())
-        }).map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
         let unknown = MemoryId::from_uuid(uuid::Uuid::from_u128(9000)).to_string();
         candidates.push(hit(&unknown));
         expected.push(unknown);
         candidates.reverse();
         expected.reverse();
         let actual = admit_hits(&options, candidates, &mut Vec::new(), None);
-        assert_eq!(ids(&actual), expected.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            ids(&actual),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
         Ok(())
     }
 
@@ -461,7 +517,12 @@ mod seal_tests {
         db.execute_raw("ALTER TABLE memory_seals RENAME TO private_unavailable_seals")
             .map_err(|error| error.to_string())?;
         let mut degraded = Vec::new();
-        let visible = admit_hits(&options, vec![hit(HIDDEN), hit("evd_other")], &mut degraded, None);
+        let visible = admit_hits(
+            &options,
+            vec![hit(HIDDEN), hit("evd_other")],
+            &mut degraded,
+            None,
+        );
         assert_eq!(ids(&visible), vec!["evd_other"]);
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, UNAVAILABLE);
@@ -469,7 +530,10 @@ mod seal_tests {
         assert!(!degraded[0].message.contains(HIDDEN));
         db.execute_raw("ALTER TABLE private_unavailable_seals RENAME TO memory_seals")
             .map_err(|error| error.to_string())?;
-        assert_eq!(admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None).len(), 1);
+        assert_eq!(
+            admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None).len(),
+            1
+        );
         assert!(!options.workspace_path.join("index").exists());
         Ok(())
     }
@@ -493,7 +557,15 @@ mod seal_tests {
         let absent = options.workspace_path.join("absent.db");
         options.database_path = Some(absent.clone());
         let mut degraded = Vec::new();
-        assert_eq!(ids(&admit_hits(&options, vec![hit("evd_other")], &mut degraded, None)), vec!["evd_other"]);
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                vec![hit("evd_other")],
+                &mut degraded,
+                None
+            )),
+            vec!["evd_other"]
+        );
         assert!(degraded.is_empty());
         assert!(!absent.exists());
         Ok(())
@@ -509,15 +581,27 @@ mod seal_tests {
             database_path: options.database_path.clone(),
             index_dir: options.index_dir.clone(),
             dry_run: false,
-        }).map_err(|error| error.to_string())?;
-        let before = crate::core::search::run_search_unaudited(&options).map_err(|error| error.to_string())?;
-        assert_eq!(ids(&before.results).into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([HIDDEN, PUBLIC]));
-        let writer = DbConnection::open_file(&options.resolve_database_path()).map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
+        let before = crate::core::search::run_search_unaudited(&options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            ids(&before.results).into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([HIDDEN, PUBLIC])
+        );
+        let writer = DbConnection::open_file(&options.resolve_database_path())
+            .map_err(|error| error.to_string())?;
         seal(&writer, HIDDEN)?;
         writer.close().map_err(|error| error.to_string())?;
-        let after = crate::core::search::run_search_unaudited(&options).map_err(|error| error.to_string())?;
+        let after = crate::core::search::run_search_unaudited(&options)
+            .map_err(|error| error.to_string())?;
         assert_eq!(ids(&after.results), vec![PUBLIC]);
-        assert!(after.degraded.iter().any(|entry| entry.code == SEALED_FILTERED));
+        assert!(
+            after
+                .degraded
+                .iter()
+                .any(|entry| entry.code == SEALED_FILTERED)
+        );
         Ok(())
     }
 }

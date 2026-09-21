@@ -5353,7 +5353,9 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             .ok_or("non-empty context pack must retain provenanceFooter.sourceCount")?;
         ensure(
             source_count > 0,
-            format!("a non-empty pack must cite at least one source, got sourceCount {source_count}"),
+            format!(
+                "a non-empty pack must cite at least one source, got sourceCount {source_count}"
+            ),
         )?;
     }
 
