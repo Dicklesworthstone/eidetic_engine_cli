@@ -294,10 +294,29 @@ def tracked_in_scope() -> list[str]:
     staged. Do not "fix" it by globbing the filesystem: that would pull in
     target/, scratch files and editor droppings, and the resulting noise is what
     makes a gate get switched off. Stage the file, then run the gate.
+
+    THE RETURN CODE IS CHECKED, and that is not defensive boilerplate (bd-05i9j).
+    This gate derives its entire POPULATION from git. Run it where .git is
+    absent -- which is exactly the RCH clean-overlay tree, measured
+    HAS_DOT_GIT=no -- and `git ls-files` exits 128 with empty stdout. Ignoring
+    that gave a population of ZERO, nothing unreachable, and a clean report:
+
+        returncode=128  stdout_len=0  stderr='fatal: not a git repository...'
+        tracked population: 0
+
+    A gate that audits an empty set and says "clean" is the precise failure this
+    file exists to prevent elsewhere, so an unusable population is an
+    ENVIRONMENT ERROR, not a pass. It is raised rather than returned so no
+    caller can mistake it for an empty-but-valid answer.
     """
     proc = subprocess.run(
         ["git", "ls-files", "*.rs"], cwd=REPO, capture_output=True, text=True
     )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git ls-files failed in {REPO} (exit {proc.returncode}): "
+            f"{proc.stderr.strip()[:200]}"
+        )
     return sorted(
         line
         for line in proc.stdout.split()

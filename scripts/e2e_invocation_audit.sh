@@ -158,7 +158,31 @@ e2e_orphans() {
         #     that was silently inert. `!**/tests/fixtures/**` matches under
         #     both roots. The docs arm never surfaced this because `!**/*.md`
         #     caught its fixture regardless of whether `!docs/**` applied.
-        if ! rg --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
+        # (d) `--no-require-git` IS LOAD-BEARING, NOT TIDINESS (bd-05i9j).
+        #     ripgrep applies .gitignore ONLY inside a git repository. The RCH
+        #     clean-overlay tree is SYNCED rather than cloned and has no .git
+        #     (measured: HAS_DOT_GIT=no), so without this flag every
+        #     gitignored-but-synced directory becomes searchable there. The one
+        #     that matters is beads_compliance_audit/ -- 8397 files on the
+        #     worker, gitignored at .gitignore:322, not excluded by .rchignore --
+        #     whose bead JSON mentions script paths in TITLES:
+        #
+        #       {"title":"sandbox: e2e script scripts/e2e_sandbox.sh (...)"}
+        #
+        #     which is the same "a sentence about coverage read AS coverage"
+        #     substitution that (b) above already fixed for docs/ and .md,
+        #     arriving through a channel nobody anticipated. Measured effect:
+        #     52 orphans on macOS, 6 on two Linux workers, SAME COMMIT, same
+        #     ripgrep 15.1.0 -- 46 scripts silently reclassified as invoked.
+        #
+        #     Two exclusions here are explicit (`target`, `.git`) and the rest
+        #     were left to ripgrep's implicit filtering. The explicit half
+        #     survives a clean overlay and the implicit half does not. This
+        #     flag makes the filtering a property of the GATE rather than of
+        #     the tree it happens to run in, which is the invariant that was
+        #     missing. It changes nothing where .git exists, so the baseline
+        #     stays valid.
+        if ! rg --no-require-git --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!**/tests/fixtures/**' \
             --glob '!**/*.md' --glob '!**/docs/**' 2>/dev/null \
