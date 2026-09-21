@@ -14,7 +14,7 @@ concurrency:
 jobs:
   publish:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 15
     permissions:
       contents: write
@@ -24,6 +24,11 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      - name: Preserve source bytes during checkout
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
@@ -39,7 +44,15 @@ jobs:
           set -euo pipefail
           test "$(git hash-object scripts/delivery/procedure-atomic-20260921.py)" = '189e9e5428ae8c51e94dae90877f479f2de551ac'
           test "$(git hash-object scripts/delivery/procedure-atomic-20260921-tests.txt)" = '0d74255dbf79c4f3893b4272e453446592703736'
-          python3 scripts/delivery/procedure-atomic-20260921.py
+          python scripts/delivery/procedure-atomic-20260921.py
+          python - <<'PY'
+          from pathlib import Path
+          # Undo only Windows text-stream newline translation from write_text.
+          # The shared source guards ran against the original LF checkout.
+          for name in ('src/db/mod.rs', 'src/core/outcome.rs', 'src/core/outcome_procedure_atomic_tests.rs'):
+              path = Path(name)
+              path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
+          PY
           git diff --check
           git diff --stat
       - name: Commit all three source changes directly to main
@@ -55,7 +68,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
           git commit -m 'fix(outcome): commit procedure scoring and feedback evidence atomically' -m 'Apply procedure counters, confidence, utility and retirement history in the feedback/audit transaction and write-intake fence. Retain the standalone transactional API and expose a caller-owned variant to avoid nested BEGIN. Recheck procedure ownership inside the transaction; preserve signal aliases, weights, neutral behavior, dry-run and quarantine. Add nine real-store rollback, same-ID retry, retirement, scope and API regressions. Exact source hashes, edited-unit nightly rustfmt parsing and git diff checks passed before publication. Rust compilation and runtime results are not claimed by this commit; the separate read-only job exercises them.'
-          header=$(python3 -c 'import base64,os; print(base64.b64encode(("x-access-token:" + os.environ["GH_TOKEN"]).encode()).decode())')
+          header=$(python -c 'import base64,os; print(base64.b64encode(("x-access-token:" + os.environ["GH_TOKEN"]).encode()).decode())')
           echo "::add-mask::$header"
           for attempt in 1 2 3; do
             if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push origin HEAD:main; then
