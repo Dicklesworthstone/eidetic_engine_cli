@@ -84290,6 +84290,227 @@ mod tests {
         )
     }
 
+    /// bd-3j6l3. THE PRECONDITION FOR
+    /// `declared_dry_run_capable_mutating_commands_actually_accept_dry_run`,
+    /// plus the one direction that test structurally cannot see. It does NOT
+    /// duplicate it: the lie direction stays there, where `try_parse_from`
+    /// exercises the real parser rather than inspecting an arg table.
+    ///
+    /// WHY A PRECONDITION IS NEEDED. That test classifies by Clap error kind,
+    /// and `ErrorKind::UnknownArgument` CARRIES TWO STATES:
+    ///   - this command exists and refuses `--dry-run`  (a real manifest lie)
+    ///   - these tokens are not subcommands at all, Clap ate them as POSITIONAL
+    ///     ARGUMENTS of a command that takes positionals, and then refused
+    ///     `--dry-run`                                   (a stale manifest path)
+    /// Only `InvalidSubcommand` is unambiguous, and it fires only when the
+    /// parent takes no positionals. Measured at ddc11bb21 that hid two stale
+    /// paths -- `outcome quarantine release` (OutcomeCommand has one variant,
+    /// `Trace`) and `team steward run-once` (`Steward` is a ValueEnum variant
+    /// of DiagResourceSurfaceArg, a value for `--surface`) -- inside a list of
+    /// 92 liars, while only the three `daemon` paths reached the honest bucket.
+    ///
+    /// Asserting the precondition SEPARATELY fixes that, because resolving a
+    /// path by subcommand name never asks the parser to accept an argv, so
+    /// positional-swallowing cannot disguise a missing command as a flag
+    /// complaint.
+    ///
+    /// THE SECOND DIRECTION: a command that ACCEPTS `--dry-run` while the
+    /// manifest says it does not. The other test `continue`s past every
+    /// `dry_run_effect: None`, so it cannot express this, and after bd-3j6l3
+    /// `None` is the DEFAULT -- which makes this the arm that catches a new
+    /// command with a working `--dry-run` that nobody added to
+    /// `DRY_RUN_CAPABLE`. Without it, opt-in silently degrades to opt-out.
+    ///
+    /// IT LIVES IN THE CLI LAYER ON PURPOSE. `Cli::command()` is unreachable
+    /// from `src/core/effect.rs` without inverting `cli -> core`; `src/core`
+    /// references `crate::cli` nowhere in this repository and this change does
+    /// not start.
+    ///
+    /// It reports every offender by name, and refuses to pass on an empty
+    /// world.
+    #[test]
+    fn mutating_dry_run_declarations_match_the_parser() -> TestResult {
+        /// A manifest path is subcommand names plus, for variant entries like
+        /// `hook codex --install`, the flag that selects the variant. The flag
+        /// qualifies the command it follows rather than naming a child, so it
+        /// is verified to exist and then does not advance the walk.
+        fn resolve(root: &clap::Command, path: &str) -> Result<clap::Command, String> {
+            let mut current = root.clone();
+            for token in path.split_whitespace() {
+                if let Some(flag) = token.strip_prefix("--") {
+                    if !current.get_arguments().any(|arg| arg.get_long() == Some(flag)) {
+                        return Err(format!("no argument `--{flag}` on `{}`", current.get_name()));
+                    }
+                    continue;
+                }
+                let Some(child) = current
+                    .get_subcommands()
+                    .find(|candidate| candidate.get_name() == token)
+                    .cloned()
+                else {
+                    return Err(format!(
+                        "no subcommand `{token}` under `{}`",
+                        current.get_name()
+                    ));
+                };
+                current = child;
+            }
+            Ok(current)
+        }
+
+        let mut root = Cli::command();
+        root.build();
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        /// Manifest paths that name no command, RECORDED AS DEBT SO
+        /// ENFORCEMENT CAN BEGIN. bd-3j6l3. This is the same device as
+        /// SECTION 2 of scripts/mod-reachability-allowlist.txt and carries the
+        /// same rule: IT MAY ONLY SHRINK.
+        ///
+        /// These five predate this gate. They were invisible because the only
+        /// test that could have seen them bucketed two of them as dry-run
+        /// liars, and the whole gate had never run to completion. Recording
+        /// pre-existing debt so a new stale path reds immediately is what this
+        /// list is for; adding a line to silence a path someone just broke is
+        /// the one way to weaken it.
+        ///
+        /// Each entry names what must happen for it to go. None is a rename I
+        /// could apply: `--foreground` is a FLAG on `daemon start`, not a
+        /// subcommand, and `DiagQuarantineCommand` has only List and Show, so
+        /// there is no `release` to point at. The dispositions belong to the
+        /// daemon, outcome and team lanes.
+        const STALE_MANIFEST_PATHS: &[(&str, &str)] = &[
+            (
+                "daemon background",
+                "daemon lane: `daemon start` already has its own manifest entry and this \
+                 describes a MODE of it, not a command. Remove, or re-point at the real path.",
+            ),
+            (
+                "daemon foreground decay_sweep",
+                "daemon lane: `--foreground` is a flag on `daemon start` (DaemonHotModeStartArgs), \
+                 not a subcommand, and `decay_sweep` is a job type. Remove or re-point.",
+            ),
+            (
+                "daemon foreground non-decay",
+                "daemon lane: same as above.",
+            ),
+            (
+                "outcome quarantine release",
+                "outcome lane: OutcomeCommand has exactly one variant, Trace. Quarantine moved \
+                 under `diag`, where DiagQuarantineCommand exposes only List and Show -- so \
+                 `release` exists nowhere. Remove, or ship the command.",
+            ),
+            (
+                "team steward run-once",
+                "team lane: `Steward` is a ValueEnum variant of DiagResourceSurfaceArg, a VALUE \
+                 for --surface. There is no steward subcommand. Remove, or ship the command.",
+            ),
+        ];
+        const STALE_BUDGET: usize = 5;
+
+        let mut examined = 0usize;
+        let mut stale = Vec::new();
+        let mut understated = Vec::new();
+        let mut resolved_but_recorded_stale = Vec::new();
+
+        for effect in manifest.mutating_commands() {
+            examined += 1;
+            let path = effect.command_path;
+            let command = match resolve(&root, path) {
+                Ok(command) => command,
+                Err(reason) => {
+                    if !STALE_MANIFEST_PATHS.iter().any(|(known, _)| *known == path) {
+                        stale.push(format!("{path} ({reason})"));
+                    }
+                    continue;
+                }
+            };
+            // THIRD DIRECTION, the one an allowlist rots without: a recorded
+            // path that RESOLVES again. Its debt entry is now fiction and must
+            // be deleted, or the list quietly grants an exemption nobody is
+            // checking.
+            if STALE_MANIFEST_PATHS.iter().any(|(known, _)| *known == path) {
+                resolved_but_recorded_stale.push(path);
+            }
+            let parser_has_flag = command
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some("dry-run"));
+
+            if effect.dry_run_effect.is_none() && parser_has_flag {
+                understated.push(path);
+            }
+        }
+
+        ensure(
+            examined > 0,
+            "empty-world guard: manifest.mutating_commands() returned nothing, so this \
+             gate examined no command and proved nothing",
+        )?;
+
+        // The ratchet, in both directions. More recorded debt than the budget
+        // is new debt absorbed; FEWER without lowering the budget in the same
+        // commit leaves a freed allowance that would silently absorb the next
+        // stale path.
+        ensure(
+            STALE_MANIFEST_PATHS.len() == STALE_BUDGET,
+            &format!(
+                "STALE_MANIFEST_PATHS holds {} entries against STALE_BUDGET {}. If you FIXED \
+                 a path, lower the budget in the same commit. If you ADDED one, do not -- \
+                 raising this number to make a finding pass is the one way to weaken this \
+                 list",
+                STALE_MANIFEST_PATHS.len(),
+                STALE_BUDGET
+            ),
+        )?;
+
+        let mut report = String::new();
+        if !stale.is_empty() {
+            let mut sorted = stale.clone();
+            sorted.sort();
+            report.push_str(&format!(
+                "\n  {} declared mutating path(s) are NOT COMMAND PATHS and are not recorded \
+                 debt. Clap has no such subcommand, so the manifest describes something that \
+                 cannot be run:\n    {}\n",
+                sorted.len(),
+                sorted.join("\n    ")
+            ));
+        }
+        if !resolved_but_recorded_stale.is_empty() {
+            let mut sorted = resolved_but_recorded_stale.clone();
+            sorted.sort_unstable();
+            report.push_str(&format!(
+                "\n  {} path(s) are recorded in STALE_MANIFEST_PATHS but RESOLVE FINE now. \
+                 The debt entry is fiction; delete it and lower STALE_BUDGET in the same \
+                 commit:\n    {}\n",
+                sorted.len(),
+                sorted.join("\n    ")
+            ));
+        }
+        if !understated.is_empty() {
+            let mut sorted = understated.clone();
+            sorted.sort_unstable();
+            report.push_str(&format!(
+                "\n  {} command(s) ACCEPT --dry-run but are missing from DRY_RUN_CAPABLE, so \
+                 dry_run_refusal_message will refuse a flag that works:\n    {}\n",
+                sorted.len(),
+                sorted.join("\n    ")
+            ));
+        }
+
+        ensure(
+            report.is_empty(),
+            format!(
+                "checked {examined} mutating command(s) against the real Clap tree.{report}\n\
+                 Add a command to DRY_RUN_CAPABLE in src/core/effect.rs when it gains \
+                 `--dry-run`; fix or remove a path that does not resolve. Note that a \
+                 non-existent path may ALSO appear in \
+                 declared_dry_run_capable_mutating_commands_actually_accept_dry_run's liar \
+                 list -- that is the conflation this test exists to separate, not a second \
+                 defect."
+            ),
+        )
+    }
+
     #[test]
     fn capabilities_inventory_matches_visible_canonical_clap_paths() -> TestResult {
         fn collect_visible_paths(
@@ -96790,6 +97011,17 @@ demos:
     /// Paths Clap cannot address at all are reported SEPARATELY rather than
     /// skipped: silently dropping them is how a population shrinks without
     /// anyone noticing.
+    ///
+    /// READ THE LIAR LIST WITH THIS CAVEAT (bd-3j6l3). `InvalidSubcommand`
+    /// only fires when the parent takes no positionals. When it DOES take
+    /// them, Clap swallows unknown path tokens as positional arguments and
+    /// then rejects `--dry-run`, so a path that is not a command at all
+    /// arrives here as `UnknownArgument` and is reported as a liar. Two of the
+    /// 92 measured at ddc11bb21 were that, not this.
+    /// `mutating_dry_run_declarations_match_the_parser` resolves every
+    /// declared path by subcommand name and separates the two; if a name in
+    /// the liar list below also appears there, it is a stale path and fixing
+    /// the path is the fix, not the declaration.
     #[test]
     fn declared_dry_run_capable_mutating_commands_actually_accept_dry_run() -> TestResult {
         let manifest = crate::core::effect::EffectManifest::build();
@@ -96827,11 +97059,27 @@ demos:
         // Non-vacuity: if the manifest stopped yielding mutating entries, or
         // every one lost its dry_run_effect, this test would pass having
         // asserted nothing.
+        //
+        // RECALIBRATED FROM A LITERAL 100 (bd-3j6l3), and this is a loosened
+        // floor, so here is why it is not a weakening. The old floor was set
+        // when 191 mutating commands declared `Some(_)` -- but 90 of those
+        // declarations were false, produced by a constructor default rather
+        // than by an author. Removing that default dropped the honest
+        // population to 96, which tripped a floor calibrated against the bug.
+        // A literal cannot tell "the roster shrank because the lie was
+        // removed" from "the roster shrank because someone emptied it", so the
+        // floor no longer uses one: it is now the length of the opt-in roster
+        // itself. Every rostered command must still be counted here, so the
+        // guard fails the moment entries stop being reached -- and it tracks
+        // the roster automatically instead of needing a human to re-pick a
+        // number every time the surface changes.
+        let roster = crate::core::effect::DRY_RUN_CAPABLE.len();
         ensure(
-            checked >= 100,
+            checked >= roster,
             &format!(
-                "expected at least 100 mutating commands declaring dry_run_effect: Some(_), \
-                 examined {checked}; the population collapsed rather than the defect being fixed"
+                "expected at least {roster} mutating commands declaring dry_run_effect: \
+                 Some(_) -- one per DRY_RUN_CAPABLE entry -- but examined {checked}; the \
+                 population collapsed rather than the defect being fixed"
             ),
         )?;
 

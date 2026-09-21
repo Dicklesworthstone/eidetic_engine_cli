@@ -155,6 +155,20 @@ pub struct CommandMutationContract {
     /// Effect on derived index or cache generation.
     pub index_generation_effect: &'static str,
     /// Dry-run or preview behavior, if exposed by this class.
+    ///
+    /// THIS IS NOT A `--dry-run` FLAG CLAIM AND MUST NOT BE READ AS ONE
+    /// (bd-3j6l3). It describes previewability BY ANY MECHANISM, and the
+    /// mechanism is frequently not `--dry-run`: `harness_hook_settings_write`
+    /// documents `--print`, `certificate_key_file_write` documents `--show`,
+    /// `ask` documents `--read-only`, and `health scorecard
+    /// --record-snapshot` documents omitting the flag. For the narrow
+    /// question "does the parser accept `--dry-run`", read
+    /// `CommandEffect::dry_run_effect`.
+    ///
+    /// The two fields are therefore deliberately NOT required to agree. Only
+    /// one implication is enforced: a command declaring `dry_run_effect:
+    /// Some(_)` must also describe what that preview does. Prose without a
+    /// flag is allowed and is how a non-`--dry-run` preview path is recorded.
     pub dry_run_behavior: Option<&'static str>,
     /// Recovery, rollback, or degraded behavior.
     pub recovery_behavior: &'static str,
@@ -508,7 +522,30 @@ pub struct CommandEffect {
     pub command_path: &'static str,
     /// Default effect class when run normally.
     pub default_effect: EffectClass,
-    /// Effect class when run with `--dry-run` (if supported).
+    /// Effect class when run with `--dry-run`.
+    ///
+    /// MIGRATION NOTE FOR CONSUMERS -- THE MEANING OF `None` CHANGED (bd-3j6l3,
+    /// bd-mmbzu). Before this change every mutating constructor hardcoded
+    /// `Some(EffectClass::ReadOnly)`, so `None` occurred on exactly one mutating
+    /// command in the whole manifest and effectively meant "unknown". An agent
+    /// could not distinguish a command that had been considered from one that
+    /// had never been thought about, because the constructor answered for both.
+    ///
+    /// `None` NOW MEANS "this command's parser does not accept `--dry-run`",
+    /// and it is the default. If you previously read `Some(_)` as evidence that
+    /// a destructive command could be safely previewed, that reading was wrong
+    /// for 90 of 191 mutating commands and is no longer produced: support is
+    /// now opt-in via `DRY_RUN_CAPABLE`, and
+    /// `cli::tests::mutating_dry_run_declarations_match_the_parser` fails in
+    /// both directions if the roster and Clap disagree.
+    ///
+    /// If you parse this field, the safe migration is to treat `Some(_)` as
+    /// "`--dry-run` is accepted" and `None` as "it is not", and to stop
+    /// treating `None` as missing data. To ask the weaker question "can this be
+    /// previewed at all", read `mutation_contract.dry_run_behavior` instead --
+    /// see its own note, because several commands preview through `--print`,
+    /// `--show`, `--read-only` or by omitting a flag, and none of those are
+    /// `--dry-run`.
     pub dry_run_effect: Option<EffectClass>,
     /// Idempotency behavior.
     pub idempotency: IdempotencyClass,
@@ -560,7 +597,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::DerivedArtifactWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -588,7 +625,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::DurableMemoryWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::NonIdempotent,
             write_surfaces: WriteSurfaces {
                 db_tables,
@@ -629,7 +666,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::DurableMemoryWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
                 db_tables,
@@ -654,7 +691,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::WorkspaceFileWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::NonIdempotent,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -684,7 +721,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::ExternalIo,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::NonIdempotent,
             write_surfaces: WriteSurfaces {
                 db_tables,
@@ -736,7 +773,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::ConfigWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
                 db_tables: vec!["workspace_registry", "audit_log"],
@@ -762,7 +799,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::ConfigWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -803,7 +840,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::ConfigWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -844,7 +881,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::ConfigWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -885,7 +922,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::WorkspaceFileWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables: Vec::new(),
@@ -925,7 +962,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::DurableMemoryWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables,
@@ -957,7 +994,7 @@ impl CommandEffect {
         Self {
             command_path: "migrate run",
             default_effect: EffectClass::DurableMemoryWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
                 db_tables: vec![
@@ -998,7 +1035,7 @@ impl CommandEffect {
         Self {
             command_path: "migrate shard-fanout",
             default_effect: EffectClass::WorkspaceFileWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables: vec!["shard catalog", "workspace shard databases", "audit_log"],
@@ -1065,7 +1102,7 @@ impl CommandEffect {
         Self {
             command_path,
             default_effect: EffectClass::DurableMemoryWrite,
-            dry_run_effect: Some(EffectClass::ReadOnly),
+            dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
                 db_tables,
@@ -1109,6 +1146,137 @@ impl CommandEffect {
         matches!(self.default_effect, EffectClass::ReadOnly)
     }
 }
+
+/// Mutating commands whose parser accepts `--dry-run`. bd-3j6l3 / bd-mmbzu.
+///
+/// THIS LIST EXISTS BECAUSE A DEFAULT THAT CLAIMS A CAPABILITY IS THE DEFECT.
+/// Every mutating constructor used to hardcode
+/// `dry_run_effect: Some(EffectClass::ReadOnly)`, so a command that had never
+/// once considered dry-run still asserted it offered a read-only preview. That
+/// was not a stale value; it was a claim no author made, produced by a
+/// constructor. Measured against the real Clap tree, it was false for 90 of the
+/// 191 mutating commands that carried it.
+///
+/// Silence now means "no `--dry-run`". Support is declared HERE and nowhere
+/// else, and `EffectManifest::build` applies it last.
+///
+/// THIS ROSTER CANNOT DRIFT UNDETECTED, which is the whole reason it is
+/// allowed to be a hand-maintained list.
+/// `cli::tests::mutating_dry_run_declarations_match_the_parser` resolves every
+/// declared mutating path against the real command tree and fails if:
+///   - a name here has no `--dry-run` in Clap        (the roster over-claims)
+///   - a command has `--dry-run` and is missing here (the roster under-claims)
+///   - a declared manifest path is not a real command path at all
+/// and `dry_run_capable_roster_names_only_real_commands` fails on a name that
+/// matches no manifest entry, because `build` skips those silently.
+///
+/// MEASURED, NOT CURATED. These 96 names came from walking `Cli::command()` at
+/// ddc11bb21; the run partitioned 192 mutating commands into 96 here, 90 that
+/// claimed the flag without having it, 5 declared paths Clap cannot address,
+/// and `ask`, which declares no preview and has none. The four sets are
+/// disjoint and sum to 192.
+///
+/// Adding a name to silence a failure is the one way to weaken this. The gate
+/// asks Clap, so a name added without a flag fails immediately in the other
+/// direction.
+pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
+    "artifact register",
+    "backup create",
+    "backup keys export",
+    "backup keys import",
+    "backup restore",
+    "causal promote-plan",
+    "config set",
+    "coordination evidence ingest",
+    "curate accept",
+    "curate apply",
+    "curate auto-promote",
+    "curate merge",
+    "curate propose-derived",
+    "curate reject",
+    "curate retire",
+    "curate snooze",
+    "curate tombstone",
+    "curate untombstone",
+    "daemon",
+    "decide record",
+    "demo run",
+    "diag pack-record",
+    "export",
+    "export agentsmd",
+    "graph centrality-refresh",
+    "graph feature-enrichment",
+    "graph snapshot refresh",
+    "handoff create",
+    "import agentsmd",
+    "import cass",
+    "import eidetic-legacy",
+    "import jsonl",
+    "index backfill-tags",
+    "index rebuild",
+    "index reembed",
+    "init",
+    "job run",
+    "journal distill",
+    "lab capture",
+    "lab swarm replay",
+    "learn close",
+    "learn experiment run",
+    "learn observe",
+    "maintenance graph-snapshot-prune",
+    "maintenance graph-witnesses-prune",
+    "maintenance run",
+    "maintenance wal-checkpoint",
+    "memory demote-global",
+    "memory expire",
+    "memory level",
+    "memory link",
+    "memory outcome-global",
+    "memory promote-global",
+    "memory revise",
+    "memory tags",
+    "mesh auto-enroll",
+    "mesh disable",
+    "mesh import",
+    "mesh reenable",
+    "migrate run",
+    "migrate shard-fanout",
+    "note",
+    "outcome",
+    "plan recipe save",
+    "playbook export",
+    "playbook extract",
+    "preflight close",
+    "preflight run",
+    "procedure promote",
+    "procedure propose",
+    "profile config apply",
+    "rationale attach",
+    "recorder event",
+    "recorder finish",
+    "recorder start",
+    "reflect ingest",
+    "reflect propose",
+    "remember",
+    "review session --propose",
+    "review workspace",
+    "rule add",
+    "rule mark",
+    "rule protect",
+    "rule update",
+    "shadow demote",
+    "shadow promote",
+    "support bundle",
+    "task-frame close",
+    "task-frame create",
+    "task-frame subgoal add",
+    "task-frame update",
+    "tripwire check",
+    "verification provenance",
+    "verify provenance",
+    "workflow create",
+    "workspace alias",
+];
 
 /// The complete command effect manifest.
 #[derive(Clone, Debug)]
@@ -1177,6 +1345,27 @@ impl EffectManifest {
         // Workspace file write commands
         for entry in Self::workspace_file_write_commands() {
             Self::insert_unique(&mut entries, entry);
+        }
+
+        // OPT-IN, APPLIED LAST. Constructors no longer guess whether a command
+        // accepts `--dry-run`; DRY_RUN_CAPABLE names the ones that do.
+        //
+        // A name here that matches no entry is SKIPPED SILENTLY by this loop,
+        // which is why `dry_run_capable_roster_names_only_real_commands` exists
+        // to fail on it. Do not add an `else` that panics: build() is called
+        // from the CLI hot path and a typo should red a gate, not abort a user
+        // command.
+        // ONLY FILLS A HOLE, NEVER OVERWRITES. `daemon` sets
+        // `Some(EffectClass::WorkspaceFileWrite)` deliberately because its
+        // foreground dry-run still records planned job rows; an unconditional
+        // assignment here would silently downgrade that to ReadOnly and make
+        // the manifest understate what `daemon --dry-run` writes.
+        for path in DRY_RUN_CAPABLE {
+            if let Some(entry) = entries.get_mut(*path)
+                && entry.dry_run_effect.is_none()
+            {
+                entry.dry_run_effect = Some(EffectClass::ReadOnly);
+            }
         }
 
         Self { entries }
@@ -1984,10 +2173,13 @@ impl EffectManifest {
             // Writes an encrypted recovery envelope OUTSIDE the workspace, so it
             // belongs here rather than with the workspace-file writers. It
             // implements its own `--dry-run` and honours it (`src/core/backup.rs`,
-            // the `if !options.dry_run` guards), and the constructor supplies
-            // `dry_run_effect: Some(ReadOnly)`; declaring it without one would
-            // make the guard at src/cli/mod.rs:13510 refuse a `--dry-run` that
-            // works today.
+            // the `if !options.dry_run` guards). The constructor NO LONGER
+            // supplies `dry_run_effect` (bd-3j6l3 -- it used to supply
+            // `Some(ReadOnly)` to every command whether or not the flag
+            // existed); this command is on `DRY_RUN_CAPABLE` instead. Removing
+            // it from that roster would make `dry_run_refusal_message` refuse a
+            // `--dry-run` that works today, and would also red
+            // `mutating_dry_run_declarations_match_the_parser`, which asks Clap.
             CommandEffect::external_io_write(
                 "backup keys export",
                 Vec::new(),
@@ -2543,7 +2735,7 @@ impl EffectManifest {
             CommandEffect {
                 command_path: "health scorecard --record-snapshot",
                 default_effect: EffectClass::DurableMemoryWrite,
-                dry_run_effect: Some(EffectClass::ReadOnly),
+                dry_run_effect: None,
                 idempotency: IdempotencyClass::Idempotent,
                 write_surfaces: WriteSurfaces {
                     db_tables: vec!["debt_snapshots"],
@@ -3161,8 +3353,8 @@ impl EffectManifest {
             ),
             // Writes the root key file INSIDE `.ee/`, so it is a workspace-file
             // write rather than external I/O. Same `--dry-run` note as `backup
-            // keys export`: the constructor supplies
-            // `dry_run_effect: Some(ReadOnly)` and the command honours it.
+            // keys export`: the command honours the flag and is declared on
+            // `DRY_RUN_CAPABLE`, not by a constructor default.
             CommandEffect::workspace_file_write(
                 "backup keys import",
                 vec![".ee/keys/store_auth_root.json"],
@@ -4505,12 +4697,16 @@ mod tests {
                     effect.command_path
                 ));
             }
-            if contract.dry_run_behavior.is_none() {
-                return Err(format!(
-                    "Mutating command '{}' has no dry-run behavior",
-                    effect.command_path
-                ));
-            }
+            // NARROWED (bd-3j6l3): this clause demanded dry_run_behavior from
+            // every mutating command. LOST COVERAGE, stated rather than
+            // implied: nothing now requires preview prose from a command that
+            // has no preview. That is intended -- prose describing a preview
+            // that does not exist is the same false claim in a second field,
+            // and this clause could only be satisfied by writing one. The
+            // surviving implication runs the other way and is asserted by
+            // `every_mutating_command_declares_a_dry_run_behavior_when_it_claims_the_flag`:
+            // a command claiming `dry_run_effect: Some(_)` must describe it.
+            // The other four clauses of this gate are untouched.
             if contract.recovery_behavior.is_empty()
                 || contract.db_generation_effect.is_empty()
                 || contract.index_generation_effect.is_empty()
@@ -4554,14 +4750,100 @@ mod tests {
         Ok(())
     }
 
+    /// `EffectManifest::build` applies `DRY_RUN_CAPABLE` with `if let Some`,
+    /// so a name that matches no manifest entry -- a typo, or a command that
+    /// was renamed or removed -- is skipped WITHOUT ANY SIGNAL. The roster
+    /// would silently stop granting a flag that still exists, and
+    /// `dry_run_refusal_message` would begin refusing a working `--dry-run`.
+    /// This is the gate that makes that loud. It is core-only: it needs no
+    /// parser, just the manifest's own key set.
+    ///
+    /// It also guards the empty world. An empty or drastically shortened
+    /// roster is not a clean bill of health, it is the instrument failing.
     #[test]
-    fn all_mutating_commands_have_dry_run_option() -> TestResult {
+    fn dry_run_capable_roster_names_only_real_commands() -> TestResult {
+        let manifest = EffectManifest::build();
+        let mut unmatched = Vec::new();
+        for path in DRY_RUN_CAPABLE {
+            if manifest.get(path).is_none() {
+                unmatched.push(*path);
+            }
+        }
+        if !unmatched.is_empty() {
+            return Err(format!(
+                "{} DRY_RUN_CAPABLE name(s) match no manifest command, and build() skips \
+                 them silently: {}",
+                unmatched.len(),
+                unmatched.join(", ")
+            ));
+        }
+
+        let mut duplicates: Vec<&str> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for path in DRY_RUN_CAPABLE {
+            if !seen.insert(*path) {
+                duplicates.push(*path);
+            }
+        }
+        if !duplicates.is_empty() {
+            return Err(format!(
+                "DRY_RUN_CAPABLE lists {} name(s) twice: {}",
+                duplicates.len(),
+                duplicates.join(", ")
+            ));
+        }
+
+        if DRY_RUN_CAPABLE.len() < 80 {
+            return Err(format!(
+                "DRY_RUN_CAPABLE holds {} names; it held 96 when measured against Clap at \
+                 ddc11bb21. A collapse this large is the roster being emptied, not 16 \
+                 commands dropping `--dry-run`. Confirm against the parser before lowering \
+                 this floor",
+                DRY_RUN_CAPABLE.len()
+            ));
+        }
+        Ok(())
+    }
+
+    /// NARROWED FROM `all_mutating_commands_have_dry_run_option` (bd-3j6l3).
+    /// This is a deliberate reduction in what is asserted and the lost coverage
+    /// is named below, because a narrowing whose lost coverage is not stated is
+    /// indistinguishable from a weakening.
+    ///
+    /// WHAT IT ASSERTED BEFORE: that every mutating command declares
+    /// `dry_run_effect: Some(_)`.
+    ///
+    /// WHY THAT WAS NOT A PROPERTY WORTH ASSERTING: `dry_run_effect` is read at
+    /// runtime by `dry_run_refusal_message` to decide whether `--dry-run` is
+    /// honoured, so it is a claim about the PARSER. This gate never consulted
+    /// the parser; it asked the manifest about itself, and every mutating
+    /// constructor hardcoded `Some(EffectClass::ReadOnly)`, so it was satisfied
+    /// by a value no author chose. It passed for 191 commands of which 90 could
+    /// not accept `--dry-run` at all, and the single command it ever failed --
+    /// `ask`, which took `--read-only` instead -- was the one telling the truth.
+    /// A gate that only fails on the truthful entry is not measuring the defect.
+    ///
+    /// WHAT IT ASSERTS NOW: the one implication that is checkable without the
+    /// parser -- a command claiming a preview must say what the preview does.
+    ///
+    /// WHAT IT CAN NO LONGER CATCH: a mutating command that supports
+    /// `--dry-run` and forgets to declare it. Nothing in core can catch that,
+    /// because core cannot see Clap. That case is now covered, in both
+    /// directions and by name, by
+    /// `cli::tests::mutating_dry_run_declarations_match_the_parser`, which
+    /// resolves each declared path against the real command tree. If that test
+    /// is ever deleted, this coverage is gone and not merely relocated.
+    #[test]
+    fn every_mutating_command_declares_a_dry_run_behavior_when_it_claims_the_flag() -> TestResult {
         let manifest = EffectManifest::build();
 
         for effect in manifest.mutating_commands() {
-            if effect.dry_run_effect.is_none() {
+            if effect.dry_run_effect.is_some() && effect.mutation_contract.dry_run_behavior.is_none()
+            {
                 return Err(format!(
-                    "Mutating command '{}' has no dry_run option",
+                    "Mutating command '{}' declares dry_run_effect: Some(_) but no \
+                     mutation_contract.dry_run_behavior, so it claims a preview and does not \
+                     say what the preview does",
                     effect.command_path
                 ));
             }
