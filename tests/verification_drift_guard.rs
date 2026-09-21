@@ -3384,3 +3384,77 @@ fn advisory_and_tracked_red_are_counted_apart_from_passed() {
          assertion above proves nothing about ADVISORY and TRACKED_RED. Got:\n{clean_text}"
     );
 }
+
+/// bd-reality-core-convergence-1azkt.5 bullet 5: every feature in Cargo.toml's
+/// `default = [...]` must appear in `build_features()`.
+///
+/// verify.sh compares the candidate binary's reported feature set against
+/// Cargo.toml's default set (652adc750). That comparison has a hidden
+/// dependency: the binary reports features from an EXPLICIT vec in
+/// `src/core/mod.rs`, not from anything cfg!-derived at large. So a feature
+/// added to `default` and NOT added to that vec is EXPECTED, NEVER REPORTED,
+/// and verify.sh refuses -- reddening for something that is not a defect.
+///
+/// An assertion that reds when the feature works is worse than no assertion,
+/// so the invariant it rests on is asserted here instead of assumed.
+///
+/// NOTE ON A RISK THIS IS *NOT*: a default feature with no cfg! sites anywhere
+/// in src/ is fine. `build_features()` carries its own site per feature --
+/// `BuildFeature::new("json", cfg!(feature = "json"))` -- which is sufficient
+/// on its own. Measured: "json" is documented "Reserved ... No cfg-gates in
+/// src/ today" and is reported enabled by a real build. The direction that
+/// breaks is the subtraction below, not cfg! coverage.
+///
+/// Fires at the moment of INTRODUCTION -- the commit that adds the feature --
+/// rather than at the moment of confusion, when verify.sh refuses a binary
+/// that is correct.
+#[test]
+fn every_default_feature_is_reported_by_build_features() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let core = fs::read_to_string(root.join("src/core/mod.rs")).expect("read src/core/mod.rs");
+
+    let defaults: BTreeSet<String> = cargo
+        .split_once("\ndefault = [")
+        .map(|(_, rest)| rest.split_once(']').map(|(list, _)| list).unwrap_or(""))
+        .unwrap_or("")
+        .split('"')
+        .filter(|piece| !piece.trim().is_empty() && !piece.contains(','))
+        .map(str::to_owned)
+        .collect();
+
+    let reported: BTreeSet<String> = core
+        .match_indices("BuildFeature::new(")
+        .filter_map(|(idx, _)| {
+            let rest = &core[idx..];
+            let open = rest.find('"')? + 1;
+            let close = rest[open..].find('"')? + open;
+            Some(rest[open..close].to_owned())
+        })
+        .collect();
+
+    // EMPTY-WORLD GUARD, both sides: the subtraction below is empty when either
+    // parse returns nothing, which would report clean while measuring nothing.
+    assert!(
+        defaults.len() >= 3,
+        "parsed {} default features from Cargo.toml; a near-zero count means \
+         this test read the wrong thing, not that the manifest is empty",
+        defaults.len()
+    );
+    assert!(
+        reported.len() >= 5,
+        "parsed {} BuildFeature::new names from src/core/mod.rs; a near-zero \
+         count means the vec moved or was renamed, not that it is empty",
+        reported.len()
+    );
+
+    let missing: Vec<&String> = defaults.difference(&reported).collect();
+    assert!(
+        missing.is_empty(),
+        "these features are in Cargo.toml's `default = [...]` but absent from \
+         build_features() in src/core/mod.rs: {missing:?}\n\
+         verify.sh expects the candidate binary to report every default \
+         feature, so it would refuse a correctly-built binary. Add them to the \
+         vec in the same commit that adds them to `default`."
+    );
+}
