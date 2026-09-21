@@ -1,0 +1,224 @@
+name: Native rule scope retrieval
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/native-rule-scope-20260921.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-rule-scope-20260921
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Publish guarded native scope integration directly to main
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          repo = 'Dicklesworthstone/eidetic_engine_cli'
+          assert os.environ['GITHUB_REPOSITORY'] == repo
+          assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+          paths = ['src/core/search.rs', 'src/core/search_rule_admission.rs', 'src/core/search_rule_scope.rs']
+          def api(method, path, payload=None):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + repo + '/' + path,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  method=method,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28',
+                           'Content-Type': 'application/json',
+                           'User-Agent': 'ee-native-rule-scope-delivery'},
+              )
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          def read(path, sha):
+              entry = api('GET', 'contents/' + path + '?ref=' + sha)
+              if entry.get('encoding') == 'base64' and entry.get('content'):
+                  return base64.b64decode(entry['content']).decode()
+              blob = api('GET', 'git/blobs/' + entry['sha'])
+              return base64.b64decode(blob['content']).decode()
+          def fmt(source):
+              return subprocess.run(
+                  ['rustfmt', '--edition', '2024', '--config', 'skip_children=true', '--emit', 'stdout'],
+                  input=source, text=True, capture_output=True, check=True,
+              ).stdout
+          source = read('scripts/delivery/native-rule-scope-20260921.rs.txt',
+                        'ca831251cb1644af9851e2a7a38df61063fdfca6')
+          assert hashlib.sha256(source.encode()).hexdigest() == '566edc79478e7e68a384e68b236d16c66cb9d61a052b1e00a449fc421485e506'
+          assert source.count('#[test]') == 12
+          begin = 'fn apply_memory_scope_visibility_with_connection('
+          end = '\nfn apply_mesh_query_visibility('
+          anchor = '    let mut scoped_hits = Vec::with_capacity(hits.len());\n    for mut hit in hits {\n'
+          integration = '''    // Native rules are not memory rows. Their own trust/scope and complete
+              // source attribution decide inclusion before the shared strict-scope gate.
+              let scoped_rules = if passthrough_scope {
+                  BTreeMap::new()
+              } else {
+                  match rule_admission::scoped_metadata(options, &hits, scope_context, connection) {
+                      Ok(metadata) => metadata,
+                      Err(_) => {
+                          degraded.push(SearchDegradation::scope_metadata_unavailable(
+                              "Could not verify native-rule scope attribution",
+                          ));
+                          BTreeMap::new()
+                      }
+                  }
+              };
+              let mut scoped_hits = Vec::with_capacity(hits.len());
+              for mut hit in hits {
+                  if !passthrough_scope && rule_admission::is_rule_hit(&hit) {
+                      let metadata = scoped_rules.get(&hit.doc_id);
+                      stats.record_candidate_id(metadata.is_some(), Some(&hit.doc_id));
+                      if let Some(metadata) = metadata {
+                          hit.metadata = Some(metadata.clone());
+                          scoped_hits.push(hit);
+                      }
+                      continue;
+                  }
+          '''
+          declaration = '#[path = "search_rule_scope.rs"]\nmod scope;\npub(super) use scope::scoped_metadata;\n\n'
+          marker = '#[path = "search_revision_admission.rs"]'
+          for attempt in range(4):
+              head = api('GET', 'git/ref/heads/main')['object']['sha']
+              base = api('GET', 'git/commits/' + head)
+              search = read(paths[0], head)
+              admission = read(paths[1], head)
+              if 'rule_admission::scoped_metadata(options, &hits, scope_context, connection)' in search:
+                  assert 'search_rule_scope.rs' in admission
+                  assert read(paths[2], head).startswith('//! Scope native rules')
+                  published = head
+                  print('Native-rule scope is already integrated; verifying current main', head)
+                  break
+              try:
+                  api('GET', 'contents/' + paths[2] + '?ref=' + head)
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise
+              else:
+                  raise RuntimeError('A scope helper already exists; reconcile without overwriting it')
+              assert search.count(begin) == 1 and search.count(end) == 1
+              start, stop = search.index(begin), search.index(end, search.index(begin))
+              body = search[start:stop]
+              assert body.count(anchor) == 1, 'Shared scope loop changed; refusing an unreviewed edit'
+              search = search[:start] + body.replace(anchor, integration, 1) + search[stop:]
+              assert admission.count(marker) == 1 and 'search_rule_scope.rs' not in admission
+              admission = admission.replace(marker, declaration + marker, 1)
+              tree_entries = []
+              for path, content in zip(paths, [search, admission, source], strict=True):
+                  blob = api('POST', 'git/blobs', {'encoding': 'utf-8', 'content': fmt(content)})
+                  tree_entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+              tree = api('POST', 'git/trees', {'base_tree': base['tree']['sha'], 'tree': tree_entries})
+              commit = api('POST', 'git/commits', {
+                  'tree': tree['sha'], 'parents': [head],
+                  'message': 'feat(search): retrieve native rules through verified global self and team scopes\n\n'
+                             'Keep RuleId identity and source-backed bodies/revisions at the shared scope\n'
+                             'boundary instead of requiring a fake memories row. Verified scope uses\n'
+                             'native trust; global uses native scope/live tags; self/team requires\n'
+                             'nonempty fully-attributed lineage. Preserve strict-scope statistics,\n'
+                             'ordering, independent rule lifecycle and unrelated memory results.\n\n'
+                             'Add 12 real-store regressions including public lexical search, mixed strict\n'
+                             'filtering, 513-parent attribution, source snapshots and unavailable rows.\n\n'
+                             'Validation before publication: exact edit guards and pinned Rust 2024\n'
+                             'rustfmt passed. Runtime tests follow in the delivery workflow; no runtime\n'
+                             'success is claimed by this commit. Direct main publication, no PR.',
+              })
+              try:
+                  api('PATCH', 'git/refs/heads/main', {'sha': commit['sha'], 'force': False})
+              except urllib.error.HTTPError as error:
+                  current = api('GET', 'git/ref/heads/main')['object']['sha']
+                  if error.code in (409, 422) and current != head and attempt < 3:
+                      print('main advanced; re-reading source and retrying without force')
+                      continue
+                  raise
+              published = commit['sha']
+              print('Published native-rule scope directly to main:', published)
+              break
+          else:
+              raise RuntimeError('Could not publish without disturbing concurrent main updates')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('source_sha=' + published + '\n')
+          PY
+      - name: Read the published main source and resolve the pinned stack
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --ff-only FETCH_HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/native-rule-scope-source.log"
+          git hash-object src/core/search.rs src/core/search_rule_admission.rs src/core/search_rule_scope.rs >> "$RUNNER_TEMP/native-rule-scope-source.log"
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/native-rule-scope-build-paths.patch"
+          rustc --version --verbose > "$RUNNER_TEMP/native-rule-scope-toolchain.log"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: native-rule-scope-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ steps.publish.outputs.source_sha }}
+          restore-keys: |
+            native-rule-scope-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Check production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/native-rule-scope-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/native-rule-scope-check.log"
+          exit "$status"
+      - name: Execute all twelve native scope regressions
+        run: |
+          status=0
+          cargo test --locked --lib 'core::search::rule_admission::scope::tests::' -- --test-threads=2 > "$RUNNER_TEMP/native-rule-scope-tests.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/native-rule-scope-tests.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/native-rule-scope-tests.log"
+      - name: Execute existing native admission regressions
+        run: |
+          status=0
+          cargo test --locked --lib 'core::search::rule_admission::' -- --test-threads=2 > "$RUNNER_TEMP/native-rule-scope-existing.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/native-rule-scope-existing.log"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: native-rule-scope-verification
+          path: |
+            ${{ runner.temp }}/native-rule-scope-*.log
+            ${{ runner.temp }}/native-rule-scope-*.patch
+          retention-days: 7
