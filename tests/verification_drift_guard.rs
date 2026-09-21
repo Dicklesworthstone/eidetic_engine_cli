@@ -3153,7 +3153,9 @@ fn verify_e2e_temp_root_is_derived_and_not_hardcoded() {
     // EMPTY-WORLD GUARD. Both assertions below are satisfied by an empty or
     // truncated file, so the population is asserted first: a zero here would
     // mean the test read nothing, not that the script is clean.
-    let stage_uses = script.matches("EE_E2E_TMPDIR=\\\"${E2E_TMPDIR_BASE}\\\"").count();
+    let stage_uses = script
+        .matches("EE_E2E_TMPDIR=\\\"${E2E_TMPDIR_BASE}\\\"")
+        .count();
     assert!(
         stage_uses >= 20,
         "expected the e2e stages to take the derived root; found {stage_uses} \
@@ -3344,8 +3346,8 @@ verification_summary_banner
 fn advisory_and_tracked_red_are_counted_apart_from_passed() {
     // 4 passed + 1 advisory + 1 tracked-red: attempted is 6, passed is 4.
     let out = summary_banner_for(4, 1, 1, 0);
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(
         !text.trim().is_empty(),
         "the banner printed nothing; the awk extraction of \

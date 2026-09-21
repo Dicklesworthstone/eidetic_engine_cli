@@ -84338,8 +84338,14 @@ mod tests {
             let mut current = root.clone();
             for token in path.split_whitespace() {
                 if let Some(flag) = token.strip_prefix("--") {
-                    if !current.get_arguments().any(|arg| arg.get_long() == Some(flag)) {
-                        return Err(format!("no argument `--{flag}` on `{}`", current.get_name()));
+                    if !current
+                        .get_arguments()
+                        .any(|arg| arg.get_long() == Some(flag))
+                    {
+                        return Err(format!(
+                            "no argument `--{flag}` on `{}`",
+                            current.get_name()
+                        ));
                     }
                     continue;
                 }
@@ -84390,10 +84396,7 @@ mod tests {
                 "daemon lane: `--foreground` is a flag on `daemon start` (DaemonHotModeStartArgs), \
                  not a subcommand, and `decay_sweep` is a job type. Remove or re-point.",
             ),
-            (
-                "daemon foreground non-decay",
-                "daemon lane: same as above.",
-            ),
+            ("daemon foreground non-decay", "daemon lane: same as above."),
             (
                 "outcome quarantine release",
                 "outcome lane: OutcomeCommand has exactly one variant, Trace. Quarantine moved \
