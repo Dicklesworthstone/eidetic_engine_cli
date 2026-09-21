@@ -63,7 +63,7 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$log"; then failed=1; fi
           done <<'CASES'
           6 core::memory_lifecycle::seal_admission_tests::
-          10 core::ask::corpus::source_authority_tests::
+          14 core::ask::corpus::source_authority_tests::
           8 core::ask::corpus::rule_lineage_tests::
           4 core::resume::snapshot::seal_authority_tests::
           CASES

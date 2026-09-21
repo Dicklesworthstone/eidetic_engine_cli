@@ -364,10 +364,16 @@ mod seal_admission_tests {
 
     fn row(revealed: Value, verified: Value) -> Row {
         Row::new(
-            ["memory_id", "content_commitment", "sealed_at", "revealed_at", "reveal_verified"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            [
+                "memory_id",
+                "content_commitment",
+                "sealed_at",
+                "revealed_at",
+                "reveal_verified",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             vec![
                 Value::Text(MEMORY.to_owned()),
                 Value::Text(format!("blake3:{}", "a".repeat(64))),
@@ -379,48 +385,69 @@ mod seal_admission_tests {
     }
 
     fn seed(db: &DbConnection, workspace: &str, id: &str) {
-        db.insert_memory(id, &CreateMemoryInput {
-            workspace_id: workspace.to_owned(),
-            level: "semantic".to_owned(),
-            kind: "note".to_owned(),
-            content: "PRIVATE-BODY must never enter a seal query".to_owned(),
-            workflow_id: None,
-            confidence: 0.9,
-            utility: 0.5,
-            importance: 0.5,
-            provenance_uri: None,
-            trust_class: "human_explicit".to_owned(),
-            trust_subclass: None,
-            tags: Vec::new(),
-            valid_from: Some(TIME.to_owned()),
-            valid_to: None,
-        }).unwrap();
-        db.insert_memory_seal(id, &format!("blake3:{}", "a".repeat(64)), TIME).unwrap();
+        db.insert_memory(
+            id,
+            &CreateMemoryInput {
+                workspace_id: workspace.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "note".to_owned(),
+                content: "PRIVATE-BODY must never enter a seal query".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: Some(TIME.to_owned()),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        db.insert_memory_seal(id, &format!("blake3:{}", "a".repeat(64)), TIME)
+            .unwrap();
     }
 
     fn fixture() -> (tempfile::TempDir, DbConnection) {
         let root = tempfile::tempdir().unwrap();
         let db = DbConnection::open_file(&root.path().join("seal.db")).unwrap();
         db.migrate().unwrap();
-        for (id, path) in [(WORKSPACE, root.path().join("workspace")), (OTHER, root.path().join("other"))] {
-            db.insert_workspace(id, &CreateWorkspaceInput {
-                path: path.to_string_lossy().into_owned(),
-                name: None,
-            }).unwrap();
+        for (id, path) in [
+            (WORKSPACE, root.path().join("workspace")),
+            (OTHER, root.path().join("other")),
+        ] {
+            db.insert_workspace(
+                id,
+                &CreateWorkspaceInput {
+                    path: path.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
         }
         (root, db)
     }
 
     #[test]
     fn seal_decoder_uses_the_shared_chronological_reveal_contract() {
-        assert!(decode_admission_seal(&row(Value::Null, Value::Null)).unwrap().is_sealed());
+        assert!(
+            decode_admission_seal(&row(Value::Null, Value::Null))
+                .unwrap()
+                .is_sealed()
+        );
         let revealed = decode_admission_seal(&row(
-            Value::Text("2026-09-17T08:00:00-04:00".to_owned()), Value::BigInt(1),
-        )).unwrap();
+            Value::Text("2026-09-17T08:00:00-04:00".to_owned()),
+            Value::BigInt(1),
+        ))
+        .unwrap();
         assert!(!revealed.is_sealed());
         assert_eq!(revealed.reveal_verified, Some(true));
         for (at, flag) in [
-            (Value::Text("2026-09-17T11:59:59Z".to_owned()), Value::BigInt(1)),
+            (
+                Value::Text("2026-09-17T11:59:59Z".to_owned()),
+                Value::BigInt(1),
+            ),
             (Value::Text(TIME.to_owned()), Value::BigInt(0)),
             (Value::Text(TIME.to_owned()), Value::Null),
             (Value::Null, Value::BigInt(1)),
@@ -458,17 +485,28 @@ mod seal_admission_tests {
         assert_eq!(db.get_memory(MEMORY).unwrap(), before);
         assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
         assert!(db.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
-        assert_eq!(load_memory_seals_for_admission(&db, WORKSPACE).unwrap(),
-            db.list_memory_seals_for_recovery(WORKSPACE).unwrap());
+        assert_eq!(
+            load_memory_seals_for_admission(&db, WORKSPACE).unwrap(),
+            db.list_memory_seals_for_recovery(WORKSPACE).unwrap()
+        );
     }
 
     #[test]
     fn foreign_seal_metadata_never_poison_or_widen_the_addressed_workspace() {
         let (_root, db) = fixture();
         seed(&db, OTHER, MEMORY);
-        db.execute_raw("UPDATE memory_seals SET sealed_at = 'PRIVATE-FOREIGN-TIME'").unwrap();
-        assert!(load_memory_seals_for_admission(&db, WORKSPACE).unwrap().is_empty());
-        assert!(load_memory_seals_for_admission(&db, "' OR 1 = 1 --").unwrap().is_empty());
+        db.execute_raw("UPDATE memory_seals SET sealed_at = 'PRIVATE-FOREIGN-TIME'")
+            .unwrap();
+        assert!(
+            load_memory_seals_for_admission(&db, WORKSPACE)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            load_memory_seals_for_admission(&db, "' OR 1 = 1 --")
+                .unwrap()
+                .is_empty()
+        );
         let error = load_memory_seals_for_admission(&db, OTHER).unwrap_err();
         assert!(!format!("{error:?}").contains("PRIVATE-FOREIGN-TIME"));
     }
@@ -482,7 +520,9 @@ mod seal_admission_tests {
         assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
         assert!(writer.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
         assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
-        reader.commit_read_snapshot().expect("reader still owns its transaction");
+        reader
+            .commit_read_snapshot()
+            .expect("reader still owns its transaction");
         assert!(!load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
     }
 

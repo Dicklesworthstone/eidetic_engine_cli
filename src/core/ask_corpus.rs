@@ -161,9 +161,7 @@ fn load_corpus_with_path_boundary(
 ) -> Result<AskCorpus, DomainError> {
     let snapshot = AskReadSnapshot::begin(connection)?;
     let paths = normalize_ask_targets(connection, workspace_id, paths)?;
-    let stored = connection
-        .list_memories(workspace_id, None, false)
-        .map_err(|_| corpus_storage_error())?;
+    let stored = load_memory_revisions(connection, workspace_id)?;
     let scope = scope_context()?;
     after_memory_read()?;
     // V123 separates revision identity from author expiry. Neither a future
@@ -208,13 +206,7 @@ fn load_corpus_with_path_boundary(
         .map(|candidate| candidate.memory_id.as_str())
         .collect();
     let contradictions = load_scoped_contradictions(connection, &ids)?;
-    let mut native_sources = load_rules(
-        connection,
-        workspace_id,
-        &scope,
-        &paths,
-        &mut candidates,
-    )?;
+    let mut native_sources = load_rules(connection, workspace_id, &scope, &paths, &mut candidates)?;
     admission::append_evidence(
         connection,
         workspace_id,
@@ -230,6 +222,52 @@ fn load_corpus_with_path_boundary(
     })
 }
 
+const ASK_MEMORY_REVISION_PAGE_SIZE: usize = 256;
+
+/// Select non-tombstoned identities, not only the currently unsuperseded heads.
+/// `list_memories(..., false)` applies `superseded_at IS NULL` in storage, which
+/// loses both pre-cutoff history and malformed revision markers before this
+/// reader can validate them. Opening all history instead would unnecessarily
+/// hydrate tombstoned bodies. Load only eligible identities in bind-safe pages,
+/// using the canonical stored-memory decoder inside the caller's one snapshot.
+fn load_memory_revisions(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<crate::db::StoredMemory>, DomainError> {
+    use sqlmodel_core::Value;
+
+    let rows = connection
+        .query(
+            "SELECT id FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )
+        .map_err(|_| corpus_storage_error())?;
+    let ids = rows
+        .iter()
+        .map(|row| match row.get(0) {
+            Some(Value::Text(id)) => Ok(id.as_str()),
+            _ => Err(corpus_storage_error()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut memories = Vec::with_capacity(ids.len());
+    for page in ids.chunks(ASK_MEMORY_REVISION_PAGE_SIZE) {
+        let mut loaded = connection
+            .get_memories_batch(page)
+            .map_err(|_| corpus_storage_error())?;
+        for id in page {
+            let memory = loaded.remove(*id).ok_or_else(corpus_storage_error)?;
+            if memory.id != *id
+                || memory.workspace_id != workspace_id
+                || memory.tombstoned_at.is_some()
+            {
+                return Err(corpus_storage_error());
+            }
+            memories.push(memory);
+        }
+    }
+    Ok(memories)
+}
+
 /// Current source authority is separate from validity, trust, and relevance.
 /// This deliberately uses the repository's seal classifier, not a second
 /// interpretation of reveal flags. Historical reference times never unseal a
@@ -242,15 +280,13 @@ fn withheld_memory_ids(
     let revisions = connection
         .list_memory_supersession_markers(workspace_id)
         .map_err(|_| corpus_storage_error())?;
-    let mut withheld: BTreeSet<_> = crate::core::memory_lifecycle::load_memory_seals_for_admission(
-        connection,
-        workspace_id,
-    )
-        .map_err(|_| corpus_storage_error())?
-        .into_iter()
-        .filter(|seal| seal.is_sealed())
-        .map(|seal| seal.memory_id)
-        .collect();
+    let mut withheld: BTreeSet<_> =
+        crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)
+            .map_err(|_| corpus_storage_error())?
+            .into_iter()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id)
+            .collect();
     for (id, raw) in revisions {
         let cutoff = DateTime::parse_from_rfc3339(&raw)
             .map_err(|_| DomainError::Storage {
@@ -289,8 +325,7 @@ fn load_rule_lineage(
         .iter()
         .copied()
         .filter(|id| {
-            crate::models::MemoryId::from_str(id)
-                .is_ok_and(|parsed| parsed.to_string() == *id)
+            crate::models::MemoryId::from_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
         })
         .collect();
     let mut lineage = AskRuleLineage::default();
@@ -332,8 +367,7 @@ fn load_rule_lineage(
                 .query(&sql, &parameters)
                 .map_err(|_| corpus_storage_error())?
             {
-                let (Some(Value::Text(id)), Some(Value::Text(owner))) =
-                    (row.get(0), row.get(1))
+                let (Some(Value::Text(id)), Some(Value::Text(owner))) = (row.get(0), row.get(1))
                 else {
                     return Err(corpus_storage_error());
                 };
@@ -416,9 +450,7 @@ fn load_rules(
                     && source_ids.iter().all(|id| lineage.attributed.contains(id))
             }
         };
-        if visible
-            && let Some((candidate, source)) = admission::rule_candidate(&projection)
-        {
+        if visible && let Some((candidate, source)) = admission::rule_candidate(&projection) {
             native_sources.insert(candidate.memory_id.clone(), source);
             candidates.push(candidate);
         }
@@ -899,13 +931,141 @@ mod source_authority_tests {
         seed(&db, PRIOR, WORKSPACE, OLD_BODY);
         seed(&db, CURRENT, WORKSPACE, NEW_BODY);
         withhold(&db, true);
-        db.execute_raw("UPDATE memory_seals SET revealed_at = 'PRIVATE-REVEAL-CANARY', reveal_verified = 1")
-            .unwrap();
+        db.execute_raw(
+            "UPDATE memory_seals SET revealed_at = 'PRIVATE-REVEAL-CANARY', reveal_verified = 1",
+        )
+        .unwrap();
         let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
         assert!(matches!(error, DomainError::Storage { .. }));
         assert!(!format!("{error:?}").contains("PRIVATE-REVEAL-CANARY"));
         db.begin_read_snapshot().expect("owned snapshot released");
         db.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn revision_cutoff_selects_the_right_body_and_exact_citation() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        withhold(&db, false);
+        db.execute_raw(&format!(
+            "UPDATE memories SET valid_from = '{CUTOFF}' WHERE id = '{CURRENT}'"
+        ))
+        .unwrap();
+        for (reference, expected_id, expected_body) in [
+            ("2026-09-17T11:59:59.999999999Z", PRIOR, OLD_BODY),
+            (CUTOFF, CURRENT, NEW_BODY),
+            ("2026-09-17T14:00:00+02:00", CURRENT, NEW_BODY),
+        ] {
+            let corpus = load_current_ask_corpus(&db, WORKSPACE, at(reference)).unwrap();
+            assert_eq!(corpus.candidates.len(), 1);
+            assert_eq!(corpus.candidates[0].memory_id, expected_id);
+            let report = answer(&corpus);
+            assert!(!report.abstained);
+            assert_eq!(report.citations.len(), 1);
+            assert_eq!(report.citations[0].memory_id, expected_id);
+            assert_eq!(report.citations[0].text, expected_body);
+        }
+    }
+
+    #[test]
+    fn historical_reference_never_reads_or_revives_a_tombstoned_body() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        assert!(db.tombstone_memory(PRIOR).unwrap());
+        // A tombstoned row is not part of live answer admission, even at an
+        // earlier clock. Its malformed validity must never be decoded as a
+        // candidate or stop an otherwise valid public answer.
+        db.execute_raw(&format!(
+            "UPDATE memories SET valid_from = 'PRIVATE-DEAD-CANARY' WHERE id = '{PRIOR}'"
+        ))
+        .unwrap();
+        let audits = db.count_table_rows("audit_log").unwrap();
+        for reference in ["2021-01-01T00:00:00Z", CUTOFF] {
+            let loaded = load_memory_revisions(&db, WORKSPACE).unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, CURRENT);
+            let corpus = load_current_ask_corpus(&db, WORKSPACE, at(reference)).unwrap();
+            assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
+            let output = ask_data_json(&answer(&corpus)).to_string();
+            assert!(!output.contains(PRIOR) && !output.contains("PRIVATE-DEAD-CANARY"));
+        }
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
+        assert!(load_memory_revisions(&db, "' OR 1 = 1 --").unwrap().is_empty());
+    }
+
+    #[test]
+    fn revision_paging_preserves_history_and_validates_the_last_superseded_row() {
+        let (_root, db) = fixture();
+        let mut expected = Vec::new();
+        db.with_transaction(|| {
+            for ordinal in 1000..1000 + ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1 {
+                let id = format!("mem_{ordinal:026}");
+                seed(&db, &id, WORKSPACE, NEW_BODY);
+                assert!(db.restore_imported_memory_supersession(&id, CUTOFF)?);
+                expected.push(id);
+            }
+            Ok(())
+        })
+        .unwrap();
+        let before = load_current_ask_corpus(
+            &db,
+            WORKSPACE,
+            at("2026-09-17T11:59:59.999999999Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            before
+                .candidates
+                .iter()
+                .map(|candidate| candidate.memory_id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF))
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        db.execute_raw(&format!(
+            "UPDATE memories SET superseded_at = 'PRIVATE-TAIL-REVISION' WHERE id = '{}'",
+            expected.last().unwrap()
+        ))
+        .unwrap();
+        let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
+        assert!(matches!(error, DomainError::Storage { .. }));
+        assert!(!format!("{error:?}").contains("PRIVATE-TAIL-REVISION"));
+        db.begin_read_snapshot().expect("failed read releases its snapshot");
+        db.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn concurrent_replacement_belongs_entirely_to_the_next_answer_snapshot() {
+        let (root, writer) = fixture();
+        seed(&writer, PRIOR, WORKSPACE, OLD_BODY);
+        let reader = DbConnection::open_file_read_only(
+            &root.path().canonicalize().unwrap().join("ask.db"),
+        )
+        .unwrap();
+        let captured = load_corpus_with_boundary(&reader, WORKSPACE, at(CUTOFF), || {
+            writer
+                .with_transaction(|| {
+                    seed(&writer, CURRENT, WORKSPACE, NEW_BODY);
+                    assert!(writer.restore_imported_memory_supersession(PRIOR, CUTOFF)?);
+                    Ok(())
+                })
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(captured.candidates.len(), 1);
+        assert_eq!(answer(&captured).citations[0].memory_id, PRIOR);
+        let next = load_current_ask_corpus(&reader, WORKSPACE, at(CUTOFF)).unwrap();
+        assert_eq!(next.candidates.len(), 1);
+        assert_eq!(answer(&next).citations[0].memory_id, CURRENT);
+        assert!(!ask_data_json(&answer(&next)).to_string().contains(OLD_BODY));
     }
 }
 
