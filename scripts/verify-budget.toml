@@ -167,6 +167,25 @@ enforced_by = "tests/verification_drift_guard.rs::every_run_stage_call_site_is_a
 #                            check already exists; this names it so the property
 #                            is findable from the manifest, and a test asserts
 #                            the named function is really there.
+# EVIDENCE OUTPUTS (bd-reality-core-convergence-1azkt.5, bullet 1). Held back
+# deliberately until 061761cb3, because until then the thing this would have
+# declared was broken: run_stage captured artifact paths only on the PASS branch,
+# and the index was never printed at all on a run that hard-failed. Declaring
+# evidence outputs over that substrate would have been correct on paper and
+# useless in fact -- outputs nobody could find. bd-ovsjv fixed both halves first.
+#
+# A CONTRACT AND AN INVARIANT, NOT A LIST OF PATHS. The paths are DISCOVERED AT
+# RUN TIME from each stage's own output, so enumerating them here would be a
+# second copy of a runtime value -- the rot shape docs/testing-strategy.md warns
+# about. What is declarable is the protocol a stage follows, the invariant that
+# must hold of the recorder, and pointers to the two functions that implement it;
+# a test derives all three from verify.sh, so nothing here is a copy.
+[evidence_outputs]
+capture_contract = "a stage that produces evidence prints `Artifacts: <dir>` in its output; run_stage records that directory in the end-of-run index, tagged with the terminal status that produced it"
+invariant = "every run_stage branch that discards a stage's captured output records that stage's artifacts first, so no terminal status drops evidence"
+recorded_by = "scripts/verify.sh::record_stage_artifacts"
+printed_by = "scripts/verify.sh::print_artifact_index"
+
 [test_inventory]
 target_source = "Cargo.toml#[[test]]"
 shard_glob = "tests/suites/integration_*.rs"

@@ -3767,3 +3767,115 @@ fn declared_test_inventory_matches_the_tree() {
          {missing:?}. With autotests = false these are targets that can never run."
     );
 }
+
+/// The declared evidence-output contract holds in verify.sh.
+///
+/// bd-reality-core-convergence-1azkt.5, bullet 1 ("evidence outputs"). The
+/// manifest declares a PROTOCOL and an INVARIANT, never a list of paths: the
+/// paths are discovered at run time from each stage's own output, so a list here
+/// would be a second copy of a runtime value.
+///
+/// The invariant is derived from verify.sh rather than restated: every branch of
+/// `run_stage` that discards a stage's captured output must record that stage's
+/// artifacts first. That is the property bd-ovsjv fixed -- the capture used to
+/// exist only on the PASS branch, so the index answered "where is the evidence
+/// for the things that worked".
+///
+/// It also asserts the index is printed from more than one place, because the
+/// second half of that defect was invisible to reading: the end-of-file printer
+/// is unreachable on a run that hard-fails, since `run_stage` exits hundreds of
+/// lines earlier.
+#[test]
+fn declared_evidence_contract_holds_in_verify_sh() {
+    let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    let value_of = |key: &str| -> Option<String> {
+        manifest
+            .lines()
+            .skip_while(|l| l.trim() != "[evidence_outputs]")
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+            })
+    };
+
+    let recorded_by = value_of("recorded_by");
+    let printed_by = value_of("printed_by");
+    let invariant = value_of("invariant");
+
+    // EMPTY-WORLD GUARD FIRST.
+    assert!(
+        recorded_by.is_some() && printed_by.is_some() && invariant.is_some(),
+        "verify-budget.toml must declare [evidence_outputs] with recorded_by, \
+         printed_by and invariant; got recorded_by={recorded_by:?} \
+         printed_by={printed_by:?} invariant={:?}",
+        invariant.is_some()
+    );
+
+    let fn_name = |decl: &str| -> String {
+        decl.split_once("::")
+            .unwrap_or_else(|| panic!("expected `<file>::<fn>`, got {decl:?}"))
+            .1
+            .to_owned()
+    };
+    let recorder = fn_name(&recorded_by.unwrap());
+    let printer = fn_name(&printed_by.unwrap());
+
+    for func in [&recorder, &printer] {
+        assert!(
+            script.contains(&format!("{func}() {{")),
+            "[evidence_outputs] names `{func}`, which is not defined in verify.sh. \
+             A manifest naming a missing implementation claims coverage it does \
+             not have."
+        );
+    }
+
+    // THE INVARIANT, DERIVED: every discard of a stage's captured output must be
+    // preceded by a record call. A new terminal branch that forgets it reds here.
+    let lines: Vec<&str> = script.lines().collect();
+    let discards: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == r#"rm -f "$output_file""#)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        discards.len() >= 4,
+        "found only {} `rm -f \"$output_file\"` sites in run_stage; a near-zero \
+         count means this test read the wrong thing and the invariant below is \
+         checked against nothing",
+        discards.len()
+    );
+    let unguarded: Vec<usize> = discards
+        .iter()
+        .copied()
+        .filter(|&i| {
+            !lines[i.saturating_sub(3)..i]
+                .iter()
+                .any(|l| l.contains(&recorder))
+        })
+        .map(|i| i + 1)
+        .collect();
+    assert!(
+        unguarded.is_empty(),
+        "verify.sh discards a stage's captured output without calling `{recorder}` \
+         first, at line(s) {unguarded:?}. That branch drops the stage's evidence \
+         from the index -- which is the passes-only population bd-ovsjv fixed."
+    );
+
+    // The printer must be reachable from a failing run, not only the end of file.
+    let printer_calls = lines
+        .iter()
+        .filter(|l| l.trim() == printer || l.trim().starts_with(&format!("{printer} ")))
+        .count();
+    assert!(
+        printer_calls >= 2,
+        "`{printer}` is called {printer_calls} time(s). It must be called from \
+         the hard-fail path as well as the end of the run: run_stage exits on a \
+         required failure hundreds of lines before the end-of-file printer, so a \
+         single call means the index never prints on exactly the runs that need it."
+    );
+}
