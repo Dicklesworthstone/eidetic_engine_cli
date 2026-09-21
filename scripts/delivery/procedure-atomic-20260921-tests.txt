@@ -1,0 +1,350 @@
+//! Real-store atomicity and replay tests for procedure outcome learning.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use super::*;
+use crate::db::{CreateProcedureEventInput, CreateProcedureInput, CreateWorkspaceInput, StoredProcedure};
+use std::path::PathBuf;
+
+const WORKSPACE: &str = "wsp_00000000000000000000000072";
+const PROCEDURE: &str = "proc_00000000000000000000000072";
+const EVENT: &str = "fb_00000000000000000000000072";
+const SPARE_EVENT: &str = "pevt_00000000000000000000000073";
+const SEED: u64 = 0x5052_4f43_4154;
+
+struct Fixture {
+    _root: tempfile::TempDir,
+    database: PathBuf,
+    db: DbConnection,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(workspace.join(".ee")).unwrap();
+        let database = workspace.join(".ee/ee.db");
+        let db = DbConnection::open_file(&database).unwrap();
+        db.migrate().unwrap();
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.insert_procedure(
+            PROCEDURE,
+            &CreateProcedureInput {
+                workspace_id: WORKSPACE.to_owned(),
+                name: "Release validation".to_owned(),
+                body: "Run the integration suite before publishing a release.".to_owned(),
+                level: "procedural".to_owned(),
+                maturity: "provisional".to_owned(),
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.6,
+                evidence_uris: Vec::new(),
+                created_at: Some("2026-09-20T00:00:00Z".to_owned()),
+            },
+        )
+        .unwrap();
+        Self { _root: root, database, db }
+    }
+
+    fn options(&self) -> OutcomeRecordOptions<'_> {
+        OutcomeRecordOptions {
+            database_path: &self.database,
+            target_type: "procedure".to_owned(),
+            target_id: PROCEDURE.to_owned(),
+            workspace_id: Some(WORKSPACE.to_owned()),
+            signal: "helpful".to_owned(),
+            weight: Some(0.5),
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: Some("Release validation completed.".to_owned()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some(EVENT.to_owned()),
+            actor: Some("atomic-procedure-test".to_owned()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        }
+    }
+
+    fn procedure(&self) -> StoredProcedure {
+        self.db.get_procedure(WORKSPACE, PROCEDURE).unwrap().unwrap()
+    }
+
+    fn counts(&self) -> (i64, i64, i64) {
+        (
+            self.db.count_table_rows("feedback_events").unwrap(),
+            self.db.count_table_rows("audit_log").unwrap(),
+            self.db.count_table_rows("procedure_events").unwrap(),
+        )
+    }
+
+    fn collide_history(&self) {
+        self.db.insert_procedure_event(
+            &procedure_event_id_for_feedback(EVENT),
+            &CreateProcedureEventInput {
+                workspace_id: WORKSPACE.to_owned(),
+                procedure_id: PROCEDURE.to_owned(),
+                event_type: "created".to_owned(),
+                from_maturity: None,
+                to_maturity: Some("provisional".to_owned()),
+                reason: Some("Deterministic late-write failure control.".to_owned()),
+                evidence_uris: Vec::new(),
+                actor: Some("atomic-procedure-test".to_owned()),
+                created_at: Some("2026-09-20T00:00:00Z".to_owned()),
+            },
+        ).unwrap();
+    }
+
+    fn release_history_collision(&self) {
+        // Preserve the control row; only vacate its deterministic primary key.
+        // The real retry still uses exactly the original feedback ID/payload.
+        self.db.execute_raw(&format!(
+            "UPDATE procedure_events SET id = '{SPARE_EVENT}' WHERE id = '{}'",
+            procedure_event_id_for_feedback(EVENT)
+        )).unwrap();
+    }
+
+    fn assert_unchanged(&self, before: &StoredProcedure, counts: (i64, i64, i64)) {
+        let after = self.procedure();
+        assert_eq!(after.helpful_count, before.helpful_count);
+        assert_eq!(after.harmful_count, before.harmful_count);
+        assert_eq!(after.confidence, before.confidence);
+        assert_eq!(after.utility, before.utility);
+        assert_eq!(after.maturity, before.maturity);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.retired_at, before.retired_at);
+        assert_eq!(after.retire_reason, before.retire_reason);
+        assert_eq!(self.counts(), counts);
+    }
+}
+
+#[test]
+fn procedure_history_failure_rolls_back_feedback_id_and_primary_audit() {
+    let fixture = Fixture::new();
+    fixture.collide_history();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    let result = record_outcome(&fixture.options());
+    assert!(matches!(result, Err(DomainError::Storage { .. })));
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    fixture.assert_unchanged(&before, counts);
+}
+
+#[test]
+fn failed_procedure_learning_can_retry_the_same_event_and_learn_exactly_once() {
+    let fixture = Fixture::new();
+    fixture.collide_history();
+    assert!(record_outcome(&fixture.options()).is_err());
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    fixture.release_history_collision();
+    let before_counts = fixture.counts();
+    let report = record_outcome(&fixture.options()).unwrap();
+    assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+    let learned = fixture.procedure();
+    assert_eq!(learned.helpful_count, 1);
+    assert_eq!(learned.harmful_count, 0);
+    assert!((learned.confidence - 0.52).abs() < 1e-6);
+    assert!((learned.utility - 0.54).abs() < 1e-6);
+    let counts = fixture.counts();
+    assert_eq!(counts.0, before_counts.0 + 1);
+    assert_eq!(counts.1, before_counts.1 + 1);
+    assert_eq!(counts.2, before_counts.2 + 1);
+    let replay = record_outcome(&fixture.options()).unwrap();
+    assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+    fixture.assert_unchanged(&learned, counts);
+}
+
+#[test]
+fn failed_retirement_restores_counters_maturity_and_retirement_metadata() {
+    let fixture = Fixture::new();
+    fixture.db.execute_raw(&format!(
+        "UPDATE procedures SET maturity = 'mature', harmful_count = 2 WHERE id = '{PROCEDURE}'"
+    )).unwrap();
+    fixture.collide_history();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    let mut options = fixture.options();
+    options.signal = "harmful".to_owned();
+    assert!(record_outcome(&options).is_err());
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    fixture.assert_unchanged(&before, counts);
+
+    fixture.release_history_collision();
+    assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::Recorded);
+    let retired = fixture.procedure();
+    assert_eq!(retired.harmful_count, 3);
+    assert_eq!(retired.maturity, "retired");
+    assert!(retired.retired_at.is_some());
+    assert_eq!(retired.retire_reason.as_deref(), Some("harmful feedback threshold reached"));
+    let counts = fixture.counts();
+    assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::AlreadyRecorded);
+    fixture.assert_unchanged(&retired, counts);
+}
+
+#[test]
+fn feedback_audit_failure_cannot_apply_procedure_scoring() {
+    let fixture = Fixture::new();
+    let audit_id = generate_audit_id_seeded(&mut Deterministic::from_seed(SEED));
+    fixture.db.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(WORKSPACE.to_owned()),
+            actor: None,
+            action: "atomic_procedure_failure_control".to_owned(),
+            target_type: Some("procedure".to_owned()),
+            target_id: Some(PROCEDURE.to_owned()),
+            details: None,
+        },
+    ).unwrap();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    assert!(record_outcome_seeded(&fixture.options(), &mut Deterministic::from_seed(SEED)).is_err());
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    fixture.assert_unchanged(&before, counts);
+}
+
+#[test]
+fn procedure_signal_aliases_keep_weights_and_neutral_history_semantics() {
+    for signal in ["helpful", "positive", "confirmation", "harmful", "negative", "contradiction", "inaccurate", "neutral", "stale", "outdated"] {
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
+        options.signal = signal.to_owned();
+        let report = record_outcome(&options).unwrap();
+        assert_eq!(report.status, OutcomeRecordStatus::Recorded, "{signal}");
+        // Procedure feedback did not previously expose memory-posterior fields.
+        assert_eq!(report.confidence_before, None);
+        assert_eq!(report.confidence_after, None);
+        let after = fixture.procedure();
+        let (helpful, harmful, confidence, utility, history) = match FeedbackSignal::from_signal_str(signal) {
+            FeedbackSignal::Helpful => (1, 0, 0.52, 0.54, 1),
+            FeedbackSignal::Harmful => (0, 1, 0.45, 0.44, 1),
+            FeedbackSignal::Neutral => (0, 0, 0.5, 0.5, 0),
+        };
+        assert_eq!(after.helpful_count, helpful, "{signal}");
+        assert_eq!(after.harmful_count, harmful, "{signal}");
+        assert!((after.confidence - confidence).abs() < 1e-6, "{signal}");
+        assert!((after.utility - utility).abs() < 1e-6, "{signal}");
+        assert_eq!(after.maturity, "provisional");
+        assert_eq!(fixture.counts().0, 1);
+        assert_eq!(fixture.counts().2, history);
+    }
+}
+
+#[test]
+fn procedure_feedback_dry_run_does_not_reserve_an_event_or_update_history() {
+    let fixture = Fixture::new();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    let mut options = fixture.options();
+    options.dry_run = true;
+    assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::DryRun);
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    fixture.assert_unchanged(&before, counts);
+    options.dry_run = false;
+    assert_eq!(record_outcome(&options).unwrap().status, OutcomeRecordStatus::Recorded);
+    assert_eq!(fixture.procedure().helpful_count, 1);
+}
+
+#[test]
+fn missing_or_foreign_procedure_rolls_back_outer_feedback_even_for_neutral_signals() {
+    let fixture = Fixture::new();
+    let other_workspace = "wsp_00000000000000000000000073";
+    fixture.db.insert_workspace(
+        other_workspace,
+        &CreateWorkspaceInput { path: "/atomic-procedure-other-workspace".to_owned(), name: None },
+    ).unwrap();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    for (workspace, procedure) in [(WORKSPACE, "proc_00000000000000000000000074"), (other_workspace, PROCEDURE)] {
+        for signal in ["helpful", "neutral"] {
+            let input = AuditedFeedbackEventInput {
+                event: CreateFeedbackEventInput {
+                    workspace_id: workspace.to_owned(),
+                    target_type: "procedure".to_owned(),
+                    target_id: procedure.to_owned(),
+                    signal: signal.to_owned(),
+                    weight: 0.5,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                },
+                actor: None,
+                details: None,
+            };
+            let result = fixture.db.with_transaction(|| {
+                record_outcome_feedback_event_in_txn(&fixture.db, EVENT, &input, generate_audit_id())?;
+                apply_procedure_outcome_in_txn(&fixture.db, &input.event, EVENT, None)
+            });
+            assert!(result.is_err(), "{workspace} / {procedure} / {signal}");
+            assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+            fixture.assert_unchanged(&before, counts);
+        }
+    }
+}
+
+#[test]
+fn standalone_procedure_feedback_keeps_its_own_rollback_boundary() {
+    let fixture = Fixture::new();
+    fixture.collide_history();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    let input = || ApplyProcedureFeedbackInput {
+        workspace_id: WORKSPACE,
+        procedure_id: PROCEDURE,
+        signal: "helpful",
+        weight: 0.5,
+        auto_retire_harmful_threshold: 3,
+        event_id: SPARE_EVENT,
+        reason: None,
+        actor: None,
+    };
+    let collision = procedure_event_id_for_feedback(EVENT);
+    let result = fixture.db.apply_procedure_feedback(ApplyProcedureFeedbackInput {
+        event_id: &collision,
+        ..input()
+    });
+    assert!(result.is_err());
+    fixture.assert_unchanged(&before, counts);
+    let learned = fixture.db.apply_procedure_feedback(input()).unwrap().unwrap();
+    assert_eq!(learned.procedure.helpful_count, 1);
+    assert_eq!(learned.event.event_type, "outcome_helpful");
+    assert!(!learned.auto_retired);
+    assert_eq!(fixture.counts().0, 0);
+}
+
+#[test]
+fn caller_owned_procedure_update_never_commits_before_its_parent_transaction() {
+    let fixture = Fixture::new();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    let result: crate::db::Result<()> = fixture.db.with_transaction(|| {
+        let learned = fixture.db.apply_procedure_feedback_in_txn(ApplyProcedureFeedbackInput {
+            workspace_id: WORKSPACE,
+            procedure_id: PROCEDURE,
+            signal: "helpful",
+            weight: 0.5,
+            auto_retire_harmful_threshold: 3,
+            event_id: SPARE_EVENT,
+            reason: None,
+            actor: None,
+        })?.expect("learning must execute before the injected parent failure");
+        assert_eq!(learned.procedure.helpful_count, 1);
+        Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Execute,
+            message: "parent transaction failure after procedure learning".to_owned(),
+        })
+    });
+    assert!(result.unwrap_err().to_string().contains("parent transaction failure"));
+    fixture.assert_unchanged(&before, counts);
+}

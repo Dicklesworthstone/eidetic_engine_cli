@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/procedure-atomic-20260921.yml
+      - scripts/delivery/procedure-atomic-20260921.py
+      - scripts/delivery/procedure-atomic-20260921-tests.txt
 permissions:
   contents: read
 concurrency:
@@ -35,146 +37,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess, zlib
-
-          EXPECTED = {
-              "src/db/mod.rs": "8aa66a8e38e8caf595388230791c9ed8b288b287",
-              "src/core/outcome.rs": "4c3efeb2bc7359f9de514ff68e8a7e3328d3123f",
-          }
-          PAYLOAD_SHA256 = "82835686899ae95dc52faef2ca6b12335a901f176044a109d8651da754518b3e"
-          # Exact prepared changes.json, compressed only to keep this one-time receipt
-          # bounded. Verify its digest before decoding the three reviewed source edits.
-          DATA = """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
-          Zbo="""
-          raw = zlib.decompress(base64.b64decode(DATA))
-          assert hashlib.sha256(raw).hexdigest() == PAYLOAD_SHA256, "delivery payload changed"
-          payload = json.loads(raw)
-          assert payload["schema"] == "ee.prepared_procedure_atomic.v1"
-          new_path = "src/core/outcome_procedure_atomic_tests.rs"
-          assert set(payload["replacements"]) == set(EXPECTED)
-          assert set(payload["newFiles"]) == {new_path}
-          paths = [*EXPECTED, new_path]
-
-          def git(*args):
-              return subprocess.check_output(["git", *args], text=True).strip()
-
-          assert git("branch", "--show-current") == "main", "not the main checkout"
-          assert not git("status", "--porcelain", "--", *paths), "targeted files are dirty"
-          assert not pathlib.Path(new_path).exists(), "test module already exists"
-          original = {}
-          for name, expected in EXPECTED.items():
-              path = pathlib.Path(name)
-              assert not any(part.is_symlink() for part in (path, *path.parents)), name
-              content = path.read_bytes()
-              actual = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
-              assert actual == expected, "source changed; review required: " + name
-              original[name] = content.decode("utf-8")
-          assert not any(part.is_symlink() for part in (pathlib.Path(new_path), *pathlib.Path(new_path).parents))
-
-          def formatted(text):
-              # Format isolated edited Rust units, not the multi-megabyte DB module or
-              # unrelated existing code. Parsing is not compilation or runtime proof.
-              command = ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--emit", "stdout"]
-              result = subprocess.run(command, input=text, text=True, capture_output=True, check=True)
-              checked = subprocess.run(command, input=result.stdout, text=True, capture_output=True, check=True)
-              assert checked.stdout == result.stdout, "changed Rust unit is not format-stable"
-              return result.stdout
-
-          db_edit = payload["replacements"]["src/db/mod.rs"][0]
-          wrapper = "impl DbConnection {\n"
-          formatted_db = formatted(wrapper + db_edit["new"] + "}\n")
-          assert formatted_db.startswith(wrapper) and formatted_db.endswith("}\n")
-          db_edit["new"] = formatted_db[len(wrapper):-2]
-          helper_edit = payload["replacements"]["src/core/outcome.rs"][2]
-          assert helper_edit["new"].endswith(helper_edit["old"])
-          helper = helper_edit["new"][:-len(helper_edit["old"])]
-          helper_edit["new"] = formatted(helper).rstrip() + "\n\n" + helper_edit["old"]
-          new_content = formatted(payload["newFiles"][new_path])
-          assert new_content.count("#[test]") == 9 and "#[ignore" not in new_content
-          planned = {}
-          for name, edits in payload["replacements"].items():
-              text = original[name]
-              for edit in edits:
-                  assert edit["old"] and text.count(edit["old"]) == 1, "source fragment changed: " + name
-                  text = text.replace(edit["old"], edit["new"], 1)
-              planned[name] = text
-          planned[new_path] = new_content
-          # Validate all three files before writing any; no deletion or branch switch.
-          for name, text in planned.items():
-              pathlib.Path(name).write_text(text, encoding="utf-8")
-              print("APPLIED", name, hashlib.sha256(text.encode()).hexdigest())
-          pathlib.Path(os.environ["RUNNER_TEMP"], "procedure-atomic-payload.sha256").write_text(PAYLOAD_SHA256 + "\n")
-          PY
+          test "$(git hash-object scripts/delivery/procedure-atomic-20260921.py)" = '189e9e5428ae8c51e94dae90877f479f2de551ac'
+          test "$(git hash-object scripts/delivery/procedure-atomic-20260921-tests.txt)" = '0d74255dbf79c4f3893b4272e453446592703736'
+          python3 scripts/delivery/procedure-atomic-20260921.py
           git diff --check
           git diff --stat
       - name: Commit all three source changes directly to main
@@ -222,13 +87,14 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - name: Require the exact published source before verification
+      - name: Require the published learning changes on current main
         env:
           PUBLISHED_SOURCE: ${{ needs.publish.outputs.source }}
         run: |
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/procedure-atomic-source.log"
-          test "$(git rev-parse HEAD)" = "$PUBLISHED_SOURCE"
+          git merge-base --is-ancestor "$PUBLISHED_SOURCE" HEAD
+          git diff --exit-code "$PUBLISHED_SOURCE" HEAD -- src/db/mod.rs src/core/outcome.rs src/core/outcome_procedure_atomic_tests.rs Cargo.toml Cargo.lock rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
