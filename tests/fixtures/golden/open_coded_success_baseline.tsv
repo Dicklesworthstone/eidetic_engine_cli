@@ -63,7 +63,7 @@
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 594 rows (function + missing-set), 870 incomplete assertions.
+# CURRENT: 593 rows (function + missing-set), 869 incomplete assertions.
 
 advanced_e2e::assert_causal_success [stdout+stderr]	1
 advanced_e2e::assert_lab_report_common [stdout+stderr]	1
@@ -134,7 +134,6 @@ closure_lint_harness::closure_lint_accepts_clean_implementation_and_honesty_sibl
 closure_lint_harness::closure_lint_accepts_tests_snapshots_as_golden_evidence [code+stdout+stderr]	1
 closure_lint_harness::closure_lint_audit_baseline_excuses_known_debt_and_fails_on_a_stale_entry [code+stdout+stderr]	1
 closure_lint_harness::closure_lint_reports_a_wholly_stale_baseline_on_a_clean_tree [code+stdout+stderr]	1
-closure_lint_harness::closure_lint_skips_when_beads_write_lock_is_held [code+stdout+stderr]	1
 consolidation_maintain_e2e::ensure [stdout]	1
 contract_drift_radar_degraded_taxonomy::contract_drift_radar_pins_json_example_count_semantics [stdout]	1
 curate_auto_promote_safety_contracts::apply_requires_explicit_apply_flag_even_when_other_flags_are_set [code+stdout]	1
