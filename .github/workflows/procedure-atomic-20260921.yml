@@ -9,12 +9,12 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: procedure-atomic-delivery-20260921
-  cancel-in-progress: true
+  group: procedure-atomic-delivery-20260921-${{ github.run_id }}
+  cancel-in-progress: false
 jobs:
   publish:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
