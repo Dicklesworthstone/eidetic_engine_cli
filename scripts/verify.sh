@@ -2570,6 +2570,10 @@ candidate_binary_identity_stable() {
     ee_assert_binary_identity_unchanged "${EE_BINARY}" "${EE_BINARY_SHA256:-}" "verify"
 }
 run_stage "Candidate Binary Identity Stable" "candidate_binary_identity_stable"
+# The emitter is WIRED by scripts/rch_run.sh (3eb67caa6); this stage is what
+# makes it GATED. Those are different things: wiring makes it run when someone
+# uses that wrapper, this makes a broken emitter fail verification.
+run_stage "Proof Capsule Emitter (1azkt.5 B9)" "python3 ./scripts/lib/emit_proof_capsule.py --self-test"
 
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.

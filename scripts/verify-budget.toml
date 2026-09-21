@@ -4,8 +4,9 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values must not EXCEED 600s, the 10-minute readiness
-# target. This is a ceiling, not an equality. It used to be an exact sum, which
+# Non-benchmark p50 values must not EXCEED 601s, the 10-minute readiness
+# target plus the one stage added since. This is a ceiling, not an equality. It
+# used to be an exact sum, which
 # meant adding any verify.sh stage forced someone to reduce another stage's p50
 # to keep the total -- i.e. to write down a number that was not the
 # measurement. A budget file that can only stay green by falsifying a latency
@@ -55,7 +56,7 @@
 # tests/verification_drift_guard.rs, so introducing one is a deliberate,
 # reviewable act rather than a default anybody can drift into — and removing one
 # is equally deliberate, because the count has to move in the same commit.
-total_expected_seconds = 600
+total_expected_seconds = 601
 total_regression_factor = 1.5
 
 # CANDIDATE BINARY (bd-reality-core-convergence-1azkt.5, bullet 1). The manifest
@@ -893,4 +894,37 @@ name = "Read Coalescing E2E (bd-udjrq)"
 # Forbidden Dependencies from an over-declared 10 to 2, not by raising the
 # 600s ceiling.
 expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Proof Capsule Emitter (1azkt.5 B9)"
+# THE DECLARED 1 BELOW IS NOT THE MEASUREMENT. IT IS THIS FIELD'S FLOOR.
+#
+# Read that before citing this row. expected_seconds_p50 is integer seconds; the
+# smallest value declared anywhere in this file is 1, and 0 appears nowhere and
+# would assert the stage is free. The measurement is SUB-SECOND, so 1 is the
+# smallest value that does not understate it -- it is a floor, not a median, and
+# anyone quoting "1 second, measured" for this stage is quoting the schema.
+#
+# MEASURED 2026-09-21, 9 consecutive runs, all rc=0:
+#   0.505 0.506 0.511 0.525 0.525 0.529 0.540 0.553 0.622 seconds
+#   MEDIAN 0.525   min 0.505   max 0.622   spread 0.117   p90 0.553
+#   host: this Mac, 10 cores -- the same host verify.sh runs on.
+#   load: 3.81 -> 4.23 one-minute, about 0.4 per core. NOT an idle host, and
+#         recorded rather than described, per the Vision Coverage precedent
+#         above. Sub-second CPU work is not strongly load-sensitive, so a
+#         quieter host would not move this materially.
+#
+# Measured OUT OF BAND -- run directly, not as a stage -- because when this was
+# added the file admitted zero new stages by either door: the measured total sat
+# at exactly 600/600 and the unmeasured ratchet at 27/27 (bd-vihzq). The stage
+# could not be added once in order to measure itself.
+#
+# THIS STAGE IS WHY THE CEILING IS 601 AND NOT 600. It is the first ceiling raise
+# this file has ever had. Every prior stage was funded by re-measuring an
+# over-declared neighbour -- see Read Coalescing directly above, funded by
+# cutting Forbidden Dependencies from 10 to 2. That route was exhausted here:
+# there was no over-declared stage left to cut, and cutting a correctly-measured
+# one to make room is the retune-to-fit this file calls fiction.
+expected_seconds_p50 = 1
 regression_factor = 1.5
