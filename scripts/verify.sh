@@ -515,6 +515,64 @@ if ! ee_assert_target_triple_matches_host \
 fi
 export EE_BINARY_TARGET_TRIPLE="${EE_ACTUAL_TRIPLE}"
 
+# PLATFORM (bd-reality-core-convergence-1azkt.5, bullet 1). The manifest now
+# declares WHERE it is valid, in `[requirements].supported_target_os`, and this
+# reads it. Without this read the key would be decoration -- a declaration
+# nothing consults, which is the defect the whole bullet is about.
+#
+# The manifest's list is the SOURCE of this fact, not a copy: nothing else in the
+# tree states which platforms verify.sh is meant to run on. The binary's side
+# comes from `ee version --json` -> data.build.targetOs, the same document the
+# triple and feature checks read.
+ee_manifest_supported_target_os() {
+    awk '
+        /^\[requirements\]/ { in_req = 1; next }
+        in_req && /^\[/     { exit }
+        in_req && /^supported_target_os[[:space:]]*=/ {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/[][",]/, " ", line)
+            print line
+            exit
+        }
+    ' "$VERIFY_BUDGET_FILE"
+}
+
+ee_binary_target_os() {
+    "${EE_BINARY}" version --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+build = doc.get("data", doc).get("build")
+if not isinstance(build, dict):
+    raise SystemExit(1)
+value = build.get("targetOs")
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value)
+'
+}
+
+if ! EE_SUPPORTED_OS="$(ee_manifest_supported_target_os)" || [ -z "${EE_SUPPORTED_OS// /}" ]; then
+    printf 'verify: refusing: verify-budget.toml declares no supported_target_os.\n' >&2
+    printf 'verify: [requirements].supported_target_os is where this manifest says\n' >&2
+    printf 'verify: which platforms it is valid on. Absent, the check below would\n' >&2
+    printf 'verify: accept every platform and pass regardless.\n' >&2
+    exit 1
+fi
+if ! EE_ACTUAL_OS="$(ee_binary_target_os)"; then
+    printf 'verify: refusing: %s could not report its target OS.\n' "${EE_BINARY}" >&2
+    printf 'verify: `ee version --json` must carry data.build.targetOs.\n' >&2
+    exit 1
+fi
+if ! ee_assert_target_os_supported "${EE_ACTUAL_OS}" "${EE_SUPPORTED_OS}" "verify"; then
+    printf 'verify: refusing to run stages on an undeclared platform.\n' >&2
+    exit 1
+fi
+export EE_BINARY_TARGET_OS="${EE_ACTUAL_OS}"
+
 # E2E TEMP ROOT: DERIVED PER HOST, AND PROVEN WRITABLE BEFORE ANY STAGE RUNS
 # (bd-13y74).
 #

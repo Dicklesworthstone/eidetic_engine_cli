@@ -92,6 +92,39 @@ binary_name = "ee"
 target_subpath = "debug/ee"
 resolver = "scripts/lib/ee_binary_resolution.sh"
 
+# PLATFORM / FEATURES / RESOURCES (bd-reality-core-convergence-1azkt.5, bullet 1).
+# The manifest is required to name the platform, features and resources a run
+# needs. Before this block it named none: zero occurrences of "platform" or
+# "feature" anywhere in the file, comments included.
+#
+# EVERY KEY HERE IS A CONTRACT OR A SOURCE POINTER, NEVER A COPY. That is the
+# rule in docs/testing-strategy.md, "Declare a contract, not a list": a list has
+# to be maintained by whoever changes the thing it describes, while a contract
+# either holds or does not and its check can find its own population.
+#
+#   supported_target_os        A real declaration -- this IS the source of truth
+#                              for where the manifest is valid, not a copy of
+#                              one. verify.sh reads it and refuses a host
+#                              outside it, so the list is load-bearing.
+#   feature_source             A POINTER, deliberately not a feature list.
+#                              Cargo.toml's `default = [...]` is the single
+#                              source; it is already cross-checked against
+#                              build_features() by
+#                              every_default_feature_is_reported_by_build_features.
+#                              Restating the features here would be a THIRD copy,
+#                              and that cross-check only guards two.
+#   requires_candidate_binary  A resource precondition, bound to behaviour:
+#                              verify.sh refuses to run stages when the binary is
+#                              missing, foreign, or the wrong version.
+#
+# Placement and naming follow [candidate_binary] above: before the first
+# [[stage]], and no key literally named `name`. Both manifest parsers mis-handle
+# a table after the stages -- see the comment there for the measured reason.
+[requirements]
+supported_target_os = ["macos", "linux"]
+feature_source = "Cargo.toml#default"
+requires_candidate_binary = true
+
 [[stage]]
 name = "Candidate Binary Identity Stable"
 expected_seconds_p50 = 1

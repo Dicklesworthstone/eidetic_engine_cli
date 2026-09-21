@@ -308,3 +308,47 @@ ee_assert_target_triple_matches_host() {
     printf '%s: would report on a build this host did not ask for.\n' "$label" >&2
     return 1
 }
+
+# Is the candidate binary's build OS one the manifest declares support for?
+# (bd-reality-core-convergence-1azkt.5, bullet 1, "platform".)
+#
+# The declared list in verify-budget.toml `[requirements].supported_target_os`
+# is the SOURCE of this fact, not a copy of one, which is why a list is the right
+# shape here -- nothing else in the tree states where the manifest is valid.
+#
+#   0  supported
+#   1  not supported -- prints the actual and the declared set
+#   3  either side empty, so there is nothing to decide
+ee_assert_target_os_supported() {
+    local actual="${1-}"
+    local supported="${2-}"
+    local label="${3:-verify}"
+    local entry
+
+    if [ -z "$actual" ] || [ -z "$supported" ]; then
+        printf '%s: target OS NOT CHECKED: actual=%s supported=%s\n' \
+            "$label" "${actual:-<empty>}" "${supported:-<empty>}" >&2
+        return 3
+    fi
+
+    # Space-padded token match rather than `for entry in $supported`. This file
+    # is SOURCED, and zsh does not word-split an unquoted parameter, so the loop
+    # form iterates once over the whole string and refuses every OS -- failing
+    # closed, but with a message that blames the manifest for a shell
+    # difference. Padding both sides makes this exact-token matching, not
+    # substring matching: " linu " does not occur in " ... linux ".
+    case " $supported " in
+        *" $actual "*)
+            printf '%s: target OS %s is declared supported.\n' "$label" "$actual" >&2
+            return 0
+            ;;
+    esac
+
+    printf '%s: candidate binary target OS is not declared supported.\n' "$label" >&2
+    printf '%s:   binary target_os: %s\n' "$label" "$actual" >&2
+    printf '%s:   manifest declares: %s\n' "$label" "$supported" >&2
+    printf '%s: verify-budget.toml [requirements].supported_target_os says where\n' "$label" >&2
+    printf '%s: this manifest is valid. Running it elsewhere reports on a\n' "$label" >&2
+    printf '%s: platform nobody declared it covers.\n' "$label" >&2
+    return 1
+}

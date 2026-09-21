@@ -415,3 +415,37 @@ ee_assert_target_triple_matches_host "" "" "/fake/ee" "selftest" >/dev/null 2>&1
 triple_empty_rc=$?
 set -e
 assert_eq "$triple_empty_rc" "3" "two empty values are not a match"
+
+# 15-17. SUPPORTED TARGET OS (1azkt.5 bullet 1, "platform"). Membership, not
+#    equality: the manifest declares a SET and the binary names one element.
+set +e
+ee_assert_target_os_supported "linux" "macos linux" "selftest" >/dev/null 2>&1
+os_ok_rc=$?
+set -e
+assert_eq "$os_ok_rc" "0" "declared OS is supported"
+
+set +e
+os_bad_log="$(ee_assert_target_os_supported "windows" "macos linux" "selftest" 2>&1 >/dev/null)"
+os_bad_rc=$?
+set -e
+assert_eq "$os_bad_rc" "1" "undeclared OS is refused"
+case "$os_bad_log" in
+    *windows*macos\ linux*) ;;
+    *) printf 'FAIL message must name the actual OS AND the declared set\n%s\n' "$os_bad_log" >&2; exit 1 ;;
+esac
+
+# EMPTY-WORLD ARM: an empty declared set must not accept everything. Without
+# this, a manifest whose key was renamed would silently support all platforms.
+set +e
+ee_assert_target_os_supported "linux" "" "selftest" >/dev/null 2>&1
+os_empty_rc=$?
+set -e
+assert_eq "$os_empty_rc" "3" "empty declared set is not blanket support"
+
+# NEGATIVE CONTROL -- a SUBSTRING of a declared entry is not a member. "linu"
+# must not pass because "linux" is declared; a naive `case` glob would accept it.
+set +e
+ee_assert_target_os_supported "linu" "macos linux" "selftest" >/dev/null 2>&1
+os_sub_rc=$?
+set -e
+assert_eq "$os_sub_rc" "1" "substring of a declared OS is not a member"
