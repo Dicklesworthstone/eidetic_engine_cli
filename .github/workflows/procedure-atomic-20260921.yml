@@ -10,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: procedure-atomic-delivery-20260921
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   publish:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
