@@ -1082,6 +1082,44 @@ The tell is that the bound is doing work for you: it explains why the hard thing
 can be deferred. That is exactly when it deserves the scrutiny you would give a
 gate reporting green.
 
+### A guard is not deployed until the caller that needs it calls it
+
+Writing the guard is the part that feels like the work. It is the smaller half.
+**The question that decides whether a guard exists in practice is: which callers
+route through it, and is the one that needed it most among them?**
+
+Two instances landed on 2026-09-21, both in guards written that same day:
+
+- `scripts/check-include-fmt.sh:61` skipped a listed-but-missing path with
+  `[ -f "$rel" ] || continue` — inside the gate whose entire purpose is that a
+  narrowed population must not read as a pass. The guard did not apply its own
+  rule to itself.
+- `scripts/lib/ee_binary_resolution.sh::ee_binary_executes_here` answers "can
+  this binary run on this host", and **24 scripts source it, including
+  `scripts/verify.sh`**. Neither RCH harness did — and the pinned lane is
+  precisely where a wrong-platform artifact lands, since an RCH run can exit 0
+  having written a Linux ELF over a macOS target dir. The result was a run that
+  died with `Exec format error` and no name for it.
+
+Both are the population class pointed at a *guard's callers* rather than at its
+inputs: the guard is correct, its coverage is narrower than its reputation, and
+nothing reports the gap because a non-caller emits no signal at all.
+
+**Two checks, cheap, at the moment you write a guard:**
+
+1. `grep -rl <guard-symbol> scripts/ src/` and read the list as a population.
+   Then ask which callers are *missing* and why — an absent caller is invisible
+   in every other view.
+2. Ask where the failure this guard names actually occurs. If that location is
+   not in the list from (1), the guard is not deployed where it matters, however
+   many other callers it has.
+
+A related tell, worth its own line: **a guard written as "did it print anything"
+cannot distinguish a result from an error message.** `candidate_ee_bin` accepted
+any non-empty `--version` output, and a foreign binary answered `exec format
+error: <path>` — non-empty, therefore accepted. Key on exit status (126/127 mean
+"could not execute"), not on output volume.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
