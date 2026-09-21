@@ -344,6 +344,113 @@ printf 'verify: ee_binary_sha256=%s target_hint=%s\n' \
     "${EE_BINARY_SHA256:-unavailable}" \
     "$(file -b "${EE_BINARY}" 2>/dev/null | cut -c1-60 || printf 'unavailable')" >&2
 
+# E2E TEMP ROOT: DERIVED PER HOST, AND PROVEN WRITABLE BEFORE ANY STAGE RUNS
+# (bd-13y74).
+#
+# This file used to hand the macOS path /private/tmp to THIRTY e2e stages as a
+# hardcoded EE_E2E_TMPDIR literal, one per stage. That path is a macOS
+# convention; on the Linux fleet where all RCH
+# verification actually runs it exists but is root-owned and unwritable. Those
+# stages therefore died at their first `mktemp -d` having executed ZERO
+# assertions, and exited nonzero -- so a reader saw what looked like thirty
+# product failures rather than a harness that never started.
+#
+# The scripts already offer EE_E2E_TMPDIR as the escape hatch from that macOS
+# default, and this runner was using the hatch to RE-ASSERT the assumption. The
+# constraint behind the default is real but it is a MACOS constraint (an ExFAT
+# TMPDIR breaks DB opens on the dev host, bd-2vq2z), so it is expressed here as
+# one instead of as a literal that is wrong on every other platform.
+#
+# WHY THIS REFUSES RATHER THAN MINTING A NEW EXIT CODE: a fresh code that the
+# callers of this script do not handle gets excused by them, which is worse
+# than the ambiguity it replaces (bd-success-shaped-signal-on-failure-l3pa4
+# documents exactly that trap). The distinction is carried by the message,
+# which names the harness as the thing that could not start, and by refusing
+# HERE -- once, before any stage -- rather than thirty times inside stages
+# where it is indistinguishable from a test failure.
+# PROVE IT, do not assume it. Existence is not writability: /private/tmp EXISTS
+# on the Linux workers -- it is merely root-owned -- which is exactly why this
+# failed so late and read so much like a product defect. The probe performs the
+# same operation the stages perform first, so a pass here means they can start.
+e2e_tmpdir_writable() {
+    local base="$1" probe
+    [ -n "$base" ] || return 1
+    [ -d "$base" ] || return 1
+    probe="$(mktemp -d "${base}/ee-verify-tmpdir-probe.XXXXXX" 2>/dev/null)" || return 1
+    rmdir "$probe" 2>/dev/null || true
+    return 0
+}
+
+e2e_tmpdir_refuse() {
+    printf 'verify: %s\n' "$1" >&2
+    printf 'verify: this is the e2e HARNESS root, not a test failure --\n' >&2
+    printf 'verify: every e2e stage would die at its first mktemp having\n' >&2
+    printf 'verify: executed zero assertions. Refusing before that happens.\n' >&2
+    exit 1
+}
+
+E2E_TMPDIR_UNAME="$(uname -s 2>/dev/null || printf 'unknown')"
+if [ -n "${EE_E2E_TMPDIR:-}" ]; then
+    # An EXPLICIT caller choice is never silently relocated: quietly running the
+    # suite somewhere other than where the operator pointed it is its own kind
+    # of dishonest gate. Refuse and let them repoint it.
+    E2E_TMPDIR_BASE="${EE_E2E_TMPDIR%/}"
+    E2E_TMPDIR_ORIGIN="caller"
+    e2e_tmpdir_writable "${E2E_TMPDIR_BASE}" || e2e_tmpdir_refuse \
+        "EE_E2E_TMPDIR=${E2E_TMPDIR_BASE} is not writable on this host."
+else
+    # ORDERED, DEDUPED CANDIDATES. The fallback must differ from what already
+    # failed: an earlier draft of this block fell back to ${TMPDIR:-/tmp} after
+    # the platform default failed, which on a host where TMPDIR IS that default
+    # retried the identical path and reported it as two attempts. The repo-local
+    # last resort is the one the bd-13y74 measurement itself used.
+    # An ARRAY, not a space-joined string: a temp path containing a space would
+    # otherwise word-split into two bogus candidates and could silently select
+    # the wrong directory.
+    case "${E2E_TMPDIR_UNAME}" in
+        Darwin)
+            # Keep the ExFAT-avoidance default this repo relies on locally
+            # (bd-2vq2z), but as a macOS-only PREFERENCE, not a global literal.
+            E2E_TMPDIR_CANDIDATES=("/private/tmp" "${TMPDIR:-}" "/tmp" "${REPO_ROOT}/target/e2e-tmp")
+            ;;
+        *)
+            E2E_TMPDIR_CANDIDATES=("${TMPDIR:-}" "/tmp" "${REPO_ROOT}/target/e2e-tmp")
+            ;;
+    esac
+
+    E2E_TMPDIR_BASE=""
+    E2E_TMPDIR_ORIGIN=""
+    E2E_TMPDIR_TRIED=""
+    E2E_TMPDIR_SEEN=" "
+    for e2e_candidate in "${E2E_TMPDIR_CANDIDATES[@]}"; do
+        e2e_candidate="${e2e_candidate%/}"
+        [ -n "${e2e_candidate}" ] || continue
+        case "${E2E_TMPDIR_SEEN}" in *" ${e2e_candidate} "*) continue ;; esac
+        E2E_TMPDIR_SEEN="${E2E_TMPDIR_SEEN}${e2e_candidate} "
+        E2E_TMPDIR_TRIED="${E2E_TMPDIR_TRIED}${E2E_TMPDIR_TRIED:+, }${e2e_candidate}"
+        # The repo-local last resort is the only candidate we may create.
+        case "${e2e_candidate}" in
+            "${REPO_ROOT}/target/e2e-tmp") mkdir -p "${e2e_candidate}" 2>/dev/null || true ;;
+        esac
+        if e2e_tmpdir_writable "${e2e_candidate}"; then
+            E2E_TMPDIR_BASE="${e2e_candidate}"
+            E2E_TMPDIR_ORIGIN="auto"
+            break
+        fi
+    done
+    [ -n "${E2E_TMPDIR_BASE}" ] || e2e_tmpdir_refuse \
+        "no writable e2e temp root on this host (tried: ${E2E_TMPDIR_TRIED})."
+fi
+# DELIBERATELY NOT EXPORTED. The thirty stages below set EE_E2E_TMPDIR inline,
+# so exporting adds nothing for them -- but it WOULD newly expose the variable
+# to stages that previously saw none, including Rust tests that read it and
+# otherwise fall back through TMPDIR (e.g. tests/agent_profile_e2e.rs:23).
+# Relocating their scratch space is a behaviour change this bead did not
+# measure and does not need.
+printf 'verify: e2e_tmpdir=%s origin=%s uname=%s tried=%s\n' \
+    "${E2E_TMPDIR_BASE}" "${E2E_TMPDIR_ORIGIN}" "${E2E_TMPDIR_UNAME}" \
+    "${E2E_TMPDIR_TRIED:-n/a}" >&2
+
 # shellcheck disable=SC2329
 beads_lock_wait_seconds() {
     case "$BEADS_LOCK_WAIT_SECONDS" in
@@ -1348,7 +1455,7 @@ run_stage "Repo Hygiene E2E (bd-udjrq)" "./scripts/e2e_repo_hygiene.sh"
 # Its orphan_baseline.txt row is deleted in the same commit, for the same
 # reason the Repo Hygiene row was: the audit fails on a stale baseline entry
 # as well as on a new orphan.
-run_stage "Read Coalescing E2E (bd-udjrq)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_read_coalescing.sh"
+run_stage "Read Coalescing E2E (bd-udjrq)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_read_coalescing.sh"
 
 # Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
 # no-Cargo test proves the shared resolver refuses a stale or missing binary
@@ -1629,7 +1736,7 @@ run_stage "Install Freshness Claim-Gate E2E (bd-3utv2.7)" "./scripts/e2e_install
 # Gate 6.057: code-anchored recall plus harness hooks — real scratch git
 # workspace, anchored memories, recall path/diff selectors, Claude Code hook
 # install, PreToolUse context injection, and Bash failure journal capture.
-run_stage "Recall Hooks E2E (bd-u875s.5)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_recall_hooks.sh"
+run_stage "Recall Hooks E2E (bd-u875s.5)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_recall_hooks.sh"
 
 # Gate 6.06: Replay lab smoke. This is intentionally no-Cargo and exercises
 # the public `ee lab swarm replay --dry-run` path plus ee.test_event.v1 logging
@@ -1689,7 +1796,7 @@ run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
 # against one workspace DB. Journal appends must never drop (the bd-d67os.26
 # flock-classification fix class, proven end-to-end), and progress-aware
 # advisory-lock waiting must keep every remember write lossless (bd-rs4cm).
-run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee && EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_single_shot_write_contention.sh"
+run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee && EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_single_shot_write_contention.sh"
 
 # Gate 6.1265: Capture-track real-binary E2E (bd-2vq2z.20). No-Cargo:
 # proves ambient capture suggestions are read-only and workspace-stable,
@@ -1700,21 +1807,21 @@ run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee &&
 # own PATH default, so this stage validated whatever `ee` was installed
 # (bd-smxdr). Passing both names keeps the pin visible at the call site rather
 # than depending on an export several hundred lines away.
-run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
+run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
 
 # Gate 6.1266: Shadow retrieval-tuning E2E (bd-2tehh.4 / ADR 0070). Real
 # binary: sparse corpus abstains with the fixture-backed degraded code and
 # persists the report; promote refuses abstained reports with exit 7;
 # a promotable report dry-runs without writing, applies the [search]
 # overlay, and demote restores the prior config bytes exactly.
-run_stage "Shadow Retrieval Tuning E2E (bd-2tehh.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_shadow_retrieval_tuning.sh"
+run_stage "Shadow Retrieval Tuning E2E (bd-2tehh.4)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_shadow_retrieval_tuning.sh"
 
 # Gate 6.1267: Global knowledge lane E2E (bd-1bfwa.4). Three real
 # workspaces + a hermetic XDG user-global store: evidence-gated promote
 # (branch asserted from the actual trust class), cross-workspace
 # storeLane=global surfacing, participate=false isolation with the
 # honest global_lane_disabled code, and demote-global tombstoning.
-run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_global_lane.sh"
+run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_global_lane.sh"
 
 # Gate 6.1268: Beads export-integrity classifier self-test (bd-2p297.1/.2).
 # Fixture-driven: safe-repair candidacy, destructive-export refusal, merge
@@ -1726,18 +1833,18 @@ run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repa
 # empty-graph honesty, hub-pattern suggestion with opposed-polarity
 # contradiction typing, --propose emission + re-propose dedup, and the
 # curate validate/apply lifecycle creating the typed link.
-run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_graph_intel.sh"
+run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_graph_intel.sh"
 
 # Gate 6.12695: Session-resume E2E (bd-resume-verb-v0f57). Real binary:
 # empty-store no-session-evidence honesty, tagged-session grouping, revisit
 # decisions + next-tagged open loops, and the superseded-note stale marker.
-run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_resume.sh"
+run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_resume.sh"
 
 # Gate 6.12696: Memory-debt E2E slice 1 (bd-3ap2m.4). Real binary: planted
 # orphan detected with an Actionable suggested command (healthy linked
 # control stays clean), resolving the debt strictly shrinks the class count,
 # and repeated missed searches form a learn-gaps cluster.
-run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_memory_debt.sh"
+run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_memory_debt.sh"
 
 # Gate 6.12697a-d: four e2e suites that were referenced by NOTHING (bd-smxdr).
 # (Numbered after 6.12696 memory-debt; 6.1269 is graph-intel.)
@@ -1762,10 +1869,10 @@ run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\"
 # stays permanently red is the appearance-of-coverage pattern this session has
 # been removing; blocking forces the real decision, which is fix or retire.
 # Each pins EE_BIN/EE_BINARY: they carried a PATH default until 48b20809f.
-run_stage "Agent Docs Env E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_agent_docs_env.sh"
-run_stage "Coverage Gap E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_coverage_gap.sh"
-run_stage "Timeline E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_timeline.sh"
-run_stage "Trust Freshness E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_trust_freshness.sh"
+run_stage "Agent Docs Env E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_agent_docs_env.sh"
+run_stage "Coverage Gap E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_coverage_gap.sh"
+run_stage "Timeline E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_timeline.sh"
+run_stage "Trust Freshness E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_trust_freshness.sh"
 
 # Gate 6.12698a-j: bd-udjrq triage — ten e2e suites that were invoked by
 # nothing, now executed. 3,047 lines of assertions across twelve orphans were
@@ -1793,59 +1900,59 @@ run_stage "Trust Freshness E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_
 #                             emit false assert_fails against a stale binary;
 #                             wiring it now would create exactly the
 #                             permanently-red stage this triage exists to avoid.
-run_stage "Anchors E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_anchors.sh"
-run_stage "Bridge Exemption E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_bridge_exemption.sh"
-run_stage "Command Inventory E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_command_inventory.sh"
-run_stage "Delivery E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_delivery.sh"
-run_stage "Provenance Reverify E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_provenance_reverify.sh"
-run_stage "Reach E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_reach.sh"
-run_stage "Rerank Precision Gain E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_rerank_precision_gain.sh"
-run_stage "Reservation Pressure E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_reservation_pressure.sh"
-run_stage "Search Weight Config E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_search_weight_config.sh"
-run_stage "Similar Scope E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_similar_scope.sh"
+run_stage "Anchors E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_anchors.sh"
+run_stage "Bridge Exemption E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_bridge_exemption.sh"
+run_stage "Command Inventory E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_command_inventory.sh"
+run_stage "Delivery E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_delivery.sh"
+run_stage "Provenance Reverify E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_provenance_reverify.sh"
+run_stage "Reach E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_reach.sh"
+run_stage "Rerank Precision Gain E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_rerank_precision_gain.sh"
+run_stage "Reservation Pressure E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_reservation_pressure.sh"
+run_stage "Search Weight Config E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_search_weight_config.sh"
+run_stage "Similar Scope E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_similar_scope.sh"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are
 # advisory-only and offline/no-network.
-run_stage "Ergonomics E2E (bd-1et0v.22)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_ergonomics.sh"
+run_stage "Ergonomics E2E (bd-1et0v.22)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_ergonomics.sh"
 
 # Gate 6.128: concise default doctor real-binary E2E (bd-1et0v.15). No-Cargo:
 # proves default `ee doctor --json` exposes only the compact core verdict,
 # actionable core repairs, and advisory summary while `ee doctor --full --json`
 # retains the exhaustive mesh/RCH/verification diagnostic blocks.
-run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_concise.sh"
+run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_doctor_concise.sh"
 
 # Gate 6.129: doctor-health real-binary E2E (bd-1et0v.21). No-Cargo:
 # proves initialized workspaces are green by default, concise output stays
 # compact, --full retains exhaustive advisory/host-calibration diagnostics, and
 # synthetic CASS/RCH advisory failures do not flip the top-line posture.
-run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_health.sh"
+run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_doctor_health.sh"
 
 # Gate 6.1292: memory-health scorecard real-binary E2E (bd-2vq2z.14).
 # No-Cargo: proves scorecard schema, debt snapshot trend reads, duplicate/
 # provenance debt scoring, top repair actions, and read-only determinism.
-run_stage "Health Scorecard E2E (bd-2vq2z.14)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_health_scorecard.sh"
+run_stage "Health Scorecard E2E (bd-2vq2z.14)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_health_scorecard.sh"
 
 # Gate 6.1293: consolidation Maintain-loop real-binary E2E (bd-1oep7).
 # No-Cargo: proves steward consolidation_pass dry-run non-mutation, budget
 # cancellation, deterministic dedupe, consolidate-absorb apply (lineage,
 # tombstone, audit chain), workflow-emitted index refresh truthfulness,
 # deduplicated search, and idempotent re-runs.
-run_stage "Consolidation E2E (bd-1oep7)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_consolidation.sh"
+run_stage "Consolidation E2E (bd-1oep7)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_consolidation.sh"
 
 # Gate 6.1295: embedding-native retrieval real-binary E2E (bd-2vq2z.19).
 # No-Cargo and no-download: uses EE_EMBED_MODEL_FIXTURE_DIR when a
 # pre-provisioned model cache is available, otherwise asserts the explicit
 # hash/lexical degradation path. Covers similar, remember-time dedupe,
 # curation dedupe proposals, rerank posture, and eval precision metrics.
-run_stage "Embedding Native E2E (bd-2vq2z.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_embedding_native.sh"
+run_stage "Embedding Native E2E (bd-2vq2z.19)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_embedding_native.sh"
 
 # Gate 6.1296: bundled embeddings regression E2E (bd-1et0v.19). No-Cargo:
 # proves the analyst paraphrase regression, fresh semantic-ready posture,
 # honest hash fallback degradation, eval semantic-recall gain, and the
 # opt-in real-download lifecycle without downloading by default.
-run_stage "Bundled Embeddings E2E (bd-1et0v.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_bundled_embeddings.sh"
+run_stage "Bundled Embeddings E2E (bd-1et0v.19)" "EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_bundled_embeddings.sh"
 
 # Gate 6.1297: pure-Rust native reranker real-binary E2E (bd-1nl13.14).
 # Every profile proves dynamic ORT-free linkage plus honest missing/rejected-
