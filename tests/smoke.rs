@@ -5296,13 +5296,64 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             "context degradation artifact should exist",
         )?;
     } else {
-        let provenance_entries = context_json
-            .pointer("/data/pack/provenanceFooter/entries")
+        // THE FIXTURE WAS WRONG HERE TOO, and for the same reason as the
+        // eligibility assertion above: it asserted a shape the product
+        // deliberately stopped emitting.
+        //
+        // This read /data/pack/provenanceFooter/entries. That array was REMOVED
+        // on purpose -- src/output/mod.rs:3238 says so in the product's own
+        // words: "Bead bd-2pe1z (A1 phase 2): drop provenanceFooter.entries[].
+        // Each entry's sourceIndex is now emitted inline on the matching
+        // items[] entry (A1 phase 1). The summary fields (memoryCount,
+        // sourceCount, schemes) remain -- they are aggregate stats with no
+        // per-item home."
+        //
+        // So the pointer could never resolve, `.ok_or` fired, and the message
+        // blamed a missing footer for a field that was intentionally retired.
+        // PRE-EXISTING, not caused by the eligibility repair: the product is
+        // byte-identical across that commit (git diff 61962c510^ 61962c510 --
+        // src/ is empty). It was simply unreachable, because the eligibility
+        // ensure at :5178 failed first -- which is what made the original test
+        // able to report only one problem at a time.
+        //
+        // The intent -- a non-empty pack must carry provenance -- is preserved
+        // and now checked where the product actually puts it.
+        let pack_items = context_json
+            .pointer("/data/pack/items")
             .and_then(serde_json::Value::as_array)
-            .ok_or("non-empty context pack must include provenance footer entries")?;
+            .ok_or("non-empty context pack must expose items[]")?;
+        // Anti-vacuity: an all-items-have-provenance loop is satisfied by zero
+        // items, which is exactly the state this branch already believes it has
+        // ruled out. Say so rather than relying on the branch condition.
         ensure(
-            !provenance_entries.is_empty(),
-            "retrieved context items must include provenance",
+            !pack_items.is_empty(),
+            "this branch is the NON-EMPTY pack case, so items[] must be non-empty",
+        )?;
+        let missing_source_index: Vec<usize> = pack_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.get("sourceIndex").is_none())
+            .map(|(index, _)| index)
+            .collect();
+        ensure(
+            missing_source_index.is_empty(),
+            format!(
+                "every pack item must carry the inline sourceIndex that replaced \
+                 provenanceFooter.entries[] (bd-2pe1z A1 phase 1); {} of {} item(s) lack it: {:?}",
+                missing_source_index.len(),
+                pack_items.len(),
+                missing_source_index
+            ),
+        )?;
+        // The aggregate half the same commit KEPT. Asserting only the per-item
+        // side would stop noticing if the footer itself vanished.
+        let source_count = context_json
+            .pointer("/data/pack/provenanceFooter/sourceCount")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("non-empty context pack must retain provenanceFooter.sourceCount")?;
+        ensure(
+            source_count > 0,
+            format!("a non-empty pack must cite at least one source, got sourceCount {source_count}"),
         )?;
     }
 
