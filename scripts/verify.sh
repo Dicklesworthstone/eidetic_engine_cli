@@ -2015,16 +2015,39 @@ fi
 # a guard that would be right to red. p50 stays 120: grading parses a log that
 # was captured anyway.
 #
-# BOTH EXITS ARE READ. `${PIPESTATUS[0]}` is cargo's; the grader's is its own. A
-# green grade over a failing cargo run, or a green cargo run over an unreadable
-# log, must not become a pass -- one value cannot express two states.
+# BOTH EXITS ARE READ -- see the capture comment inside the function for why
+# that needs `||` rather than a bare statement, and what happened when it did
+# not. `${PIPESTATUS[0]}` is cargo's; the grader's is its own. A green grade over
+# a failing cargo run, or a green cargo run over an unreadable log, must not
+# become a pass -- one value cannot express two states.
 unit_contract_golden_tests() {
-    local log rc grade
+    local log rc=0 grade=0
     log="$(mktemp "${TMPDIR:-/tmp}/ee-unit-contract-golden.XXXXXX")"
-    cargo test --workspace --lib --bins --tests --examples -- --test-threads=1 2>&1 | tee "$log"
-    rc=${PIPESTATUS[0]}
-    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets "$log"
-    grade=$?
+    # CAPTURE THROUGH `||`, NEVER AS A BARE STATEMENT FOLLOWED BY $?.
+    #
+    # verify.sh:2 is `set -euo pipefail`. A bare `cargo ... | tee` that fails
+    # makes the pipeline non-zero and ABORTS THIS FUNCTION AT THAT LINE, so the
+    # `rc=${PIPESTATUS[0]}` beneath it never executes -- and the same for a bare
+    # grader call followed by `grade=$?`. Both reads, both diagnostics and the
+    # `rm -f` were unreachable in the first version of this function.
+    #
+    # Measured in a mirror of run_stage's exact shape (set -euo pipefail, the
+    # function evaluated inside an `if` and piped to tee), because bash's
+    # documented "-e is ignored in an if condition" does NOT save this and
+    # reading the manual said otherwise:
+    #     bare form, inner cmd fails  -> the line after the pipeline NEVER RAN
+    #     `||` form,  inner cmd fails -> rc=1 read, grade read, stage fails
+    #     `||` form,  all succeed     -> both read, stage passes
+    # Commands on the left of `||` are exempt from -e, so the capture survives.
+    #
+    # This is the SECOND time this shape has shipped dead code in this file
+    # family today (4c3678daf was the first). It is not decidable by reading a
+    # diff; only by running both arms.
+    cargo test --workspace --lib --bins --tests --examples -- --test-threads=1 2>&1 \
+        | tee "$log" || rc=${PIPESTATUS[0]}
+    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets "$log" || grade=$?
+    # Unconditional, and before any return: in the first version this sat on the
+    # unreachable path, so every failing run leaked a temp file.
     rm -f "$log"
     if [ "$rc" -ne 0 ]; then
         printf 'verify: cargo test exited %s.\n' "$rc" >&2
