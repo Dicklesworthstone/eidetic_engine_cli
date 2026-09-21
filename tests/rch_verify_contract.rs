@@ -8678,3 +8678,123 @@ fn rch_verify_remediation_beads_are_open_or_recorded_as_stale() -> TestResult {
 
     Ok(())
 }
+
+/// Every blocker kind the verifier can PRODUCE has a remediation mapping, and
+/// there is no substituting default to hide a kind that does not. bd-sh3ew.
+///
+/// WHY THE TEST ABOVE DOES NOT COVER THIS, though it already reads liveness.
+/// Its population is "bead-id literals appearing inside `remediation_bead_for`".
+/// Adding a thirteenth blocker kind without a mapping changes no literal in
+/// that function, so the citation set is identical and the test stays green --
+/// while every run of the new kind cites whatever the fallback returns. Worse,
+/// the fallback's id was itself on that test's KNOWN_STALE baseline, so its
+/// staleness was not merely invisible, it was explicitly excused. A gate can be
+/// correct over a perfect population and still be blind to the thing that
+/// breaks it: this defect fires by changing a set the gate does not read.
+///
+/// So this is a set-difference, in both directions:
+///   - a kind with no mapping would be answered by a default, or by nothing;
+///   - a mapping key no kind can produce is dead weight that reads as coverage.
+///
+/// AND IT ASSERTS THE ABSENT DEFAULT, because the set-difference only has teeth
+/// while there is no fallback. Re-add `mapping.get(kind, "bd-...")` and an
+/// unmapped kind silently resolves again -- the sets would still agree while
+/// the defect this exists to prevent is back. The two assertions are
+/// load-bearing together and neither is sufficient alone.
+#[test]
+fn rch_verify_every_blocker_kind_has_a_remediation_mapping() -> TestResult {
+    let script = fs::read_to_string(script_path())
+        .map_err(|error| format!("read rch_verify.sh: {error}"))?;
+
+    // A nested fn with an explicit lifetime, not a closure: a closure returning
+    // `Result<&str, _>` ties the borrow to its `name` argument rather than to
+    // `script`, which does not compile.
+    fn slice_python_fn<'a>(script: &'a str, name: &str) -> Result<&'a str, String> {
+        script
+            .split_once(&format!("def {name}("))
+            .and_then(|(_, rest)| rest.split_once("\ndef "))
+            .map(|(body, _)| body)
+            .ok_or_else(|| format!("{name} not found in rch_verify.sh"))
+    }
+    let slice_fn = |name: &str| slice_python_fn(&script, name);
+
+    // The kinds the verifier can emit: every string literal `blocker_kind_for`
+    // returns. Its `return None` arm is guarded by `if blocker_kind:` at the
+    // call site and needs no mapping.
+    let kind_body = slice_fn("blocker_kind_for")?;
+    let mut kinds: BTreeSet<String> = BTreeSet::new();
+    for chunk in kind_body.split("return \"").skip(1) {
+        if let Some(end) = chunk.find('"') {
+            kinds.insert(chunk[..end].to_owned());
+        }
+    }
+
+    let map_body = slice_fn("remediation_bead_for")?;
+    let mut mapped: BTreeSet<String> = BTreeSet::new();
+    for line in map_body.lines() {
+        let Some(rest) = line.trim().strip_prefix('"') else {
+            continue;
+        };
+        let Some((key, value)) = rest.split_once("\": ") else {
+            continue;
+        };
+        if value.trim_start().starts_with("\"bd-") {
+            mapped.insert(key.to_owned());
+        }
+    }
+
+    // EMPTY-WORLD GUARDS, on both parses. An empty set is a subset of
+    // everything, so either parser breaking would make this test agree with any
+    // tree at all. Asserted before the comparison, not after it.
+    if kinds.len() < 8 {
+        return Err(format!(
+            "parsed only {} blocker kinds from blocker_kind_for; the function's \
+             shape changed and this test can no longer read it",
+            kinds.len()
+        ));
+    }
+    if mapped.len() < 8 {
+        return Err(format!(
+            "parsed only {} mapping keys from remediation_bead_for; the mapping \
+             shape changed and every kind would read as unmapped",
+            mapped.len()
+        ));
+    }
+
+    let unmapped: Vec<&String> = kinds.difference(&mapped).collect();
+    let dead: Vec<&String> = mapped.difference(&kinds).collect();
+    if !unmapped.is_empty() || !dead.is_empty() {
+        return Err(format!(
+            "blocker kinds and remediation mappings disagree.\nKINDS WITH NO \
+             MAPPING (each answered by the fallback, or by nothing): \
+             {unmapped:?}\nMAPPING KEYS NO KIND CAN PRODUCE (dead entries that \
+             read as coverage): {dead:?}"
+        ));
+    }
+
+    // No substituting default. `mapping.get(blocker_kind)` is the contract;
+    // `mapping.get(blocker_kind, "bd-...")` is the defect bd-sh3ew removed.
+    let returns: Vec<&str> = map_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("return mapping.get("))
+        .collect();
+    if returns.len() != 1 {
+        return Err(format!(
+            "expected exactly one `return mapping.get(...)` in \
+             remediation_bead_for, found {}: {returns:?}",
+            returns.len()
+        ));
+    }
+    if returns[0] != "return mapping.get(blocker_kind)" {
+        return Err(format!(
+            "remediation_bead_for substitutes a default for unmapped blocker \
+             kinds: `{}`. An unmapped kind must yield NO bead -- a substituted \
+             id is emitted beside retry_after and tells an operator to wait on \
+             work that may already be closed (bd-sh3ew).",
+            returns[0]
+        ));
+    }
+
+    Ok(())
+}

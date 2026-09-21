@@ -4,6 +4,41 @@
 //! transcripts. A complete bounded view must still be reconciled for an
 //! existing session. Keep old evidence identities, linkage and security posture
 //! exactly intact; publication work and redaction audits commit with new rows.
+//!
+//! # IF `cargo clippy --lib` SENT YOU HERE, IT IS NOT YOUR CHANGE
+//!
+//! This module is DECLARED AND UNCALLED, so `-D warnings` turns six `dead_code`
+//! lints into errors and the library refuses to compile:
+//!
+//! ```text
+//! error: struct `BackfillResult` is never constructed          backfill.rs:21
+//! error: function `backfill_session` is never used             backfill.rs:28
+//! error: function `same_upstream_reference` is never used       backfill.rs:187
+//! error: function `snapshot_hash` is never used                 backfill.rs:193
+//! error: function `digest` is never used                        backfill.rs:206
+//! error: function `backfill_error` is never used                backfill.rs:210
+//! error: could not compile `eidetic-engine` (lib) due to 6 previous errors
+//! ```
+//!
+//! Tracked as **bd-4aw2d** (the red-main condition) and caused by **bd-5uym0**
+//! (the public importer never invokes the backfill it ships). It predates any
+//! change you are making; confirmed by execution on a clean committed base at
+//! 164e86d77.
+//!
+//! WHY IT IS STILL HERE. 6a425cf69 added `#[path = "backfill.rs"] mod backfill;`
+//! at src/cass/import.rs:1529 to clear a MODULE REACHABILITY red — the file
+//! existed and had never compiled. Declaring an unused module is exactly what
+//! makes `dead_code` fire, so the two gates are in opposition and cannot both be
+//! green while this module exists unused. The commit introduced no defect; it
+//! moved a true statement from one gate to another.
+//!
+//! BOTH EXITS ARE SOMEONE ELSE'S TO TAKE: wire the importer to call this (that
+//! is bd-5uym0's actual repair), or remove the file (a deletion requiring
+//! explicit authorisation). `#[allow(dead_code)]` here is a third option and a
+//! gate relaxation, so it is a decision rather than a lane's to make quietly.
+//!
+//! Do not "fix" this by silencing it in passing, and do not spend time
+//! attributing it to your own diff.
 
 use std::collections::{BTreeMap, BTreeSet};
 

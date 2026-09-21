@@ -1152,6 +1152,94 @@ output volume, an explicit `[ -d ]` over a path prefix, a parsed value over a
 substring match. A proxy is a predicate you have not checked the failure case of
 yet.
 
+### The third blindness: a field that answers no question at all
+
+The two blindnesses above both assume the guard *asks something*. A third shape
+skips the question. It is the one this repo actually accumulated, so it gets its
+own section and a census.
+
+**A field whose name is a question must have a line that answers it. If you
+cannot point at that line, the field is decoration** — and decoration shaped like
+`success` is worse than no field, because it is the field a consumer reaches for
+first.
+
+Five landed instances, ordered by how hard each was to *see* rather than to fix:
+
+| # | shape | the defect | fix |
+|---|---|---|---|
+| 1 | **the proxy** | the predicate is real but measures a stand-in — `--version` printing a non-empty string, where a Linux ELF's `exec format error` is non-empty too | `4397160ab` |
+| 2 | **the collapsed range** | the predicate is right and its *type* cannot carry the answer — five terminal statuses folded into exit 1 | `aefc006ef` |
+| 3 | **the overloaded absence** | one `null` standing for three distinct states: not attempted, attempted-and-empty, deliberately bypassed | `a527f4f27` |
+| 4 | **the wrong question** | the field is computed, from a predicate about a *different subject* — "did the wrapper execute its own logic" inside a receipt reporting whether verification happened | `923a2a4c8` |
+| 5 | **the literal** | the field is a constant. No question is asked at all | `4f474df02` |
+
+The ordering is the point. Going down the table the fix gets **easier** and the
+defect gets **harder to notice in review**, because there is progressively less
+wrongness on the page to catch the eye. At the bottom, `"success": True` sitting
+in a payload has no wrong question visible — there is no question — and a
+reviewer's eye supplies the justification the code never gave. Instance 5 sat two
+lines above a `status` that already had four values, one of them `healthy`, and
+survived a survey that was *specifically hunting this class*.
+
+**Four of the five were in `scripts/rch_verify.sh`.** Not because that file is
+badly written, but because it is the repo's proof emitter: it is where fields
+named `success`, `status` and `verdict` are *supposed* to live, so it is where a
+dishonest one is camouflaged by a hundred honest ones. Density follows the
+vocabulary. When auditing for this class, go to the file that legitimately speaks
+the language.
+
+#### The check
+
+Cheap, and it finds all five shapes:
+
+> For each success-shaped field, name the expression that produces it. Then ask
+> whether that expression's **range** has as many distinct values as the subject
+> has outcomes.
+
+- a constant has range 1 — instance 5
+- `exit 1` has range 2 against five statuses — instance 2
+- `null` has range 1 against three states — instance 3
+- range is fine but the *subject* is wrong — instance 4
+- range and subject fine but the measurement is a stand-in — instance 1
+
+#### Three states, not two
+
+A pass and an abstention must not share an exit code or a status word
+(`c9f49b736`). A dry run that never executed has no success verdict, and
+emitting `true` there is this same defect pointed the other way. `923a2a4c8`
+carries the precedent: `exit_code null` + caller-declined → `success: null`,
+`verdict: "abstained"`. An argument *refusal* also never executed, but it is a
+refusal rather than an abstention and keeps `false`.
+
+The corollary bites when one schema has two producers: if producer A carries
+`success` and producer B omits it, a consumer that learned `.success` from A
+reads missing-and-falsy from B, which is this class inverted — **absence
+indistinguishable from failure**. Tracked for `ee.rch.worker_root_canary.v1` at
+`bd-ldypi`.
+
+#### Do not hunt the literal
+
+The obvious sweep is the wrong sweep, and it costs real time to rediscover that.
+Measured on this tree: 440 `"success": true` literals → 295 on production paths
+→ 94 beside a computed failure-bearing sibling → **0 real**, because the
+`ee.response.v2` envelope contract makes the literal *correct* almost everywhere.
+`success` there describes whether the command completed and produced a
+well-formed response; partial failure belongs in `degraded[]`.
+
+So hunt the emitters instead: **find the functions that take a success-shaped
+argument, then read what their call sites pass alongside a non-zero exit.** In
+this repo that shape is rare — five Rust functions — which is itself the warning.
+The danger is not volume. It is that one such emitter feeds every receipt a lane
+reads, and thirteen call sites passed `true` beside `exit_code 1` through exactly
+one of them.
+
+One caveat on resolvers built for this hunt: **a fixed-line window is the defect,
+not its size.** Resolve by structure — brace-match the literal and record the
+key's nesting depth. A key at depth 1 describes *the command*; nested deeper it
+describes *the subject*, and `data.status = "mismatch"` from a replay that ran
+fine is a successful command reporting a mismatch. Lexically identical to the
+defect, structurally its opposite, and no window of any size separates them.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:

@@ -5347,9 +5347,24 @@ if "rch_worker_root_canary_active_project_exclusion" in degraded:
 if "rch_worker_root_canary_timeout" in degraded:
     repair_actions.append({"kind": "retry", "command": "scripts/rch_verify.sh --worker-root-canary --json", "summary": "Retry the bounded canary after RCH responds."})
 
+# COMPUTED FROM STATUS, NOT A LITERAL
+# (bd-success-shaped-signal-on-failure-l3pa4, a FOURTH instance in this file).
+#
+# This was `"success": True` unconditionally, while `status` two lines below can
+# be "healthy", "blocked", "timeout" or "unavailable" and nothing reassigned
+# success afterwards. So a canary that timed out, was blocked by an active
+# project exclusion, or found the required root missing still emitted
+# success=true beside its own degraded codes -- and a consumer keying on
+# `.success`, which is the field whose NAME invites exactly that, read a failed
+# probe as a pass.
+#
+# Same class as instance (2) in this file, whose fix at 923a2a4c8 computed
+# success from the exit code rather than asserting it. The literal form is the
+# easier half to spot and the harder half to notice in review, because there is
+# no wrong question being asked -- there is no question at all.
 payload = {
     "schema": "ee.rch.worker_root_canary.v1",
-    "success": True,
+    "success": status == "healthy",
     "generated_at": now,
     "status": status,
     "mode": "read_only_no_cargo",
@@ -5995,7 +6010,25 @@ def remediation_bead_for(blocker_kind):
         "topology_blocked": "bd-17c65.10.17.1.2",
         "local_fallback_refused": "bd-17c65.10.17.1",
     }
-    return mapping.get(blocker_kind, "bd-17c65.10.17.1")
+    # NO DEFAULT -- bd-sh3ew. This was `mapping.get(blocker_kind, "bd-17c65.10.17.1")`,
+    # answering every UNMAPPED blocker kind with a bead closed 2026-05-21.
+    #
+    # The value is not a hint. It lands in the persisted `known_blocker` entry
+    # beside `retry_after` and `expires_at`, so the receipt tells an operator:
+    # this is known, here is the bead, come back later. Against a closed bead
+    # that instruction costs more than silence -- the operator reads resolved
+    # work as their live blocker, waits out a retry window on nothing, and an
+    # agent treating `known_blocker` as "expected, not mine" excuses a real
+    # failure on a four-month-old closure.
+    #
+    # Deliberately NOT repointed at a fresher id. bd-17c65.10.17.1's own close
+    # reason names two successors for the residual work, bd-17c65.10.17.1.2 and
+    # bd-17c65.10.17.1.4, and BOTH ARE ALSO CLOSED -- there is no live bead in
+    # that chain to pick. Substituting one by inference is how a wrong reference
+    # becomes permanent, which is the rule bd-5d8rx exists to enforce.
+    #
+    # "I have no mapping for this kind" is true and immediately actionable.
+    return mapping.get(blocker_kind)
 
 def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     source_state_hash = (
@@ -6087,6 +6120,11 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     if ttl_seconds < 60:
         ttl_seconds = 60
     expires_at = now + dt.timedelta(seconds=ttl_seconds)
+    # An absent remediation bead must be legible AS ABSENT (bd-sh3ew). A bare
+    # null reads like a field nobody got round to filling in; "unmapped" says
+    # the verifier looked and has no bead for this kind. Those are two states
+    # and one null cannot carry both.
+    remediation_bead = remediation_bead_for(blocker_kind)
     entry = {
         "schema": "ee.rch.known_blocker.v1",
         "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
@@ -6108,7 +6146,8 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "last_seen": format_time(now),
         "expires_at": format_time(expires_at),
         "retry_after": format_time(expires_at),
-        "remediation_bead": remediation_bead_for(blocker_kind),
+        "remediation_bead": remediation_bead,
+        "remediation_bead_status": "mapped" if remediation_bead else "unmapped",
         "override_used": False,
     }
     if active_project_details:
@@ -7159,6 +7198,38 @@ if [ -n "$PROOF_BROKER_LEDGER" ]; then
             fi
             ;;
     esac
+fi
+
+# A BYPASS RECORDED AS AN ABSENCE IS NOT RECORDED (bd-jui80).
+#
+# RCH_VERIFY_PROOF_BROKER_ENABLED=0 makes :295 skip assigning the default
+# ledger, so the block above -- guarded on `[ -n "$PROOF_BROKER_LEDGER" ]` --
+# never executes and PROOF_BROKER_JSON keeps its :121 default of "null".
+# Validation at :6858 accepts 0 explicitly, so this is a supported, silent
+# bypass.
+#
+# The problem is not only that it is permitted; it is that NULL ALREADY MEANS
+# THREE THINGS. proof_broker is also null under --dry-run, and on any lane that
+# never had a broker at all. One value cannot express three states, and this is
+# the artifact whose entire job is to be evidence: "deliberately bypassed" and
+# "not applicable here" were indistinguishable to every reader of the proof.
+#
+# Demonstrated with two real pinned runs, identical command, one variable
+# changed: broker on -> {status: checked, verdict: dispatch_allowed} and it
+# REFUSED that dispatch with proof_broker_source_state_mismatch; broker off ->
+# null and no code of any kind.
+#
+# THIS MAKES THE BYPASS VISIBLE, NOT IMPOSSIBLE. Refusing it outright is the
+# clause's plain reading and it is NOT done here, deliberately: every pinned-lane
+# contract test in tests/rch_verify_contract.rs runs through a helper (:48) that
+# sets this variable to 0, because a real broker writes a ledger and takes
+# reservations and a hermetic test must not. That caller is a requirement, not a
+# bug, so making it fatal would break the suite that proves this lane works.
+# Separating "bypassed for a declared test reason" from "bypassed in production"
+# is a design decision recorded on bd-jui80 rather than taken here.
+if [ -z "$PROOF_BROKER_LEDGER" ] && [ "$PROOF_BROKER_ENABLED" = "0" ]; then
+    PROOF_BROKER_JSON='{"status":"bypassed","enabled":false,"verdict":null,"reason":"RCH_VERIFY_PROOF_BROKER_ENABLED=0","admissionSurface":null}'
+    proof_broker_degraded+=("rch_verify_proof_broker_bypassed")
 fi
 
 if [ "$KNOWN_BLOCKER_ENABLED" = "1" ]; then
