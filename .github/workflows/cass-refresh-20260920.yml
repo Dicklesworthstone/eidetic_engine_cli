@@ -9,11 +9,11 @@ permissions:
   contents: read
 concurrency:
   group: cass-refresh-delivery-20260920
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   apply-and-commit:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     timeout-minutes: 15
     permissions:
       contents: write
@@ -49,7 +49,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
           git commit -m 'feat(cass): refresh growing sessions and backfill retained evidence' -m 'Revisit known CASS sessions when evidence capture is enabled. Preserve session/evidence identities, attachments and admission decisions; reject changed or missing retained excerpts. Atomically persist new screened spans, metadata, refresh/redaction audits and transition-specific index jobs. Reuse the complete-corpus publisher and reconcile unfinished work on unchanged retries. Add 17 database-backed regressions. Nightly rustfmt parsing, formatting and git diff checks passed; Rust compilation and runtime tests have not been run by this delivery.'
-          header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          header=$(python3 -c 'import base64,os; print(base64.b64encode(("x-access-token:" + os.environ["GH_TOKEN"]).encode()).decode())')
           echo "::add-mask::$header"
           for attempt in 1 2 3; do
             if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push origin HEAD:main; then
