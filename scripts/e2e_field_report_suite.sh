@@ -169,24 +169,58 @@ arm_auto_index_rebuild_request() {
     empty_index="$ws/empty-index"
     mkdir -p "$empty_index"
     pack_json="$( export EE_INDEX_DIR="$empty_index"; ee_in "$ws" pack "release checklist" --max-tokens 2000 --json )"
+    # Counts the degradation the pack ACTUALLY emits, not the status-surface code
+    # this line used to name. It recorded fell_back=0 on every run, which read as
+    # "the pack never degraded" and sent the diagnosis in the wrong direction for
+    # 39 hours. See the re-aim note below.
     fell_back="$(printf '%s' "$pack_json" \
-        | jq -r '[.degraded[]? | select(.code == "search_index_degraded")] | length')"
+        | jq -r '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length')"
     marker="$ws/.ee/index-rebuild-request.json"
 
     log_event arm_act bead_id "$bead" phase act check pack_fallback_probe \
         workspace "$ws" host "$SUITE_HOST" fell_back "${fell_back:-0}"
 
-    # Precondition assertion: the arm must PROVE it reached the path it tests.
-    # The PACK surfaces `search_index_degraded` (src/core/health.rs:329);
-    # `context_lexical_fallback` is the trigger reason recorded INTO the marker
-    # (src/core/index.rs:9838). Asserting the pack's own code here, and the
-    # marker's recorded code below, keeps each assertion single-shape.
+    # RE-AIMED AT THE BOUNDARY THIS ARM ACTUALLY EXERCISES (bd-1iupc.2).
+    #
+    # THE OLD FILTER WAS WRONG AND THE OLD COMMENT ARGUED AGAINST ITSELF. It read
+    # "The PACK surfaces `search_index_degraded` (src/core/health.rs:329)" --
+    # citing the HEALTH surface as evidence about the PACK. That code lives only
+    # in health.rs:329 and status.rs:4053/4542/7437 and is absent from
+    # ALL_DEGRADATION_CODES (src/models/degradation.rs:612), so the filter could
+    # never match a pack response and both this arm and dlr6a failed on it.
+    #
+    # PROBED on this exact scenario -- fresh workspace, memories, no index --
+    # the pack emits: pack_assembly_elapsed_over_budget, embed_model_unavailable,
+    # global_lane_migration_required. The pack DOES degrade; the filter missed it.
+    #
+    # WHY THE EXPECTATION FLIPS. This host has no embedding model, so the
+    # operative degradation is embed_model_unavailable, and the product then
+    # DELIBERATELY DECLINES to request a rebuild. src/core/index.rs:11056, in the
+    # product's own words:
+    #
+    #   "A missing embedding model is deliberately NOT a rebuild trigger
+    #    (bd-1iupc.2): rebuilding cannot conjure a model, and requesting one
+    #    there would imply a repair that cannot happen."
+    #
+    # Asserting a marker PRESENT here accused the product of failing to do
+    # something it is documented to refuse. This bead's scope item 3 already
+    # separates the two cases -- "no index -> rebuild" and "no embedding model ->
+    # NO rebuild attempt" -- and this arm runs in the second. The first case is
+    # owed and tracked separately; it needs a host that HAS a model.
+    #
+    # THE ABSENCE ASSERTION BELOW IS TWO-SIDED ON PURPOSE. "No rebuild marker"
+    # passes when the pack never ran, when the workspace never built, and when
+    # the whole mechanism is broken. So the degradation that MUST be present is
+    # asserted first; only then does the absence mean anything.
     assert_jq "$pack_json" \
-        '[.degraded[]? | select(.code == "search_index_degraded")] | length >= 1' \
-        "$bead: precondition — pack degraded because the index could not serve"
+        '(.degraded // .data.degraded // []) | length >= 1' \
+        "$bead: precondition — the pack actually degraded (guards the absence assertion below)"
+    assert_jq "$pack_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length >= 1' \
+        "$bead: precondition — the operative degradation is a missing embedding model"
 
-    assert_eq "$( [ -f "$marker" ] && echo present || echo missing )" "present" \
-        "$bead: lexical fallback records an index-rebuild request marker"
+    assert_eq "$( [ -f "$marker" ] && echo present || echo missing )" "missing" \
+        "$bead: no rebuild is requested when the embedding model is missing (bd-1iupc.2)"
     if [ -f "$marker" ]; then
         assert_jq "$(cat "$marker")" \
             '.schema == "ee.index.rebuild_request.v1"' \
@@ -249,9 +283,32 @@ arm_fallback_relevance_floor() {
     mkdir -p "$empty_index"
     pack_json="$( export EE_INDEX_DIR="$empty_index"; ee_in "$ws" pack "ucu" --max-tokens 2000 --json )"
 
+    # SAME CORRECTION AS THE x35vi ARM ABOVE, and it shares the same cause: this
+    # filter named `search_index_degraded`, a STATUS-surface code (health.rs:329,
+    # status.rs:4053/4542/7437) that is absent from ALL_DEGRADATION_CODES and is
+    # never present in a pack response. It could not match, so this arm's
+    # precondition failed on every run and its two downstream relevance
+    # assertions were VOID -- they read like live relevance-floor defects while
+    # the scorer under test had never run. Probed codes for this scenario:
+    # pack_assembly_elapsed_over_budget, embed_model_unavailable,
+    # global_lane_migration_required.
+    #
+    # Two clauses, not one: the pack must have degraded AT ALL (so an empty or
+    # failed pack cannot satisfy the relevance assertions below by having no
+    # items), and the operative degradation must be the missing embedding model
+    # that forces the index-free path on this host.
     assert_jq "$pack_json" \
-        '[.degraded[]? | select(.code == "search_index_degraded")] | length >= 1' \
-        "$bead: precondition — pack used the index-free fallback scorer"
+        '(.degraded // .data.degraded // []) | length >= 1' \
+        "$bead: precondition — the pack actually degraded"
+    assert_jq "$pack_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length >= 1' \
+        "$bead: precondition — pack used the index-free fallback scorer (no embedding model)"
+    # The relevance assertions below count ABSENCES (off-topic memories must not
+    # appear). An absent memory is also what an EMPTY pack produces, so require
+    # the pack to have selected something before reading anything into a zero.
+    assert_jq "$pack_json" \
+        '((.data.pack.items // []) | length) >= 1' \
+        "$bead: precondition — the pack selected at least one item, so a zero off-topic count means exclusion rather than an empty pack"
 
     log_event arm_act bead_id "$bead" phase act check substring_inflation_probe \
         workspace "$ws" host "$SUITE_HOST" off_topic "$off_topic_id" on_topic "$on_topic_id"
