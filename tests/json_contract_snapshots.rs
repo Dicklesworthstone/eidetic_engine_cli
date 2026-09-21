@@ -7,6 +7,7 @@ use ee::db::{
     DbConnection,
 };
 use ee::models::{PackId, WorkspaceId};
+use ee::obs::volatile_fields::normalize_pack_slo_measurements;
 use insta::assert_snapshot;
 use serde_json::{Map, Value, json};
 
@@ -37,12 +38,19 @@ impl JsonContractFixture {
         let index_dir = workspace.join(".ee").join("index");
         let runtime_dir = workspace.join(".runtime");
 
-        fs::create_dir_all(&runtime_dir).map_err(|error| {
-            format!(
-                "failed to create fixture runtime directory {}: {error}",
-                runtime_dir.display()
-            )
-        })?;
+        // bd-28kky: a private HOME, for the same reason .runtime is private.
+        // run_ee_at points HOME here so the running account's user-global
+        // memory lane cannot leak into these contracts.
+        let home_dir = workspace.join(".home");
+
+        for dir in [&runtime_dir, &home_dir] {
+            fs::create_dir_all(dir).map_err(|error| {
+                format!(
+                    "failed to create fixture directory {}: {error}",
+                    dir.display()
+                )
+            })?;
+        }
         seed_workspace(&workspace, &database)?;
         write_operating_profile_config(&workspace)?;
 
@@ -399,6 +407,26 @@ fn run_ee_at(binary: &Path, workspace: &Path, args: &[String]) -> Result<Output,
         .env_remove("EE_WORKSPACE")
         .env("PATH", "/usr/bin:/bin")
         .env("XDG_RUNTIME_DIR", workspace.join(".runtime"))
+        // bd-28kky. Keep the RUNNING USER'S user-global memory lane out of these
+        // contracts. Without this, `ee` resolves that account's global store and
+        // the snapshots record whatever state it happens to be in, INCLUDING its
+        // path: regenerating on an RCH worker wrote three
+        // `global_lane_migration_required` degradations carrying the worker
+        // account's home directory, moved degradationCount 2 -> 3 and rewrote the
+        // context summary -- none of which is about the surface under test. The
+        // scrubber normalises [WORKSPACE]/[DATABASE]/[INDEX]/[REPO]/[EE_BINARY]
+        // and timestamps; it does not know the global-store path, so nothing
+        // caught it.
+        //
+        // HOME ONLY, DELIBERATELY. An earlier attempt set XDG_DATA_HOME too and
+        // the test failed outright. src/core/index.rs:7517 process_ee_data_dir()
+        // resolves the EMBEDDING REGISTRY through that same XDG root, so moving
+        // it plausibly took the model registry with it and broke the fixture's
+        // own precondition (:374 requires embedding.mode == deterministic_hash).
+        // That mechanism is UNVERIFIED -- I never captured the failure text --
+        // so this change isolates the smaller variable and leaves XDG_DATA_HOME
+        // alone. scripts/e2e_overhaul/determinism.sh:588 sets HOME the same way.
+        .env("HOME", workspace.join(".home"))
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -439,17 +467,50 @@ fn parse_ee_json_output(output: Output, args: &[String]) -> Result<Value, String
 
 fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<Value, String> {
     let mut value = parse_ee_json_output(run_ee(fixture, &args)?, &args)?;
-    scrub_json_contract(&mut value, fixture);
+    scrub_json_contract(&mut value, fixture)?;
     Ok(value)
 }
 
-fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
+fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) -> Result<(), String> {
     // Document-level first: the timing normalization has to see the whole
     // response at once, because one degraded list is serialized at both
     // `.degraded` and `.data.degraded` and its length is echoed into counts
     // and prose elsewhere in the tree.
     normalize_timing_degradations(value);
+    // ...and the pack SLO is the SECOND place the same wall clock is published.
+    //
+    // `normalize_timing_degradations` above only filters `degraded[]`. It has
+    // no reference to `slo`, so `slo.elapsedStatus` -- classified straight off
+    // `elapsed_ms` by `PackAssemblySloStatus::for_elapsed_ms` (src/pack/mod.rs)
+    // -- and the `slo.status` rollup that takes the worst of it survived
+    // unnormalized. A loaded worker records `warning` there where an idle
+    // laptop records `within_budget`, so freezing either into a snapshot bakes
+    // one host's load into a committed contract (bd-28kky).
+    //
+    // This calls the PRODUCTION definition of that volatile channel rather
+    // than a second, test-local one. `src/obs/volatile_fields.rs` already names
+    // `/data/pack/slo/{status,elapsedStatus}` and `/actuals/elapsedMs` as the
+    // unsigned producer measurements; a copy here would be free to drift from
+    // it, and the drift would show up as a flake rather than as a red.
+    //
+    // ORDER IS LOAD-BEARING: this must run BEFORE `scrub_json_contract_recursive`,
+    // which zeroes every `*Ms` field in the tree. The validator checks that
+    // `elapsedStatus` agrees with `elapsedMs` against the real budget
+    // thresholds, and it rejects a `budgetClass.elapsedMsTarget` of 0. After
+    // the recursive scrub every one of those inputs reads 0 and the check
+    // could no longer be made at all.
+    //
+    // An `Err` is not volatility, it is an inconsistent SLO -- a status that
+    // disagrees with the measurement it is supposed to summarize -- so it fails
+    // the test with the producer's own message instead of being scrubbed away.
+    // That trade is what keeps this from being a weakening: the snapshot gives
+    // up three frozen literals that only ever asserted one host's reading, and
+    // gets back an algebraic assertion re-checked against the real numbers on
+    // every single run.
+    normalize_pack_slo_measurements(value)
+        .map_err(|error| format!("pack SLO measurements are not self-consistent: {error}"))?;
     scrub_json_contract_recursive(value, fixture);
+    Ok(())
 }
 
 fn scrub_json_contract_recursive(value: &mut Value, fixture: &JsonContractFixture) {
@@ -789,13 +850,119 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
     ] {
         scrubbed = scrubbed.replace(path.to_string_lossy().as_ref(), replacement);
     }
-    scrub_pack_hash_comments(&scrubbed)
+    scrub_pack_hash_comments(&scrub_daemon_socket_path(&scrubbed))
+}
+
+/// Replace the daemon socket path, which CANNOT be stable in a snapshot.
+///
+/// bd-28kky. `ee doctor` reports the socket it looked for, and that path varies
+/// on two independent axes that the path-literal scrubbing above cannot reach:
+///
+///   * the PARENT is per-UID. src/daemon/mod.rs:176 uses
+///     `${XDG_RUNTIME_DIR}/ee` only when the runtime dir follows the
+///     systemd-user 0700 contract, and otherwise falls back to
+///     `${TMPDIR:-/tmp}/ee-${uid}`. That is uid 1000 on an RCH worker and a
+///     different uid on a dev Mac.
+///   * the FILENAME is per-run. workspace_daemon_socket_path() is
+///     `d-{blake3(canonical_workspace)[..24]}.sock`, and this fixture builds a
+///     UNIQUE temp workspace per run, so the digest changes every time. Measured:
+///     two regenerations minutes apart produced d-b5752ef3... and d-f97be5b5...
+///
+/// The workspace path itself is already scrubbed to [WORKSPACE], but the DIGEST
+/// of it is not a substring of it, so no path replacement can catch this. It
+/// needs its own rule.
+fn scrub_daemon_socket_path(text: &str) -> String {
+    let mut scrubbed = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/ee-") {
+        let Some(sock) = rest[start..].find(".sock") else {
+            break;
+        };
+        let candidate = &rest[start..start + sock + ".sock".len()];
+        // Only a per-uid daemon socket: /ee-<digits>/d-<hex>.sock
+        let looks_like_socket = candidate
+            .strip_prefix("/ee-")
+            .and_then(|tail| tail.split_once('/'))
+            .is_some_and(|(uid, file)| {
+                !uid.is_empty()
+                    && uid.bytes().all(|b| b.is_ascii_digit())
+                    && file.starts_with("d-")
+                    && file.ends_with(".sock")
+            });
+        if !looks_like_socket {
+            scrubbed.push_str(&rest[..start + 4]);
+            rest = &rest[start + 4..];
+            continue;
+        }
+        // Walk back over the parent directory so the whole path is replaced.
+        let dir_start = rest[..start]
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + 1);
+        scrubbed.push_str(&rest[..dir_start]);
+        scrubbed.push_str("[DAEMON_SOCKET]");
+        rest = &rest[start + sock + ".sock".len()..];
+    }
+    scrubbed.push_str(rest);
+    scrubbed
 }
 
 #[test]
 fn pack_id_scrubbing_distinguishes_ids_from_degraded_codes() {
     assert!(PACK_ID.parse::<PackId>().is_ok());
     assert!("pack_slot_lock_unavailable".parse::<PackId>().is_err());
+}
+
+/// bd-28kky. A scrubber defines a volatile channel, so it needs a NEGATIVE arm:
+/// one that only ever fires is indistinguishable from one that eats real values.
+/// The two positive cases are the exact strings two regenerations produced
+/// minutes apart; the digest differs between them, which is the whole point.
+#[test]
+fn daemon_socket_scrubbing_replaces_the_volatile_path_and_nothing_else() {
+    // Built from one template so the ONLY difference is the socket path.
+    let message = |socket: &str| {
+        format!(
+            "Optional daemon socket is not present at {socket}; in-process CLI execution remains authoritative."
+        )
+    };
+    let first = message("/tmp/ee-1000/d-b5752ef363443d504fed354a.sock");
+    let second = message("/tmp/ee-1000/d-f97be5b58e2da7577117314c.sock");
+    let scrubbed_first = scrub_daemon_socket_path(&first);
+    assert!(
+        scrubbed_first.contains("[DAEMON_SOCKET]"),
+        "socket path was not scrubbed: {scrubbed_first}"
+    );
+    assert!(
+        !scrubbed_first.contains("d-b5752ef363443d504fed354a"),
+        "per-run digest survived: {scrubbed_first}"
+    );
+    assert!(
+        !scrubbed_first.contains("ee-1000"),
+        "per-uid parent survived: {scrubbed_first}"
+    );
+
+    // THE POINT OF THE SCRUBBER: two runs whose ONLY difference is the volatile
+    // path must normalise to the same text, or the snapshot can never settle.
+    assert_eq!(
+        scrubbed_first,
+        scrub_daemon_socket_path(&second),
+        "two runs differing only in socket path must scrub identically"
+    );
+
+    // NEGATIVE ARMS. None of these is a per-uid daemon socket and none may be
+    // touched -- a scrubber that widens is worse than one that is missing,
+    // because it silently deletes evidence from every future snapshot.
+    for untouched in [
+        "index at [WORKSPACE]/.ee/index is ready",
+        "no socket here at all",
+        "/tmp/ee-notanumber/d-abc.sock is not a uid path",
+        "/var/run/other/d-abc.sock lives outside the ee- parent",
+    ] {
+        assert_eq!(
+            scrub_daemon_socket_path(untouched),
+            untouched,
+            "scrubber must not touch: {untouched}"
+        );
+    }
 }
 
 fn scrub_pack_hash_comments(text: &str) -> String {
@@ -1043,7 +1210,7 @@ fn run_profile_json_command(
 
     let mut value: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))?;
-    scrub_json_contract(&mut value, fixture);
+    scrub_json_contract(&mut value, fixture)?;
     scrub_profile_host_specific(&mut value);
     Ok(value)
 }
@@ -1326,6 +1493,162 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
     // Print what was found rather than only comparing.
     println!("normalized slow-host degraded codes: {codes:?}");
     println!("normalized slow-host body:\n{text}");
+
+    Ok(())
+}
+
+/// Build a pack SLO response whose only variable is how long the pack took.
+///
+/// Thresholds are the shape `PackSloBudgetClass` publishes -- positive and
+/// strictly ordered target < warning < failure -- because the validator
+/// rejects anything else before it touches a field, and a fixture it rejects
+/// would prove nothing about the normalization.
+fn slo_document(elapsed_ms: u64, elapsed_status: &str, status: &str) -> Value {
+    json!({
+        "data": {
+            "pack": {
+                "slo": {
+                    "schema": "ee.pack.slo.v1",
+                    "profile": "standard",
+                    "degradations": [],
+                    "actuals": {
+                        "candidateCount": 1,
+                        "elapsedMs": elapsed_ms,
+                        "graphEdgesTraversed": 0,
+                        "memoryBytesPeak": 755,
+                        "scannedCount": 1,
+                    },
+                    "budgetClass": {
+                        "candidatesScannedMax": 240,
+                        "concurrentPackMax": 4,
+                        "elapsedMsTarget": 200,
+                        "elapsedMsWarning": 500,
+                        "elapsedMsFailure": 2000,
+                        "graphTraversalMaxEdges": 8192,
+                    },
+                    "resourceStatus": "within_budget",
+                    "elapsedStatus": elapsed_status,
+                    "status": status,
+                }
+            }
+        }
+    })
+}
+
+/// The pack SLO is the second publication of the same wall clock, and it has
+/// to converge across hosts for the same reason `degraded[]` does.
+///
+/// `slo.elapsedStatus` is `for_elapsed_ms(elapsed_ms, budget)` and `slo.status`
+/// is the worst of it and `resourceStatus`, so an idle laptop and a loaded
+/// worker disagree on both while every deterministic field agrees. This proves
+/// the normalization makes them agree, that it does not simply blank the SLO,
+/// and -- the part that matters most -- that it REFUSES a reading whose status
+/// contradicts its own measurement instead of scrubbing the contradiction away.
+#[test]
+fn pack_slo_reads_the_same_on_a_fast_and_a_slow_host() -> TestResult {
+    // 120ms is under the 200ms target; 812ms is at or over the 500ms warning
+    // and under the 2000ms failure. Same request, two hosts.
+    let fast = slo_document(120, "within_budget", "within_budget");
+    let slow = slo_document(812, "warning", "warning");
+
+    // Negative control: a normalization that did nothing would pass every
+    // convergence check below if the inputs were already equal.
+    if fast == slow {
+        return Err("fixtures are identical before normalization; the test proves nothing".into());
+    }
+
+    let mut fast_normalized = fast.clone();
+    let mut slow_normalized = slow.clone();
+    if !normalize_pack_slo_measurements(&mut fast_normalized)? {
+        return Err("fast fixture was not recognized as carrying a pack SLO".into());
+    }
+    if !normalize_pack_slo_measurements(&mut slow_normalized)? {
+        return Err("slow fixture was not recognized as carrying a pack SLO".into());
+    }
+
+    // It has to BITE on the slow document. Unlike the `degraded[]`
+    // normalization it also rewrites the fast one -- the measurement is
+    // volatile whatever it reads -- so "unchanged on fast" is NOT the property
+    // here, and asserting it would red on a working normalization.
+    if slow_normalized == slow {
+        return Err(format!(
+            "slow-host SLO was unchanged by normalization:\n{slow_normalized:#}"
+        ));
+    }
+    if fast_normalized != slow_normalized {
+        return Err(format!(
+            "host-dependent snapshot: fast and slow SLOs normalized differently\n\
+             fast:\n{fast_normalized:#}\n\nslow:\n{slow_normalized:#}"
+        ));
+    }
+
+    let slo = slow_normalized
+        .pointer("/data/pack/slo")
+        .ok_or("normalized document lost /data/pack/slo")?;
+
+    // The three measurements go...
+    let leaked: Vec<&str> = ["/status", "/elapsedStatus", "/actuals/elapsedMs"]
+        .into_iter()
+        .filter(|pointer| slo.pointer(pointer).is_some())
+        .collect();
+    if !leaked.is_empty() {
+        return Err(format!(
+            "host-dependent SLO measurements survived normalization: {leaked:?}\n{slo:#}"
+        ));
+    }
+
+    // ...and the deterministic evidence stays. Emptying the SLO outright would
+    // satisfy every assertion above.
+    let missing: Vec<&str> = [
+        "/resourceStatus",
+        "/schema",
+        "/profile",
+        "/budgetClass/elapsedMsWarning",
+        "/budgetClass/elapsedMsFailure",
+        "/actuals/candidateCount",
+        "/actuals/memoryBytesPeak",
+        "/actuals/scannedCount",
+    ]
+    .into_iter()
+    .filter(|pointer| slo.pointer(pointer).is_none())
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "deterministic SLO evidence must survive normalization, missing: {missing:?}\n{slo:#}"
+        ));
+    }
+
+    // The trade that makes the dropped literals safe: a status that disagrees
+    // with its own measurement is REJECTED, and nothing is mutated. If this
+    // ever passed, the contract test would be scrubbing a real defect.
+    let mut inconsistent = slo_document(812, "within_budget", "within_budget");
+    let before = inconsistent.clone();
+    match normalize_pack_slo_measurements(&mut inconsistent) {
+        Ok(_) => {
+            return Err(
+                "an elapsedStatus contradicting elapsedMs was accepted; the contract test would \
+                 scrub the contradiction instead of failing on it"
+                    .into(),
+            );
+        }
+        Err(message) => {
+            if inconsistent != before {
+                return Err(format!(
+                    "a rejected SLO must be left verbatim, but it was mutated:\n{inconsistent:#}"
+                ));
+            }
+            println!("inconsistent SLO correctly rejected: {message}");
+        }
+    }
+
+    // A response with no pack SLO at all is reported as such, not as an error:
+    // `search`, `why`, `doctor` and `status` share this scrub path.
+    let mut sloless = json!({"data": {"results": []}});
+    if normalize_pack_slo_measurements(&mut sloless)? {
+        return Err("a response without a pack SLO must report false".into());
+    }
+
+    println!("normalized SLO: {slo:#}");
 
     Ok(())
 }

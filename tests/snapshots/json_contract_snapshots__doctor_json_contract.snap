@@ -1,6 +1,6 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: doctor
+expression: canonical_json_text(value)
 ---
 {
   "data": {
@@ -12,7 +12,7 @@ expression: doctor
         "tier": "core"
       },
       {
-        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version 0.14.4; local source version 0.14.4 via cargo_toml at [REPO]/Cargo.toml; installed/current version 0.14.4 via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
+        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version 0.15.2; local source version 0.15.2 via cargo_toml at [REPO]/Cargo.toml; installed/current version 0.15.2 via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
         "name": "ee_install_path",
         "severity": "warning",
         "tier": "advisory"
@@ -21,6 +21,12 @@ expression: doctor
         "message": "Semantic retrieval: deterministic-hash fallback (non-semantic) — the bundled neural model is not active (mode=deterministic_hash, fnv1a-256, 256d). Degraded code: embed_model_unavailable.",
         "name": "embedding_posture",
         "severity": "warning",
+        "tier": "advisory"
+      },
+      {
+        "message": "Remote embedding endpoint: not configured (EE_EMBED_BACKEND=local). ee uses its bundled local embedder.",
+        "name": "remote_embedding_endpoint",
+        "severity": "ok",
         "tier": "advisory"
       },
       {
@@ -72,7 +78,7 @@ expression: doctor
         "tier": "advisory"
       },
       {
-        "message": "Optional daemon socket is not present at [WORKSPACE]/.runtime/ee/daemon.sock; in-process CLI execution remains authoritative.",
+        "message": "Optional daemon socket is not present at [DAEMON_SOCKET]; in-process CLI execution remains authoritative.",
         "name": "daemon_socket_reachable",
         "severity": "ok",
         "tier": "advisory"
@@ -94,6 +100,12 @@ expression: doctor
         "name": "cass",
         "severity": "warning",
         "tier": "advisory"
+      },
+      {
+        "message": "WAL sidecar is 5903992 bytes across 1433 frames, larger than the 2510848-byte database it describes; every connection open replays it.",
+        "name": "wal_pressure",
+        "severity": "warning",
+        "tier": "advisory"
       }
     ],
     "command": "doctor",
@@ -112,7 +124,7 @@ expression: doctor
       "verificationActiveCount": 0,
       "workspaceHash": "[HASH]"
     },
-    "version": "0.14.4"
+    "version": "0.15.2"
   },
   "degraded": [],
   "fields": "standard",

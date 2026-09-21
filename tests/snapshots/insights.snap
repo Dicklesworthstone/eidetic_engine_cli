@@ -1,6 +1,6 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: canonical_json(value)
+expression: canonical_json_text(value)
 ---
 {
   "availableSections": [
@@ -17,6 +17,7 @@ expression: canonical_json(value)
     "knowledgeGaps",
     "knowledgeSkyline",
     "loadBearingMemories",
+    "peerConflicts",
     "proximityHotspots",
     "revisionFrontiers",
     "topMemories"
@@ -40,6 +41,127 @@ expression: canonical_json(value)
   "pagination": null,
   "runDurationMs": 0,
   "schema": "ee.insights.v1",
+  "sectionPagination": [
+    {
+      "limit": 10,
+      "name": "authorities",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "blindSpots",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "bridges",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "causalBottlenecks",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "comprehensiveRules",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "contradictionClusters",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "houseRules",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "hubs",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "kCore",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "kTruss",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "knowledgeGaps",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "knowledgeSkyline",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "loadBearingMemories",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "peerConflicts",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "proximityHotspots",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "revisionFrontiers",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    },
+    {
+      "limit": 10,
+      "name": "topMemories",
+      "offset": 0,
+      "returned": 0,
+      "total": 0
+    }
+  ],
   "sections": [
     {
       "items": [],
@@ -174,6 +296,16 @@ expression: canonical_json(value)
       "summary": "Memories with high influence in rule-to-source provenance projections.",
       "title": "Load-Bearing Memories",
       "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them."
+    },
+    {
+      "items": [],
+      "name": "peerConflicts",
+      "nextCommands": [
+        "ee insights --section peerConflicts --workspace . --json"
+      ],
+      "summary": "Local/team/global overlap and evidence-bounded peer contradictions that pack must not rank away.",
+      "title": "Peer Conflicts",
+      "whyItMatters": "Team-synced duplicates and contradictions stay visible with provenance so agents do not flatten disagreement into one answer."
     },
     {
       "items": [],

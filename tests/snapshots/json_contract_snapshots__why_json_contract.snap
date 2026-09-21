@@ -1,6 +1,6 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: why
+expression: canonical_json_text(value)
 ---
 {
   "data": {
@@ -9,23 +9,28 @@ expression: why
       "bundleHash": "[HASH]",
       "evidenceManifest": {
         "chainHashes": [
+          "[HASH]",
           "[HASH]"
         ],
         "contentHashes": [
+          "[HASH]",
           "[HASH]"
         ],
-        "entryCount": 1,
+        "entryCount": 2,
         "kinds": {
+          "audit_log": 1,
           "memory": 1
         },
         "provenanceUriIncluded": false,
         "schemas": [
+          "ee.audit_log.v1",
           "ee.memory.v1"
         ]
       },
       "hashManifest": {
         "entryCount": 6,
         "hashes": [
+          "[HASH]",
           "[HASH]",
           "[HASH]",
           "[HASH]",
@@ -52,16 +57,19 @@ expression: why
       },
       "redactionManifest": {
         "classes": [
+          "audit_details",
           "memory_content",
           "provenance_uri"
         ],
-        "entryCount": 2,
+        "entryCount": 3,
         "fields": [
+          "audit.details",
           "memory.content",
           "memory.provenanceUri"
         ],
         "policy": "ee.policy.secret_redaction.v1",
         "replacementHashes": [
+          "[HASH]",
           "[HASH]",
           "[HASH]"
         ]
@@ -222,8 +230,16 @@ expression: why
       "status": "scores_unavailable"
     },
     "history": {
-      "entries": [],
-      "totalCount": 0,
+      "entries": [
+        {
+          "action": "search.returned_mem",
+          "actor": null,
+          "auditId": "[AUDIT_ID]",
+          "details": "{\"queryHash\":\"blake3:e7a628a91b8c840c\",\"rank\":1,\"score\":1.0,\"relevanceScore\":1.0,\"scoreKind\":\"query_relative_pool_minmax\",\"calibrationId\":\"blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1\",\"source\":\"lexical\"}",
+          "timestamp": "[TIMESTAMP]"
+        }
+      ],
+      "totalCount": 1,
       "truncated": false
     },
     "lifecycle": {
@@ -307,7 +323,7 @@ expression: why
       "workflowId": null
     },
     "verificationEvidence": [],
-    "version": "0.14.4"
+    "version": "0.15.2"
   },
   "degraded": [
     {
