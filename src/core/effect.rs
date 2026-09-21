@@ -3832,10 +3832,26 @@ mod tests {
             "default effect",
         )?;
         ensure(effect.requires_audit, true, "audit required")?;
+        // bd-3j6l3. This builds a CommandEffect DIRECTLY, so it sees what the
+        // constructor decides and never reaches DRY_RUN_CAPABLE. It used to
+        // assert Some(ReadOnly) here, which pinned the very default that made
+        // 90 commands claim a flag they do not have. The constructor no longer
+        // decides, so the truthful constructor-level value is None.
         ensure(
             effect.dry_run_effect,
+            None,
+            "the constructor no longer claims --dry-run support",
+        )?;
+        // The capability is a property of the MANIFEST, not the constructor,
+        // and asserting only the line above would leave this test unable to
+        // tell "opt-in works" from "opt-in was deleted". `remember` is on the
+        // roster and really does take --dry-run.
+        ensure(
+            EffectManifest::build()
+                .get("remember")
+                .and_then(|entry| entry.dry_run_effect),
             Some(EffectClass::ReadOnly),
-            "dry_run reduces to read_only",
+            "the manifest grants remember its --dry-run via DRY_RUN_CAPABLE",
         )?;
         ensure(
             effect.mutation_contract.side_effect_class,
@@ -3942,10 +3958,20 @@ mod tests {
             EffectClass::WorkspaceFileWrite,
             "workspace write effect",
         )?;
+        // bd-3j6l3, same reason as command_effect_durable_write_requires_audit:
+        // built directly, so this is the constructor's value and the
+        // constructor no longer claims a flag on the command's behalf.
         ensure(
             effect.dry_run_effect,
+            None,
+            "the constructor no longer claims --dry-run support",
+        )?;
+        ensure(
+            EffectManifest::build()
+                .get("backup restore")
+                .and_then(|entry| entry.dry_run_effect),
             Some(EffectClass::ReadOnly),
-            "dry-run is read-only",
+            "the manifest grants backup restore its --dry-run via DRY_RUN_CAPABLE",
         )?;
         ensure(
             effect.mutation_contract.side_effect_class,
