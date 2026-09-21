@@ -59,7 +59,25 @@ gather_evidence() {
         JSONL_EXISTS=true
         local now mtime
         now=$(date +%s)
-        mtime=$(stat -f %m "$jsonl" 2>/dev/null || stat -c %Y "$jsonl" 2>/dev/null || echo "$now")
+        # GNU FIRST, AND THE ORDER IS NOT ARBITRARY. BSD `stat -f %m` and GNU
+        # `stat -c %Y` are not symmetric fallbacks. On BSD, `-c` is simply
+        # invalid: it fails cleanly with no stdout, so the fallback runs. On GNU,
+        # `-f` is VALID BUT DIFFERENT -- it means --file-system and treats `%m`
+        # as a FILE operand, so it prints filesystem text beginning "  File: ..."
+        # AND exits non-zero, which makes the `||` fallback run TOO and append
+        # the epoch to that text. BSD-first therefore silently yields a
+        # multi-line non-numeric mtime on Linux.
+        #
+        # That then dies one line down rather than here: inside $(( )) a bare
+        # word is a VARIABLE reference, so "File" is looked up and `set -u`
+        # aborts with "line 63: File: unbound variable" -- an error naming
+        # neither stat nor this script's real problem. Both Beads Export gates
+        # failed that way on every Linux run; measured on an RCH worker, while
+        # passing 22/22 on macOS.
+        mtime=$(stat -c %Y "$jsonl" 2>/dev/null || stat -f %m "$jsonl" 2>/dev/null || echo "$now")
+        # Belt and braces: never let a non-numeric mtime reach arithmetic, so a
+        # third stat dialect degrades to age 0 instead of killing the gate.
+        case "$mtime" in ''|*[!0-9]*) mtime="$now" ;; esac
         JSONL_AGE_SECONDS=$((now - mtime))
         MERGE_MARKERS=$(grep -cE '^(<{7}|={7}|>{7})' "$jsonl" 2>/dev/null)
         MERGE_MARKERS=${MERGE_MARKERS:-0}
