@@ -443,6 +443,69 @@ if [ "${EE_ACTUAL_FEATURES}" != "${EE_EXPECTED_FEATURES}" ]; then
 fi
 export EE_BINARY_FEATURES="${EE_ACTUAL_FEATURES}"
 
+# TARGET TRIPLE (bd-reality-core-convergence-1azkt.5, bullet 5). The last of the
+# five properties that bullet names. `ee_binary_executes_here` already refuses a
+# binary whose FORMAT is foreign to this host, but "can execute here" and "was
+# built for here" are different questions: a binary cross-built for a sibling
+# triple can still load and run, and then every stage reports on a build nobody
+# asked for.
+#
+# THE BINARY ALREADY CARRIES THE ANSWER and nothing read it:
+# `ee version --json` -> data.build.targetTriple, from build.rs putting cargo's
+# TARGET into EE_BUILD_TARGET (cargo sets TARGET for build scripts only, which
+# is why a build script is the only way to obtain it). The reference value is
+# `rustc -vV`'s host line, because that is by definition what a plain
+# `cargo build` on this host produces.
+#
+# THREE OUTCOMES, KEPT APART. "unknown" is not a mismatch -- it means the binary
+# was built without EE_BUILD_TARGET, which src/core/mod.rs:432 already models as
+# the `target_triple_unavailable` degradation. Reporting it as a mismatch would
+# send a reader hunting a cross-compile that never happened.
+ee_host_target_triple() {
+    rustc -vV 2>/dev/null | awk '/^host:/ {print $2}'
+}
+
+ee_binary_target_triple() {
+    "${EE_BINARY}" version --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+node = doc.get("data", doc)
+build = node.get("build")
+if not isinstance(build, dict):
+    raise SystemExit(1)
+triple = build.get("targetTriple")
+if not isinstance(triple, str) or not triple:
+    raise SystemExit(1)
+print(triple)
+'
+}
+
+if ! EE_HOST_TRIPLE="$(ee_host_target_triple)" || [ -z "${EE_HOST_TRIPLE}" ]; then
+    printf 'verify: refusing: could not read the host triple from `rustc -vV`.\n' >&2
+    printf 'verify: the target expectation has no source, so the check below\n' >&2
+    printf 'verify: would compare against nothing and pass regardless.\n' >&2
+    exit 1
+fi
+if ! EE_ACTUAL_TRIPLE="$(ee_binary_target_triple)"; then
+    printf 'verify: refusing: %s could not report its target triple.\n' "${EE_BINARY}" >&2
+    printf 'verify: `ee version --json` must carry data.build.targetTriple.\n' >&2
+    printf 'verify: an unreadable target is NOT a pass.\n' >&2
+    exit 1
+fi
+printf 'verify: ee_binary_target=%s host_target=%s\n' \
+    "${EE_ACTUAL_TRIPLE}" "${EE_HOST_TRIPLE}" >&2
+# The comparison itself lives in the resolution lib so it has self-test arms;
+# an inline chain here could only be exercised by running the whole script.
+if ! ee_assert_target_triple_matches_host \
+        "${EE_ACTUAL_TRIPLE}" "${EE_HOST_TRIPLE}" "${EE_BINARY}" "verify"; then
+    printf 'verify: refusing to run stages against that binary.\n' >&2
+    exit 1
+fi
+export EE_BINARY_TARGET_TRIPLE="${EE_ACTUAL_TRIPLE}"
+
 # E2E TEMP ROOT: DERIVED PER HOST, AND PROVEN WRITABLE BEFORE ANY STAGE RUNS
 # (bd-13y74).
 #

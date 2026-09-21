@@ -375,3 +375,43 @@ ee_assert_binary_identity_unchanged "/nonexistent/ee" "" "selftest" >/dev/null 2
 identity_nobase_rc=$?
 set -e
 assert_eq "$identity_nobase_rc" "3" "absent baseline is distinct from unchanged"
+
+# 11-14. TARGET TRIPLE (1azkt.5 bullet 5, "target"). Four states, four codes.
+#    The "unknown" arm is the one worth having: a binary built without
+#    EE_BUILD_TARGET has no target to conflict with, and reporting that as a
+#    mismatch sends a reader hunting a cross-compile that never happened.
+set +e
+ee_assert_target_triple_matches_host \
+    "aarch64-apple-darwin" "aarch64-apple-darwin" "/fake/ee" "selftest" >/dev/null 2>&1
+triple_match_rc=$?
+set -e
+assert_eq "$triple_match_rc" "0" "identical triples match"
+
+set +e
+triple_mismatch_log="$(
+    ee_assert_target_triple_matches_host \
+        "x86_64-unknown-linux-gnu" "aarch64-apple-darwin" "/fake/ee" "selftest" 2>&1 >/dev/null
+)"
+triple_mismatch_rc=$?
+set -e
+assert_eq "$triple_mismatch_rc" "1" "differing triples are a mismatch"
+case "$triple_mismatch_log" in
+    *x86_64-unknown-linux-gnu*aarch64-apple-darwin*|*aarch64-apple-darwin*x86_64-unknown-linux-gnu*) ;;
+    *) printf 'FAIL mismatch message must quote BOTH triples\n%s\n' "$triple_mismatch_log" >&2; exit 1 ;;
+esac
+
+set +e
+ee_assert_target_triple_matches_host \
+    "unknown" "aarch64-apple-darwin" "/fake/ee" "selftest" >/dev/null 2>&1
+triple_unknown_rc=$?
+set -e
+assert_eq "$triple_unknown_rc" "2" "unknown target is distinct from a mismatch"
+
+# EMPTY-WORLD ARM: an empty host reference must not read as agreement with an
+# empty binary value. Without this, a `rustc` that prints nothing would make the
+# whole check pass by comparing "" to "".
+set +e
+ee_assert_target_triple_matches_host "" "" "/fake/ee" "selftest" >/dev/null 2>&1
+triple_empty_rc=$?
+set -e
+assert_eq "$triple_empty_rc" "3" "two empty values are not a match"

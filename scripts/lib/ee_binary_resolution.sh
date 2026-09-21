@@ -260,3 +260,51 @@ ee_assert_binary_identity_unchanged() {
     printf '%s: produced the later verdicts.\n' "$label" >&2
     return 1
 }
+
+# Compare the candidate binary's BUILD target against this host's target
+# (bd-reality-core-convergence-1azkt.5, bullet 5, "target").
+#
+# ee_binary_executes_here already refuses a binary whose FORMAT is foreign to
+# this host. That is a different question: a binary cross-built for a sibling
+# triple can still load and run, and then every stage reports on a build nobody
+# asked for. "Can execute here" is not "was built for here".
+#
+# Exit codes are distinct because "unknown" is NOT a mismatch. A binary built
+# without EE_BUILD_TARGET reports "unknown" -- src/core/mod.rs already models
+# that as the `target_triple_unavailable` degradation -- and calling it a
+# mismatch sends a reader hunting a cross-compile that never happened.
+#   0  match
+#   1  mismatch -- prints both triples
+#   2  the binary reports "unknown": a missing fact, not a conflict
+#   3  either side is empty, so there is nothing to compare
+ee_assert_target_triple_matches_host() {
+    local actual="${1-}"
+    local host="${2-}"
+    local binary="${3:-the candidate binary}"
+    local label="${4:-verify}"
+
+    if [ -z "$actual" ] || [ -z "$host" ]; then
+        printf '%s: target triple NOT CHECKED: actual=%s host=%s\n' \
+            "$label" "${actual:-<empty>}" "${host:-<empty>}" >&2
+        return 3
+    fi
+
+    if [ "$actual" = "unknown" ]; then
+        printf '%s: candidate binary reports target_triple=unknown.\n' "$label" >&2
+        printf '%s: it was built without EE_BUILD_TARGET, so WHICH TARGET it was\n' "$label" >&2
+        printf '%s: built for cannot be established. A missing fact, not a mismatch.\n' "$label" >&2
+        return 2
+    fi
+
+    if [ "$actual" = "$host" ]; then
+        printf '%s: candidate binary target matches host: %s\n' "$label" "$actual" >&2
+        return 0
+    fi
+
+    printf '%s: candidate binary was built for a different target.\n' "$label" >&2
+    printf '%s:   host   (rustc -vV): %s\n' "$label" "$host" >&2
+    printf '%s:   binary (%s): %s\n' "$label" "$binary" "$actual" >&2
+    printf '%s: executing here is not the same as being built for here; stages\n' "$label" >&2
+    printf '%s: would report on a build this host did not ask for.\n' "$label" >&2
+    return 1
+}
