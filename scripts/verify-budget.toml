@@ -143,6 +143,36 @@ requires_candidate_binary = true
 predicate = "every run_stage call site in verify.sh has exactly one [[stage]] entry here, and every [[stage]] entry has exactly one call site, except names listed MUTUALLY_EXCLUSIVE in the enforcing test whose call sites cannot both execute in one invocation"
 enforced_by = "tests/verification_drift_guard.rs::every_run_stage_call_site_is_accountable_in_the_manifest"
 
+# EXACT TEST INVENTORY / SHARDS (bd-reality-core-convergence-1azkt.5, bullet 1).
+# Before this block the ONLY shard declaration in the repository was a job matrix
+# inside a workflow that is disabled_manually -- i.e. a declaration nothing reads
+# in a file nothing runs.
+#
+# THIS IS NOT A LIST OF TESTS, ON PURPOSE. Enumerating 45 targets here would rot
+# on the next added test and would be a second copy of Cargo.toml. What the
+# manifest declares instead is WHERE the inventory derives from and WHAT must
+# hold of it; a test derives both sides and compares, so neither is a copy. See
+# docs/testing-strategy.md, "Declare a contract, not a list".
+#
+#   target_source            Cargo.toml's [[test]] blocks. `autotests = false`
+#                            (Cargo.toml:36), so a tests/*.rs file that is
+#                            neither declared nor #[path]-included compiles into
+#                            nothing -- which is why "declared" is the inventory
+#                            and the filesystem is not.
+#   shard_glob / shard_count The shard set is small and stable, so the count is a
+#                            RATCHET rather than a copy: adding a shard must be a
+#                            deliberate edit here, and the enforcing test globs
+#                            the directory and refuses a mismatch.
+#   exactly_once_enforced_by Bullet 1 wants each logical test to appear once. The
+#                            check already exists; this names it so the property
+#                            is findable from the manifest, and a test asserts
+#                            the named function is really there.
+[test_inventory]
+target_source = "Cargo.toml#[[test]]"
+shard_glob = "tests/suites/integration_*.rs"
+shard_count = 7
+exactly_once_enforced_by = "tests/suites/inventory.rs::no_test_bearing_helper_is_included_by_two_targets"
+
 [[stage]]
 name = "Candidate Binary Identity Stable"
 expected_seconds_p50 = 1

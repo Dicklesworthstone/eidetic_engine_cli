@@ -3654,3 +3654,116 @@ fn declared_completeness_enforcer_exists() {
          does not have."
     );
 }
+
+/// The declared test inventory matches the tree, and its named enforcer exists.
+///
+/// bd-reality-core-convergence-1azkt.5, bullet 1 ("exact test inventory/shards").
+/// The manifest declares WHERE the inventory derives from and WHAT holds of it,
+/// never a list of tests -- 45 enumerated targets would rot on the next added
+/// test and be a second copy of Cargo.toml. This test derives both sides and
+/// compares, so neither is a copy of the other.
+///
+/// Three properties, each able to fail on its own:
+///   1. the declared shard count equals the shards actually on disk;
+///   2. the named exactly-once enforcer really exists;
+///   3. every `[[test]]` target Cargo.toml declares points at a file that
+///      exists -- with `autotests = false`, a declared-but-missing path is a
+///      target that can never run.
+#[test]
+fn declared_test_inventory_matches_the_tree() {
+    let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let cargo = fs::read_to_string(project_root().join("Cargo.toml")).expect("read Cargo.toml");
+
+    let value_of = |key: &str| -> Option<String> {
+        manifest
+            .lines()
+            .skip_while(|l| l.trim() != "[test_inventory]")
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+            })
+    };
+
+    let shard_count = value_of("shard_count");
+    let enforcer = value_of("exactly_once_enforced_by");
+    let target_source = value_of("target_source");
+
+    // EMPTY-WORLD GUARD FIRST.
+    assert!(
+        shard_count.is_some() && enforcer.is_some() && target_source.is_some(),
+        "verify-budget.toml must declare [test_inventory] with target_source, \
+         shard_count and exactly_once_enforced_by; got shard_count={shard_count:?} \
+         enforcer={enforcer:?} target_source={target_source:?}"
+    );
+    let declared_shards: usize = shard_count
+        .unwrap()
+        .parse()
+        .expect("shard_count is a number");
+
+    // 1. Shard count is a ratchet: adding a shard is a deliberate manifest edit.
+    let shard_dir = project_root().join("tests/suites");
+    let actual_shards = fs::read_dir(&shard_dir)
+        .expect("read tests/suites")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("integration_") && n.ends_with(".rs"))
+        })
+        .count();
+    assert!(
+        actual_shards > 0,
+        "found no integration_*.rs shards under {shard_dir:?}; this test would \
+         otherwise compare two zeros and pass over nothing"
+    );
+    assert_eq!(
+        actual_shards, declared_shards,
+        "verify-budget.toml declares shard_count = {declared_shards} but \
+         tests/suites holds {actual_shards} integration_*.rs shards. Adding or \
+         removing a shard must move this number in the same commit."
+    );
+
+    // 2. The named enforcer must be real.
+    let enforcer = enforcer.unwrap();
+    let (file, func) = enforcer.split_once("::").unwrap_or_else(|| {
+        panic!("exactly_once_enforced_by must be `<file>::<fn>`, got {enforcer:?}")
+    });
+    let enforcer_src = fs::read_to_string(project_root().join(file))
+        .unwrap_or_else(|_| panic!("exactly_once_enforced_by names {file}, which is not readable"));
+    assert!(
+        enforcer_src.contains(&format!("fn {func}(")),
+        "exactly_once_enforced_by names `{func}`, absent from {file}. A manifest \
+         naming a missing enforcer claims coverage it does not have."
+    );
+
+    // 3. Every declared [[test]] path exists. `autotests = false`, so a target
+    //    whose path is gone is one that can never run, and nothing else looks.
+    let mut declared_paths = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    for line in cargo.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("path = ") else {
+            continue;
+        };
+        let path = rest.trim().trim_matches('"');
+        if !path.starts_with("tests/") {
+            continue;
+        }
+        declared_paths += 1;
+        if !project_root().join(path).is_file() {
+            missing.push(path.to_owned());
+        }
+    }
+    assert!(
+        declared_paths >= 20,
+        "parsed only {declared_paths} tests/ paths from Cargo.toml; a near-zero \
+         count means this test read the wrong thing, not that the manifest is empty"
+    );
+    assert!(
+        missing.is_empty(),
+        "Cargo.toml declares [[test]] targets whose path does not exist: \
+         {missing:?}. With autotests = false these are targets that can never run."
+    );
+}
