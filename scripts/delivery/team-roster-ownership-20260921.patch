@@ -1,0 +1,250 @@
+--- a/src/core/memory_scope.rs
++++ b/src/core/memory_scope.rs
+@@ -1276,14 +1276,13 @@
+     workspace_path: &Path,
+     read_connection: Option<&crate::db::DbConnection>,
+ ) -> BTreeSet<String> {
+-    let mut members = BTreeSet::new();
+     // Bound-read config so symlink/oversize paths stay fail-closed. The
+     // unauthenticated [trust] team_members list is not an authorization
+     // source; Team scope admits only durable team_members rows.
+     let _ = read_memory_scope_config(&workspace_path.join(".ee").join("config.toml"));
+     let database_path = workspace_path.join(".ee").join("ee.db");
+     if !database_path.is_file() {
+-        return members;
++        return BTreeSet::new();
+     }
+     // Exact lexical identity is deliberately conservative. A different store
+     // (or an unrecognized alias) retains the normal workspace-roster lookup.
+@@ -1296,21 +1295,48 @@
+         None
+     };
+     let Some(connection) = supplied.or(owned.as_ref()) else {
+-        return members;
++        return BTreeSet::new();
+     };
+-    if let Ok(rows) = connection.list_all_team_members() {
+-        for row in rows {
+-            if row.state == "active" {
+-                if let Some(name) = normalized_non_empty(row.display_name) {
+-                    members.insert(name);
+-                }
+-                if let Some(node) = normalized_non_empty(row.origin_node_id) {
+-                    members.insert(node);
+-                }
++    // A read-only connection alone does not pin the workspace binding and its
++    // roster to the same source state. Borrow an existing request snapshot;
++    // otherwise own and release only the snapshot opened on this connection.
++    if owned.is_some() && connection.begin_read_snapshot().is_err() {
++        return BTreeSet::new();
++    }
++    let members = bound_team_members(workspace_path, connection).unwrap_or_default();
++    if owned.is_some() && connection.rollback_read_snapshot().is_err() {
++        return BTreeSet::new();
++    }
++    members
++}
++
++/// A team row is authority only in its owning workspace. A multi-workspace
++/// store must not let an active membership elsewhere undo a local removal or
++/// authorize an unrelated producer. No matching binding is absence of authority,
++/// not permission to choose the first workspace or union all its rosters.
++fn bound_team_members(
++    workspace_path: &Path,
++    connection: &crate::db::DbConnection,
++) -> Option<BTreeSet<String>> {
++    let workspace = crate::core::workspace::addressed_workspace_row(
++        connection,
++        workspace_path,
++        &workspace_path.join(".ee").join("ee.db"),
++    )
++    .ok()??;
++    let rows = connection.list_all_team_members().ok()?;
++    let mut members = BTreeSet::new();
++    for row in rows {
++        if row.workspace_id == workspace.id && row.state == "active" {
++            if let Some(name) = normalized_non_empty(row.display_name) {
++                members.insert(name);
++            }
++            if let Some(node) = normalized_non_empty(row.origin_node_id) {
++                members.insert(node);
+             }
+         }
+     }
+-    members
++    Some(members)
+ }
+ 
+ /// Hard cap on the byte length of `<workspace>/.ee/config.toml` when
+@@ -2154,7 +2180,16 @@
+         let connection =
+             crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+         connection
+-            .execute_raw(crate::db::V106_TEAM_MEMBERS.sql())
++            .migrate()
++            .map_err(|error| error.to_string())?;
++        connection
++            .insert_workspace(
++                "wsp_01234567890123456789012345",
++                &crate::db::CreateWorkspaceInput {
++                    path: temp.path().to_string_lossy().into_owned(),
++                    name: None,
++                },
++            )
+             .map_err(|error| error.to_string())?;
+         let member_id = "mbr_00000000000000000000000000000001";
+         connection
+@@ -2249,7 +2284,16 @@
+         let local =
+             crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+         local
+-            .execute_raw(crate::db::V106_TEAM_MEMBERS.sql())
++            .migrate()
++            .map_err(|error| error.to_string())?;
++        local
++            .insert_workspace(
++                "wsp_01234567890123456789012345",
++                &crate::db::CreateWorkspaceInput {
++                    path: temp.path().to_string_lossy().into_owned(),
++                    name: None,
++                },
++            )
+             .map_err(|error| error.to_string())?;
+         local
+             .insert_team_member(&crate::db::InsertTeamMemberInput {
+@@ -4035,4 +4079,134 @@
+         );
+         assert_eq!(mesh_query_visibility(None), MeshQueryVisibility::Local);
+     }
+-}
++
++    mod roster_ownership_tests {
++        #![allow(clippy::expect_used, clippy::unwrap_used)]
++
++        use super::*;
++        use crate::db::{CreateWorkspaceInput, DbConnection, InsertTeamMemberInput};
++
++        const OWN: &str = "wsp_00000000000000000000000081";
++        const OTHER: &str = "wsp_00000000000000000000000082";
++
++        struct Fixture {
++            _root: tempfile::TempDir,
++            path: PathBuf,
++            database: PathBuf,
++            writer: DbConnection,
++        }
++
++        impl Fixture {
++            fn new(bind_requested: bool) -> Self {
++                let root = tempfile::tempdir().unwrap();
++                let path = root.path().canonicalize().unwrap();
++                std::fs::create_dir(path.join(".ee")).unwrap();
++                let database = path.join(".ee/ee.db");
++                let writer = DbConnection::open_file(&database).unwrap();
++                writer.migrate().unwrap();
++                if bind_requested {
++                    writer.insert_workspace(OWN, &CreateWorkspaceInput {
++                        path: path.to_string_lossy().into_owned(),
++                        name: None,
++                    }).unwrap();
++                }
++                writer.insert_workspace(OTHER, &CreateWorkspaceInput {
++                    path: path.join("other-project").to_string_lossy().into_owned(),
++                    name: None,
++                }).unwrap();
++                Self { _root: root, path, database, writer }
++            }
++
++            fn member(&self, n: u32, owner: &str, name: &str, state: &str) -> String {
++                let id = format!("mbr_{n:032}");
++                self.writer.insert_team_member(&InsertTeamMemberInput {
++                    member_id: id.clone(),
++                    team_id: format!("team_{owner}"),
++                    workspace_id: owner.to_owned(),
++                    display_name: name.to_owned(),
++                    state: state.to_owned(),
++                    is_self: false,
++                    origin_node_id: format!("node_roster_{n}"),
++                    bound_via: "team_genesis".to_owned(),
++                    joined_at: "2026-09-15T00:00:00Z".to_owned(),
++                }).unwrap();
++                id
++            }
++
++            fn context(&self, supplied: Option<&DbConnection>) -> MemoryScopeContext {
++                MemoryScopeContext {
++                    // Test roster authority, not the harness's own identity.
++                    current_agent: None,
++                    ..MemoryScopeContext::for_workspace_with_connection(
++                        &self.path, MemoryScope::Team, false, supplied,
++                    )
++                }
++            }
++        }
++
++        #[test]
++        fn foreign_workspace_members_cannot_authorize_local_memory_producers() {
++            let fixture = Fixture::new(true);
++            fixture.member(81, OWN, "LocalAgent", "active");
++            fixture.member(82, OTHER, "OutsideAgent", "active");
++            let before = fixture.writer.count_table_rows("audit_log").unwrap();
++            for supplied in [None, Some(&fixture.writer)] {
++                let context = fixture.context(supplied);
++                assert_eq!(context.team_members,
++                    BTreeSet::from(["LocalAgent".to_owned(), "node_roster_81".to_owned()]));
++                assert!(context.memory_in_scope(&memory_with_scope(
++                    TrustClass::PeerHumanAttested, Some("agent:LocalAgent"))));
++                assert!(!context.memory_in_scope(&memory_with_scope(
++                    TrustClass::PeerHumanAttested, Some("agent:OutsideAgent"))));
++            }
++            assert_eq!(fixture.writer.count_table_rows("audit_log").unwrap(), before);
++        }
++
++        #[test]
++        fn removal_cannot_be_undone_by_an_active_namesake_in_another_workspace() {
++            let fixture = Fixture::new(true);
++            fixture.member(81, OWN, "ReturningAgent", "removed");
++            fixture.member(82, OTHER, "ReturningAgent", "active");
++            let context = fixture.context(None);
++            assert!(context.team_members.is_empty());
++            assert!(!context.memory_in_scope(&memory_with_scope(
++                TrustClass::PeerHumanAttested, Some("agent:ReturningAgent"))));
++        }
++
++        #[test]
++        fn an_unbound_store_cannot_adopt_its_only_foreign_roster() {
++            let fixture = Fixture::new(false);
++            fixture.member(82, OTHER, "OutsideAgent", "active");
++            assert!(fixture.context(None).team_members.is_empty());
++            assert!(fixture.context(Some(&fixture.writer)).team_members.is_empty());
++            assert_eq!(fixture.writer.list_workspaces().unwrap().len(), 1);
++            assert!(fixture.writer.get_workspace(OWN).unwrap().is_none());
++        }
++
++        #[test]
++        fn caller_snapshot_retains_membership_until_release_then_observes_revocation() {
++            let fixture = Fixture::new(true);
++            let member = fixture.member(81, OWN, "LocalAgent", "active");
++            let reader = DbConnection::open_file_read_only(&fixture.database).unwrap();
++            reader.begin_read_snapshot().unwrap();
++            assert!(reader.get_workspace(OWN).unwrap().is_some());
++            assert!(fixture.writer.set_team_member_state(&member, "removed").unwrap());
++            assert!(fixture.context(Some(&reader)).team_members.contains("LocalAgent"));
++            reader.rollback_read_snapshot().expect("scope read must not release the caller's snapshot");
++            assert!(fixture.context(Some(&reader)).team_members.is_empty());
++            assert!(fixture.context(None).team_members.is_empty());
++        }
++
++        #[test]
++        fn failed_workspace_authority_never_falls_back_to_unfiltered_membership() {
++            let fixture = Fixture::new(true);
++            fixture.member(81, OWN, "LocalAgent", "active");
++            fixture.writer.execute_raw("ALTER TABLE workspaces RENAME TO unavailable_roster_workspaces").unwrap();
++            assert_eq!(fixture.writer.list_all_team_members().unwrap().len(), 1);
++            assert!(fixture.context(None).team_members.is_empty());
++            assert!(fixture.context(Some(&fixture.writer)).team_members.is_empty());
++            fixture.writer.begin_read_snapshot().unwrap();
++            fixture.writer.rollback_read_snapshot().unwrap();
++        }
++    }
++}
