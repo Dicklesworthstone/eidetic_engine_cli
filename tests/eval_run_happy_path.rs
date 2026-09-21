@@ -1031,3 +1031,115 @@ fn eval_run_executes_every_ask_quality_case_and_rejects_wrong_citations() -> Tes
     }
     Ok(())
 }
+
+/// bd-1azkt.33. A declared query that appears verbatim inside the memory it is
+/// expected to retrieve is a LEXICAL DIRECT HIT: it cannot miss. Measured
+/// against the frozen goldens, every such query scores precision_at_1 = 1.0 at
+/// rank 1 -- six of six, no exceptions -- while paraphrase queries in the same
+/// two families average 0.250 and several land at 0.0 on rank 2-3. Same
+/// evaluator, same corpus, same run; the only difference is whether the query
+/// text occurs in the target.
+///
+/// They are averaged into the same `mean_precision_at_1` that decides the
+/// release-quality verdict in `src/cli/mod.rs` (`>= 0.5`), so they do not
+/// merely fail to measure retrieval -- they push the verdict toward passing.
+/// Today `fx.dangerous_cleanup.v1` reports 0.667 and PASSES; across its four
+/// paraphrase queries alone it scores 0.250 and would FAIL the same gate. Five
+/// direct hits are carrying that pass. It executes every query it declares, so
+/// executed equals expected and no coverage count can see it.
+///
+/// WHAT THIS CANNOT CATCH. It pins the direct-hit COUNT, not the verdict. A
+/// family can still pass on direct hits -- `fx.dangerous_cleanup.v1` does, and
+/// this test is green while it does. Excluding direct hits from the quality
+/// mean is .12's threshold call and relabeling them is .30's; both change a
+/// passing fixture to failing, which is not this bead's to decide.
+///
+/// Substring is deliberately the weakest reading of "direct hit" -- it counts
+/// only exact occurrences, so stemmed and reordered near-hits score as
+/// paraphrase and the 17 is a FLOOR on contamination, never an overstatement.
+///
+/// Ratcheted both directions, because each direction means something
+/// different. UP means a new query was authored that cannot fail. DOWN means
+/// the repair landed, or a query was re-anchored -- update the constant then,
+/// and only after establishing which.
+const LEXICAL_DIRECT_HIT_QUERIES: usize = 17;
+
+/// Below this, the census read nothing and a `0` would be a broken instrument
+/// reporting a clean suite.
+///
+/// The floor is not ceremony: reading the raw JSON instead of materializing it
+/// undercounts by four. `fx.data_size_tiers.v1` declares a generator and an id
+/// range and carries no `content` key at all, so parsing the file scores every
+/// one of its nine queries a false paraphrase -- yet once its 600 memories are
+/// materialized, four of its queries turn out to sit verbatim in the templates
+/// that generate them (`release memory` inside "Small tier release memory
+/// {n}", `deterministic priority bucket` inside the large-tier template). A
+/// clean zero from that family was the instrument failing to read, not the
+/// family being clean.
+const MIN_CENSUSED_QUERIES: usize = 40;
+
+#[test]
+fn declared_eval_queries_do_not_drift_toward_lexical_direct_hits() -> TestResult {
+    let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
+        .map_err(|error| error.to_string())?;
+    let mut direct_hits: BTreeSet<(&str, String)> = BTreeSet::new();
+    let mut paraphrases: BTreeSet<(&str, String)> = BTreeSet::new();
+
+    for &(fixture_id, _) in RETRIEVAL_WORKLOADS {
+        let fixture = fixtures
+            .iter()
+            .find(|fixture| fixture.fixture_id == fixture_id)
+            .ok_or_else(|| format!("missing fixture {fixture_id}"))?;
+        let source = ee::eval::load_source_memories(&fixture.source_memory_path)
+            .map_err(|error| error.to_string())?;
+        let memories =
+            ee::eval::materialize_source_memories(&source).map_err(|error| error.to_string())?;
+        for memory in &memories {
+            let content = memory.content.to_lowercase();
+            for query in &memory.expected_query_match {
+                let key = (fixture_id, query.clone());
+                if content.contains(&query.to_lowercase()) {
+                    paraphrases.remove(&key);
+                    direct_hits.insert(key);
+                } else if !direct_hits.contains(&key) {
+                    paraphrases.insert(key);
+                }
+            }
+        }
+    }
+
+    let censused = direct_hits.len() + paraphrases.len();
+    // Print the population before judging it: a bare count cannot say which
+    // query newly became unmissable, and that is the only actionable part.
+    println!(
+        "lexical direct-hit census: {} direct / {censused} declared across {} families",
+        direct_hits.len(),
+        RETRIEVAL_WORKLOADS.len()
+    );
+    for (fixture_id, query) in &direct_hits {
+        println!("  DIRECT HIT  {fixture_id}  {query:?}");
+    }
+
+    if censused < MIN_CENSUSED_QUERIES {
+        return Err(format!(
+            "censused only {censused} declared queries (floor {MIN_CENSUSED_QUERIES}): \
+             the corpus did not materialize, so this measured nothing"
+        ));
+    }
+    // A matcher stuck at always-true or always-false cannot discriminate, and
+    // would sail through a count it happened to match. Both arms must be
+    // populated for the count above to carry any information.
+    if direct_hits.is_empty() || paraphrases.is_empty() {
+        return Err(format!(
+            "predicate does not discriminate: {} direct, {} paraphrase -- \
+             one arm is empty, so the classifier is broken, not the suite clean",
+            direct_hits.len(),
+            paraphrases.len()
+        ));
+    }
+    ensure_equal(
+        &direct_hits.len(),
+        &LEXICAL_DIRECT_HIT_QUERIES,
+        "declared queries that appear verbatim in the memory they must retrieve",
+    )
+}
