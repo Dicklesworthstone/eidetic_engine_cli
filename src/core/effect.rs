@@ -4838,7 +4838,8 @@ mod tests {
         let manifest = EffectManifest::build();
 
         for effect in manifest.mutating_commands() {
-            if effect.dry_run_effect.is_some() && effect.mutation_contract.dry_run_behavior.is_none()
+            if effect.dry_run_effect.is_some()
+                && effect.mutation_contract.dry_run_behavior.is_none()
             {
                 return Err(format!(
                     "Mutating command '{}' declares dry_run_effect: Some(_) but no \

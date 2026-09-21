@@ -27,8 +27,8 @@
 # whoever re-enables hosted CI, at that moment.
 #
 # USAGE
-#   scripts/check-format.sh              check tracked .rs files
-#   scripts/check-format.sh --staged     check only files staged for commit
+#   scripts/check-format.sh              run the gate's own `cargo fmt --check`
+#   scripts/check-format.sh --staged     accepted, NO-OP (see run_cargo_fmt_check)
 #   scripts/check-format.sh --self-test  prove both arms plus the fail-open arm
 #
 # EXIT CODES — the whole contract is here
@@ -49,6 +49,16 @@ set -uo pipefail
 EDITION="${CHECK_FORMAT_EDITION:-2024}"
 TIMEOUT_SECS="${CHECK_FORMAT_TIMEOUT_SECS:-60}"
 
+# Read the pin from rust-toolchain.toml rather than hard-coding it, so this
+# script cannot drift from the toolchain the gate actually uses. Comments are
+# stripped first: the file's own preamble mentions `channel` in prose.
+PINNED_TOOLCHAIN="${CHECK_FORMAT_TOOLCHAIN:-}"
+if [ -z "$PINNED_TOOLCHAIN" ] && [ -f rust-toolchain.toml ]; then
+    PINNED_TOOLCHAIN="$(grep -vE '^[[:space:]]*#' rust-toolchain.toml \
+        | grep -E '^[[:space:]]*channel[[:space:]]*=' \
+        | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
+fi
+
 warn() { printf '[check-format] %s\n' "$*" >&2; }
 note() { printf '[check-format] %s\n' "$*"; }
 
@@ -61,9 +71,98 @@ resolve_timeout() {
     printf ''
 }
 
+# Run the GATE'S OWN command over the crate and classify the outcome.
+#   prints the diff summary on drift
+#   returns 0 clean, 1 drift, 2 inconclusive
+#
+# WHY NOT ENUMERATE FILES OURSELVES. This script exists to PREDICT CI Static's
+# Format step. A predictor that checks a DIFFERENT SET of files than the gate is
+# not a stricter predictor, it is a broken one -- and this one was.
+#
+# MEASURED 2026-09-21 on a tree the gate called clean (`cargo fmt --check`
+# exit 0), the previous `git ls-files -- '*.rs'` + per-file `rustfmt` path
+# returned exit 1 and named four files:
+#
+#   src/cass/backfill_public_tests.rs   pulled in by `include!` (src/cass/import.rs:2435).
+#                                       rustfmt follows `mod` and `#[path]`, NEVER
+#                                       `include!`, so the gate never formats it. Its
+#                                       body is indented because it is spliced inside a
+#                                       module, and standalone rustfmt demands that
+#                                       indentation be removed -- a diff that can never
+#                                       be resolved.
+#   src/mcp_ask.rs                      behind `#[cfg(feature = "mcp")]` (src/lib.rs:38),
+#   src/mcp_ask_live_tests.rs           so `cargo fmt` under default features never
+#                                       reaches either.
+#   src/core/backup_workflow_recovery_tests.rs
+#                                       tracked but reachable from no module declaration.
+#
+# All four are the GATE'S blind spots, and this script had the inverse coverage.
+# Neither set contains the other, so the two tools disagreed permanently. The
+# practical effect: the old path returned 1 on a clean tree AND 1 on a dirty one,
+# so it could not distinguish the two states it exists to distinguish. Wired into
+# a blocking hook it would have blocked every push in this repo, forever, over a
+# file CI deliberately never examines.
+#
+# Delegating to `cargo fmt --check` fixes the scope by construction: same walker,
+# same rustfmt.toml resolution, same answer. Measured at 6.5s for the whole crate
+# with no build, which is why the old `--staged` narrowing bought nothing worth
+# a scope mismatch.
+run_cargo_fmt_check() {
+    local out rc timeout_bin
+    local -a fmt_cmd
+    if ! command -v cargo >/dev/null 2>&1; then
+        warn "cargo not found on PATH — cannot check formatting, not blocking"
+        return 2
+    fi
+
+    # The pinned toolchain, because rustfmt OUTPUT DIFFERS BETWEEN NIGHTLIES.
+    # `cargo +toolchain` fails where cargo is not the rustup shim (it is not on
+    # the dev Macs here), so go through `rustup run`. If the pin is unavailable
+    # we still check, and say which toolchain answered.
+    fmt_cmd=(cargo fmt --check)
+    if [ -n "$PINNED_TOOLCHAIN" ] \
+        && command -v rustup >/dev/null 2>&1 \
+        && rustup run "$PINNED_TOOLCHAIN" true >/dev/null 2>&1; then
+        fmt_cmd=(rustup run "$PINNED_TOOLCHAIN" cargo fmt --check)
+    else
+        warn "pinned toolchain ${PINNED_TOOLCHAIN:-<unresolved>} unavailable — using default cargo fmt; verdict may differ from CI"
+    fi
+
+    timeout_bin="$(resolve_timeout)"
+    if [ -n "$timeout_bin" ]; then
+        out="$("$timeout_bin" "$TIMEOUT_SECS" "${fmt_cmd[@]}" 2>&1)"
+        rc=$?
+    else
+        warn "no timeout binary (timeout/gtimeout) — running without a hard cap"
+        out="$("${fmt_cmd[@]}" 2>&1)"
+        rc=$?
+    fi
+
+    if [ "$rc" -eq 124 ]; then
+        warn "cargo fmt exceeded ${TIMEOUT_SECS}s — inconclusive, not blocking"
+        return 2
+    fi
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    # Same discrimination as before, and for the same reason: a parse error
+    # mid-edit is not formatting drift and must not block.
+    if printf '%s' "$out" | grep -q '^Diff in '; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    warn "cargo fmt exited ${rc} without producing a diff — inconclusive, not blocking"
+    if [ -n "$out" ]; then printf '%s\n' "$out" >&2; fi
+    return 2
+}
+
 # Run rustfmt --check over the given files and classify the outcome.
 #   prints the diff summary on drift
 #   returns 0 clean, 1 drift, 2 inconclusive
+#
+# STILL USED BY --self-test, where it is CORRECT: those fixtures are standalone
+# whole files in a temp dir, outside any module tree, so per-file rustfmt is
+# exactly the right instrument. It is no longer used against the repo.
 run_rustfmt_check() {
     local out rc timeout_bin
     if ! command -v rustfmt >/dev/null 2>&1; then
@@ -214,46 +313,24 @@ main() {
         exit 0
     fi
 
-    local files=()
+    # `--staged` is accepted and ignored, deliberately. It narrowed the file set,
+    # and narrowing the file set is what made this script disagree with the gate.
+    # `cargo fmt --check` is 6.5s for the whole crate, so there is nothing to buy.
     if [ "${1:-}" = "--staged" ]; then
-        while IFS= read -r line; do
-            [ -n "$line" ] && files+=("$line")
-        done < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
-    else
-        while IFS= read -r line; do
-            [ -n "$line" ] && files+=("$line")
-        done < <(git ls-files -- '*.rs')
+        note "--staged is a no-op: the gate is whole-crate, and matching its scope is the point"
     fi
 
-    if [ "${#files[@]}" -eq 0 ]; then
-        note "no Rust files to check"
-        exit 0
-    fi
-
-    # Only check files that still exist on disk: a staged rename or a path
-    # deleted after staging would otherwise make rustfmt error and turn a clean
-    # tree into an inconclusive warning on every run.
-    local present=()
-    local f
-    for f in "${files[@]}"; do
-        [ -f "$f" ] && present+=("$f")
-    done
-    if [ "${#present[@]}" -eq 0 ]; then
-        note "no Rust files present on disk to check"
-        exit 0
-    fi
-
-    run_rustfmt_check "${present[@]}"
+    run_cargo_fmt_check
     local rc=$?
     local failed=0
     case "$rc" in
-        0) note "${#present[@]} file(s) checked, formatting clean" ;;
+        0) note "formatting clean (cargo fmt --check, toolchain ${PINNED_TOOLCHAIN:-default})" ;;
         1)
             warn "FORMATTING DRIFT in the files listed above."
-            warn "Fix with: rustfmt --edition ${EDITION} <file>   (this script never writes)"
+            warn "Fix with: rustup run ${PINNED_TOOLCHAIN:-nightly} cargo fmt -- <file>   (this script never writes)"
             failed=1
             ;;
-        *) : ;;   # inconclusive; run_rustfmt_check already warned
+        *) : ;;   # inconclusive; run_cargo_fmt_check already warned
     esac
 
     # Runs even when formatting failed: reporting one finding and stopping is
