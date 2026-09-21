@@ -165,14 +165,6 @@ fn load_corpus_with_path_boundary(
         .list_memories(workspace_id, None, false)
         .map_err(|_| corpus_storage_error())?;
     let scope = scope_context()?;
-    // Producer membership can scope a derived rule, but the source memory's
-    // body is not substituted for that rule. Rule lifecycle is independent of
-    // the source memory's validity window.
-    let attributed_memories: BTreeSet<_> = stored
-        .iter()
-        .filter(|memory| memory.workspace_id == workspace_id && scope.memory_in_scope(memory))
-        .map(|memory| memory.id.clone())
-        .collect();
     after_memory_read()?;
     // V123 separates revision identity from author expiry. Neither a future
     // valid_to nor an unexpectedly populated sealed body grants admission.
@@ -220,7 +212,6 @@ fn load_corpus_with_path_boundary(
         connection,
         workspace_id,
         &scope,
-        &attributed_memories,
         &paths,
         &mut candidates,
     )?;
@@ -273,11 +264,90 @@ fn withheld_memory_ids(
     Ok(withheld)
 }
 
+// Rule lineage is authority about authorship and ownership, not admission of
+// parent bodies. A superseded incident must not hide a separately active rule;
+// a missing or foreign parent must not masquerade as a source-less rule either.
+const ASK_RULE_LINEAGE_PAGE_SIZE: usize = 256;
+
+#[derive(Default)]
+struct AskRuleLineage {
+    owned: BTreeSet<String>,
+    attributed: BTreeSet<String>,
+}
+
+fn load_rule_lineage(
+    connection: &DbConnection,
+    workspace_id: &str,
+    scope: &MemoryScopeContext,
+    source_ids: &BTreeSet<&str>,
+) -> Result<AskRuleLineage, DomainError> {
+    use sqlmodel_core::Value;
+
+    let ids: Vec<_> = source_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            crate::models::MemoryId::from_str(id)
+                .is_ok_and(|parsed| parsed.to_string() == *id)
+        })
+        .collect();
+    let mut lineage = AskRuleLineage::default();
+    for page in ids.chunks(ASK_RULE_LINEAGE_PAGE_SIZE) {
+        if matches!(scope.scope, MemoryScope::SelfOnly | MemoryScope::Team) {
+            // Reuse the established producer parser on actual source rows.
+            // ID lookup intentionally includes retired versions: no source
+            // body is made answerable, and no parent lifecycle is inherited.
+            let memories = connection
+                .get_memories_batch(page)
+                .map_err(|_| corpus_storage_error())?;
+            for id in page {
+                let Some(memory) = memories.get(*id) else {
+                    continue;
+                };
+                if memory.id != *id || memory.workspace_id != workspace_id {
+                    continue;
+                }
+                lineage.owned.insert(memory.id.clone());
+                if scope.memory_in_scope(memory) {
+                    lineage.attributed.insert(memory.id.clone());
+                }
+            }
+        } else {
+            // Workspace/global/verified need identity and ownership only.
+            // Avoid loading private parent bodies simply to prove provenance.
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, workspace_id FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
+            );
+            let parameters: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in connection
+                .query(&sql, &parameters)
+                .map_err(|_| corpus_storage_error())?
+            {
+                let (Some(Value::Text(id)), Some(Value::Text(owner))) =
+                    (row.get(0), row.get(1))
+                else {
+                    return Err(corpus_storage_error());
+                };
+                if owner == workspace_id && source_ids.contains(id.as_str()) {
+                    lineage.owned.insert(id.clone());
+                }
+            }
+        }
+    }
+    Ok(lineage)
+}
+
 fn load_rules(
     connection: &DbConnection,
     workspace_id: &str,
     scope: &MemoryScopeContext,
-    attributed_memories: &BTreeSet<String>,
     paths: &[String],
     candidates: &mut Vec<AskCandidate>,
 ) -> Result<BTreeMap<String, AskNativeSource>, DomainError> {
@@ -298,17 +368,37 @@ fn load_rules(
     let mut sources = connection
         .list_rule_source_memory_ids_for_workspace(workspace_id)
         .map_err(|_| corpus_storage_error())?;
+    let mut projections = Vec::with_capacity(rules.len());
     for rule in rules {
         if rule.workspace_id != workspace_id {
             continue;
         }
         let rule_tags = tags.remove(&rule.id).unwrap_or_default();
         let source_ids = sources.remove(&rule.id).unwrap_or_default();
+        let projection =
+            crate::search::RuleIndexProjection::new(rule, &workspace.path, rule_tags, source_ids);
+        if projection.is_pack_admissible() && rule_matches_targets(&projection, paths) {
+            projections.push(projection);
+        }
+    }
+    // Every read remains inside the caller's existing body/link snapshot.
+    // Work is bounded by eligible rules' lineage, not all workspace history.
+    let source_ids = projections
+        .iter()
+        .flat_map(|projection| projection.source_memory_ids().iter().map(String::as_str))
+        .collect();
+    let lineage = load_rule_lineage(connection, workspace_id, scope, &source_ids)?;
+    for projection in projections {
+        let rule = projection.rule();
+        let source_ids = projection.source_memory_ids();
+        if !source_ids.iter().all(|id| lineage.owned.contains(id)) {
+            continue;
+        }
         let visible = match scope.scope {
             MemoryScope::Workspace | MemoryScope::Swarm => true,
             MemoryScope::Global => {
                 rule.scope == RuleScope::Global.as_str()
-                    || crate::models::memory_tags_include_global_scope(&rule_tags)
+                    || crate::models::memory_tags_include_global_scope(projection.tags())
             }
             MemoryScope::Verified => matches!(
                 TrustClass::from_str(&rule.trust_class),
@@ -317,22 +407,16 @@ fn load_rules(
                     | TrustClass::AgentValidated)
             ),
             // There is no durable producer field on a rule. Require a nonempty
-            // fully-attributed lineage; a single authorized parent cannot
-            // launder another producer's contribution into self/team scope.
+            // fully-attributed lineage; one authorized parent cannot launder
+            // another producer's contribution into self/team scope.
             MemoryScope::SelfOnly | MemoryScope::Team => {
                 !source_ids.is_empty()
-                    && source_ids.iter().all(|id| attributed_memories.contains(id))
+                    && source_ids.iter().all(|id| lineage.attributed.contains(id))
             }
         };
-        if !visible {
-            continue;
-        }
-        let projection =
-            crate::search::RuleIndexProjection::new(rule, &workspace.path, rule_tags, source_ids);
-        if !rule_matches_targets(&projection, paths) {
-            continue;
-        }
-        if let Some((candidate, source)) = admission::rule_candidate(&projection) {
+        if visible
+            && let Some((candidate, source)) = admission::rule_candidate(&projection)
+        {
             native_sources.insert(candidate.memory_id.clone(), source);
             candidates.push(candidate);
         }
@@ -788,3 +872,7 @@ mod source_authority_tests {
         assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
     }
 }
+
+#[cfg(test)]
+#[path = "ask_rule_lineage_tests.rs"]
+mod rule_lineage_tests;
