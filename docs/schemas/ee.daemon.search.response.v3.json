@@ -547,7 +547,6 @@
         "score",
         "relevanceScore",
         "scoreKind",
-        "calibrationId",
         "scoreInterval",
         "coverageGuarantee",
         "calibrated",
@@ -565,6 +564,7 @@
           "type": "string",
           "enum": ["query_relative_pool_minmax", "cosine_similarity", "rrf_fused", "reranked"]
         },
+        "calibrationId": { "type": ["string", "null"] },
         "scoreInterval": {
           "type": "array",
           "items": { "type": "number" },
