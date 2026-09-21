@@ -5347,9 +5347,24 @@ if "rch_worker_root_canary_active_project_exclusion" in degraded:
 if "rch_worker_root_canary_timeout" in degraded:
     repair_actions.append({"kind": "retry", "command": "scripts/rch_verify.sh --worker-root-canary --json", "summary": "Retry the bounded canary after RCH responds."})
 
+# COMPUTED FROM STATUS, NOT A LITERAL
+# (bd-success-shaped-signal-on-failure-l3pa4, a FOURTH instance in this file).
+#
+# This was `"success": True` unconditionally, while `status` two lines below can
+# be "healthy", "blocked", "timeout" or "unavailable" and nothing reassigned
+# success afterwards. So a canary that timed out, was blocked by an active
+# project exclusion, or found the required root missing still emitted
+# success=true beside its own degraded codes -- and a consumer keying on
+# `.success`, which is the field whose NAME invites exactly that, read a failed
+# probe as a pass.
+#
+# Same class as instance (2) in this file, whose fix at 923a2a4c8 computed
+# success from the exit code rather than asserting it. The literal form is the
+# easier half to spot and the harder half to notice in review, because there is
+# no wrong question being asked -- there is no question at all.
 payload = {
     "schema": "ee.rch.worker_root_canary.v1",
-    "success": True,
+    "success": status == "healthy",
     "generated_at": now,
     "status": status,
     "mode": "read_only_no_cargo",
