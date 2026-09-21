@@ -4,8 +4,85 @@
 //! changes. Storage surfaces may keep legacy audit rows for compatibility, but
 //! every promotion, demotion, or tombstone transition must also be explainable
 //! through this table and a `memory.level_transition` audit row.
+//! Live seal admission is a separate lifecycle question from backup validity:
+//! a closed seal withholds a body even when that body's storage is inconsistent.
 
 use serde_json::json;
+
+/// Read seal authority for a live corpus without reading or exporting bodies.
+///
+/// The backup reader also checks that a closed seal has placeholder content.
+/// That stricter export contract must not turn a single damaged sealed row into
+/// an outage for unrelated public memories. This reader still validates every
+/// seal with the same model validator as storage and attestation. Invalid
+/// metadata fails the read; inconsistent body bytes never grant visibility.
+///
+/// One bound query loads the workspace's seals, including retired history. The
+/// caller owns the surrounding body/authority snapshot; this function neither
+/// opens a store nor starts, commits, or releases any transaction.
+pub(crate) fn load_memory_seals_for_admission(
+    connection: &crate::db::DbConnection,
+    workspace_id: &str,
+) -> crate::db::Result<Vec<crate::models::MemorySeal>> {
+    use sqlmodel_core::Value;
+
+    connection
+        .query(
+            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
+            &[Value::Text(workspace_id.to_owned())],
+        )
+        .map_err(|_| seal_admission_error())?
+        .iter()
+        .map(decode_admission_seal)
+        .collect()
+}
+
+fn seal_admission_error() -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not verify live memory seal authority".to_owned(),
+    }
+}
+
+fn decode_admission_seal(row: &sqlmodel_core::Row) -> crate::db::Result<crate::models::MemorySeal> {
+    use sqlmodel_core::Value;
+
+    let text = |index| {
+        row.get(index)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(seal_admission_error)
+    };
+    let revealed_at = match row.get(3) {
+        Some(Value::Null) => None,
+        Some(Value::Text(value)) => Some(value.clone()),
+        _ => return Err(seal_admission_error()),
+    };
+    let reveal_verified = match row.get(4) {
+        Some(Value::Null) => None,
+        Some(value) => match value.as_i64() {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => return Err(seal_admission_error()),
+        },
+        None => return Err(seal_admission_error()),
+    };
+    let seal = crate::models::MemorySeal {
+        memory_id: text(0)?,
+        content_commitment: text(1)?,
+        sealed_at: text(2)?,
+        revealed_at,
+        reveal_verified,
+    };
+    crate::models::validate_attestation_seal_fields(
+        &seal.content_commitment,
+        &seal.sealed_at,
+        seal.revealed_at.as_deref(),
+        seal.reveal_verified,
+    )
+    .map_err(|_| seal_admission_error())?;
+    Ok(seal)
+}
 
 /// Stable audit action for memory level lifecycle changes.
 pub const MEMORY_LEVEL_TRANSITION_ACTION: &str = "memory.level_transition";
@@ -270,4 +347,151 @@ pub fn level_transition_audit_details(input: &MemoryLevelTransitionAudit<'_>) ->
     let mut payload_with_hash = payload;
     payload_with_hash["detailsHash"] = json!(details_hash);
     payload_with_hash.to_string()
+}
+
+#[cfg(test)]
+mod seal_admission_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use sqlmodel_core::{Row, Value};
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000091";
+    const OTHER: &str = "wsp_00000000000000000000000092";
+    const MEMORY: &str = "mem_00000000000000000000000091";
+    const TIME: &str = "2026-09-17T12:00:00Z";
+
+    fn row(revealed: Value, verified: Value) -> Row {
+        Row::new(
+            ["memory_id", "content_commitment", "sealed_at", "revealed_at", "reveal_verified"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            vec![
+                Value::Text(MEMORY.to_owned()),
+                Value::Text(format!("blake3:{}", "a".repeat(64))),
+                Value::Text(TIME.to_owned()),
+                revealed,
+                verified,
+            ],
+        )
+    }
+
+    fn seed(db: &DbConnection, workspace: &str, id: &str) {
+        db.insert_memory(id, &CreateMemoryInput {
+            workspace_id: workspace.to_owned(),
+            level: "semantic".to_owned(),
+            kind: "note".to_owned(),
+            content: "PRIVATE-BODY must never enter a seal query".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: Some(TIME.to_owned()),
+            valid_to: None,
+        }).unwrap();
+        db.insert_memory_seal(id, &format!("blake3:{}", "a".repeat(64)), TIME).unwrap();
+    }
+
+    fn fixture() -> (tempfile::TempDir, DbConnection) {
+        let root = tempfile::tempdir().unwrap();
+        let db = DbConnection::open_file(&root.path().join("seal.db")).unwrap();
+        db.migrate().unwrap();
+        for (id, path) in [(WORKSPACE, root.path().join("workspace")), (OTHER, root.path().join("other"))] {
+            db.insert_workspace(id, &CreateWorkspaceInput {
+                path: path.to_string_lossy().into_owned(),
+                name: None,
+            }).unwrap();
+        }
+        (root, db)
+    }
+
+    #[test]
+    fn seal_decoder_uses_the_shared_chronological_reveal_contract() {
+        assert!(decode_admission_seal(&row(Value::Null, Value::Null)).unwrap().is_sealed());
+        let revealed = decode_admission_seal(&row(
+            Value::Text("2026-09-17T08:00:00-04:00".to_owned()), Value::BigInt(1),
+        )).unwrap();
+        assert!(!revealed.is_sealed());
+        assert_eq!(revealed.reveal_verified, Some(true));
+        for (at, flag) in [
+            (Value::Text("2026-09-17T11:59:59Z".to_owned()), Value::BigInt(1)),
+            (Value::Text(TIME.to_owned()), Value::BigInt(0)),
+            (Value::Text(TIME.to_owned()), Value::Null),
+            (Value::Null, Value::BigInt(1)),
+        ] {
+            assert!(decode_admission_seal(&row(at, flag)).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_reveal_types_and_values_never_become_an_unsealed_row() {
+        for (at, flag) in [
+            (Value::Text("PRIVATE-REVEAL".to_owned()), Value::BigInt(1)),
+            (Value::BigInt(1), Value::BigInt(1)),
+            (Value::Text(TIME.to_owned()), Value::Text("1".to_owned())),
+            (Value::Text(TIME.to_owned()), Value::BigInt(-1)),
+            (Value::Text(TIME.to_owned()), Value::BigInt(2)),
+        ] {
+            let error = decode_admission_seal(&row(at, flag)).unwrap_err();
+            assert!(!format!("{error:?}").contains("PRIVATE-REVEAL"));
+            assert!(!format!("{error:?}").contains(MEMORY));
+        }
+        assert!(decode_admission_seal(&Row::new(Vec::new(), Vec::new())).is_err());
+    }
+
+    #[test]
+    fn live_reader_preserves_closed_body_exclusion_and_strict_backup_validation() {
+        let (_root, db) = fixture();
+        seed(&db, WORKSPACE, MEMORY);
+        let before = db.get_memory(MEMORY).unwrap();
+        let audits = db.count_table_rows("audit_log").unwrap();
+        let seals = load_memory_seals_for_admission(&db, WORKSPACE).unwrap();
+        assert_eq!(seals, vec![db.get_memory_seal(MEMORY).unwrap().unwrap()]);
+        assert!(seals[0].is_sealed());
+        assert!(db.list_memory_seals_for_recovery(WORKSPACE).is_err());
+        assert_eq!(db.get_memory(MEMORY).unwrap(), before);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
+        assert!(db.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
+        assert_eq!(load_memory_seals_for_admission(&db, WORKSPACE).unwrap(),
+            db.list_memory_seals_for_recovery(WORKSPACE).unwrap());
+    }
+
+    #[test]
+    fn foreign_seal_metadata_never_poison_or_widen_the_addressed_workspace() {
+        let (_root, db) = fixture();
+        seed(&db, OTHER, MEMORY);
+        db.execute_raw("UPDATE memory_seals SET sealed_at = 'PRIVATE-FOREIGN-TIME'").unwrap();
+        assert!(load_memory_seals_for_admission(&db, WORKSPACE).unwrap().is_empty());
+        assert!(load_memory_seals_for_admission(&db, "' OR 1 = 1 --").unwrap().is_empty());
+        let error = load_memory_seals_for_admission(&db, OTHER).unwrap_err();
+        assert!(!format!("{error:?}").contains("PRIVATE-FOREIGN-TIME"));
+    }
+
+    #[test]
+    fn admission_borrows_the_readers_snapshot_without_releasing_it() {
+        let (root, writer) = fixture();
+        seed(&writer, WORKSPACE, MEMORY);
+        let reader = DbConnection::open_file_read_only(&root.path().join("seal.db")).unwrap();
+        reader.begin_read_snapshot().unwrap();
+        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+        assert!(writer.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
+        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+        reader.commit_read_snapshot().expect("reader still owns its transaction");
+        assert!(!load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+    }
+
+    #[test]
+    fn missing_seal_storage_is_an_error_not_an_authoritatively_empty_set() {
+        let db = DbConnection::open_memory().unwrap();
+        let error = load_memory_seals_for_admission(&db, WORKSPACE).unwrap_err();
+        assert!(matches!(error, crate::db::DbError::MalformedRow { .. }));
+        assert!(!format!("{error:?}").contains("SELECT"));
+        assert!(!format!("{error:?}").contains(WORKSPACE));
+    }
 }

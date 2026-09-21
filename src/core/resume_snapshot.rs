@@ -83,8 +83,10 @@ fn load_with_boundary(
     // One workspace read replaces per-memory seal lookups, and the ordinary
     // empty-store path does not need an authority read at all.
     if !current_memories.is_empty() {
-        let closed: BTreeSet<_> = connection
-            .list_memory_seals_for_recovery(&workspace_id)
+        let closed: BTreeSet<_> = crate::core::memory_lifecycle::load_memory_seals_for_admission(
+            connection,
+            &workspace_id,
+        )
             .map_err(|_| DomainError::Storage {
                 message: "Could not verify resume memory seals; bundle withheld".to_owned(),
                 repair: Some("ee doctor --workspace . --json".to_owned()),

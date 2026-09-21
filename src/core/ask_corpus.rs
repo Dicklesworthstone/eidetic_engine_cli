@@ -242,8 +242,10 @@ fn withheld_memory_ids(
     let revisions = connection
         .list_memory_supersession_markers(workspace_id)
         .map_err(|_| corpus_storage_error())?;
-    let mut withheld: BTreeSet<_> = connection
-        .list_memory_seals_for_recovery(workspace_id)
+    let mut withheld: BTreeSet<_> = crate::core::memory_lifecycle::load_memory_seals_for_admission(
+        connection,
+        workspace_id,
+    )
         .map_err(|_| corpus_storage_error())?
         .into_iter()
         .filter(|seal| seal.is_sealed())
@@ -870,6 +872,40 @@ mod source_authority_tests {
         let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
         assert_eq!(corpus.candidates.len(), 1);
         assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
+    }
+
+    #[test]
+    fn populated_closed_seal_withholds_only_its_body_without_weakening_backup_checks() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        withhold(&db, true);
+        assert!(db.list_memory_seals_for_recovery(WORKSPACE).is_err());
+        let before = db.get_memory(PRIOR).unwrap();
+        let audits = db.count_table_rows("audit_log").unwrap();
+        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
+        let output = ask_data_json(&answer(&corpus)).to_string();
+        assert!(!output.contains(PRIOR) && !output.contains(OLD_BODY));
+        assert_eq!(db.get_memory(PRIOR).unwrap(), before);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
+        assert!(db.list_memory_seals_for_recovery(WORKSPACE).is_err());
+    }
+
+    #[test]
+    fn invalid_live_seal_metadata_withholds_answers_and_releases_the_snapshot() {
+        let (_root, db) = fixture();
+        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
+        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
+        withhold(&db, true);
+        db.execute_raw("UPDATE memory_seals SET revealed_at = 'PRIVATE-REVEAL-CANARY', reveal_verified = 1")
+            .unwrap();
+        let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
+        assert!(matches!(error, DomainError::Storage { .. }));
+        assert!(!format!("{error:?}").contains("PRIVATE-REVEAL-CANARY"));
+        db.begin_read_snapshot().expect("owned snapshot released");
+        db.rollback_read_snapshot().unwrap();
     }
 }
 
