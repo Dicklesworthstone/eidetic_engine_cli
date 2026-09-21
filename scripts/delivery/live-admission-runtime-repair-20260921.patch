@@ -1,0 +1,201 @@
+--- a/src/db/mod.rs
++++ b/src/db/mod.rs
+@@ -23366,6 +23366,26 @@
+         rows.first().map(stored_memory_seal_from_row).transpose()
+     }
+ 
++    /// Read workspace seal authority without admitting or exporting any body.
++    /// Live readers must withhold a closed seal even if damaged storage still
++    /// holds its body. Backup export separately rejects that inconsistent body;
++    /// using its recovery validator here would block unrelated public evidence.
++    /// Seal metadata still uses the same strict commitment/time/flag decoder.
++    /// The caller owns the snapshot containing its body and admission reads.
++    pub(crate) fn list_memory_seals_for_admission(
++        &self,
++        workspace_id: &str,
++    ) -> Result<Vec<MemorySeal>> {
++        self.query_for(
++            DbOperation::Query,
++            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
++            &[Value::Text(workspace_id.to_owned())],
++        )?
++        .iter()
++        .map(stored_memory_seal_from_row)
++        .collect()
++    }
++
+     /// Include sealed and revealed history, including tombstoned memories.
+     pub fn list_memory_seals_for_recovery(&self, workspace_id: &str) -> Result<Vec<MemorySeal>> {
+         self.query_for(DbOperation::Query,
+--- a/src/core/ask_corpus.rs
++++ b/src/core/ask_corpus.rs
+@@ -243,7 +243,7 @@
+         .list_memory_supersession_markers(workspace_id)
+         .map_err(|_| corpus_storage_error())?;
+     let mut withheld: BTreeSet<_> = connection
+-        .list_memory_seals_for_recovery(workspace_id)
++        .list_memory_seals_for_admission(workspace_id)
+         .map_err(|_| corpus_storage_error())?
+         .into_iter()
+         .filter(|seal| seal.is_sealed())
+@@ -871,6 +871,60 @@
+         assert_eq!(corpus.candidates.len(), 1);
+         assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
+     }
++
++    #[test]
++    fn live_seal_admission_does_not_weaken_backup_export_or_hide_unrelated_answers() {
++        let (_root, db) = fixture();
++        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
++        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
++        withhold(&db, true);
++        let seals = db.list_memory_seals_for_admission(WORKSPACE).unwrap();
++        assert_eq!(seals.len(), 1);
++        assert_eq!(seals[0].memory_id, PRIOR);
++        assert!(seals[0].is_sealed());
++        assert!(db.list_memory_seals_for_recovery(WORKSPACE).is_err(),
++            "an archive must still reject exposed content before reveal");
++        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
++        assert_eq!(corpus.candidates.len(), 1);
++        assert_eq!(corpus.candidates[0].memory_id, CURRENT);
++        assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
++        assert!(!ask_data_json(&answer(&corpus)).to_string().contains(OLD_BODY));
++        assert_eq!(db.get_memory(PRIOR).unwrap().unwrap().content, OLD_BODY,
++            "admission is not an implicit repair of stored bytes");
++    }
++
++    #[test]
++    fn live_seal_admission_still_rejects_invalid_reveal_metadata() {
++        let (_root, db) = fixture();
++        seed(&db, PRIOR, WORKSPACE, OLD_BODY);
++        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
++        withhold(&db, true);
++        db.execute_raw("UPDATE memory_seals SET revealed_at = 'PRIVATE-REVEAL-CANARY', reveal_verified = 1").unwrap();
++        assert!(db.list_memory_seals_for_admission(WORKSPACE).is_err());
++        let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
++        assert!(!format!("{error:?}").contains("PRIVATE-REVEAL-CANARY"));
++        db.begin_read_snapshot().expect("failed admission released its snapshot");
++        db.rollback_read_snapshot().unwrap();
++    }
++
++    #[test]
++    fn live_seal_admission_cannot_borrow_another_workspaces_authority() {
++        let (root, db) = fixture();
++        let other = "wsp_00000000000000000000000052";
++        db.insert_workspace(other, &CreateWorkspaceInput {
++            path: root.path().join("other").to_string_lossy().into_owned(),
++            name: None,
++        }).unwrap();
++        seed(&db, PRIOR, other, OLD_BODY);
++        seed(&db, CURRENT, WORKSPACE, NEW_BODY);
++        withhold(&db, true);
++        assert!(db.list_memory_seals_for_admission(WORKSPACE).unwrap().is_empty());
++        assert_eq!(db.list_memory_seals_for_admission(other).unwrap().len(), 1);
++        let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
++        assert_eq!(answer(&corpus).citations[0].memory_id, CURRENT);
++        assert!(db.list_memory_seals_for_recovery(other).is_err());
++    }
++
+ }
+ 
+ #[cfg(test)]
+--- a/src/core/resume_snapshot.rs
++++ b/src/core/resume_snapshot.rs
+@@ -84,7 +84,7 @@
+     // empty-store path does not need an authority read at all.
+     if !current_memories.is_empty() {
+         let closed: BTreeSet<_> = connection
+-            .list_memory_seals_for_recovery(&workspace_id)
++            .list_memory_seals_for_admission(&workspace_id)
+             .map_err(|_| DomainError::Storage {
+                 message: "Could not verify resume memory seals; bundle withheld".to_owned(),
+                 repair: Some("ee doctor --workspace . --json".to_owned()),
+--- a/src/core/global_store.rs
++++ b/src/core/global_store.rs
+@@ -809,7 +809,7 @@
+         .list_memory_supersession_markers(&workspace.id)
+         .map_err(global_read_error)?;
+     let closed_seals = connection
+-        .list_memory_seals_for_recovery(&workspace.id)
++        .list_memory_seals_for_admission(&workspace.id)
+         .map_err(global_read_error)?
+         .into_iter()
+         .filter(|seal| seal.is_sealed())
+--- a/src/core/primer.rs
++++ b/src/core/primer.rs
+@@ -842,7 +842,7 @@
+     workspace_id: &str,
+ ) -> crate::db::Result<(BTreeSet<String>, String)> {
+     let closed = connection
+-        .list_memory_seals_for_recovery(workspace_id)
++        .list_memory_seals_for_admission(workspace_id)
+         .map_err(|_| crate::db::DbError::MalformedRow {
+             operation: crate::db::DbOperation::Query,
+             message:
+--- a/src/core/search_revision_admission.rs
++++ b/src/core/search_revision_admission.rs
+@@ -542,7 +542,9 @@
+     fn malformed_reveal_metadata_fails_closed_without_echoing_values() -> TestResult {
+         let (_temp, options, db) = fixture()?;
+         seal(&db, HIDDEN)?;
+-        db.execute_raw("UPDATE memory_seals SET revealed_at = X'50524956415445'")
++        // Preserve the schema's null-pair invariant so this fixture reaches
++        // the malformed-type admission check rather than failing at insertion.
++        db.execute_raw("UPDATE memory_seals SET revealed_at = X'50524956415445', reveal_verified = 1")
+             .map_err(|error| error.to_string())?;
+         let mut degraded = Vec::new();
+         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut degraded, None).is_empty());
+--- a/src/core/global_promotion.rs
++++ b/src/core/global_promotion.rs
+@@ -516,7 +516,7 @@
+     // Separate databases cannot share this transaction. Report committed state
+     // explicitly if the origin audit fails; a compatible retry repairs the
+     // audit without inserting another destination memory or index job.
+-    workspace_connection
++    let origin_audit = workspace_connection
+         .insert_audit(
+             &generate_audit_id(),
+             &CreateAuditInput {
+@@ -536,7 +536,7 @@
+             format!(
+                 "global_promotion_origin_audit_pending: global memory {global_memory_id} is committed; retry promotion to repair the origin audit"
+             )
+-        })?;
++        });
+     let (index_status, index_error) = index_job_id.as_ref().map_or_else(
+         || ("not_applicable".to_owned(), None),
+         |index_job_id| {
+@@ -558,8 +558,12 @@
+             (status, report.error)
+         },
+     );
++    // A failed origin audit cannot cancel a committed destination's index
++    // repair or retain its writer connection. Finish those obligations before
++    // reporting the separate-store partial outcome to the caller.
+     let _ = global_connection.close();
+     let _ = workspace_connection.close();
++    origin_audit?;
+ 
+     Ok(PromotionReport {
+         plan,
+@@ -1796,6 +1800,7 @@
+         source
+             .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_origin_audit")
+             .expect("plant origin failure");
++        source.close().expect("release schema-fixture connection");
+         let options = PromoteGlobalOptions {
+             workspace_database_path: &f.source_path,
+             memory_id: &f.memory.id,
+@@ -1813,6 +1818,12 @@
+             .expect("committed destination");
+         assert!(error.contains(&copy.id));
+         assert_eq!(f.count("search_index_jobs"), 1);
++        let jobs = f.destination.list_search_index_jobs(&f.workspace, None).unwrap();
++        assert_eq!(jobs[0].status, crate::db::SearchIndexJobStatus::Completed,
++            "a committed promotion must reconcile indexing even when the origin audit fails");
++        // A public repair opens a new connection; do not reuse the handle
++        // that compiled the retired schema before the failure was planted.
++        let source = DbConnection::open_file(&f.source_path).expect("repair connection");
+         source
+             .execute_raw("ALTER TABLE unavailable_origin_audit RENAME TO audit_log")
+             .expect("repair origin audit");
