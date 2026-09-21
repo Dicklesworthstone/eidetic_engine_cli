@@ -1,0 +1,144 @@
+name: Feedback counts and core retrieval acceptance
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/feedback-counts-core-retrieval-20260921.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: feedback-counts-core-retrieval-20260921
+  cancel-in-progress: false
+jobs:
+  repair-and-test:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Publish only the compiler-confirmed count repairs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.error, urllib.request
+          root = 'https://api.github.com/repos/Dicklesworthstone/eidetic_engine_cli/'
+          assert os.environ['GITHUB_REPOSITORY'] == 'Dicklesworthstone/eidetic_engine_cli'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+          path = 'src/core/global_promotion.rs'
+          edits = [
+              ('fn count(&self, table: &str) -> u64 {', 'fn count(&self, table: &str) -> i64 {'),
+              ('before_audits + u64::try_from(successes).unwrap()', 'before_audits + i64::try_from(successes).unwrap()'),
+              ('before_jobs + u64::try_from(successes).unwrap()', 'before_jobs + i64::try_from(successes).unwrap()'),
+          ]
+          def api(method, suffix, data=None):
+              req = urllib.request.Request(root + suffix,
+                  data=None if data is None else json.dumps(data).encode(), method=method,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json', 'User-Agent': 'ee-count-repair'})
+              with urllib.request.urlopen(req, timeout=45) as response:
+                  return json.load(response)
+          for attempt in range(4):
+              head = api('GET', 'git/ref/heads/main')['object']['sha']
+              base = api('GET', 'git/commits/' + head)
+              entry = api('GET', 'contents/' + path + '?ref=' + head)
+              assert entry['encoding'] == 'base64'
+              source = base64.b64decode(entry['content']).decode()
+              changed = False
+              for old, new in edits:
+                  if old in source:
+                      assert source.count(old) == 1 and new not in source
+                      source = source.replace(old, new, 1)
+                      changed = True
+                  else:
+                      assert source.count(new) == 1, 'Count assertion changed; reconcile explicitly'
+              if not changed:
+                  print('Count repairs already present at', head)
+                  break
+              formatted = subprocess.run(['rustfmt', '--edition', '2024', '--config',
+                  'skip_children=true', '--emit', 'stdout'], input=source, text=True,
+                  capture_output=True, check=True).stdout
+              blob = api('POST', 'git/blobs', {'content': formatted, 'encoding': 'utf-8'})
+              tree = api('POST', 'git/trees', {'base_tree': base['tree']['sha'],
+                  'tree': [{'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']}]})
+              commit = api('POST', 'git/commits', {'tree': tree['sha'], 'parents': [head],
+                  'message': 'fix(test): use signed database row counts in global feedback regressions\n\nRepair the E0308/E0277 errors found by native-rule scope run 35619569027.\nKeep the database API return type i64 in the fixture helper and concurrent\naudit/job count assertions. No assertion is removed or weakened. Pinned\nrustfmt passed; runtime suites execute separately after this commit.'})
+              try:
+                  api('PATCH', 'git/refs/heads/main', {'sha': commit['sha'], 'force': False})
+              except urllib.error.HTTPError as error:
+                  if error.code in (409, 422) and attempt < 3 and api('GET', 'git/ref/heads/main')['object']['sha'] != head:
+                      continue
+                  raise
+              print('Published source repair:', commit['sha'])
+              break
+          else:
+              raise RuntimeError('Concurrent main publication prevented safe repair')
+          PY
+      - name: Capture actual tested source
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --ff-only FETCH_HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/core-retrieval-source.log"
+          git archive --format=tar HEAD -o "$RUNNER_TEMP/ee-current-source.tar"
+          rustc --version --verbose > "$RUNNER_TEMP/core-retrieval-toolchain.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-retrieval-source
+          path: |
+            ${{ runner.temp }}/ee-current-source.tar
+            ${{ runner.temp }}/core-retrieval-source.log
+          retention-days: 7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: core-retrieval-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            core-retrieval-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            native-rule-scope-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Resolve pinned dependency paths
+        run: |
+          set -euo pipefail
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/core-retrieval-build-paths.patch"
+      - name: Execute all focused groups without hiding later failures
+        run: |
+          set -uo pipefail
+          failed=0
+          for filter in 'core::search::rule_admission::' 'core::ask::corpus::rule_lineage_tests::' 'core::global_promotion::'; do
+            name=$(printf '%s' "$filter" | tr ':' '_')
+            status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/core-retrieval-$name.log" 2>&1 || status=$?
+            tail -n 160 "$RUNNER_TEMP/core-retrieval-$name.log"
+            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/core-retrieval-$name.log"; then failed=1; fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: core-retrieval-verification
+          path: |
+            ${{ runner.temp }}/core-retrieval-*.log
+            ${{ runner.temp }}/core-retrieval-*.patch
+          retention-days: 7
