@@ -2022,10 +2022,28 @@ fn effect_manifest_playbook_import_is_audited_dry_run_write() -> TestResult {
         EffectClass::DurableMemoryWrite,
         "playbook import may write procedural rules with --apply",
     )?;
+    // CHANGED ASSERTION, bd-3j6l3, and it is a correction rather than a
+    // relaxation. This pinned `Some(EffectClass::ReadOnly)` -- but that value
+    // was never chosen for this command; every mutating constructor stamped it
+    // on unconditionally, so the test was pinning a default, not a fact.
+    //
+    // `PlaybookImportArgs` declares --source, --database, --apply and --actor.
+    // THERE IS NO --dry-run. Three independent instruments agree: the arg-table
+    // walk in `mutating_dry_run_declarations_match_the_parser`, the real parse
+    // in `declared_dry_run_capable_mutating_commands_actually_accept_dry_run`,
+    // and the struct itself. The assertion directly above this one already
+    // says the mechanism out loud -- "may write procedural rules with --apply"
+    // -- so the preview here is OMITTING --apply, exactly as `health scorecard
+    // --record-snapshot` previews by omitting --record-snapshot.
+    //
+    // `None` now means "the parser does not accept --dry-run", which is true.
+    // The non-flag preview path belongs in mutation_contract.dry_run_behavior,
+    // which is prose about previewability by any mechanism and is deliberately
+    // not required to agree with this field.
     ensure(
         effect.dry_run_effect,
-        Some(EffectClass::ReadOnly),
-        "playbook import dry-run is read-only",
+        None,
+        "playbook import has no --dry-run flag; it previews by omitting --apply",
     )?;
     ensure(
         effect.mutation_contract.side_effect_class,
@@ -2192,9 +2210,21 @@ fn effect_manifest_mutating_commands_have_complete_s43e_contracts() -> TestResul
                 effect.command_path
             ));
         }
-        if contract.dry_run_behavior.is_none() {
+        // NARROWED (bd-3j6l3), and this is the integration-test twin of the
+        // clause removed from `all_mutating_commands_have_s43e_contract_metadata`
+        // in src/core/effect.rs. Both had to move or the narrowing would have
+        // been half-applied and main would have stayed red on the same defect
+        // from a second file.
+        //
+        // WHAT IT ASSERTED: dry_run_behavior present on every mutating command.
+        // LOST COVERAGE: nothing requires preview prose from a command with no
+        // preview. Intended -- the only way to satisfy it for such a command
+        // was to describe a preview that does not exist.
+        // WHAT REPLACES IT: the reverse implication, asserted in core by
+        // `every_mutating_command_declares_a_dry_run_behavior_when_it_claims_the_flag`.
+        if effect.dry_run_effect.is_some() && contract.dry_run_behavior.is_none() {
             return Err(format!(
-                "{} must declare dry-run no-op behavior",
+                "{} declares dry_run_effect: Some(_) but no dry-run behavior",
                 effect.command_path
             ));
         }
