@@ -1,0 +1,18 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_source_filtered",
+  "introduced_by": {"bead": "bd-u875s.2", "epic_letter": "RECALL"},
+  "surfaces": ["recall"],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "A code anchor remains indexed after its owning memory expires or is superseded, sealed, or moved outside this workspace. Live source admission withholds the memory before ranking and disclosure; stale index metadata never overrides source authority.",
+    "setup_commands": ["ee init --workspace .", "ee remember 'Old release instructions. anchor:path:src/release.rs' --level procedural --kind rule --workspace . --json", "ee memory revise <returned-memory-id> --content 'Replacement release instructions.' --workspace . --json"],
+    "invocation": "ee recall --path src/release.rs --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "recall_source_filtered",
+    "severity": "low",
+    "message_contains": ["Withheld anchored memories", "source authority"]
+  }
+}

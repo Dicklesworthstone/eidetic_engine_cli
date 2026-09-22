@@ -1,0 +1,136 @@
+name: Live source-backed recall
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/recall*.rs'
+      - 'scripts/delivery/recall-source-admission-20260922.patch'
+      - 'tests/recall_source_lifecycle_cli.py'
+      - '.github/workflows/recall-source-admission.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: macos-14
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Integrate reviewed live recall admission
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          files=(src/core/recall.rs src/core/recall_admission.rs)
+          if ! grep -Fq 'fn run_recall_in_snapshot(' src/core/recall.rs; then
+            test "$(git hash-object src/core/recall.rs)" = 20a617675d3c61a53f1f798eaae9b52a8626f037
+            test "$(git hash-object src/core/recall_admission.rs)" = c7b9128268404306132e1cd27ed4ac9222ec3410
+            patch=scripts/delivery/recall-source-admission-20260922.patch
+            test "$(git hash-object "$patch")" = 584c96226c2a980cb1e7160ad44698884f1aa076
+            git apply --check --whitespace=error-all "$patch"
+            git apply "$patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(recall): admit only current visible source-backed anchors' -m 'Gate anchored recall on live workspace, exact validity, supersession and seal authority before ranking, previews, tags or provenance. Pin public library reads while reusing the CLI-owned snapshot. Reject failed authority reads without returning partial data, preserve caller transactions, and exercise real stale-anchor and concurrent writer scenarios. Runtime verdict follows in the verification job.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/recall-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: recall-source-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/recall-source-sha.log
+            ${{ runner.temp }}/recall-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: recall-source-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            recall-source-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Exercise production recall and live source regressions
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/recall-identity.log"
+          cargo test --locked --lib core::recall:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-engine.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-engine.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: recall-engine-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recall-*.log
+          retention-days: 7
+      - name: Check integration compilation and formatting
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recall-check.log"
+          rustfmt --edition 2024 --config skip_children=true --check src/core/recall.rs src/core/recall_admission.rs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: recall-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recall-*.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

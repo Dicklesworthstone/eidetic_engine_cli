@@ -1,0 +1,102 @@
+--- a/src/core/recall.rs
++++ b/src/core/recall.rs
+@@ -18,6 +18,9 @@
+     encode_cursor,
+ };
+ use crate::search::scoring::{freshness_drift_multiplier, stale_anchor_floor};
++
++#[path = "recall_admission.rs"]
++mod admission;
+ 
+ /// Response payload schema carried under `ee.response.v2` `data.recall`.
+ pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
+@@ -739,6 +742,20 @@
+     workspace_id: &str,
+     query: &RecallQuery,
+ ) -> crate::db::Result<RecallReport> {
++    let snapshot = RecallReadSnapshot::begin_db(connection)?;
++    let report = run_recall_in_snapshot(connection, workspace_id, query, chrono::Utc::now())?;
++    snapshot.finish_db()?;
++    Ok(report)
++}
++
++// The CLI already pins schema, workspace and cursor generation. Keep its
++// source reads in that snapshot rather than beginning a nested transaction.
++fn run_recall_in_snapshot(
++    connection: &crate::db::DbConnection,
++    workspace_id: &str,
++    query: &RecallQuery,
++    reference: chrono::DateTime<chrono::Utc>,
++) -> crate::db::Result<RecallReport> {
+     let db_generation = i64::try_from(
+         connection
+             .get_workspace_generation(workspace_id)?
+@@ -791,6 +808,11 @@
+         )?);
+     }
+ 
++    // The anchor index is a locator, not permission to disclose a memory.
++    // Recheck the live source even when the index has not been rebuilt since
++    // a revision, expiry, seal, or workspace-ownership change.
++    let (candidates, source_degraded) =
++        admission::admit(connection, workspace_id, candidates, reference)?;
+     let memory_ids: Vec<&str> = {
+         let mut ids: Vec<&str> = candidates
+             .iter()
+@@ -840,12 +862,14 @@
+     // Path and symbol recall only reads the anchor index. Missing embeddings
+     // do not affect these results and must not trigger model loading or an
+     // unrelated per-response degradation (including during daemon warm-up).
+-    Ok(evaluate_recall(
++    let mut report = evaluate_recall(
+         query,
+         &rows,
+         index_generation,
+         db_generation,
+-    ))
++    );
++    report.degraded.extend(source_degraded);
++    Ok(report)
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1301,7 +1325,7 @@
+             })?;
+         empty_recall_report_for_rejected_cursor(index_generation, db_generation)
+     } else {
+-        run_recall(&connection, &workspace_id, &query)
++        run_recall_in_snapshot(&connection, &workspace_id, &query, chrono::Utc::now())
+             .map_err(|error| storage_error(format!("Failed to run recall: {error}")))?
+     };
+     if let Some((offset, dropped_count)) = resume_cursor
+@@ -1340,19 +1364,23 @@
+ 
+ impl<'a> RecallReadSnapshot<'a> {
+     fn begin(connection: &'a crate::db::DbConnection) -> Result<Self, crate::models::DomainError> {
+-        connection
+-            .begin_read_snapshot()
+-            .map_err(|_| recall_snapshot_error("begin"))?;
++        Self::begin_db(connection).map_err(|_| recall_snapshot_error("begin"))
++    }
++
++    fn begin_db(connection: &'a crate::db::DbConnection) -> crate::db::Result<Self> {
++        connection.begin_read_snapshot()?;
+         Ok(Self {
+             connection,
+             active: true,
+         })
+     }
+ 
+-    fn finish(mut self) -> Result<(), crate::models::DomainError> {
+-        self.connection
+-            .commit_read_snapshot()
+-            .map_err(|_| recall_snapshot_error("finish"))?;
++    fn finish(self) -> Result<(), crate::models::DomainError> {
++        self.finish_db().map_err(|_| recall_snapshot_error("finish"))
++    }
++
++    fn finish_db(mut self) -> crate::db::Result<()> {
++        self.connection.commit_read_snapshot()?;
+         self.active = false;
+         Ok(())
+     }
