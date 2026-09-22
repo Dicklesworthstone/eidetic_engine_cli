@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "curate_session_arc_text.rs"]
+mod text;
+
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an
 /// excerpt are not transcript line boundaries and must not invent provenance.
@@ -15,7 +18,10 @@ pub(super) fn inline_candidates(
         if span.workspace_id != workspace_id || span.session_id != session.id {
             continue;
         }
-        let Some((failure, repair)) = inline_pair(&span.excerpt) else {
+        let Some(message) = text::message_text(&span.excerpt) else {
+            continue;
+        };
+        let Some((failure, repair)) = inline_pair(message.as_ref()) else {
             continue;
         };
         let mut failure_span = span.clone();
