@@ -178,24 +178,6 @@
       "surface": "auto_enroll_perf_gate"
     },
     {
-      "bead": "bd-36bbk.1.16",
-      "label": "implements-surface",
-      "reason": "missing tests/golden/ee_doctor_auto_enroll_checks.snap",
-      "surface": "ee_doctor_auto_enroll_checks"
-    },
-    {
-      "bead": "bd-36bbk.1.16",
-      "label": "implements-surface",
-      "reason": "referenced test path missing: tests/doctor_mesh_auto_enroll_checks.rs",
-      "surface": "ee_doctor_auto_enroll_checks"
-    },
-    {
-      "bead": "bd-36bbk.1.16",
-      "label": "implements-surface",
-      "reason": "referenced test path missing: tests/repair_action_graph_shared_contract.rs",
-      "surface": "ee_doctor_auto_enroll_checks"
-    },
-    {
       "bead": "bd-36bbk.1.17",
       "label": "implements-surface",
       "reason": "missing tests/golden/lane_grant_preview.snap",
@@ -238,12 +220,6 @@
       "surface": "auto_enroll_ci_integration"
     },
     {
-      "bead": "bd-36bbk.1.2",
-      "label": "implements-surface",
-      "reason": "missing tests/golden/tailscale_peer_autodiscovery.snap",
-      "surface": "tailscale_peer_autodiscovery"
-    },
-    {
       "bead": "bd-36bbk.1.20",
       "label": "implements-surface",
       "reason": "missing tests/golden/auto_enroll_release_readiness.snap",
@@ -254,18 +230,6 @@
       "label": "implements-surface",
       "reason": "referenced test path missing: tests/auto_enroll_release_readiness.rs",
       "surface": "auto_enroll_release_readiness"
-    },
-    {
-      "bead": "bd-36bbk.1.3",
-      "label": "implements-surface",
-      "reason": "missing tests/golden/tailscale_auto_enrollment_flow.snap",
-      "surface": "tailscale_auto_enrollment_flow"
-    },
-    {
-      "bead": "bd-36bbk.1.3",
-      "label": "implements-surface",
-      "reason": "referenced test path missing: tests/mesh_auto_enrollment_audit.rs",
-      "surface": "tailscale_auto_enrollment_flow"
     },
     {
       "bead": "bd-36bbk.1.4",
