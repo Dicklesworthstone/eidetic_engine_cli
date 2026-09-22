@@ -410,9 +410,18 @@ impl fmt::Display for RemoteEmbedError {
 
 impl RemoteEmbedError {
     fn into_search_error(self, model: &str) -> SearchError {
-        SearchError::EmbeddingFailed {
-            model: model.to_owned(),
-            source: self.to_string().into(),
+        match self {
+            // Dimension drift changes the vector space. Keep its typed error
+            // so retrieval cannot mistake it for an inference outage and
+            // silently authorize lexical recovery.
+            Self::DimensionMismatch { expected, actual } => SearchError::DimensionMismatch {
+                expected,
+                found: actual,
+            },
+            error => SearchError::EmbeddingFailed {
+                model: model.to_owned(),
+                source: error.to_string().into(),
+            },
         }
     }
 }
@@ -717,9 +726,31 @@ fn parse_embeddings_response(
             ),
         });
     }
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
 
+    // Positional compatibility is valid only when the entire response omits
+    // indexes. A malformed or partially indexed response does not establish
+    // which input produced each vector and must never be repaired by guessing.
+    let indexed_response = data.iter().any(|entry| entry.get("index").is_some());
     let mut indexed = Vec::with_capacity(data.len());
     for (position, entry) in data.iter().enumerate() {
+        let index = match entry.get("index") {
+            Some(value) => value
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < expected_count)
+                .ok_or_else(|| RemoteEmbedError::MalformedResponse {
+                    detail: "response entry has an invalid input index".to_owned(),
+                })?,
+            None if !indexed_response => position,
+            None => {
+                return Err(RemoteEmbedError::MalformedResponse {
+                    detail: "response mixes indexed and positional embeddings".to_owned(),
+                });
+            }
+        };
         let values = entry
             .get("embedding")
             .and_then(serde_json::Value::as_array)
@@ -755,13 +786,6 @@ fn parse_embeddings_response(
             }
             vector.push(component);
         }
-        // A missing `index` falls back to array position, which is what a
-        // server that always answers in order effectively means.
-        let index = entry
-            .get("index")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|index| usize::try_from(index).ok())
-            .unwrap_or(position);
         indexed.push((index, vector));
     }
 
@@ -1151,5 +1175,77 @@ mod tests {
         assert!(!detail.contains('\n'));
         assert!(detail.chars().count() <= 200);
         assert_eq!(bounded_detail("   "), "transport error");
+    }
+
+    #[test]
+    fn response_parsing_rejects_malformed_explicit_indexes() {
+        for index in [
+            serde_json::json!(null),
+            serde_json::json!(-1),
+            serde_json::json!(0.0),
+            serde_json::json!(0.5),
+            serde_json::json!(true),
+            serde_json::json!("private-server-index"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(u64::MAX),
+        ] {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "data": [{"index": index, "embedding": [1.0, 0.0]}]
+            }))
+            .expect("response JSON");
+            let error = parse_embeddings_response(&payload, 1).expect_err("invalid index");
+            assert_eq!(error.code(), "remote_embed_malformed_response");
+            assert!(!error.to_string().contains("private-server-index"));
+        }
+    }
+
+    #[test]
+    fn response_parsing_rejects_partial_index_maps_in_either_order() {
+        for data in [
+            serde_json::json!([
+                {"index": 0, "embedding": [1.0]},
+                {"embedding": [2.0]}
+            ]),
+            serde_json::json!([
+                {"embedding": [1.0]},
+                {"index": 1, "embedding": [2.0]}
+            ]),
+        ] {
+            let payload = serde_json::to_vec(&serde_json::json!({"data": data}))
+                .expect("response JSON");
+            assert!(parse_embeddings_response(&payload, 2).is_err());
+        }
+    }
+
+    #[test]
+    fn response_parsing_keeps_input_identity_for_every_three_item_permutation() {
+        let expected = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]];
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let data: Vec<_> = order
+                .into_iter()
+                .map(|index| serde_json::json!({"index": index, "embedding": expected[index]}))
+                .collect();
+            let payload = serde_json::to_vec(&serde_json::json!({"data": data}))
+                .expect("response JSON");
+            assert_eq!(parse_embeddings_response(&payload, 3).expect("permutation"), expected);
+        }
+    }
+
+    #[test]
+    fn response_parsing_accepts_an_empty_response_only_for_an_empty_input() {
+        assert!(parse_embeddings_response(br#"{"data":[]}"#, 0).expect("empty batch").is_empty());
+        assert!(parse_embeddings_response(br#"{"data":[]}"#, 1).is_err());
+        assert!(parse_embeddings_response(br#"{"data":[{"embedding":[1.0]}]}"#, 0).is_err());
+    }
+
+    #[test]
+    fn remote_dimension_drift_is_not_a_recoverable_inference_failure() {
+        let error = RemoteEmbedError::DimensionMismatch { expected: 384, actual: 768 }
+            .into_search_error("private-model");
+        assert!(matches!(error, SearchError::DimensionMismatch { expected: 384, found: 768 }));
+        let unavailable = RemoteEmbedError::Unreachable { detail: "offline".to_owned() }
+            .into_search_error("remote-model");
+        assert!(matches!(unavailable, SearchError::EmbeddingFailed { .. }));
     }
 }
