@@ -14,9 +14,7 @@
   "must_verify_checks": [
     "Review evidence source dependency_contract:dep_no_tokio before proceeding."
   ],
-  "evidence_ids": [
-    "dep_no_tokio"
-  ],
+  "evidence_ids": ["dep_no_tokio"],
   "next_action": "review_evidence_matches_before_proceeding",
   "risks_identified": 1,
   "tripwires_set": 1,
@@ -32,11 +30,7 @@
       "source_kind": "dependency_contract",
       "source_id": "dep_no_tokio",
       "source_score": 1.0,
-      "trigger_terms": [
-        "deploy",
-        "migration",
-        "production"
-      ],
+      "trigger_terms": ["deploy", "migration", "production"],
       "provenance": [
         "source_kind=dependency_contract",
         "source_id=dep_no_tokio",
