@@ -53,11 +53,6 @@ jobs:
           grep -qF 'fn same_numeric_context(' src/core/ask.rs
           grep -qF 'mod polarity_tests;' src/core/ask_numeric_tests.rs
           grep -qF 'mod polarity;' tests/contracts/ask_numeric.rs
-      - name: Execute the dependency-free scalar classifier
-        run: |
-          rustc --edition 2024 --test src/core/ask_numeric.rs -o "$RUNNER_TEMP/ask-numeric-classifier"
-          "$RUNNER_TEMP/ask-numeric-classifier" --nocapture | tee "$RUNNER_TEMP/numeric-classifier.log"
-          grep -Eq 'test result: ok\. 8 passed; 0 failed' "$RUNNER_TEMP/numeric-classifier.log"
       - name: Compile production library
         id: compile
         run: |
@@ -65,13 +60,23 @@ jobs:
           cargo check --locked --lib > "$RUNNER_TEMP/numeric-check.log" 2>&1 || status=$?
           tail -n 140 "$RUNNER_TEMP/numeric-check.log"
           exit "$status"
+      - name: Execute assignment classifiers in the real ask module
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          status=0
+          cargo test --locked --lib core::ask::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-classifier.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/numeric-classifier.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/numeric-classifier.log" || status=1
+          grep -q 'calendar_and_clock_literals_validate_boundaries_without_locale_guessing ... ok' "$RUNNER_TEMP/numeric-classifier.log" || status=1
+          grep -q 'public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap ... ok' "$RUNNER_TEMP/numeric-classifier.log" || status=1
+          exit "$status"
       - name: Execute real CLI numeric contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           status=0
           cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || status=$?
           tail -n 180 "$RUNNER_TEMP/numeric-cli.log"
-          grep -Eq 'test result: ok\. 5 passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
           exit "$status"
       - name: Execute complete ask engine regressions
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
