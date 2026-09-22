@@ -461,14 +461,17 @@ fn eval_async_migration_retrieves_the_exact_complete_query_inventory() -> TestRe
         .ok_or_else(|| "missing async query results".to_owned())?;
     ensure_equal(&queries.len(), &3, "async per-query result count")?;
     for (query, (expected_query, expected_id)) in queries.iter().zip([
-        ("background job queue health and capacity", "memory-1"),
+        (
+            "background job queue health and capacity",
+            "mem_asyncmigration000000000001",
+        ),
         (
             "production backfill timeout and stuck migration",
-            "memory-2",
+            "mem_asyncmigration000000000002",
         ),
         (
             "rollback plan and pre-migration schema checkpoint",
-            "memory-3",
+            "mem_asyncmigration000000000003",
         ),
     ]) {
         ensure_equal(&query["query"], &json!(expected_query), "exact async query")?;
@@ -970,7 +973,7 @@ fn eval_run_executes_every_ask_quality_case_and_rejects_wrong_citations() -> Tes
         .ok_or_else(|| "missing lexical release-tag result".to_owned())?;
     ensure_equal(
         &direct["actual_cited_memory_ids"],
-        &json!(["mem_ask_release_tag_format"]),
+        &json!(["mem_askreleasetagformat0000000"]),
         "real lexical answer citation",
     )?;
     ensure_equal(
@@ -1005,7 +1008,7 @@ fn eval_run_executes_every_ask_quality_case_and_rejects_wrong_citations() -> Tes
         .iter_mut()
         .find(|case| case["case_id"] == "ask.lexical_release_tag")
         .ok_or_else(|| "missing direct case".to_owned())?;
-    direct_case["expected_cited_memory_ids"] = json!(["mem_ask_unrelated_ui"]);
+    direct_case["expected_cited_memory_ids"] = json!(["mem_askunrelatedui000000000000"]);
     std::fs::write(
         fixture.join("scenario.json"),
         serde_json::to_vec_pretty(&scenario).map_err(|error| error.to_string())?,
