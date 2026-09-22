@@ -7,7 +7,6 @@ on:
       - 'src/core/curate*.rs'
       - 'tests/session_arc_learning_cli.rs'
       - 'tests/cass_session_arc_import.py'
-      - 'scripts/delivery/session-learning-resources-20260922.patch.xz.b64'
       - 'scripts/delivery/session-learning-policy-20260922.patch'
       - '.github/workflows/session-learning-regressions.yml'
   workflow_dispatch:
@@ -36,58 +35,32 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Apply resource-grounded learning once
+      - name: Apply source-backed policy lessons once
         id: delivery
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, hashlib, lzma, os
+          import hashlib
           from pathlib import Path
-          source = Path('src/core/curate_session_arc_sequence.rs')
-          if hashlib.sha256(source.read_bytes()).hexdigest() != '31cfdb9046326ae0512bbd8782ccca2ced89b3dabf43a383280a585c369e7b3f':
-              raise SystemExit('Sequence source changed; refusing historical patch replay')
-          if Path('tests/cass_session_arc_import.py').exists():
-              raise SystemExit('Import lifecycle already exists; refusing replacement')
-          parent = Path('src/core/curate.rs')
-          if hashlib.sha256(parent.read_bytes()).hexdigest() != 'e3dd9fdd70663f16df2487d5958354ecf8cae200c53aaaaa333bb95ff1aea79c':
-              raise SystemExit('Curation source changed; refusing overwrite')
-          policy = Path('scripts/delivery/session-learning-policy-20260922.patch').read_bytes()
-          if hashlib.sha256(policy).hexdigest() != '23ae9c2cca3fc5223265f648c766f813be1ee7e442c3ec38a764a487974c2c3e':
-              raise SystemExit('Policy lesson patch checksum mismatch')
-          encoded = Path('scripts/delivery/session-learning-resources-20260922.patch.xz.b64').read_text()
-          patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
-          if hashlib.sha256(patch).hexdigest() != '14278e0358d71a74474ffb362f185abcd64de4755c48491e78eb681d79c4e8d0':
-              raise SystemExit('Resource learning patch checksum mismatch')
-          Path(os.environ['RUNNER_TEMP'], 'learning-resources.patch').write_bytes(patch)
+          expected = {
+              'src/core/curate.rs': 'e3dd9fdd70663f16df2487d5958354ecf8cae200c53aaaaa333bb95ff1aea79c',
+              'src/core/curate_session_arc_sequence.rs': 'fb06929d943a7c8f09a6ada5f67e0c38df9c0cd3c6de896857f03177ffef5f5c',
+              'scripts/delivery/session-learning-policy-20260922.patch': '23ae9c2cca3fc5223265f648c766f813be1ee7e442c3ec38a764a487974c2c3e',
+          }
+          for name, digest in expected.items():
+              if hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f'Source changed; refusing historical replay over {name}')
           PY
-          git apply --check "$RUNNER_TEMP/learning-resources.patch"
-          git apply "$RUNNER_TEMP/learning-resources.patch"
-          rustfmt --edition 2024 --config skip_children=true src/core/curate_session_arc_sequence.rs
           git apply --check scripts/delivery/session-learning-policy-20260922.patch
           git apply scripts/delivery/session-learning-policy-20260922.patch
           rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc_sequence.rs
           python3 -m py_compile tests/cass_session_arc_import.py
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/session-learning-regressions.yml')
-          text = path.read_text()
-          start = text.index('      - name: Apply resource-grounded learning once\n')
-          end = text.index('      - name: Capture exact learning source\n', start)
-          text = text[:start] + text[end:]
-          start = text.index('      - name: Publish the tested source directly to main\n')
-          end = text.index('      - uses: actions/upload-artifact@', start)
-          text = text[:start] + text[end:]
-          text = text.replace('  contents: write\n', '  contents: read\n')
-          text = text.replace('          persist-credentials: true\n', '          persist-credentials: false\n')
-          text = text.replace("!cancelled() && steps.delivery.outcome == 'success'", '!cancelled()')
-          path.write_text(text)
-          PY
           git diff --check
-          git add -- src/core/curate.rs src/core/curate_session_arc_sequence.rs tests/cass_session_arc_import.py .github/workflows/session-learning-regressions.yml
+          git add -- src/core/curate.rs src/core/curate_session_arc_sequence.rs
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
-            -m 'feat(curate): ground and apply ordinary conversation repairs' \
-            -m 'Keep same-topic failures on different resources independent, pair ordinary repairs through exact resources or narrow adjacent coreference, and refuse ambiguity. Preserve risk, mitigation and both canonical source locations for otherwise underspecified imported policy lessons without weakening validation. Exercise the actual EE importer through explicit application and replay. Keep already-specific historical content identities and retire the delivery mutation path.'
+            -m 'fix(curate): make imported policy lessons actionable with exact source evidence' \
+            -m 'Preserve observed risk, mitigation and both canonical source locations for otherwise underspecified two-window lessons. Keep the specificity floor and explicit approval gates intact, invent no commands, and preserve content-bound identities of already-specific historical pairs. Cover the unchanged policy fixture and compatibility contract in regression tests.'
       - name: Capture exact learning source
         if: ${{ !cancelled() }}
         shell: bash
@@ -127,9 +100,15 @@ jobs:
         run: |
           set -o pipefail
           python3 tests/cass_session_arc_import.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/learning-import.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: session-learning-import-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/learning-import.log
+          retention-days: 7
       - name: Execute source reconstruction and application regressions
         id: engine
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo test --locked --lib session_arc -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-engine.log"
