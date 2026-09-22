@@ -736,7 +736,11 @@ fn multiple_inline_episodes_keep_distinct_reciprocal_ids_and_exact_sources() {
         std::slice::from_ref(&span),
         0.0,
     );
-    assert_eq!(candidates.len(), 4, "both episodes must reach the review path");
+    assert_eq!(
+        candidates.len(),
+        4,
+        "both episodes must reach the review path"
+    );
     let ids: std::collections::BTreeSet<_> = candidates
         .iter()
         .map(|candidate| candidate.candidate_id.as_str())
@@ -761,13 +765,21 @@ fn multiple_inline_episodes_keep_distinct_reciprocal_ids_and_exact_sources() {
         assert_ne!(peer_arc.role, arc.role);
         assert_eq!(peer_arc.failure_span, arc.failure_span);
         assert_eq!(peer_arc.resolution_span, arc.resolution_span);
-        if arc.failure_span.excerpt.contains("rewriting evidence ownership") {
+        if arc
+            .failure_span
+            .excerpt
+            .contains("rewriting evidence ownership")
+        {
             assert_eq!(arc.failure_span.excerpt, LATER_FAILURE);
             assert_eq!(arc.resolution_span.excerpt, LATER_REPAIR);
             assert!(!candidate.proposed_content.contains("no-loop-takeover"));
         } else {
             assert!(arc.failure_span.excerpt.contains("no-loop-takeover"));
-            assert!(!candidate.proposed_content.contains("rewriting evidence ownership"));
+            assert!(
+                !candidate
+                    .proposed_content
+                    .contains("rewriting evidence ownership")
+            );
         }
     }
     for limit in 0..7 {
@@ -807,7 +819,8 @@ fn repeated_inline_episodes_deduplicate_complete_pairs_without_changing_first_id
 }
 
 #[test]
-fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier_pair() -> TestResult {
+fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier_pair() -> TestResult
+{
     let fixture = review_session_fixture()?;
     let session = SessionId::from_uuid(uuid::Uuid::from_u128(9810)).to_string();
     let source_id = evidence_id(9811);
@@ -848,7 +861,12 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
     })
     .map_err(|error| error.message())?;
     assert_eq!(report.candidate_count, 4, "{:?}", report.candidates);
-    assert!(report.candidates.iter().all(|candidate| candidate.persisted));
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.persisted)
+    );
     let connection =
         DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
     for candidate in &report.candidates {
@@ -875,7 +893,9 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
         .iter()
         .filter(|candidate| {
             candidate.session_arc.as_ref().is_some_and(|arc| {
-                arc.failure_span.excerpt.contains("rewriting evidence ownership")
+                arc.failure_span
+                    .excerpt
+                    .contains("rewriting evidence ownership")
             })
         })
         .collect();
@@ -886,7 +906,8 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
         let applied = apply_arc(&fixture, &candidate.candidate_id, false)?;
         assert_eq!(
             applied.application.status, "applied",
-            "{:?}", applied.application.errors
+            "{:?}",
+            applied.application.errors
         );
         created.push(applied.application.created_memory_id.unwrap());
     }
@@ -928,7 +949,9 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
         .len();
     for candidate in selected {
         assert_eq!(
-            apply_arc(&fixture, &candidate.candidate_id, false)?.application.status,
+            apply_arc(&fixture, &candidate.candidate_id, false)?
+                .application
+                .status,
             "already_applied"
         );
     }
