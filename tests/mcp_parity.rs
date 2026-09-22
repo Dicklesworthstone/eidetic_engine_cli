@@ -12,7 +12,7 @@
 #![cfg(feature = "mcp")]
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -657,6 +657,128 @@ fn mcp_parity_ask_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "ask")
+}
+
+fn mcp_ask_store_snapshot(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if kind.is_dir() {
+            files.extend(mcp_ask_store_snapshot(&path)?);
+        } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with("-shm") {
+            // Shared memory is transient reader coordination. Include every
+            // durable file, the WAL, and writer-owner epochs in the comparison.
+            files.insert(
+                path.clone(),
+                fs::read(&path).map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    Ok(files)
+}
+
+#[test]
+fn mcp_ask_scopes_native_rules_and_preserves_read_only_store() -> TestResult {
+    use ee::db::{CreateProceduralRuleInput, DbConnection};
+
+    let workspace = scenario_dir("ask_scope_read_only")?;
+    init_workspace(&workspace)?;
+    let database = workspace.join(".ee/ee.db");
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let workspace_id = db
+        .get_workspace_by_path(&workspace.to_string_lossy())
+        .map_err(|error| error.to_string())?
+        .ok_or("missing MCP ask fixture workspace")?
+        .id;
+    let ids = [861, 862, 863].map(|number| format!("rule_{number:026}"));
+    for (id, trust, directory) in [
+        (&ids[0], "human_explicit", "src"),
+        (&ids[1], "agent_assertion", "src"),
+        (&ids[2], "human_explicit", "tests"),
+    ] {
+        db.insert_procedural_rule(
+            id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.clone(),
+                content: "Run cargo fmt before every release tag.".to_owned(),
+                confidence: 0.95,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: trust.to_owned(),
+                scope: "directory".to_owned(),
+                scope_pattern: Some(directory.to_owned()),
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    db.close().map_err(|error| error.to_string())?;
+    let before = mcp_ask_store_snapshot(&workspace)?;
+    for (scope, paths, expected) in [
+        ("verified", vec!["src/a,b.rs"], vec![&ids[0]]),
+        ("workspace", vec!["src/a,b.rs"], vec![&ids[0], &ids[1]]),
+        ("verified", vec!["tests/café notes.rs"], vec![&ids[2]]),
+        ("verified", vec!["src-other/lib.rs"], vec![]),
+        ("verified", vec![], vec![]),
+    ] {
+        let response = run_mcp_tool_call(
+            "ee_ask",
+            json!({
+                "workspace": workspace,
+                "question": "Which command must run before every release tag?",
+                "memoryScope": scope,
+                "path": paths,
+                "limitEvidence": 8,
+                "minConfidence": 0.1
+            }),
+        )?;
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let payload: JsonValue = serde_json::from_str(&extract_mcp_tool_text(&response)?)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(payload["success"], true, "{payload}");
+        assert_eq!(payload["data"]["candidatesScanned"], expected.len());
+        assert_eq!(payload["data"]["abstained"], expected.is_empty());
+        let citations = payload["data"]["citations"]
+            .as_array()
+            .ok_or("missing citations")?;
+        assert_eq!(citations.is_empty(), expected.is_empty());
+        for citation in citations {
+            assert_eq!(citation["entityKind"], "rule");
+            assert!(expected.iter().any(|id| citation["ruleId"] == id.as_str()));
+        }
+        for forbidden in ids.iter().filter(|id| !expected.contains(id)) {
+            assert!(
+                !payload.to_string().contains(forbidden),
+                "{scope} {paths:?}"
+            );
+        }
+        assert_eq!(
+            mcp_ask_store_snapshot(&workspace)?,
+            before,
+            "{scope} {paths:?}"
+        );
+    }
+    let strict_miss = run_mcp_tool_call(
+        "ee_ask",
+        json!({
+            "workspace": workspace,
+            "question": "What is the database port?",
+            "memoryScope": "verified",
+            "path": "src/lib.rs",
+            "requireConfidence": 1
+        }),
+    )?;
+    assert_eq!(strict_miss["result"]["isError"], true);
+    let payload: JsonValue = serde_json::from_str(&extract_mcp_tool_text(&strict_miss)?)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(payload["error"]["code"], "unsatisfied_degraded_mode");
+    assert_eq!(mcp_ask_store_snapshot(&workspace)?, before);
+    Ok(())
 }
 
 /// Parity test: `ee primer --json` vs `ee_primer` MCP tool

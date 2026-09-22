@@ -11274,7 +11274,7 @@ pub struct CassImportArgs {
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
 
-    /// Only import sessions started within this duration window; combines with --limit.
+    /// Only import sessions active within this duration window; combines with --limit.
     #[arg(long, value_name = "DURATION")]
     pub since: Option<String>,
 

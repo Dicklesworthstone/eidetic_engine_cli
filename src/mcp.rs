@@ -29,6 +29,13 @@ use crate::models::{ContextProfileName, ProcessExitCode, RedactionLevel};
 pub use crate::output::MCP_PROTOCOL_VERSION;
 use crate::output::public_schemas;
 
+#[path = "mcp_ask.rs"]
+mod ask;
+
+#[cfg(test)]
+#[path = "mcp_ask_live_tests.rs"]
+mod ask_live_tests;
+
 #[path = "mcp_capture_git.rs"]
 mod capture_git;
 
@@ -331,10 +338,10 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
     McpToolEntry {
         name: "ee_ask",
         description: "Run ee ask --json for extractive answers; abstention stays in the response payload",
-        input_schema: ask_tool_schema,
+        input_schema: ask::schema,
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
         effect: None,
-        args_builder: build_ask_tool_args,
+        args_builder: ask::build_args,
     },
     McpToolEntry {
         name: "ee_primer",
@@ -1095,39 +1102,6 @@ fn recall_tool_schema() -> Value {
                 "description": "Database path override"
             }
         }
-    })
-}
-
-fn ask_tool_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": "Question to answer extractively from stored memories"
-            },
-            "workspace": {
-                "type": "string",
-                "description": "Workspace path"
-            },
-            "limitEvidence": {
-                "type": "integer",
-                "description": "Maximum evidence spans to include"
-            },
-            "minConfidence": {
-                "type": "number",
-                "description": "Minimum confidence threshold"
-            },
-            "requireConfidence": {
-                "type": "number",
-                "description": "Fail-closed threshold; abstention still appears in the ee error payload"
-            },
-            "database": {
-                "type": "string",
-                "description": "Database path override"
-            }
-        },
-        "required": ["question"]
     })
 }
 
@@ -2014,29 +1988,6 @@ fn build_recall_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result
         push_arg(args, budget_tokens.to_string());
     }
     append_optional_string_flag(args, arguments, &["cursor"], "--cursor")?;
-    append_optional_path_flag(args, arguments, &["database"], "--database")?;
-    Ok(())
-}
-
-fn build_ask_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
-    push_arg(args, "ask");
-    push_arg(args, required_string(arguments, &["question"])?);
-    if let Some(limit_evidence) = optional_u32(arguments, &["limitEvidence", "limit_evidence"])? {
-        push_arg(args, "--limit-evidence");
-        push_arg(args, limit_evidence.to_string());
-    }
-    append_optional_number_flag(
-        args,
-        arguments,
-        &["minConfidence", "min_confidence"],
-        "--min-confidence",
-    )?;
-    append_optional_number_flag(
-        args,
-        arguments,
-        &["requireConfidence", "require_confidence"],
-        "--require-confidence",
-    )?;
     append_optional_path_flag(args, arguments, &["database"], "--database")?;
     Ok(())
 }
@@ -4738,15 +4689,13 @@ mod tests {
                 "ee",
                 "--json",
                 "ask",
+                "--read-only",
+                "--limit-evidence=4",
+                "--min-confidence=0.4",
+                "--require-confidence=0.7",
+                "--database=/tmp/ee.db",
+                "--",
                 "What MCP write tools require allowWrite?",
-                "--limit-evidence",
-                "4",
-                "--min-confidence",
-                "0.4",
-                "--require-confidence",
-                "0.7",
-                "--database",
-                "/tmp/ee.db",
             ]
         );
 
@@ -4770,6 +4719,84 @@ mod tests {
                 "--no-persist",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn registered_ask_preserves_scope_and_literal_arguments_through_clap() -> Result<(), String> {
+        use clap::Parser;
+
+        let question = "--workspace=/private-canary";
+        let paths = ["src/a,b.rs", "src/café notes.rs", "--private.rs"];
+        for scope in ["self", "team", "verified", "global", "workspace", "swarm"] {
+            let args = build_cli_args_for_tool(
+                registry_tool("ee_ask")?,
+                &json!({
+                    "workspace": "workspace with spaces",
+                    "question": question,
+                    "memoryScope": scope,
+                    "path": paths,
+                    "database": "--foreign-store",
+                    "limitEvidence": 7,
+                    "minConfidence": 0.25,
+                    "requireConfidence": 0.75
+                }),
+            )?;
+            let cli = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            assert_eq!(cli.workspace, Some(PathBuf::from("workspace with spaces")));
+            let Some(crate::cli::Command::Ask(args)) = cli.command else {
+                return Err("registered ee_ask did not dispatch the ask command".to_owned());
+            };
+            assert_eq!(args.question.as_deref(), Some(question));
+            assert_eq!(args.memory_scope.as_str(), scope);
+            assert_eq!(args.paths, paths);
+            assert_eq!(args.database, Some(PathBuf::from("--foreign-store")));
+            assert_eq!(args.limit_evidence, 7);
+            assert_eq!(args.min_confidence, Some(0.25));
+            assert_eq!(args.require_confidence, Some(0.75));
+            assert!(args.read_only);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registered_ask_advertises_constraints_and_rejects_invalid_json_rpc_arguments()
+    -> Result<(), String> {
+        let listed = handle_json_rpc_message(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+        }))
+        .ok_or("tools/list did not respond")?;
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["name"] == "ee_ask"))
+            .ok_or("tools/list omitted ee_ask")?;
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tool["inputSchema"]["properties"]["readOnly"]["const"], true);
+        assert_eq!(
+            tool["inputSchema"]["properties"]["memoryScope"]["enum"],
+            json!(["self", "team", "verified", "global", "workspace", "swarm"])
+        );
+        for arguments in [
+            json!({"question": "release", "memoryScope": "private-canary"}),
+            json!({"question": "release", "memoryScope": "verified", "memory_scope": "workspace"}),
+            json!({"question": "release", "path": ["src/lib.rs", 42]}),
+            json!({"question": "release", "path": "src/lib.rs", "paths": []}),
+            json!({"question": "release", "readOnly": false}),
+            json!({"question": "release", "read_only": "true"}),
+            json!({"question": "release", "minConfidence": 1.1}),
+            json!({"question": "release", "limitEvidence": 0}),
+            json!({"question": "release", "private-canary-typo": "verified"}),
+        ] {
+            let response = handle_json_rpc_message(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "ee_ask", "arguments": arguments}
+            }))
+            .ok_or("invalid ee_ask call did not respond")?;
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert!(response.get("result").is_none(), "{response}");
+            assert!(!response.to_string().contains("private-canary"));
+        }
         Ok(())
     }
 

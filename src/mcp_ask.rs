@@ -18,8 +18,15 @@ const ALIASES: &[(&str, &str)] = &[
     ("path", "paths"),
 ];
 const FIELDS: &[&str] = &[
-    "question", "workspace", "database", "limitEvidence", "minConfidence",
-    "requireConfidence", "memoryScope", "readOnly", "path",
+    "question",
+    "workspace",
+    "database",
+    "limitEvidence",
+    "minConfidence",
+    "requireConfidence",
+    "memoryScope",
+    "readOnly",
+    "path",
 ];
 const SCOPES: &[&str] = &["self", "team", "verified", "global", "workspace", "swarm"];
 
@@ -57,7 +64,8 @@ pub(super) fn schema() -> Value {
     });
     for &(canonical, alias) in ALIASES {
         let mut property = schema["properties"][canonical].clone();
-        property["description"] = format!("Alias for {canonical}; do not supply both spellings").into();
+        property["description"] =
+            format!("Alias for {canonical}; do not supply both spellings").into();
         schema["properties"][alias] = property;
     }
     schema
@@ -65,21 +73,25 @@ pub(super) fn schema() -> Value {
 
 fn field<'a>(arguments: &'a Value, canonical: &str) -> Option<&'a Value> {
     arguments.get(canonical).or_else(|| {
-        ALIASES.iter().find_map(|&(name, alias)| {
-            (name == canonical).then(|| arguments.get(alias)).flatten()
-        })
+        ALIASES
+            .iter()
+            .find_map(|&(name, alias)| (name == canonical).then(|| arguments.get(alias)).flatten())
     })
 }
 
 fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
-    value.as_str().filter(|text| !text.trim().is_empty())
+    value
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| format!("Argument '{name}' must be a non-empty string"))
 }
 
 /// Stage all arguments first: an invalid constraint cannot leave a partial
 /// invocation in the caller's buffer. There is no shell interpolation.
 pub(super) fn build_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
-    let object = arguments.as_object().ok_or("ee_ask arguments must be an object")?;
+    let object = arguments
+        .as_object()
+        .ok_or("ee_ask arguments must be an object")?;
     if object.keys().any(|key| {
         !FIELDS.contains(&key.as_str()) && !ALIASES.iter().any(|&(_, alias)| alias == key)
     }) {
@@ -90,7 +102,10 @@ pub(super) fn build_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<
             return Err(format!("Conflicting aliases for '{canonical}'"));
         }
     }
-    let question = string(field(arguments, "question").ok_or("Missing required argument 'question'")?, "question")?;
+    let question = string(
+        field(arguments, "question").ok_or("Missing required argument 'question'")?,
+        "question",
+    )?;
     if let Some(read_only) = field(arguments, "readOnly") {
         if read_only.as_bool() != Some(true) {
             return Err("ee_ask is read-only; readOnly must be true".to_owned());
@@ -121,14 +136,21 @@ pub(super) fn build_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<
         }
     }
     if let Some(limit) = field(arguments, "limitEvidence") {
-        let limit = limit.as_u64().and_then(|value| u32::try_from(value).ok())
+        let limit = limit
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0)
             .ok_or("Argument 'limitEvidence' must be an integer from 1 to 4294967295")?;
         staged.push(format!("--limit-evidence={limit}").into());
     }
-    for (name, flag) in [("minConfidence", "--min-confidence"), ("requireConfidence", "--require-confidence")] {
+    for (name, flag) in [
+        ("minConfidence", "--min-confidence"),
+        ("requireConfidence", "--require-confidence"),
+    ] {
         if let Some(value) = field(arguments, name) {
-            let number = value.as_f64().filter(|number| number.is_finite() && (0.0..=1.0).contains(number))
+            let number = value
+                .as_f64()
+                .filter(|number| number.is_finite() && (0.0..=1.0).contains(number))
                 .ok_or_else(|| format!("Argument '{name}' must be a number from 0 to 1"))?;
             staged.push(format!("{flag}={number}").into());
         }
@@ -152,21 +174,28 @@ mod tests {
     fn arguments(value: Value) -> Vec<String> {
         let mut args = Vec::new();
         build_args(&mut args, &value).unwrap();
-        args.into_iter().map(|value| value.into_string().unwrap()).collect()
+        args.into_iter()
+            .map(|value| value.into_string().unwrap())
+            .collect()
     }
 
     fn rejects(value: Value) -> String {
         let mut args = vec![OsString::from("ee")];
         let before = args.clone();
         let error = build_args(&mut args, &value).unwrap_err();
-        assert_eq!(args, before, "invalid arguments must not leave a partial command");
+        assert_eq!(
+            args, before,
+            "invalid arguments must not leave a partial command"
+        );
         error
     }
 
     #[test]
     fn default_ask_is_genuinely_read_only() {
-        assert_eq!(arguments(json!({"question": "Which port?"})),
-            ["ask", "--read-only", "--", "Which port?"]);
+        assert_eq!(
+            arguments(json!({"question": "Which port?"})),
+            ["ask", "--read-only", "--", "Which port?"]
+        );
     }
 
     #[test]
@@ -179,17 +208,24 @@ mod tests {
 
     #[test]
     fn paths_preserve_literal_commas_spaces_unicode_and_option_prefixes() {
-        let args = arguments(json!({"question": "Which checks?", "path": ["src/a,b.rs", "src/café notes.rs", "--private.rs"]}));
+        let args = arguments(
+            json!({"question": "Which checks?", "path": ["src/a,b.rs", "src/café notes.rs", "--private.rs"]}),
+        );
         for path in ["src/a,b.rs", "src/café notes.rs", "--private.rs"] {
             assert!(args.contains(&format!("--path={path}")));
         }
-        assert_eq!(args.iter().filter(|arg| arg.starts_with("--path=")).count(), 3);
+        assert_eq!(
+            args.iter().filter(|arg| arg.starts_with("--path=")).count(),
+            3
+        );
     }
 
     #[test]
     fn string_and_single_element_array_paths_have_identical_meaning() {
-        assert_eq!(arguments(json!({"question": "Q", "path": "src/a,b.rs"})),
-            arguments(json!({"question": "Q", "paths": ["src/a,b.rs"]})));
+        assert_eq!(
+            arguments(json!({"question": "Q", "path": "src/a,b.rs"})),
+            arguments(json!({"question": "Q", "paths": ["src/a,b.rs"]}))
+        );
     }
 
     #[test]
@@ -222,15 +258,30 @@ mod tests {
 
     #[test]
     fn malformed_paths_do_not_become_unscoped_queries() {
-        for paths in [Value::Null, json!(false), json!(42), json!({}), json!(""), json!(["src/lib.rs", 3]), json!([" "])] {
+        for paths in [
+            Value::Null,
+            json!(false),
+            json!(42),
+            json!({}),
+            json!(""),
+            json!(["src/lib.rs", 3]),
+            json!([" "]),
+        ] {
             rejects(json!({"question":"Q", "paths":paths}));
         }
     }
 
     #[test]
     fn invalid_scopes_fail_closed_without_disclosure() {
-        for scope in [json!("private-canary"), json!(""), json!(["team"]), Value::Null] {
-            assert!(!rejects(json!({"question":"Q", "memoryScope":scope})).contains("private-canary"));
+        for scope in [
+            json!("private-canary"),
+            json!(""),
+            json!(["team"]),
+            Value::Null,
+        ] {
+            assert!(
+                !rejects(json!({"question":"Q", "memoryScope":scope})).contains("private-canary")
+            );
         }
     }
 
@@ -262,13 +313,16 @@ mod tests {
     fn option_like_questions_and_database_values_remain_single_arguments() {
         let question = "--workspace=/private-canary";
         let args = arguments(json!({"question":question, "database":"--foreign-store"}));
-        assert_eq!(&args[args.len()-2..], &["--", question]);
+        assert_eq!(&args[args.len() - 2..], &["--", question]);
         assert!(args.contains(&"--database=--foreign-store".to_owned()));
         let schema = schema();
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["readOnly"]["const"], true);
         for &(canonical, alias) in ALIASES {
-            assert_eq!(schema["properties"][canonical]["type"], schema["properties"][alias]["type"]);
+            assert_eq!(
+                schema["properties"][canonical]["type"],
+                schema["properties"][alias]["type"]
+            );
         }
     }
 }

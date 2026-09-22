@@ -33,7 +33,7 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 
 # =========================================================================
 # @SECTION-2-BEGIN
-# @SECTION-2-BUDGET: 10
+# @SECTION-2-BUDGET: 8
 #
 # THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
 # sentence here. The gate fails in BOTH directions: more entries than the budget
@@ -74,6 +74,4 @@ tests/fixtures/closure_lint/test_assertion_cases/empty_test.rs	bd-l6h3g item 5. 
 tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/glob_match.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/real_test_exists.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/real_test_exists.rs; byte-identical, unreferenced.
-src/mcp_ask.rs	bd-l6h3g. LIVE FEATURE THAT NEVER REACHED THE PRODUCT. f23932576 (2026-09-18) "feat(mcp): preserve ask scope and literal targets with true read-only execution" added this file and NOTHING ELSE -- 274 insertions, one file, no `mod` line and no call site. It is not a duplicate of the inline ask handling in src/mcp.rs: `memoryScope` appears 9 times here and 0 times there, so the scope preservation the commit message announces is absent from the shipped MCP path. Declaring it as-is would only make its 5 private items dead code; WIRING it is a product decision and is not this gate's to take. MCP lane owns it. REMOVE THIS LINE WHEN IT IS WIRED INTO src/mcp.rs OR RETIRED.
-src/mcp_ask_live_tests.rs	bd-l6h3g. Test module for the above, added 3e904a635 (2026-09-18), likewise never declared. It calls crate::mcp::handle_json_rpc_message, which DOES exist, so it would compile and run once declared -- but it asserts the scope behaviour that src/mcp_ask.rs implements and the product does not, so declaring it before its subject is wired would red the suite. REMOVE THIS LINE WHEN src/mcp_ask.rs IS WIRED OR RETIRED, TOGETHER WITH IT.
 src/core/backup_workflow_recovery_tests.rs	bd-l6h3g. DOES NOT COMPILE. Shipped by dec5235e1 (2026-09-20) "fix(workflow): deliver atomic completion and full recovery lifecycle". I declared it and ran `cargo check --profile test --lib`: CHECK_RC=101. It asserts `expected.workflow_id` on jsonl::ExportMemoryRecord, a field that does not exist. The declaration is NOT the fix -- the feature the commit says it delivered is absent, and declaring this file only moves a red from invisible to main. Workflow lane owns it. REMOVE THIS LINE WHEN workflow_id EXISTS AND THE FILE COMPILES DECLARED.
