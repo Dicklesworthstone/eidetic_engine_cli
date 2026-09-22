@@ -8,7 +8,7 @@
 
 **Status:** `degraded`
 
-Context includes 3 degraded signals; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available. `ee doctor` reports this as advisory and keeps workspace posture ok, because the memory loop still works on the deterministic-hash tier.
+Context includes 2 degraded signals; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available. \`ee doctor\` reports this as advisory and keeps workspace posture ok, because the memory loop still works on the deterministic-hash tier.
 
 ## procedural_rules
 
@@ -18,7 +18,7 @@ Context includes 3 degraded signals; semantic embedding is unavailable, so treat
 Run cargo fmt --check before release.
 ```
 
-**Why:** matched 'format before release' via lexical (relevance 0.5000, utility 0.8000)
+**Why:** matched 'format before release' via lexical (relevance 1.0000, utility 0.8000)
 
 **Trust:** `human_explicit` / `authoritative`
 
@@ -27,8 +27,6 @@ Run cargo fmt --check before release.
 
 ## Degradations
 
-- **[medium]** Proximity-to-seed scoring is disabled by graph.feature.proximity.enabled.
-  - *Repair:* `ee config set graph.feature.proximity.enabled true`
 - **[warning]** Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.
   - *Repair:* `ee index reembed --workspace .`
 - **[low]** Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file \[REDACTED_PATH\] is missing.
