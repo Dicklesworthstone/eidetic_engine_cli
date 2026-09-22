@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths:
       - 'src/core/recall*.rs'
-      - 'scripts/delivery/recall-source-admission-20260922.patch'
+      - 'scripts/delivery/recall-admitted-scan-20260922.patch'
       - 'tests/recall_source_lifecycle_cli.py'
       - '.github/workflows/recall-source-admission.yml'
   workflow_dispatch:
@@ -28,28 +28,37 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Integrate reviewed live recall admission
+      - name: Integrate bounded admitted anchor traversal
         id: source
         shell: bash
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          files=(src/core/recall.rs src/core/recall_admission.rs)
-          if ! grep -Fq 'fn run_recall_in_snapshot(' src/core/recall.rs; then
-            test "$(git hash-object src/core/recall.rs)" = 20a617675d3c61a53f1f798eaae9b52a8626f037
-            test "$(git hash-object src/core/recall_admission.rs)" = c7b9128268404306132e1cd27ed4ac9222ec3410
-            patch=scripts/delivery/recall-source-admission-20260922.patch
-            test "$(git hash-object "$patch")" = 584c96226c2a980cb1e7160ad44698884f1aa076
+          new_files=(src/core/recall_scan.rs scripts/delivery/recall-admitted-scan-20260922.patch tests/recall_source_lifecycle_cli.py tests/fixtures/failure_modes/recall_anchor_filtered.json tests/fixtures/failure_modes/recall_scan_incomplete.json)
+          files=(src/core/recall.rs src/core/recall_admission.rs "${new_files[@]}")
+          if ! grep -Fq 'let scan = scan::load(' src/core/recall.rs; then
+            test "$(git hash-object src/core/recall.rs)" = f46e30453fc59aed49f2203540fe15f0d65bfb04
+            test "$(git hash-object src/core/recall_admission.rs)" = 3911882901f25215fa9bb43acbbc276886c31206
+            reviewed=270a987de2db628af16107ee14ef625266bbb307
+            git fetch --no-tags origin "$reviewed"
+            git diff --binary 99157cf509af58f9d8af18b13a1a2cbe651ed115 "$reviewed" -- "${new_files[@]}" > "$RUNNER_TEMP/recall-reviewed-files.patch"
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/recall-reviewed-files.patch"
+            git apply "$RUNNER_TEMP/recall-reviewed-files.patch"
+            test "$(git hash-object src/core/recall_scan.rs)" = 2e0e2eabfe905d20047aaa7011fa518919da1e42
+            test "$(git hash-object tests/recall_source_lifecycle_cli.py)" = a4e09160eb077987edba8f809047f08ccc7814bc
+            patch=scripts/delivery/recall-admitted-scan-20260922.patch
+            test "$(git hash-object "$patch")" = 53311669eab557e9053308343a7bf76014344b25
             git apply --check --whitespace=error-all "$patch"
             git apply "$patch"
           fi
-          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          rustfmt --edition 2024 --config skip_children=true src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs
+          python3 -m py_compile tests/recall_source_lifecycle_cli.py
           git diff --check
           git add -- "${files[@]}"
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(recall): admit only current visible source-backed anchors' -m 'Gate anchored recall on live workspace, exact validity, supersession and seal authority before ranking, previews, tags or provenance. Pin public library reads while reusing the CLI-owned snapshot. Reject failed authority reads without returning partial data, preserve caller transactions, and exercise real stale-anchor and concurrent writer scenarios. Runtime verdict follows in the verification job.'
+            git commit -m 'feat(recall): page admitted code anchors before ranked retention' -m 'Replace prefix-limited raw anchor reads with fair path/symbol keyset streams, exact source admission, canonical locator validation and ranked retention. Load only retained memory bodies in bounded batches. Preserve existing filters, drift flags, cursor and token-budget behavior; explicitly report incomplete source scans. Add beyond-4096, obsolete-page, late-ranking, selector and locator substitution regressions plus a public capture/revise/seal/reveal journey.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -61,7 +70,7 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/recall-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs tests/recall_source_lifecycle_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -73,7 +82,7 @@ jobs:
   verify:
     needs: integrate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
@@ -115,12 +124,25 @@ jobs:
           name: recall-engine-results-${{ github.run_attempt }}
           path: ${{ runner.temp }}/recall-*.log
           retention-days: 7
-      - name: Check integration compilation and formatting
+      - name: Exercise public recall lifecycle without models
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recall-check.log"
-          rustfmt --edition 2024 --config skip_children=true --check src/core/recall.rs src/core/recall_admission.rs
+          cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/recall-build.log"
+          python3 tests/recall_source_lifecycle_cli.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/recall-public.log"
+          grep -q '^PASS: public anchored recall' "$RUNNER_TEMP/recall-public.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: recall-public-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recall-*.log
+          retention-days: 7
+      - name: Exercise existing recall CLI contracts and goldens
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test integration_n_r recall_cli_golden -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-contracts.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-contracts.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
