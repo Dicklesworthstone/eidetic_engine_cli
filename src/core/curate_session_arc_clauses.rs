@@ -28,8 +28,7 @@ pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
                 continue;
             }
             let end = position + ch.len_utf8();
-            let boundary = matches!(ch, '\n' | ';')
-                || (ch == '.' && sentence_period(excerpt, end));
+            let boundary = matches!(ch, '\n' | ';') || (ch == '.' && sentence_period(excerpt, end));
             if boundary {
                 let part = &excerpt[start..end];
                 start = end;
@@ -57,14 +56,20 @@ fn escaped(text: &str, position: usize) -> bool {
 }
 
 fn sentence_period(text: &str, end: usize) -> bool {
-    if text[end..].chars().next().is_some_and(|next| !next.is_whitespace()) {
+    if text[end..]
+        .chars()
+        .next()
+        .is_some_and(|next| !next.is_whitespace())
+    {
         return false;
     }
     let word = text[..end]
         .rsplit_once(char::is_whitespace)
         .map_or(&text[..end], |(_, word)| word);
     // These common technical abbreviations introduce the rest of a clause.
-    !["e.g.", "i.e.", "vs."].iter().any(|item| word.eq_ignore_ascii_case(item))
+    !["e.g.", "i.e.", "vs."]
+        .iter()
+        .any(|item| word.eq_ignore_ascii_case(item))
 }
 
 #[cfg(test)]
@@ -72,14 +77,22 @@ mod tests {
     use super::*;
 
     const FAILURE: &str = "Failure arc: M7.cache.lookup in src/cache.rs failed with version 2.4.1.";
-    const REPAIR: &str = "Fix: M7.cache.lookup in src/cache.rs was repaired by selecting stable identity bytes.";
+    const REPAIR: &str =
+        "Fix: M7.cache.lookup in src/cache.rs was repaired by selecting stable identity bytes.";
 
     #[test]
     fn filenames_versions_and_configuration_keys_survive_in_both_halves() {
         let text = format!("{FAILURE} {REPAIR}");
-        assert_eq!(split(&text).map(str::trim).collect::<Vec<_>>(), [FAILURE, REPAIR]);
+        assert_eq!(
+            split(&text).map(str::trim).collect::<Vec<_>>(),
+            [FAILURE, REPAIR]
+        );
         assert_eq!(super::super::inline_pair(&text), Some((FAILURE, REPAIR)));
-        assert!(!text.split_inclusive(['\n', ';', '.']).any(|part| part == FAILURE));
+        assert!(
+            !text
+                .split_inclusive(['\n', ';', '.'])
+                .any(|part| part == FAILURE)
+        );
     }
 
     #[test]
@@ -87,7 +100,10 @@ mod tests {
         let failure = "Failure arc: `cache.read(\"a.b\"); cache.close()` failed.";
         let repair = "Fix: ``cache.write(`key`, 2.4); cache.close()`` repaired the lookup.";
         let text = format!("{failure}\n{repair}");
-        let parts: Vec<_> = split(&text).map(str::trim).filter(|part| !part.is_empty()).collect();
+        let parts: Vec<_> = split(&text)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
         assert_eq!(parts, [failure, repair]);
         assert_eq!(super::super::inline_pair(&text), Some((failure, repair)));
     }
@@ -102,7 +118,9 @@ mod tests {
 
     #[test]
     fn unicode_and_all_delimiters_roundtrip_without_losing_a_single_byte() {
-        let pieces = ["資料", "🦀", "x.y", "e.g. ", ". ", ";", "\r\n", "`", "``", "\\`", ""];
+        let pieces = [
+            "資料", "🦀", "x.y", "e.g. ", ". ", ";", "\r\n", "`", "``", "\\`", "",
+        ];
         let mut cases = 0;
         for left in pieces {
             for middle in pieces {
@@ -135,7 +153,8 @@ mod tests {
         let repair = "Fix: stable keys repaired the cache";
         for separator in ["\n", ";"] {
             let text = format!("{failure}{separator}{repair}");
-            let (actual_failure, actual_repair) = super::super::inline_pair(&text).expect("ordered pair");
+            let (actual_failure, actual_repair) =
+                super::super::inline_pair(&text).expect("ordered pair");
             assert_eq!(actual_failure.trim_end_matches(';'), failure);
             assert_eq!(actual_repair, repair);
         }
@@ -167,7 +186,10 @@ mod tests {
             "Fix: stable keys repaired the cache and the retry succeeded.",
         ] {
             assert!(super::super::resolution_signal(repair), "{repair}");
-            assert_eq!(super::super::inline_pair(&format!("{FAILURE} {repair}")), Some((FAILURE, repair)));
+            assert_eq!(
+                super::super::inline_pair(&format!("{FAILURE} {repair}")),
+                Some((FAILURE, repair))
+            );
         }
         let text = format!("{FAILURE} Failure arc: M7 cache patch failed. {REPAIR}");
         let pair = super::super::inline_pair(&text).expect("later observed repair");

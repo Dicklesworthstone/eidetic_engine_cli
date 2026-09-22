@@ -86,16 +86,26 @@ pub(super) fn resolution_signal(excerpt: &str) -> bool {
     if words.iter().any(|word| {
         matches!(
             *word,
-            "failed" | "failing" | "broken" | "blocked" | "timeout" | "panic" | "denied"
-                | "unsuccessful" | "unverified" | "unresolved"
+            "failed"
+                | "failing"
+                | "broken"
+                | "blocked"
+                | "timeout"
+                | "panic"
+                | "denied"
+                | "unsuccessful"
+                | "unverified"
+                | "unresolved"
         )
     }) {
         return false;
     }
     !words.iter().enumerate().any(|(index, word)| {
-        let negated = matches!(*word, "not" | "never" | "cannot" | "no")
-            || word.ends_with("n't");
-        let predicted = matches!(*word, "will" | "would" | "should" | "could" | "may" | "might");
+        let negated = matches!(*word, "not" | "never" | "cannot" | "no") || word.ends_with("n't");
+        let predicted = matches!(
+            *word,
+            "will" | "would" | "should" | "could" | "may" | "might"
+        );
         (negated || predicted)
             && words.iter().skip(index + 1).take(6).any(|next| {
                 matches!(

@@ -292,12 +292,20 @@ mod tests {
         let mut old_reasons = generic.redacted_reasons;
         let (old_content, _) =
             crate::policy::redact_raw_api_tokens_anywhere(&generic.content, &mut old_reasons);
-        assert!(old_content.contains(&second), "fixture must expose the former leak");
+        assert!(
+            old_content.contains(&second),
+            "fixture must expose the former leak"
+        );
 
         let report = screen_external_text_for_ingestion(&raw);
         assert!(!report.content.contains(&first));
         assert!(!report.content.contains(&second));
-        assert!(report.redacted_reasons.iter().any(|reason| reason == "github_token"));
+        assert!(
+            report
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "github_token")
+        );
         assert!(
             report
                 .redacted_reasons

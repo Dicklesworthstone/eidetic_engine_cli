@@ -5382,8 +5382,10 @@ fn env_var_proof_broker_bypass_distinguishes_declared_from_undeclared() -> TestR
 
     // UNDECLARED. run_script_with_env sets RCH_VERIFY_PROOF_BROKER_ENABLED=0 and
     // passes no ledger, which is exactly the branch under test.
-    let (_status, stdout, _stderr) =
-        run_script_with_env(&["--", "cargo", "test", "--test", "rch_verify_contract"], &fake)?;
+    let (_status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "rch_verify_contract"],
+        &fake,
+    )?;
     let undeclared: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse undeclared bypass report: {error}"))?;
     if undeclared["proof_broker"]["declared"] != false
