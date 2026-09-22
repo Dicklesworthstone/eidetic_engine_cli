@@ -7,9 +7,13 @@
 //! Preparation and dry runs are read-only. The transaction rechecks both source
 //! projections before writing and persists the sidecar before indexing.
 
+use std::path::Path;
 use std::str::FromStr;
 
-use crate::db::{DbConnection, DbError, DbOperation, StoredMemory};
+use crate::db::{
+    CreateAuditInput, DbConnection, DbError, DbOperation, StoredMemory, audit_actions,
+    generate_audit_id,
+};
 use crate::models::memory::{
     canonicalize_typed_memory_fields_json, extract_typed_memory_fields_json_with_redactor,
     merge_typed_memory_fields_json,
@@ -19,6 +23,9 @@ use crate::models::{MemoryContent, MemoryKind};
 pub(super) struct Prepared {
     source_json: Option<String>,
     projected_json: Option<String>,
+    policy_bypass: Option<super::RememberPolicyBypassReport>,
+    workspace_id: String,
+    source_id: String,
     pub(super) changed: bool,
 }
 
@@ -45,6 +52,22 @@ impl Prepared {
             })?;
         let body = content.unwrap_or(&original.content);
         MemoryContent::parse(body).map_err(|error| format!("Invalid revision content: {error}"))?;
+        // Revisions are another write ingress, not a policy exception. Reuse
+        // the same detector and configured allow contract as remember, before
+        // either preview or mutation. An unchanged, previously stored body is
+        // not newly admitted merely because its tags or confidence changed.
+        let policy_bypass = if body != original.content
+            && crate::policy::redact_secret_like_content(body).redacted
+        {
+            let workspace = db
+                .get_workspace(&original.workspace_id)
+                .map_err(|_| "Could not resolve revision policy workspace".to_owned())?
+                .ok_or_else(|| "Revision policy workspace is missing".to_owned())?;
+            super::validate_remember_policy(body, Path::new(&workspace.path), false)
+                .map_err(|error| error.message())?
+        } else {
+            None
+        };
         let inherited = (source_kind == target_kind)
             .then_some(canonical_source.as_deref())
             .flatten();
@@ -66,6 +89,9 @@ impl Prepared {
         Ok(Self {
             source_json,
             projected_json,
+            policy_bypass,
+            workspace_id: original.workspace_id.clone(),
+            source_id: original.id.clone(),
             changed,
         })
     }
@@ -95,6 +121,26 @@ impl Prepared {
                 message: "New revision could not retain typed fields; revision was not written"
                     .to_owned(),
             });
+        }
+        if let Some(bypass) = &self.policy_bypass {
+            let audit_id = generate_audit_id();
+            let bypass = bypass.clone().with_audit_id(audit_id.clone());
+            db.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(self.workspace_id.clone()),
+                    actor: Some("ee memory revise".to_owned()),
+                    action: audit_actions::POLICY_BYPASS.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(new_id.to_owned()),
+                    details: Some(serde_json::json!({
+                        "schema": "ee.audit.policy_bypass.v1",
+                        "command": "ee memory revise",
+                        "originalMemoryId": &self.source_id,
+                        "policyBypass": super::policy_bypass_audit_json(&bypass),
+                    }).to_string()),
+                },
+            )?;
         }
         Ok(())
     }
@@ -284,6 +330,106 @@ mod tests {
         assert!(prepared.check_source(&db, &original).is_err());
         assert_eq!(fields(&db, &source)?["chosen"], "Postgres");
         assert_eq!(db.count_memory_chain(&source)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn revised_secret_content_is_rejected_in_preview_and_apply_without_leaking() -> TestResult {
+        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
+        let credential = format!("ghp_{}", "Q".repeat(36));
+        let body = format!("The credential is {credential}.");
+        assert!(crate::policy::redact_secret_like_content(&body).redacted);
+        let db = DbConnection::open_file(&path)?;
+        let original = db.get_memory(&source)?;
+        let audit_count = db.count_table_rows("audit_log")?;
+        let jobs = db.count_table_rows("search_index_jobs")?;
+        db.close()?;
+        for dry_run in [true, false] {
+            let mut request = options(&path, &source);
+            request.content = Some(&body);
+            request.dry_run = dry_run;
+            let report = revise_memory(&request);
+            assert!(!report.success);
+            let error = report.error.as_deref().ok_or("policy error missing")?;
+            assert!(error.contains("secrets"));
+            assert!(!error.contains(&credential));
+        }
+        let db = DbConnection::open_file(&path)?;
+        assert_eq!(db.get_memory(&source)?, original);
+        assert_eq!(db.count_memory_chain(&source)?, 1);
+        assert!(db.get_memory_superseded_at(&source)?.is_none());
+        assert_eq!(fields(&db, &source)?["chosen"], "SQLite");
+        assert_eq!(db.count_table_rows("audit_log")?, audit_count);
+        assert_eq!(db.count_table_rows("search_index_jobs")?, jobs);
+        Ok(())
+    }
+
+    #[test]
+    fn configured_revision_exception_is_audited_atomically_and_rollback_removes_it() -> TestResult {
+        use crate::core::memory::{
+            UnchangedRevisionPolicy, revise_memory_with_transaction_hook,
+        };
+
+        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
+        let config = path.parent().ok_or("config directory missing")?.join("config.toml");
+        std::fs::write(&config, "[policy.secret_detector]\nallow_phrases = [\"OAuth refresh token\"]\n")?;
+        let body = "OAuth refresh token fixture uses API_KEY=sk-FAKEabc123def456ghi789jkl012 for documentation.";
+        assert!(crate::policy::redact_secret_like_content(body).redacted);
+        let mut request = options(&path, &source);
+        request.content = Some(body);
+        let db = DbConnection::open_file(&path)?;
+        let audits_before = db.count_table_rows("audit_log")?;
+        db.close()?;
+        request.dry_run = true;
+        assert!(revise_memory(&request).success);
+        request.dry_run = false;
+        // The hook observes the new revision and its exception audit inside
+        // the same transaction, then forces rollback after both were written.
+        let failed = revise_memory_with_transaction_hook(
+            &request,
+            UnchangedRevisionPolicy::Reject,
+            |db, context| {
+                let audits = db.list_audit_by_target("memory", &context.new_id, None)?;
+                assert_eq!(audits.iter().filter(|row| row.action == audit_actions::POLICY_BYPASS).count(), 1);
+                assert!(db.get_memory_typed_fields_json(&context.new_id)?.is_some());
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Planted failure after revision policy admission".to_owned(),
+                })
+            },
+        );
+        assert!(!failed.success);
+        let db = DbConnection::open_file(&path)?;
+        assert_eq!(db.count_table_rows("audit_log")?, audits_before);
+        assert_eq!(db.count_memory_chain(&source)?, 1);
+        assert!(db.get_memory_superseded_at(&source)?.is_none());
+        db.close()?;
+        let report = revise_memory(&request);
+        assert!(report.success, "{:?}", report.error);
+        let new_id = report.new_id.as_deref().ok_or("new revision missing")?;
+        let db = DbConnection::open_file(&path)?;
+        assert_eq!(db.get_memory(new_id)?.ok_or("revision missing")?.content, body);
+        assert_eq!(fields(&db, new_id)?["chosen"], "SQLite");
+        let audits = db.list_audit_by_target("memory", new_id, None)?;
+        let exceptions: Vec<_> = audits.iter().filter(|row| row.action == audit_actions::POLICY_BYPASS).collect();
+        assert_eq!(exceptions.len(), 1);
+        let details: Value = serde_json::from_str(exceptions[0].details.as_deref().ok_or("exception detail missing")?)?;
+        assert_eq!(details["command"], "ee memory revise");
+        assert_eq!(details["originalMemoryId"], source);
+        assert_eq!(details["policyBypass"]["kind"], "config_phrase");
+        assert_eq!(details["policyBypass"]["auditId"], exceptions[0].id);
+        db.close()?;
+        // No new body is admitted by a metadata edit. Historical authorized
+        // content remains editable even after its allow phrase is removed.
+        std::fs::write(&config, "[policy.secret_detector]\nallow_phrases = []\n")?;
+        let mut metadata = options(&path, new_id);
+        metadata.tags = Some(vec!["reviewed".into()]);
+        let edited = revise_memory(&metadata);
+        assert!(edited.success, "{:?}", edited.error);
+        let db = DbConnection::open_file(&path)?;
+        let metadata_id = edited.new_id.as_deref().ok_or("metadata revision missing")?;
+        assert_eq!(db.get_memory(metadata_id)?.ok_or("metadata revision missing")?.content, body);
+        assert!(!db.list_audit_by_target("memory", metadata_id, None)?.iter().any(|row| row.action == audit_actions::POLICY_BYPASS));
         Ok(())
     }
 }
