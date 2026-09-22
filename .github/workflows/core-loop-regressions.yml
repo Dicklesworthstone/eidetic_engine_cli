@@ -15,7 +15,7 @@ permissions:
   contents: read
 concurrency:
   group: workspace-relocation-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   workspace-relocation:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -94,6 +94,10 @@ jobs:
           subprocess.run(['git', 'apply', str(patch)], check=True)
           for path, sha in additions.items():
               pathlib.Path(path).write_bytes(fetch(sha))
+          correction = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-correction.patch')
+          correction.write_bytes(fetch('1796ac1d6fca758b153eb099d665e2179414cb07'))
+          subprocess.run(['git', 'apply', '--check', str(correction)], check=True)
+          subprocess.run(['git', 'apply', str(correction)], check=True)
           paths = list(bases) + list(additions)
           rust = [path for path in paths if path.endswith('.rs')]
           subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
