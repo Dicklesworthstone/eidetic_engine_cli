@@ -4125,11 +4125,7 @@ fn cargo_subcommand_in_command_position(fragment: &str) -> Option<&'static str> 
         for prefix in ["=$(", "=\"$(", "=`"] {
             if let Some(index) = rest.find(prefix) {
                 let name = &rest[..index];
-                if !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     rest = rest[index + prefix.len()..].trim_start();
                 }
             }
@@ -4138,12 +4134,9 @@ fn cargo_subcommand_in_command_position(fragment: &str) -> Option<&'static str> 
         if let Some((head, tail)) = rest.split_once(char::is_whitespace) {
             if head.contains('=')
                 && !head.starts_with('=')
-                && head
-                    .split_once('=')
-                    .is_some_and(|(k, _)| {
-                        !k.is_empty()
-                            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    })
+                && head.split_once('=').is_some_and(|(k, _)| {
+                    !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
             {
                 rest = tail.trim_start();
             }
