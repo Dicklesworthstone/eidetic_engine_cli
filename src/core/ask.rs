@@ -1071,6 +1071,14 @@ fn evaluate_ask_inner(
         Ok(selected) => selected,
         Err(_) => return extractiveness_failure_report(request, candidates_scanned),
     };
+    // Admission may omit a low-relevance parent or provenance connector while
+    // retaining its derived rules. Preserve the complete scoped snapshot's
+    // lineage: re-deriving groups from selected spans would turn those rules
+    // into independent votes merely because their common origin lost a slot.
+    // This lineage pass inspects only borrowed identity metadata. Bodies that
+    // lose their slots cannot enter citations, hints, or the source registry.
+    let support_groups =
+        native::candidate_support_groups(candidates.iter(), &request.native_sources);
     let candidates = selected_candidates.as_slice();
 
     // Build a content lookup map (memory_id → content) for the extractiveness check.
@@ -1120,13 +1128,10 @@ fn evaluate_ask_inner(
 
     let (conflict_link, mut clusters) = match explicit_conflict(request, &all_spans) {
         Some((link, sides)) => (Some(link), sides),
-        None => {
-            let groups = native::support_groups(&all_spans, &request.native_sources);
-            (
-                None,
-                clustering::cluster_spans_with_groups(&all_spans, &groups),
-            )
-        }
+        None => (
+            None,
+            clustering::cluster_spans_with_groups(&all_spans, &support_groups),
+        ),
     };
 
     let top_span_score = clusters.first().map(|s| s.score).unwrap_or(0.0);

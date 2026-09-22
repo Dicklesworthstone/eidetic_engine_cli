@@ -542,6 +542,95 @@ fn rules_sharing_an_unselected_parent_are_still_correlated() {
 }
 
 #[test]
+fn native_answer_lineage_survives_the_real_corpus_candidate_budget() {
+    let (_root, db, workspace) = fixture();
+    let insert_source = |number: usize, body: &str, provenance: String| {
+        let id = format!("mem_{number:026}");
+        db.insert_memory(
+            &id,
+            &CreateMemoryInput {
+                workspace_id: workspace.clone(),
+                level: "semantic".to_owned(),
+                kind: "note".to_owned(),
+                content: body.to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some(provenance),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: Some("2000-01-01T00:00:00Z".to_owned()),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        id
+    };
+    let mut parents = Vec::new();
+    for number in 1..=2 {
+        let parent = insert_source(
+            number,
+            "Historical incident source material.",
+            format!("cass-session://shared-incident#L{number}"),
+        );
+        rule(&db, &workspace, number, BODY, std::slice::from_ref(&parent));
+        parents.push(parent);
+    }
+    let baseline = answer(&load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap());
+    assert!(!baseline.abstained);
+    assert_eq!(baseline.confidence_components.corroboration, 1.0);
+
+    let limit = crate::core::ask::ASK_CANDIDATE_SCAN_CAP;
+    for index in 0..limit {
+        insert_source(
+            index + 100,
+            "Release inventory lists warehouse crates.",
+            format!("file://release-inventory.md#L{}", index + 1),
+        );
+    }
+    let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(corpus.candidates.len(), limit + 4);
+    let request = request(&corpus);
+    let selected = crate::core::ask::selection::select_candidates(
+        &request,
+        &crate::core::ask::tokenize_for_ask(&request.question),
+        &corpus.candidates,
+        limit,
+    )
+    .unwrap();
+    assert_eq!(selected.len(), limit);
+    assert!(parents.iter().all(|parent| {
+        selected
+            .iter()
+            .all(|candidate| candidate.memory_id != *parent)
+    }));
+    let report = answer(&corpus);
+    assert!(!report.abstained);
+    assert_eq!(report.confidence.to_bits(), baseline.confidence.to_bits());
+    assert_eq!(report.confidence_components.corroboration, 1.0);
+    let data = ask_data_json(&report);
+    assert_eq!(data["citations"], ask_data_json(&baseline)["citations"]);
+    for parent in parents {
+        assert!(!data.to_string().contains(&parent));
+    }
+    assert!(
+        !data
+            .to_string()
+            .contains("Historical incident source material")
+    );
+
+    insert_source(
+        limit + 100,
+        BODY,
+        "file://independent-observation.md#L1".to_owned(),
+    );
+    let independent = answer(&load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap());
+    assert!(independent.confidence > report.confidence);
+}
+
+#[test]
 fn rules_require_complete_producer_attribution_for_self_and_team_scope() {
     let (_root, db, workspace) = fixture();
     let alice = memory(&db, &workspace, 1, "Alice", "An observation by Alice.");

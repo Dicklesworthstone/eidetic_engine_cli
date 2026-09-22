@@ -263,6 +263,160 @@ mod tests {
         );
     }
 
+    fn crowded_native_derivations() -> (AskRequest, Vec<AskCandidate>, Vec<String>) {
+        let mut request = AskRequest {
+            question: "Use the cache for repeated reads".to_owned(),
+            ..AskRequest::default()
+        };
+        let mut rows = Vec::new();
+        let mut parents = Vec::new();
+        for number in 1..=2 {
+            let parent = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            let rule = RuleId::from_uuid(uuid::Uuid::from_u128(number + 10));
+            let mut source = candidate(
+                &parent,
+                0.1,
+                &format!("cass-session://shared-incident#L{number}"),
+            );
+            source.content = "Historical incident source material.".to_owned();
+            rows.push(source);
+            rows.push(candidate(&rule.to_string(), 0.54, "manual://derived-rule"));
+            request.native_sources.insert(
+                rule.to_string(),
+                AskNativeSource {
+                    entity: PackEntityRef::Rule(rule),
+                    entity_revision: format!("blake3:{}", "0".repeat(64)),
+                    source_memory_ids: vec![parent.clone()],
+                },
+            );
+            parents.push(parent);
+        }
+        // These unrelated passages outrank the historical connectors, but
+        // share one origin and cannot corroborate either answer statement.
+        for index in 0..ASK_CANDIDATE_SCAN_CAP {
+            let id = MemoryId::from_uuid(uuid::Uuid::from_u128(index as u128 + 100));
+            let mut row = candidate(
+                &id.to_string(),
+                0.53,
+                &format!("file://inventory.md#L{}", index + 1),
+            );
+            row.content = "Unrelated inventory notes.".to_owned();
+            rows.push(row);
+        }
+        (request, rows, parents)
+    }
+
+    #[test]
+    fn dropping_lineage_connectors_cannot_turn_correlated_rules_into_an_answer() {
+        let (request, mut rows, parents) = crowded_native_derivations();
+        let selected = select(&request, &rows, ASK_CANDIDATE_SCAN_CAP);
+        assert_eq!(selected.len(), ASK_CANDIDATE_SCAN_CAP);
+        assert!(
+            parents
+                .iter()
+                .all(|parent| { selected.iter().all(|row| row.memory_id != *parent) })
+        );
+        assert!(
+            request
+                .native_sources
+                .keys()
+                .all(|id| { selected.iter().any(|row| row.memory_id == *id) })
+        );
+
+        let score = |_: &[String], _: &str, confidence: f32, _: &str| confidence;
+        let report = crate::core::ask::evaluate_ask_scored(&request, &rows, &score, false);
+        assert!(
+            report.abstained,
+            "one origin cannot cross the evidence floor"
+        );
+        assert!(!report.extractiveness_violated);
+        assert_eq!(report.confidence, 0.54);
+        assert_eq!(report.confidence_components.corroboration, 1.0);
+        let data = crate::core::ask::ask_data_json(&report);
+        for parent in &parents {
+            assert!(!data.to_string().contains(parent));
+        }
+        rows.reverse();
+        assert_eq!(
+            data,
+            crate::core::ask::ask_data_json(&crate::core::ask::evaluate_ask_scored(
+                &request, &rows, &score, false,
+            ))
+        );
+
+        // A genuinely separate source still provides the second independent
+        // observation. Retaining old lineage must not suppress real support.
+        rows.push(candidate(
+            "independent-answer",
+            0.54,
+            "file://independent-observation.md#L1",
+        ));
+        let independent = crate::core::ask::evaluate_ask_scored(&request, &rows, &score, false);
+        assert!(!independent.abstained);
+        assert!(!independent.conflict_detected);
+        let expected = 0.54 * (1.0 + 0.1 * 2.0_f32.ln());
+        assert!((independent.confidence - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dropped_connectors_preserve_opposition_without_inflating_either_side() {
+        let (request, mut rows, parents) = crowded_native_derivations();
+        for row in &mut rows {
+            if request.native_sources.contains_key(&row.memory_id) {
+                row.confidence = 0.8;
+            } else if !parents.contains(&row.memory_id) {
+                row.confidence = 0.79;
+            }
+        }
+        let mut opposing = candidate(
+            "independent-opposition",
+            0.8,
+            "file://opposing-observation.md#L1",
+        );
+        opposing.content = "Never use the cache for repeated reads.".to_owned();
+        rows.push(opposing);
+        let selected = select(&request, &rows, ASK_CANDIDATE_SCAN_CAP);
+        assert!(
+            parents
+                .iter()
+                .all(|parent| { selected.iter().all(|row| row.memory_id != *parent) })
+        );
+        let score = |_: &[String], _: &str, confidence: f32, _: &str| confidence;
+        let report = crate::core::ask::evaluate_ask_scored(&request, &rows, &score, false);
+        assert!(!report.abstained);
+        assert!(report.conflict_detected);
+        assert!(!report.extractiveness_violated);
+        assert_eq!(report.confidence_components.top_span_score, 0.8);
+        assert_eq!(report.confidence_components.corroboration, 1.0);
+        assert_eq!(report.confidence_components.contradiction_penalty, 0.4);
+        assert!((report.confidence - 0.8 * (1.0 - 0.4)).abs() < 1e-6);
+        let sides = report.sides.as_ref().expect("both supported sides");
+        assert_eq!(sides.len(), 2);
+        assert!(sides.iter().any(|side| {
+            side.citations.iter().any(|citation| {
+                request.native_sources.contains_key(&citation.memory_id)
+                    && citation.text == "Use the cache for repeated reads."
+            })
+        }));
+        assert!(sides.iter().any(|side| {
+            side.citations.iter().any(|citation| {
+                citation.memory_id == "independent-opposition"
+                    && citation.text == "Never use the cache for repeated reads."
+            })
+        }));
+        let data = crate::core::ask::ask_data_json(&report);
+        for parent in parents {
+            assert!(!data.to_string().contains(&parent));
+        }
+        rows.reverse();
+        assert_eq!(
+            data,
+            crate::core::ask::ask_data_json(&crate::core::ask::evaluate_ask_scored(
+                &request, &rows, &score, false,
+            ))
+        );
+    }
+
     #[test]
     fn complete_scorer_not_source_confidence_controls_diversity_and_its_floor() {
         let mut rows = vec![

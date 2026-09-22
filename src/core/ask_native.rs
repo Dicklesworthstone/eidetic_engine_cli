@@ -10,7 +10,9 @@ use std::str::FromStr;
 use crate::models::{EvidenceId, MemoryId, ProvenanceUri, RuleId};
 use crate::pack::PackEntityRef;
 
-use super::{AskCandidate, AskReport, AskRequest, AskSpan};
+#[cfg(test)]
+use super::AskSpan;
+use super::{AskCandidate, AskReport, AskRequest};
 
 /// Source-of-truth metadata captured in the same read snapshot as the body.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,6 +155,7 @@ pub(super) fn markdown_identity(report: &AskReport, id: &str) -> String {
 /// memory references join that same lineage rather than creating new votes.
 /// Join before counting support, including a shared parent outside the corpus.
 /// Root choice and path compression are deterministic.
+#[cfg(test)]
 pub(super) fn support_groups(
     spans: &[AskSpan],
     sources: &BTreeMap<String, AskNativeSource>,
