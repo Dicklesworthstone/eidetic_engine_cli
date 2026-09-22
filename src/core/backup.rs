@@ -408,6 +408,7 @@ impl BackupRecoveryInventory {
     pub fn data_json(&self) -> JsonValue {
         json!({
             "schema": "ee.backup.recovery_inventory.v1",
+            "requiredRowScope": "selected_workspace_and_shared_history",
             "schemaCoverageComplete": self.schema_coverage_complete,
             "snapshotCoverageComplete": self.snapshot_coverage_complete,
             "uncoveredRequiredTableCount": self.uncovered_required_table_count,
@@ -2010,6 +2011,7 @@ fn legacy_migration_table(table: &str) -> bool {
 
 fn build_recovery_inventory(
     connection: &DbConnection,
+    workspace_id: &str,
 ) -> Result<BackupRecoveryInventory, DomainError> {
     let tables = connection
         .list_user_tables()
@@ -2019,17 +2021,7 @@ fn build_recovery_inventory(
         })?;
     let mut entries = Vec::with_capacity(tables.len());
     for table in tables {
-        let raw_row_count =
-            connection
-                .count_table_rows(&table)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("failed to count backup source table {table:?}: {error}"),
-                    repair: Some("ee db check --workspace .".to_owned()),
-                })?;
-        let row_count = u64::try_from(raw_row_count).map_err(|_| DomainError::Storage {
-            message: format!("backup row count for {table:?} was negative"),
-            repair: Some("ee db check --workspace .".to_owned()),
-        })?;
+        let row_count = recovery::count_rows(connection, &table, workspace_id)?;
         let policy = backup_table_policy(&table);
         entries.push(BackupRecoveryInventoryEntry {
             table,
@@ -2391,8 +2383,8 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         with_backup_read_snapshot(&connection, || {
             let workspace = load_workspace(&connection, &workspace_path)?;
             let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
-            let inventory = build_recovery_inventory(&connection)?;
             let workspace_id = &export_data.workspace.workspace_id;
+            let inventory = build_recovery_inventory(&connection, workspace_id)?;
             let memory_ids =
                 backup_memory_id_mapping(&export_data.memories, options.redaction_level)?;
             let mut payloads = Vec::new();
@@ -2561,15 +2553,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         &export_data,
         options.redaction_level,
     ));
-    // The manifest contains exactly the selected workspace, not every row in a
-    // shared database. Do not claim that unexported workspace rows are covered.
-    if let Some(entry) = recovery_inventory
-        .entries
-        .iter_mut()
-        .find(|e| e.table == "workspaces")
-    {
-        entry.snapshot_covered = entry.row_count == 1;
-    }
+    recovery::reconcile_primary(&mut recovery_inventory, &export_data);
     reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
 
@@ -13288,7 +13272,9 @@ mod tests {
         let (_tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
         let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
 
-        let inventory = build_recovery_inventory(&connection).map_err(|error| error.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let inventory = build_recovery_inventory(&connection, &workspace_id)
+            .map_err(|error| error.message())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let unclassified = inventory
@@ -13407,8 +13393,9 @@ mod tests {
         connection.execute_raw(&format!(
             "INSERT INTO agents (id, workspace_id, name, created_at, last_seen_at) VALUES ('agt_00000000000000000000000000', '{workspace_id}', 'backup-agent', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
         )).map_err(|e| e.to_string())?;
-        // This table is now supported. A row belonging to a different
-        // workspace must still remain visibly uncovered by this scoped backup.
+        // Unrelated workspace history is outside this recovery point. An
+        // unowned episode, however, cannot silently disappear: no scoped
+        // episode writer can recover it, so the backup must remain partial.
         let other_workspace = WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string();
         connection
             .insert_workspace(
@@ -13422,6 +13409,26 @@ mod tests {
         connection.execute_raw(&format!(
             "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES ('{other_workspace}', '2026-09-01', 1, 'blake3:debt-fixture', '{{}}', 0, 0.0, '2026-09-01T00:00:00Z')"
         )).map_err(|e| e.to_string())?;
+        connection
+            .insert_task_episode(
+                "ep_000000000000000000000000099",
+                &CreateTaskEpisodeInput {
+                    workspace_id: None,
+                    session_id: None,
+                    task_input: "Unowned execution history must not be lost.".to_owned(),
+                    retrieved_memory_ids: vec![],
+                    context_pack_id: None,
+                    actions: vec![],
+                    outcome: "failure".to_owned(),
+                    outcome_details: None,
+                    started_at: "2026-09-01T00:00:00Z".to_owned(),
+                    ended_at: None,
+                    duration_ms: None,
+                    agent: None,
+                    episode_hash: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let report = create_backup(&BackupCreateOptions {
@@ -13444,7 +13451,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "foreign-workspace debt snapshot must make whole-database snapshot coverage incomplete",
+            "unowned execution history must keep scoped coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -13493,7 +13500,7 @@ mod tests {
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("debt_snapshots=1")
+                    && entry.message.contains("task_episodes=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",

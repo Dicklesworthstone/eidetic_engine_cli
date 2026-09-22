@@ -18,6 +18,10 @@ use super::BackupTablePolicy;
 mod history;
 pub(super) use history::HistoryExpectation;
 
+#[path = "backup_scope.rs"]
+mod scope;
+pub(super) use scope::{count_rows, reconcile_primary};
+
 #[cfg(test)]
 #[path = "backup_typed_memory_recovery_tests.rs"]
 mod typed_memory_tests;
