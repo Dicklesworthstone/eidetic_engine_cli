@@ -1,17 +1,19 @@
 //! Conservative single-valued setting alternatives, not general language inference.
 //!
-//! Only an affirmative assignment with one scalar slot is eligible. The entire
-//! ordered nonnumeric statement (including the unit and subject) must agree.
-//! Different environments, identifiers, ranges, lists and negative restrictions
-//! are not contradictory just because they contain different numbers. More
-//! general or paraphrased disputes still need an explicitly stored relation.
-//! Categorical settings reuse the clustering parser so an alternative that
-//! cannot corroborate the anchor can also be disclosed as opposing evidence.
+//! Only an affirmative assignment with one value slot is eligible. The entire
+//! ordered statement outside that slot (including the unit and subject) must
+//! agree. Different environments, identifiers, ranges, lists and negative
+//! restrictions are not contradictory just because they contain different
+//! numbers or dates. More general or paraphrased disputes still need an
+//! explicitly stored relation. Categorical settings reuse the clustering
+//! parser so alternatives can also be disclosed as opposing evidence.
 
 #[derive(Debug, Eq, PartialEq)]
 enum Token {
     Text(String),
     Scalar { unit: String },
+    CalendarDate,
+    LocalTime,
     Categorical,
 }
 
@@ -21,7 +23,7 @@ struct Claim {
     value: String,
 }
 
-/// Detect a different numeric or categorical setting in the same affirmative claim.
+/// Detect a different numeric, temporal or categorical value in an affirmative claim.
 /// Prose uses the caller's shared polarity detector, not another vocabulary
 /// of negation words. Exact setting syntax instead binds identifiers as keys:
 /// `NO_RETRY=1` and `NO_RETRY=enabled` are assignments, not English prohibitions.
@@ -126,7 +128,7 @@ fn setting_claim(text: &str) -> Option<Claim> {
 
 /// Configuration literals are not prose: a `false` value or a `NO_` key does
 /// not negate the assignment. Keep symbolic values case-sensitive, including
-/// quoted spellings, and retain a distinct slot from numeric values with units.
+/// quoted spellings, and retain distinct numeric, temporal and symbolic slots.
 /// Unknown values, expressions, lists and malformed quotes grant no inference.
 fn setting_value(raw: &str) -> Option<(String, Token)> {
     if let Some((value, unit)) = scalar(raw) {
@@ -136,6 +138,9 @@ fn setting_value(raw: &str) -> Option<(String, Token)> {
         quote @ ('`' | '\'' | '"') => raw.strip_prefix(quote)?.strip_suffix(quote)?,
         _ => raw,
     };
+    if let Some(literal) = temporal_literal(value) {
+        return Some(literal);
+    }
     if !value
         .chars()
         .next()
@@ -166,6 +171,8 @@ fn claim(text: &str) -> Option<Claim> {
     let mut value = None;
     let mut has_subject = false;
     let mut has_assignment = false;
+    let mut has_temporal_value = false;
+    let mut has_temporal_bound = false;
     for raw in text.split_whitespace() {
         let token = raw
             .trim_start_matches(['"', '\'', '`', '(', '[', '{'])
@@ -214,6 +221,24 @@ fn claim(text: &str) -> Option<Claim> {
         {
             return None;
         }
+        // "The launch is before DATE" expresses a bound, not a date
+        // assignment. Two different bounds may both be true. Retain this
+        // guard even when the qualifier follows the temporal value.
+        has_temporal_bound |= matches!(
+            lower.as_str(),
+            "before"
+                | "after"
+                | "by"
+                | "since"
+                | "until"
+                | "during"
+                | "from"
+                | "through"
+                | "earlier"
+                | "later"
+                | "starting"
+                | "ending"
+        );
         if let Some((number, unit)) = scalar(&token) {
             // A numeric subject ("Port 5432 is open") does not assign a
             // property of the same entity as "Port 6432 is open".
@@ -222,6 +247,13 @@ fn claim(text: &str) -> Option<Claim> {
             }
             value = Some(number);
             template.push(Token::Scalar { unit });
+        } else if let Some((literal, slot)) = temporal_literal(&token) {
+            if !has_subject || !has_assignment || value.is_some() {
+                return None;
+            }
+            has_temporal_value = true;
+            value = Some(literal);
+            template.push(slot);
         } else {
             let assignment = matches!(
                 lower.as_str(),
@@ -237,15 +269,67 @@ fn claim(text: &str) -> Option<Claim> {
             }));
         }
     }
+    if has_temporal_value && has_temporal_bound {
+        return None;
+    }
     Some(Claim {
         template,
         value: value?,
     })
 }
 
+/// An unambiguous Gregorian calendar day or local wall-clock literal.
+/// Do not guess locale-specific date order, relative dates, zones, durations,
+/// leap seconds or versions. A clock does not identify an instant and therefore
+/// cannot be compared with a date. Canonicalization never changes source bytes.
+fn temporal_literal(token: &str) -> Option<(String, Token)> {
+    fn digits(bytes: &[u8]) -> Option<u32> {
+        bytes.iter().try_fold(0, |value, byte| {
+            byte.is_ascii_digit()
+                .then(|| value * 10 + u32::from(byte - b'0'))
+        })
+    }
+
+    let bytes = token.as_bytes();
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year = digits(&bytes[..4])?;
+        let month = digits(&bytes[5..7])?;
+        let day = digits(&bytes[8..])?;
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let last_day = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => return None,
+        };
+        if year == 0 || day == 0 || day > last_day {
+            return None;
+        }
+        return Some((token.to_owned(), Token::CalendarDate));
+    }
+    if matches!(bytes.len(), 5 | 8) && bytes[2] == b':' {
+        let hour = digits(&bytes[..2])?;
+        let minute = digits(&bytes[3..5])?;
+        let second = if bytes.len() == 8 {
+            if bytes[5] != b':' {
+                return None;
+            }
+            digits(&bytes[6..])?
+        } else {
+            0
+        };
+        if hour >= 24 || minute >= 60 || second >= 60 {
+            return None;
+        }
+        return Some((format!("{hour:02}:{minute:02}:{second:02}"), Token::LocalTime));
+    }
+    None
+}
+
 /// A signed integer or ordinary decimal, optionally followed by an ASCII unit
-/// or percent sign. Scientific notation, versions, dates, locale separators
-/// and arithmetic expressions are deliberately outside this narrow grammar.
+/// or percent sign. Scientific notation, versions, locale separators and
+/// arithmetic expressions are deliberately outside this narrow grammar.
 fn scalar(token: &str) -> Option<(String, String)> {
     let unit_start = token
         .char_indices()
@@ -399,7 +483,7 @@ mod tests {
         for (left, right) in [
             ("1e3", "2e3"),
             ("1.2.3", "1.2.4"),
-            ("2026-09-19", "2026-09-20"),
+            ("2026-02-29", "2026-02-30"),
             ("1,234", "1,235"),
             (".5", ".6"),
             ("３０", "４０"),
@@ -457,6 +541,8 @@ mod tests {
             ("backend: 'sqlite'", "backend : sqlite"),
             ("`--backend=sqlite`", "--backend = \"sqlite\""),
             ("NO_RETRY=enabled", "NO_RETRY = `enabled`"),
+            ("launch: '2026-09-22'", "launch : 2026-09-22"),
+            ("time=09:30", "time = 09:30:00"),
         ] {
             assert!(!disagreement(left, right), "{left} / {right}");
         }
@@ -558,6 +644,10 @@ mod tests {
             ("backend: sqlite", "backend : 'sqlite'", true),
             ("NO_RETRY=enabled", "`NO_RETRY = enabled`", true),
             ("timeout=+030.00ms", "timeout=30ms", true),
+            ("launch: 2026-09-22", "launch : '2026-09-22'", true),
+            ("time=09:30", "time=09:30:00", true),
+            ("launch: 2026-09-22", "launch: 2026-09-23", false),
+            ("launch: 2026-09-22", "launch: unknown", false),
             ("backend: sqlite", "backend: postgres", false),
             ("backend: sqlite", "Backend: sqlite", false),
             ("backend: sqlite", "backend=sqlite", false),
@@ -624,6 +714,18 @@ mod tests {
             ("--backend=sqlite", "--backend=postgres", "backend"),
             ("NO_RETRY=enabled", "NO_RETRY=disabled", "NO_RETRY"),
             ("CACHE_ENABLED=true", "CACHE_ENABLED=false", "CACHE_ENABLED"),
+            ("LAUNCH=2026-09-22", "LAUNCH=2026-09-23", "LAUNCH"),
+            ("time: 09:30", "time: 10:30", "time"),
+            (
+                "The production launch date is 2026-09-22.",
+                "The production launch date is 2026-09-23.",
+                "production launch date",
+            ),
+            (
+                "The deployment time is 09:30.",
+                "The deployment time is 10:30.",
+                "deployment time",
+            ),
             (
                 "RUST_TOOLCHAIN=\"nightly\"",
                 "RUST_TOOLCHAIN=\"stable\"",
@@ -687,6 +789,8 @@ mod tests {
             ("BACKEND=sqlite", "BACKEND=postgres", "BACKEND"),
             ("backend: sqlite", "backend: postgres", "backend"),
             ("NO_RETRY=enabled", "NO_RETRY=disabled", "NO_RETRY"),
+            ("LAUNCH=2026-09-22", "LAUNCH=2026-09-23", "LAUNCH"),
+            ("time: 09:30", "time: 10:30", "time"),
         ] {
             let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
                 .map(|index| AskCandidate {
@@ -826,5 +930,79 @@ mod tests {
                 .iter()
                 .any(|citation| citation.memory_id == "backend-0")
         );
+    }
+
+    #[test]
+    fn calendar_and_clock_assignments_compare_only_the_same_temporal_slot() {
+        for (left, right) in [
+            ("launch: 2026-09-22", "launch: '2026-09-23'"),
+            ("time=09:30", "time=10:30:00"),
+            (
+                "The production launch date is 2026-09-22.",
+                "The production launch date is 2026-09-23.",
+            ),
+            (
+                "The café opening time is `09:30`.",
+                "The café opening time is (10:30)!",
+            ),
+        ] {
+            assert!(disagreement(left, right), "{left} / {right}");
+            assert!(disagreement(right, left), "symmetric temporal alternatives");
+        }
+        for (left, right) in [
+            ("launch=2026-09-22", "launch=09:30"),
+            ("production.date=2026-09-22", "staging.date=2026-09-23"),
+            ("launch=2026-09-22", "Launch=2026-09-23"),
+            ("The time is 09:30 UTC.", "The time is 10:30 EDT."),
+            ("The launch date is 2026-09-22.", "The launch date is unknown."),
+            ("Release 2026-09-22 is stable.", "Release 2026-09-23 is stable."),
+            ("The launch dates are 2026-09-22 and 2026-09-23.", "The launch dates are 2026-09-24 and 2026-09-25."),
+        ] {
+            assert!(!disagreement(left, right), "{left} / {right}");
+        }
+    }
+
+    #[test]
+    fn calendar_and_clock_literals_validate_boundaries_without_locale_guessing() {
+        for valid in [
+            "0001-01-01", "9999-12-31", "2000-02-29", "2024-02-29",
+            "2026-04-30", "00:00", "23:59", "23:59:59",
+        ] {
+            assert!(temporal_literal(valid).is_some(), "{valid}");
+        }
+        for invalid in [
+            "0000-01-01", "1900-02-29", "2100-02-29", "2026-02-29",
+            "2026-04-31", "2026-00-01", "2026-13-01", "2026-01-00",
+            "2026-9-22", "09/22/2026", "22-09-2026", "tomorrow", "1.2.3",
+            "24:00", "23:60", "23:59:60", "9:30", "09:30Z", "09:30:xx",
+            "２０２６-09-22", "2026-09-22T09:30:00Z",
+        ] {
+            assert!(temporal_literal(invalid).is_none(), "{invalid}");
+        }
+        assert_eq!(temporal_literal("09:30"), temporal_literal("09:30:00"));
+    }
+
+    #[test]
+    fn temporal_bounds_ranges_and_restrictions_do_not_invent_conflicts() {
+        for template in [
+            "The launch is before VALUE.",
+            "The launch is after VALUE.",
+            "The launch is by VALUE.",
+            "The launch is from VALUE.",
+            "The launch is VALUE or later.",
+            "The launch is VALUE if approved.",
+            "The launch is approximately VALUE.",
+        ] {
+            assert!(!disagreement(
+                &template.replace("VALUE", "2026-09-22"),
+                &template.replace("VALUE", "2026-09-23"),
+            ), "{template}");
+        }
+        assert!(!conflicts(
+            "The launch date is 2026-09-22.",
+            true,
+            "The launch date is 2026-09-23.",
+            true,
+        ));
     }
 }
