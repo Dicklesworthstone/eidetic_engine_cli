@@ -371,10 +371,7 @@ fn instant_literal(token: &str) -> Option<(String, Token)> {
         if zone.len() != 6
             || !matches!(zone[0], b'+' | b'-')
             || zone[3] != b':'
-            || !zone[1..3]
-                .iter()
-                .chain(&zone[4..6])
-                .all(u8::is_ascii_digit)
+            || !zone[1..3].iter().chain(&zone[4..6]).all(u8::is_ascii_digit)
         {
             return None;
         }
@@ -395,7 +392,8 @@ fn instant_literal(token: &str) -> Option<(String, Token)> {
     let day = date[8..].parse::<i64>().ok()?;
     let prior_year = year - 1;
     let month_starts: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let mut days = 365 * prior_year + prior_year / 4 - prior_year / 100 + prior_year / 400
+    let mut days = 365 * prior_year + prior_year / 4 - prior_year / 100
+        + prior_year / 400
         + month_starts[month - 1]
         + day
         - 1;
@@ -1276,7 +1274,10 @@ mod tests {
             }
             let expected = ask_data_json(&report);
             candidates.reverse();
-            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
+            assert_eq!(
+                ask_data_json(&evaluate_ask(&request, &candidates)),
+                expected
+            );
         }
     }
 }
