@@ -1,0 +1,157 @@
+name: Shared workspace backup recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/backup*.rs'
+      - 'scripts/delivery/shared-workspace-backup-20260922.patch.xz.b64'
+      - '.github/workflows/workspace-backup-recovery.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: shared-workspace-backup-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Integrate reviewed workspace recovery implementation
+        id: source
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          if ! grep -Fq 'recovery::reconcile_primary(&mut recovery_inventory, &export_data)' src/core/backup.rs; then
+            python3 - <<'PY'
+          import base64, hashlib, lzma, os
+          from pathlib import Path
+          expected = {
+              'src/core/backup.rs': '0f03173385924e5009029c621db901730c6def0522142c824cd77d0671c8fb02',
+              'src/core/backup_recovery.rs': 'c0a5ae74ebe78ec79d2f67bc0dec5f365cac7d3c1a7c2c0c0c5b58066bc079a9',
+          }
+          for name, digest in expected.items():
+              if hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f'Source changed; refusing to overwrite {name}')
+          for name in ['src/core/backup_scope.rs', 'src/core/backup_scope_tests.rs']:
+              if Path(name).exists():
+                  raise SystemExit(f'Unexpected existing file: {name}')
+          encoded = Path('scripts/delivery/shared-workspace-backup-20260922.patch.xz.b64').read_text()
+          patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
+          if hashlib.sha256(patch).hexdigest() != '9a820e1e10952c9cebd2f15d985d51f73063d995beb8416e452a7cdb1b2d9d3f':
+              raise SystemExit('Workspace recovery patch checksum mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'workspace-backup.patch').write_bytes(patch)
+          PY
+            git apply --check "$RUNNER_TEMP/workspace-backup.patch"
+            git apply "$RUNNER_TEMP/workspace-backup.patch"
+            files=(src/core/backup.rs src/core/backup_recovery.rs src/core/backup_scope.rs src/core/backup_scope_tests.rs)
+            rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+            git diff --check
+            git add -- "${files[@]}"
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
+              -m 'feat(backup): recover individual workspaces from shared stores' \
+              -m 'Count all 52 durable families through explicit workspace ownership within the captured read snapshot. Preserve shared audit, recorder and TTL history. Reconcile primary carriers and retain cross-workspace edges and unowned episodes as honest coverage gaps. Keep destination-wide population and content fences unchanged. Add real shared-store, typed/rule/evidence round-trip, read-only dry-run and cross-scope refusal regressions.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/workspace-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/workspace-source.tar.gz" HEAD src/core/backup*.rs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: workspace-backup-source-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/workspace-source-sha.log
+            ${{ runner.temp }}/workspace-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            typed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Exercise shared-store scope and unchanged restore fences
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/workspace-backup-identity.log"
+          failed=0
+          for group in core::backup::recovery::scope::tests core::backup::tests::recovery_inventory_ core::backup::recovery::tests; do
+            log="$RUNNER_TEMP/workspace-backup-${group//::/-}.log"
+            if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: workspace-backup-scope-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workspace-backup-*.log
+          retention-days: 7
+      - name: Exercise public backup and restore round trips
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test e2e_backup_restore_roundtrip -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/workspace-backup-public.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/workspace-backup-public.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: workspace-backup-public-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workspace-backup-public.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
