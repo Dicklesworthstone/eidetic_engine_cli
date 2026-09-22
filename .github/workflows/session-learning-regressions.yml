@@ -1,0 +1,75 @@
+name: Session learning regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/curate*.rs'
+      - 'tests/session_arc_learning_cli.rs'
+      - '.github/workflows/session-learning-regressions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Capture exact learning source
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/learning-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/learning-source.tar.gz" HEAD \
+            .beads/issues.jsonl AGENTS.md COMPREHENSIVE_PLAN.md CLOSE_THE_GAP_PLAN.md \
+            Cargo.toml Cargo.lock rust-toolchain.toml src/core/curate.rs \
+            src/core/curate_session_arc.rs src/core/curate_session_arc_text.rs \
+            src/core/curate_session_arc_clauses.rs src/core/curate_session_arc_tests.rs \
+            tests/session_arc_learning_cli.rs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: session-learning-source-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/learning-source.tar.gz
+            ${{ runner.temp }}/learning-source-sha.log
+          retention-days: 7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ask-numeric-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Execute public learning lifecycle
+        run: |
+          set -o pipefail
+          cargo test --locked --test session_arc_learning_cli -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/learning-cli.log"
+      - name: Execute source reconstruction and application regressions
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --locked --lib session_arc -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-engine.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/learning-engine.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: session-learning-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/learning-*.log
+          retention-days: 7
