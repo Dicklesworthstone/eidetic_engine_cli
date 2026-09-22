@@ -4158,10 +4158,7 @@ fn cargo_subcommand_in_command_position(fragment: &str) -> Option<&'static str> 
         Some(tail) => tail.split_once(char::is_whitespace)?.1.trim_start(),
         None => rest,
     };
-    let word = rest
-        .split(|c: char| c.is_whitespace())
-        .next()
-        .unwrap_or_default();
+    let word = rest.split_whitespace().next().unwrap_or_default();
     CARGO_COMPILING_SUBCOMMANDS
         .into_iter()
         .find(|candidate| *candidate == word)
