@@ -544,8 +544,10 @@ mod seal_tests {
         seal(&db, HIDDEN)?;
         // Preserve the schema's null-pair invariant so the malformed value
         // reaches admission, rather than failing the fixture's own write.
-        db.execute_raw("UPDATE memory_seals SET revealed_at = X'50524956415445', reveal_verified = 1")
-            .map_err(|error| error.to_string())?;
+        db.execute_raw(
+            "UPDATE memory_seals SET revealed_at = X'50524956415445', reveal_verified = 1",
+        )
+        .map_err(|error| error.to_string())?;
         let mut degraded = Vec::new();
         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut degraded, None).is_empty());
         assert_eq!(degraded[0].code, UNAVAILABLE);

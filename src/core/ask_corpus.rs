@@ -992,7 +992,11 @@ mod source_authority_tests {
             assert!(!output.contains(PRIOR) && !output.contains("PRIVATE-DEAD-CANARY"));
         }
         assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
-        assert!(load_memory_revisions(&db, "' OR 1 = 1 --").unwrap().is_empty());
+        assert!(
+            load_memory_revisions(&db, "' OR 1 = 1 --")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1009,12 +1013,8 @@ mod source_authority_tests {
             Ok(())
         })
         .unwrap();
-        let before = load_current_ask_corpus(
-            &db,
-            WORKSPACE,
-            at("2026-09-17T11:59:59.999999999Z"),
-        )
-        .unwrap();
+        let before =
+            load_current_ask_corpus(&db, WORKSPACE, at("2026-09-17T11:59:59.999999999Z")).unwrap();
         assert_eq!(
             before
                 .candidates
@@ -1037,7 +1037,8 @@ mod source_authority_tests {
         let error = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap_err();
         assert!(matches!(error, DomainError::Storage { .. }));
         assert!(!format!("{error:?}").contains("PRIVATE-TAIL-REVISION"));
-        db.begin_read_snapshot().expect("failed read releases its snapshot");
+        db.begin_read_snapshot()
+            .expect("failed read releases its snapshot");
         db.rollback_read_snapshot().unwrap();
     }
 
@@ -1045,10 +1046,9 @@ mod source_authority_tests {
     fn concurrent_replacement_belongs_entirely_to_the_next_answer_snapshot() {
         let (root, writer) = fixture();
         seed(&writer, PRIOR, WORKSPACE, OLD_BODY);
-        let reader = DbConnection::open_file_read_only(
-            &root.path().canonicalize().unwrap().join("ask.db"),
-        )
-        .unwrap();
+        let reader =
+            DbConnection::open_file_read_only(&root.path().canonicalize().unwrap().join("ask.db"))
+                .unwrap();
         let captured = load_corpus_with_boundary(&reader, WORKSPACE, at(CUTOFF), || {
             writer
                 .with_transaction(|| {

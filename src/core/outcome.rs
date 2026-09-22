@@ -1330,7 +1330,6 @@ fn record_outcome_inner(
         },
     )?;
 
-
     if target_type == "memory" {
         record_agent_context_profile_update(
             &connection,

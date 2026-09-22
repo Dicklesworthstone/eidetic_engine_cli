@@ -561,16 +561,27 @@ mod tests {
             ("backend: sqlite", "backend: postgres", false),
             ("backend: sqlite", "Backend: sqlite", false),
             ("backend: sqlite", "backend=sqlite", false),
-            ("production.backend: sqlite", "staging.backend: sqlite", false),
+            (
+                "production.backend: sqlite",
+                "staging.backend: sqlite",
+                false,
+            ),
             ("backend: sqlite", "backend: unknown", false),
             ("backend: sqlite", "backend: sqlite if available", false),
             ("backend: sqlite", "The backend is sqlite.", false),
             ("profile=Release", "profile=release", false),
         ] {
-            assert_eq!(settings_compatible(left, right), expected, "{left} / {right}");
+            assert_eq!(
+                settings_compatible(left, right),
+                expected,
+                "{left} / {right}"
+            );
             assert_eq!(settings_compatible(right, left), expected, "symmetry");
         }
-        assert!(settings_compatible("ordinary prose", "other ordinary prose"));
+        assert!(settings_compatible(
+            "ordinary prose",
+            "other ordinary prose"
+        ));
     }
 
     #[test]

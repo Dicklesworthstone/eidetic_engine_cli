@@ -1878,9 +1878,15 @@ mod tests {
             .expect("committed destination");
         assert!(error.contains(&copy.id));
         assert_eq!(f.count("search_index_jobs"), 1);
-        let jobs = f.destination.list_search_index_jobs(&f.workspace, None).unwrap();
-        assert_eq!(jobs[0].status_enum(), Some(crate::db::SearchIndexJobStatus::Completed),
-            "origin-audit failure must not strand a committed destination's index job");
+        let jobs = f
+            .destination
+            .list_search_index_jobs(&f.workspace, None)
+            .unwrap();
+        assert_eq!(
+            jobs[0].status_enum(),
+            Some(crate::db::SearchIndexJobStatus::Completed),
+            "origin-audit failure must not strand a committed destination's index job"
+        );
         let source = DbConnection::open_file(&f.source_path).expect("fresh repair connection");
         source
             .execute_raw("ALTER TABLE unavailable_origin_audit RENAME TO audit_log")
@@ -1938,7 +1944,11 @@ mod tests {
             }
             SearchIndexJobStatus::Failed => {
                 assert!(f.destination.start_search_index_job(job).unwrap());
-                assert!(f.destination.fail_search_index_job(job, "interrupted publication").unwrap());
+                assert!(
+                    f.destination
+                        .fail_search_index_job(job, "interrupted publication")
+                        .unwrap()
+                );
             }
             SearchIndexJobStatus::Cancelled => {
                 assert!(f.destination.cancel_search_index_job(job).unwrap());
@@ -1970,7 +1980,10 @@ mod tests {
             assert!(already);
             assert_eq!(again, id);
             assert_eq!(receipt.as_deref(), Some(job.as_str()));
-            assert_eq!(f.destination.get_search_index_job(&job).unwrap().unwrap(), before);
+            assert_eq!(
+                f.destination.get_search_index_job(&job).unwrap().unwrap(),
+                before
+            );
             assert_eq!(f.destination.get_memory(&id).unwrap().unwrap(), copy);
             assert_eq!(f.count("search_index_jobs"), 1);
             assert_eq!(f.count("memories"), 1);
@@ -2040,43 +2053,102 @@ mod tests {
         let completed = completed.unwrap();
         set_retry_job_state(&f, &completed, crate::db::SearchIndexJobStatus::Completed);
         let other = "wsp_00000000000000000000000098";
-        f.destination.insert_workspace(other, &CreateWorkspaceInput {
-            path: f.paths.root.join("other").to_string_lossy().into_owned(),
-            name: None,
-        }).unwrap();
+        f.destination
+            .insert_workspace(
+                other,
+                &CreateWorkspaceInput {
+                    path: f.paths.root.join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
         let mut valid = Vec::new();
         for (workspace, source, target, job_type) in [
-            (other, "memory", id.as_str(), SearchIndexJobType::SingleDocument),
-            (f.workspace.as_str(), "session", id.as_str(), SearchIndexJobType::SingleDocument),
-            (f.workspace.as_str(), "memory", "mem_other", SearchIndexJobType::SingleDocument),
-            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::FullRebuild),
-            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::SingleDocument),
-            (f.workspace.as_str(), "memory", id.as_str(), SearchIndexJobType::SingleDocument),
+            (
+                other,
+                "memory",
+                id.as_str(),
+                SearchIndexJobType::SingleDocument,
+            ),
+            (
+                f.workspace.as_str(),
+                "session",
+                id.as_str(),
+                SearchIndexJobType::SingleDocument,
+            ),
+            (
+                f.workspace.as_str(),
+                "memory",
+                "mem_other",
+                SearchIndexJobType::SingleDocument,
+            ),
+            (
+                f.workspace.as_str(),
+                "memory",
+                id.as_str(),
+                SearchIndexJobType::FullRebuild,
+            ),
+            (
+                f.workspace.as_str(),
+                "memory",
+                id.as_str(),
+                SearchIndexJobType::SingleDocument,
+            ),
+            (
+                f.workspace.as_str(),
+                "memory",
+                id.as_str(),
+                SearchIndexJobType::SingleDocument,
+            ),
         ] {
             let job = promotion_index_job_id();
-            f.destination.insert_search_index_job(&job, &CreateSearchIndexJobInput {
-                workspace_id: workspace.to_owned(),
-                job_type,
-                document_source: Some(source.to_owned()),
-                document_id: Some(target.to_owned()),
-                documents_total: 1,
-            }).unwrap();
-            if workspace == f.workspace.as_str() && source == "memory" && target == id.as_str()
+            f.destination
+                .insert_search_index_job(
+                    &job,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: workspace.to_owned(),
+                        job_type,
+                        document_source: Some(source.to_owned()),
+                        document_id: Some(target.to_owned()),
+                        documents_total: 1,
+                    },
+                )
+                .unwrap();
+            if workspace == f.workspace.as_str()
+                && source == "memory"
+                && target == id.as_str()
                 && job_type == SearchIndexJobType::SingleDocument
             {
                 valid.push(job);
             }
         }
         // Equal clocks must be resolved by stable ID order, not row insertion.
-        f.destination.execute_raw("UPDATE search_index_jobs SET created_at = '2026-09-17T00:00:00Z'").unwrap();
+        f.destination
+            .execute_raw("UPDATE search_index_jobs SET created_at = '2026-09-17T00:00:00Z'")
+            .unwrap();
         valid.sort();
-        let before = f.destination.list_search_index_jobs(&f.workspace, None).unwrap();
-        assert_eq!(unfinished_promotion_index_job(&f.destination, &f.workspace, &id).unwrap(), Some(valid[0].clone()));
-        assert!(unfinished_promotion_index_job(&f.destination, &f.workspace, "' OR 1 = 1 --").unwrap().is_none());
+        let before = f
+            .destination
+            .list_search_index_jobs(&f.workspace, None)
+            .unwrap();
+        assert_eq!(
+            unfinished_promotion_index_job(&f.destination, &f.workspace, &id).unwrap(),
+            Some(valid[0].clone())
+        );
+        assert!(
+            unfinished_promotion_index_job(&f.destination, &f.workspace, "' OR 1 = 1 --")
+                .unwrap()
+                .is_none()
+        );
         let (again, already, receipt) = f.publish().unwrap();
         assert!(already && again == id);
         assert_eq!(receipt, Some(valid[0].clone()));
-        assert_eq!(f.destination.list_search_index_jobs(&f.workspace, None).unwrap(), before);
+        assert_eq!(
+            f.destination
+                .list_search_index_jobs(&f.workspace, None)
+                .unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -2084,10 +2156,14 @@ mod tests {
         let f = PublicationFixture::new();
         let (id, _, job) = f.publish().unwrap();
         let before = (f.count("audit_log"), f.count("memories"));
-        f.destination.execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_retry_jobs").unwrap();
+        f.destination
+            .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_retry_jobs")
+            .unwrap();
         assert!(f.publish().is_err());
         assert_eq!((f.count("audit_log"), f.count("memories")), before);
-        f.destination.execute_raw("ALTER TABLE unavailable_retry_jobs RENAME TO search_index_jobs").unwrap();
+        f.destination
+            .execute_raw("ALTER TABLE unavailable_retry_jobs RENAME TO search_index_jobs")
+            .unwrap();
         let (again, already, receipt) = f.publish().unwrap();
         assert!(already && again == id);
         assert_eq!(receipt, job);

@@ -194,7 +194,7 @@ assert_eq "$reembed_signature" "$index_signature" "reembed semantic/source/model
 step "doctor discloses ignored foreign embedding env without network hints"
 run_command_capture doctor_trap doctor_env_trap \
     env EMBEDDING_MODEL=text-embedding-3-small OPENAI_API_KEY=sk-e2e-not-used \
-    "$EE_BIN" doctor --workspace "$WS" --json --fields full
+    "$EE_BIN" doctor --workspace "$WS" --json --full --fields full
 assert_jq "$doctor_trap" '.schema == "ee.response.v2"' "doctor emits response envelope"
 assert_jq "$doctor_trap" '.success == true' "doctor command succeeds with foreign env traps"
 assert_jq "$doctor_trap" '

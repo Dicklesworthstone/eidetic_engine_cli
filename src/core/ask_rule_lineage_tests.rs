@@ -23,7 +23,10 @@ impl Fixture {
         let database = physical.join("ask.db");
         let db = DbConnection::open_file(&database).unwrap();
         db.migrate().unwrap();
-        for (id, path) in [(WORKSPACE, physical.clone()), (OTHER, physical.join("other"))] {
+        for (id, path) in [
+            (WORKSPACE, physical.clone()),
+            (OTHER, physical.join("other")),
+        ] {
             db.insert_workspace(
                 id,
                 &CreateWorkspaceInput {
@@ -200,7 +203,12 @@ fn all_retired_parents_must_be_attributed_not_just_one_authorized_contributor() 
     let public = f.load(MemoryScope::Verified);
     assert_eq!(
         candidate_ids(&public),
-        BTreeSet::from([own.as_str(), team.as_str(), mixed.as_str(), unowned.as_str()])
+        BTreeSet::from([
+            own.as_str(),
+            team.as_str(),
+            mixed.as_str(),
+            unowned.as_str()
+        ])
     );
 }
 
@@ -242,9 +250,13 @@ fn missing_and_noncanonical_parent_ids_never_gain_lineage_authority() {
     let parent = f.parent(1, "Alice");
     let missing = "mem_00000000000000000000009999";
     let requested = BTreeSet::from([parent.as_str(), missing, "mem_not_an_id"]);
-    for scope in [MemoryScope::Workspace, MemoryScope::SelfOnly, MemoryScope::Team] {
-        let lineage = load_rule_lineage(&f.db, WORKSPACE, &scope_context(scope), &requested)
-            .unwrap();
+    for scope in [
+        MemoryScope::Workspace,
+        MemoryScope::SelfOnly,
+        MemoryScope::Team,
+    ] {
+        let lineage =
+            load_rule_lineage(&f.db, WORKSPACE, &scope_context(scope), &requested).unwrap();
         assert_eq!(lineage.owned, BTreeSet::from([parent.clone()]));
         if scope == MemoryScope::Workspace {
             assert!(lineage.attributed.is_empty());
@@ -258,8 +270,15 @@ fn missing_and_noncanonical_parent_ids_never_gain_lineage_authority() {
 fn source_less_rules_do_not_need_a_parent_query_and_keep_native_scope_policy() {
     let f = Fixture::new();
     let rule = f.rule(1, &[]);
-    for scope in [MemoryScope::Workspace, MemoryScope::Verified, MemoryScope::Global] {
-        assert_eq!(candidate_ids(&f.load(scope)), BTreeSet::from([rule.as_str()]));
+    for scope in [
+        MemoryScope::Workspace,
+        MemoryScope::Verified,
+        MemoryScope::Global,
+    ] {
+        assert_eq!(
+            candidate_ids(&f.load(scope)),
+            BTreeSet::from([rule.as_str()])
+        );
     }
     for scope in [MemoryScope::SelfOnly, MemoryScope::Team] {
         assert!(f.load(scope).candidates.is_empty());
@@ -301,8 +320,15 @@ fn source_attribution_and_rule_body_are_read_from_the_same_snapshot() {
         )
         .unwrap();
         assert_eq!(candidate_ids(&corpus), BTreeSet::from([rule.as_str()]));
-        assert!(load_with_scope(&reader, MemoryScope::SelfOnly).unwrap().candidates.is_empty());
-        reader.begin_read_snapshot().expect("ask released its owned snapshot");
+        assert!(
+            load_with_scope(&reader, MemoryScope::SelfOnly)
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        reader
+            .begin_read_snapshot()
+            .expect("ask released its owned snapshot");
         reader.rollback_read_snapshot().unwrap();
     }
 }
@@ -324,7 +350,10 @@ fn multi_page_lineage_checks_the_last_parent_and_does_not_mutate_history() {
     f.db.execute_raw("UPDATE memories SET tombstoned_at = '2002-01-01T00:00:00Z'")
         .unwrap();
     for scope in [MemoryScope::SelfOnly, MemoryScope::Workspace] {
-        assert_eq!(candidate_ids(&f.load(scope)), BTreeSet::from([rule.as_str()]));
+        assert_eq!(
+            candidate_ids(&f.load(scope)),
+            BTreeSet::from([rule.as_str()])
+        );
     }
     f.db.execute_raw(&format!(
         "UPDATE memories SET trust_subclass = 'agent:Eve' WHERE id = '{}'",

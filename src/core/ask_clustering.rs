@@ -725,10 +725,8 @@ mod categorical_tests {
             assert!(categorical_setting(left).is_none());
             assert!(categorical_setting(right).is_none());
             assert!(
-                super::super::jaccard_similarity(
-                    &tokenize_for_ask(left),
-                    &tokenize_for_ask(right),
-                ) >= CLUSTER_SIMILARITY_THRESHOLD
+                super::super::jaccard_similarity(&tokenize_for_ask(left), &tokenize_for_ask(right),)
+                    >= CLUSTER_SIMILARITY_THRESHOLD
             );
             let input = [span("a", left), span("b", right)];
             let result = cluster_spans(&input);
@@ -797,7 +795,10 @@ mod categorical_tests {
             assert!(!report.abstained && !report.extractiveness_violated);
             assert!(report.conflict_detected && report.conflict_link.is_none());
             assert!(report.answer_text.is_none() && report.citations.is_empty());
-            let sides = report.sides.as_ref().expect("both exact configuration values");
+            let sides = report
+                .sides
+                .as_ref()
+                .expect("both exact configuration values");
             assert_eq!(sides.len(), 2);
             let citations: Vec<_> = sides.iter().flat_map(|side| &side.citations).collect();
             assert_eq!(citations.len(), 2);
@@ -818,7 +819,10 @@ mod categorical_tests {
             }
             let expected = ask_data_json(&report);
             candidates.reverse();
-            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
+            assert_eq!(
+                ask_data_json(&evaluate_ask(&request, &candidates)),
+                expected
+            );
         }
     }
 }
