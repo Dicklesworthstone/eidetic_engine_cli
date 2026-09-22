@@ -160,18 +160,21 @@ pub(super) fn admit(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{RecallQuery, RecallReadSnapshot, run_recall, run_recall_in_snapshot};
+    use super::*;
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 
     const WORKSPACE: &str = "wsp_00000000000000000000000601";
     const MEMORY: &str = "mem_00000000000000000000000601";
     const BASE: &str = "2026-01-01T00:00:00Z";
     const NOW: &str = "2030-01-01T00:00:00.500000000Z";
-    const BODY: &str = "Release guidance. anchor:path:src/release.rs anchor:symbol:Release::publish";
+    const BODY: &str =
+        "Release guidance. anchor:path:src/release.rs anchor:symbol:Release::publish";
 
     fn at(raw: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(raw).unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn seed(db: &DbConnection, workspace: &str, id: &str) {
@@ -196,16 +199,21 @@ mod tests {
             BASE,
             BASE,
             id,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn fixture() -> DbConnection {
         let db = DbConnection::open_memory().unwrap();
         db.migrate().unwrap();
-        db.insert_workspace(WORKSPACE, &CreateWorkspaceInput {
-            path: "/recall-authority-test".to_owned(),
-            name: None,
-        }).unwrap();
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/recall-authority-test".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
         seed(&db, WORKSPACE, MEMORY);
         db
     }
@@ -227,7 +235,10 @@ mod tests {
 
     fn set(db: &DbConnection, column: &str, raw: &str) {
         // Both column and raw are test-owned literals, never external input.
-        db.execute_raw(&format!("UPDATE memories SET {column} = '{raw}' WHERE id = '{MEMORY}'")).unwrap();
+        db.execute_raw(&format!(
+            "UPDATE memories SET {column} = '{raw}' WHERE id = '{MEMORY}'"
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -235,24 +246,49 @@ mod tests {
         let db = fixture();
         for request in [
             query(),
-            RecallQuery { paths: vec!["src/release.rs".to_owned()], ..RecallQuery::default() },
-            RecallQuery { symbols: vec!["Release::publish".to_owned()], ..RecallQuery::default() },
-            RecallQuery { diff_paths: vec!["src/release.rs".to_owned()], ..RecallQuery::default() },
+            RecallQuery {
+                paths: vec!["src/release.rs".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: vec!["Release::publish".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                diff_paths: vec!["src/release.rs".to_owned()],
+                ..RecallQuery::default()
+            },
         ] {
             let before = run_recall_in_snapshot(&db, WORKSPACE, &request, at(NOW)).unwrap();
             assert_eq!(before.items.len(), 1, "{request:?}");
             assert_eq!(before.items[0].memory_id, MEMORY);
         }
         set(&db, "superseded_at", "2029-12-31T19:00:00.5-05:00");
-        for request in [query(), RecallQuery { diff_paths: vec!["src/release.rs".to_owned()], ..RecallQuery::default() }] {
+        for request in [
+            query(),
+            RecallQuery {
+                diff_paths: vec!["src/release.rs".to_owned()],
+                ..RecallQuery::default()
+            },
+        ] {
             let after = run_recall_in_snapshot(&db, WORKSPACE, &request, at(NOW)).unwrap();
             assert!(after.items.is_empty());
             assert_eq!(after.total_matched, 0);
             assert!(after.continuation_cursor.is_none());
-            assert!(after.degraded.iter().any(|d| d.code == "recall_source_filtered" && d.message.contains("superseded=1")));
+            assert!(
+                after
+                    .degraded
+                    .iter()
+                    .any(|d| d.code == "recall_source_filtered"
+                        && d.message.contains("superseded=1"))
+            );
         }
         // The stale locator remains present, proving the read boundary did the work.
-        assert!(!db.query_anchor_index_path_candidates(WORKSPACE, None, 10).unwrap().is_empty());
+        assert!(
+            !db.query_anchor_index_path_candidates(WORKSPACE, None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -282,7 +318,12 @@ mod tests {
         db.insert_memory_seal(MEMORY, &commitment, BASE).unwrap();
         let hidden = recall(&db);
         assert!(hidden.items.is_empty());
-        assert!(hidden.degraded.iter().any(|d| d.message.contains("sealed=1")));
+        assert!(
+            hidden
+                .degraded
+                .iter()
+                .any(|d| d.message.contains("sealed=1"))
+        );
         assert!(!format!("{hidden:?}").contains(BODY));
         // Even unexpectedly retained plaintext cannot defeat a closed seal.
         assert_eq!(db.get_memory(MEMORY).unwrap().unwrap().content, BODY);
@@ -294,12 +335,28 @@ mod tests {
     fn foreign_live_ownership_is_not_authorized_by_a_stale_anchor_workspace() {
         let db = fixture();
         let other = "wsp_00000000000000000000000602";
-        db.insert_workspace(other, &CreateWorkspaceInput { path: "/foreign-recall-test".to_owned(), name: None }).unwrap();
+        db.insert_workspace(
+            other,
+            &CreateWorkspaceInput {
+                path: "/foreign-recall-test".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
         set(&db, "workspace_id", other);
-        assert!(!db.query_anchor_index_path_candidates(WORKSPACE, None, 10).unwrap().is_empty());
+        assert!(
+            !db.query_anchor_index_path_candidates(WORKSPACE, None, 10)
+                .unwrap()
+                .is_empty()
+        );
         let report = recall(&db);
         assert!(report.items.is_empty());
-        assert!(report.degraded.iter().any(|d| d.message.contains("workspace_mismatch=1")));
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|d| d.message.contains("workspace_mismatch=1"))
+        );
         assert!(!format!("{report:?}").contains(other));
         assert!(!format!("{report:?}").contains(MEMORY));
     }
@@ -309,13 +366,24 @@ mod tests {
         let db = fixture();
         let public = "mem_00000000000000000000000602";
         seed(&db, WORKSPACE, public);
-        for column in ["created_at", "updated_at", "valid_from", "valid_to", "superseded_at"] {
+        for column in [
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "superseded_at",
+        ] {
             db.execute_raw(&format!("UPDATE memories SET created_at = '{BASE}', updated_at = '{BASE}', valid_from = '{BASE}', valid_to = NULL, superseded_at = NULL WHERE id = '{MEMORY}'")).unwrap();
             set(&db, column, "PRIVATE-BROKEN-TIMESTAMP");
             let report = recall(&db);
             assert_eq!(report.items.len(), 1);
             assert_eq!(report.items[0].memory_id, public);
-            assert!(report.degraded.iter().any(|d| d.severity == "medium" && d.message.contains("malformed=1")));
+            assert!(
+                report
+                    .degraded
+                    .iter()
+                    .any(|d| d.severity == "medium" && d.message.contains("malformed=1"))
+            );
             assert!(!format!("{report:?}").contains("PRIVATE-BROKEN-TIMESTAMP"));
         }
     }
@@ -330,18 +398,21 @@ mod tests {
         assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
         db.begin_read_snapshot().unwrap();
         assert!(run_recall(&db, WORKSPACE, &query()).is_err());
-        db.commit_read_snapshot().expect("failed nested begin must not roll back the caller");
+        db.commit_read_snapshot()
+            .expect("failed nested begin must not roll back the caller");
         assert!(run_recall(&db, WORKSPACE, &query()).is_ok());
     }
 
     #[test]
     fn failed_authority_read_returns_no_partial_report_and_releases_owned_snapshot() {
         let db = fixture();
-        db.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals").unwrap();
+        db.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals")
+            .unwrap();
         let error = run_recall(&db, WORKSPACE, &query()).unwrap_err();
         assert!(error.to_string().contains("no partial result"));
         assert!(!error.to_string().contains(BODY));
-        db.begin_read_snapshot().expect("no leaked source read snapshot");
+        db.begin_read_snapshot()
+            .expect("no leaked source read snapshot");
         db.rollback_read_snapshot().unwrap();
     }
 
@@ -351,15 +422,42 @@ mod tests {
         let database = root.path().join("recall.db");
         let writer = DbConnection::open_file(&database).unwrap();
         writer.migrate().unwrap();
-        writer.insert_workspace(WORKSPACE, &CreateWorkspaceInput { path: root.path().to_string_lossy().into_owned(), name: None }).unwrap();
+        writer
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: root.path().to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
         seed(&writer, WORKSPACE, MEMORY);
         let reader = DbConnection::open_file_read_only(&database).unwrap();
         let snapshot = RecallReadSnapshot::begin_db(&reader).unwrap();
-        assert_eq!(run_recall_in_snapshot(&reader, WORKSPACE, &query(), at(NOW)).unwrap().items.len(), 1);
-        writer.insert_memory_seal(MEMORY, &format!("blake3:{}", "b".repeat(64)), BASE).unwrap();
+        assert_eq!(
+            run_recall_in_snapshot(&reader, WORKSPACE, &query(), at(NOW))
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        writer
+            .insert_memory_seal(MEMORY, &format!("blake3:{}", "b".repeat(64)), BASE)
+            .unwrap();
         set(&writer, "superseded_at", BASE);
-        assert_eq!(run_recall_in_snapshot(&reader, WORKSPACE, &query(), at(NOW)).unwrap().items.len(), 1);
+        assert_eq!(
+            run_recall_in_snapshot(&reader, WORKSPACE, &query(), at(NOW))
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
         snapshot.finish_db().unwrap();
-        assert!(run_recall(&reader, WORKSPACE, &query()).unwrap().items.is_empty());
+        assert!(
+            run_recall(&reader, WORKSPACE, &query())
+                .unwrap()
+                .items
+                .is_empty()
+        );
     }
 }
