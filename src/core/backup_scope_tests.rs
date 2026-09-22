@@ -390,7 +390,7 @@ fn shared_database_workspaces_restore_independently_with_typed_and_learned_histo
         assert!(
             !audits
                 .iter()
-                .any(|row| row.workspace_id.as_deref() == Some(&fixture.ids[other]))
+                .any(|row| row.workspace_id.as_deref() == Some(fixture.ids[other].as_str()))
         );
         assert!(
             Path::new(&restored.restored_database_path)
@@ -470,4 +470,68 @@ fn cross_workspace_links_remain_uncovered_instead_of_leaking_or_disappearing() {
         );
         assert!(!side.join(".ee").exists());
     }
+}
+
+#[test]
+fn orphaned_children_cannot_disappear_from_every_workspace_inventory() {
+    let fixture = fixture();
+    let db = DbConnection::open_file(&fixture.database).unwrap();
+    let before = db.count_table_rows("memory_tags").unwrap();
+    // Simulate a damaged historical source using the real storage engine.
+    // Normal writers enforce this ownership; recovery cannot assume they were
+    // the only programs ever to touch a user's database.
+    db.execute_raw("PRAGMA foreign_keys = OFF").unwrap();
+    db.execute_raw("INSERT INTO memory_tags (memory_id, tag) VALUES ('mem_00000000000000000000000999', 'ORPHAN_PRIVATE_CANARY')").unwrap();
+    assert_eq!(db.count_table_rows("memory_tags").unwrap(), before + 1);
+    for workspace in &fixture.ids {
+        let error = count_rows(&db, "memory_tags", workspace)
+            .unwrap_err()
+            .message();
+        assert!(
+            error.contains("unowned durable rows in memory_tags"),
+            "{error}"
+        );
+        assert!(!error.contains("ORPHAN_PRIVATE_CANARY"));
+        assert!(!error.contains("mem_00000000000000000000000999"));
+    }
+    db.close().unwrap();
+    let before = std::fs::read(&fixture.database).unwrap();
+    let options = BackupCreateOptions {
+        workspace_path: fixture.workspaces[0].clone(),
+        database_path: Some(fixture.database.clone()),
+        output_dir: Some(fixture.root.path().join("must-not-publish")),
+        label: None,
+        redaction_level: RedactionLevel::None,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: true,
+    };
+    assert!(create_backup(&options).is_err());
+    assert!(!options.output_dir.unwrap().exists());
+    assert_eq!(std::fs::read(&fixture.database).unwrap(), before);
+}
+
+#[test]
+fn missing_workspace_ownership_is_not_misclassified_as_unrelated_state() {
+    let fixture = fixture();
+    let db = DbConnection::open_file(&fixture.database).unwrap();
+    let before = db.count_table_rows("memories").unwrap();
+    db.execute_raw("PRAGMA foreign_keys = OFF").unwrap();
+    db.execute_raw(&format!(
+        "UPDATE memories SET workspace_id = 'wsp_00000000000000000000000999' WHERE id = '{}'",
+        fixture.memories[0][0]
+    ))
+    .unwrap();
+    assert_eq!(db.count_table_rows("memories").unwrap(), before);
+    for workspace in &fixture.ids {
+        let error = count_rows(&db, "memories", workspace)
+            .unwrap_err()
+            .message();
+        assert!(
+            error.contains("unowned durable rows in memories"),
+            "{error}"
+        );
+        assert!(!error.contains("wsp_00000000000000000000000999"));
+    }
+    db.close().unwrap();
 }

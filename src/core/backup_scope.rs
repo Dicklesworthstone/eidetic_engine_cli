@@ -108,6 +108,30 @@ pub(in crate::core::backup) fn count_rows(
     }
     let ownership = scope(table)
         .ok_or_else(|| recovery_error("Required backup table has no source ownership rule"))?;
+    // A scoped join must not conceal records whose durable owner vanished.
+    // Such rows cannot honestly be assigned to any workspace recovery point.
+    // Refuse rather than silently excluding them from every backup's counts.
+    match ownership {
+        Scope::Column("workspace_id") => {
+            require_owners(db, table, "workspace_id", "workspaces", "id", false)?;
+        }
+        Scope::WithUnscoped => {
+            require_owners(db, table, "workspace_id", "workspaces", "id", true)?;
+        }
+        Scope::Child {
+            key,
+            parent,
+            parent_key,
+            ..
+        } => {
+            require_owners(db, table, key, parent, parent_key, false)?;
+        }
+        Scope::MemoryLinks => {
+            require_owners(db, table, "src_memory_id", "memories", "id", false)?;
+            require_owners(db, table, "dst_memory_id", "memories", "id", false)?;
+        }
+        _ => {}
+    }
     let predicate = match ownership {
         Scope::Shared => {
             return u64::try_from(db.count_table_rows(table).map_err(storage_error)?)
@@ -158,6 +182,38 @@ pub(in crate::core::backup) fn count_rows(
         .and_then(Value::as_i64)
         .and_then(|count| u64::try_from(count).ok())
         .ok_or_else(|| recovery_error("Backup source count is not a nonnegative integer"))
+}
+
+/// This guard reads only binary-owned table/column names, never row content.
+/// Foreign-but-owned data stays outside the selected recovery point; dangling
+/// data stays an error. Nullable shared ownership is explicit, not inferred.
+fn require_owners(
+    db: &DbConnection,
+    table: &str,
+    key: &str,
+    parent: &str,
+    parent_key: &str,
+    allow_null: bool,
+) -> Result<(), DomainError> {
+    let missing = format!("\"{key}\" NOT IN (SELECT \"{parent_key}\" FROM \"{parent}\")");
+    let predicate = if allow_null {
+        missing
+    } else {
+        format!("\"{key}\" IS NULL OR {missing}")
+    };
+    if !db
+        .query(
+            &format!("SELECT 1 FROM \"{table}\" WHERE {predicate} LIMIT 1"),
+            &[],
+        )
+        .map_err(storage_error)?
+        .is_empty()
+    {
+        return Err(recovery_error(format!(
+            "Backup source contains unowned durable rows in {table}; repair ownership before creating a recovery point"
+        )));
+    }
+    Ok(())
 }
 
 /// Primary JSONL carriers need the same source-versus-capture reconciliation
