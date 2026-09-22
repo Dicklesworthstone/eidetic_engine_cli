@@ -60,6 +60,97 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
     Ok(modules)
 }
 
+/// The files a source declares as modules through `#[path = "..."]`, as written.
+///
+/// An include counts only when the attribute is followed by its `mod` line
+/// (`pub` and `pub(crate)` allowed, with `#[allow]`/`#[expect]` lint attributes
+/// in between). A commented-out declaration, or a path attribute separated from
+/// its `mod` by anything else, is not an include.
+fn path_includes(source: &str) -> Vec<String> {
+    let mut includes = Vec::new();
+    let mut lines = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    while let Some(line) = lines.next() {
+        let Some(file) = line
+            .strip_prefix("#[path = \"")
+            .and_then(|rest| rest.strip_suffix("\"]"))
+        else {
+            continue;
+        };
+        let declaration =
+            lines.find(|next| !(next.starts_with("#[allow(") || next.starts_with("#[expect(")));
+        let declares_module = declaration.is_some_and(|next| {
+            let next = next
+                .strip_prefix("pub(crate) ")
+                .or_else(|| next.strip_prefix("pub "))
+                .unwrap_or(next);
+            next.starts_with("mod ") && next.ends_with(';')
+        });
+        if declares_module {
+            includes.push(file.to_owned());
+        }
+    }
+    includes
+}
+
+/// Resolve `.` and `..` without touching the filesystem.
+fn normalize(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    normal
+}
+
+/// Root test files reached through a `#[path]` include nested below a
+/// registered entry point, counted once per including file.
+///
+/// `suite_modules` sees only a suite's direct declarations. A root file that
+/// another test module includes -- `snapshot_index_recovery_e2e.rs` by
+/// `concurrent_search_lexical_arm_e2e.rs`, `mcp_capture_git.rs` by the
+/// `mcp_parity` target -- compiles into that parent's binary, yet this count
+/// used to miss it and report both as unregistered (bd-tsrq7). Edges out of
+/// suite files are skipped because `suite_modules` already counted them. Paths
+/// resolve against the including file's directory, as rustc resolves them.
+fn nested_root_includes(
+    targets: &[PathBuf],
+    suites: &BTreeSet<PathBuf>,
+    read: impl Fn(&Path) -> Option<String>,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    let mut queue = targets.to_vec();
+    let mut seen = BTreeSet::new();
+    while let Some(file) = queue.pop() {
+        if !seen.insert(file.clone()) {
+            continue;
+        }
+        let Some(source) = read(&file) else {
+            continue;
+        };
+        let dir = file.parent().unwrap_or(Path::new("")).to_path_buf();
+        for include in path_includes(&source) {
+            let resolved = normalize(&dir.join(include));
+            let is_root_file = resolved.parent() == Some(Path::new("tests"))
+                && resolved.extension().is_some_and(|ext| ext == "rs");
+            if is_root_file && !suites.contains(&file) {
+                if let Some(name) = resolved.file_name().and_then(|name| name.to_str()) {
+                    *counts.entry(name.to_owned()).or_insert(0) += 1;
+                }
+            }
+            queue.push(resolved);
+        }
+    }
+    counts
+}
+
 fn root_files(root: &Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
     let mut files = BTreeSet::new();
     for entry in root.join("tests").read_dir()? {
@@ -104,11 +195,13 @@ fn every_root_test_file_is_registered_exactly_once() -> TestResult {
         .ok_or("Cargo.toml is missing explicit integration test targets")?;
     let mut counts = BTreeMap::new();
     let mut registered_suites = BTreeSet::new();
+    let mut target_paths = Vec::new();
     for target in targets {
         let path = target["path"]
             .as_str()
             .ok_or("test target has no explicit path")?;
         let path = Path::new(path);
+        target_paths.push(path.to_path_buf());
         if path.parent() == Some(Path::new("tests/suites")) {
             registered_suites.insert(path.to_path_buf());
             for file in suite_modules(&std::fs::read_to_string(root.join(path))?)? {
@@ -134,17 +227,18 @@ fn every_root_test_file_is_registered_exactly_once() -> TestResult {
             }
         }
     }
-    // THIS IS CURRENTLY RED, AND HONESTLY SO: bd-tsrq7. With the module-path
-    // grammar above repaired, this check finally reaches its subject and reports
-    // that tests/mcp_capture_git.rs and tests/snapshot_index_recovery_e2e.rs are
-    // registered in neither Cargo.toml nor any suite. Under autotests = false
-    // that means they never compile and never run -- which is exactly what this
-    // file's docstring says it exists to catch. Before the repair it aborted on
-    // "invalid suite module path" for a legitimate nested helper and pointed at
-    // nothing.
-    //
-    // Do not silence it by narrowing this check. The failure IS the finding;
-    // the fix is to register those files or remove them.
+    // A root file included one level further down is registered too: it
+    // compiles into its parent's binary. Before this was counted, the check
+    // reported tests/mcp_capture_git.rs and tests/snapshot_index_recovery_e2e.rs
+    // as unregistered (bd-tsrq7), and "register them" would have compiled each
+    // twice. An unreached root file still fails here, and so does one reached
+    // twice.
+    let nested = nested_root_includes(&target_paths, &registered_suites, |path| {
+        std::fs::read_to_string(root.join(path)).ok()
+    });
+    for (file, count) in nested {
+        *counts.entry(file).or_insert(0) += count;
+    }
     let errors = coverage_errors(&root_files(&root)?, &counts);
     if !errors.is_empty() {
         return Err(errors.join("\n").into());
@@ -202,6 +296,84 @@ fn inventory_shared_helpers_cannot_hide_root_test_files() -> TestResult {
             .any(|error| error.contains("graph_generator.rs") && error.contains("found 0"))
     );
     Ok(())
+}
+
+#[test]
+fn inventory_counts_root_files_included_below_a_registered_module() {
+    let sources = BTreeMap::from([
+        (
+            "tests/suites/integration_x.rs",
+            "#[path = \"../parent.rs\"]\nmod parent;\n",
+        ),
+        (
+            "tests/parent.rs",
+            "#[path = \"child_e2e.rs\"]\nmod child;\n\
+             // #[path = \"commented.rs\"]\n// mod commented;\n\
+             #[path = \"detached.rs\"]\nfn not_a_module() {}\n",
+        ),
+        (
+            "tests/target_like.rs",
+            "#[path = \"helpers/deep.rs\"]\n#[allow(dead_code)]\npub mod deep;\n",
+        ),
+        (
+            "tests/helpers/deep.rs",
+            "#[path = \"../grandchild.rs\"]\nmod grandchild;\n",
+        ),
+    ]);
+    let targets = [
+        PathBuf::from("tests/suites/integration_x.rs"),
+        PathBuf::from("tests/target_like.rs"),
+    ];
+    let suites = BTreeSet::from([PathBuf::from("tests/suites/integration_x.rs")]);
+    let read = |path: &Path| {
+        path.to_str()
+            .and_then(|key| sources.get(key))
+            .map(|s| s.to_string())
+    };
+
+    // The suite's own edge to parent.rs belongs to suite_modules, so only the
+    // nested includes are counted here -- and not the commented or detached ones.
+    let nested = nested_root_includes(&targets, &suites, read);
+    assert_eq!(
+        nested,
+        BTreeMap::from([
+            ("child_e2e.rs".to_owned(), 1),
+            ("grandchild.rs".to_owned(), 1)
+        ])
+    );
+
+    // Composed with the direct counts, every reached file is covered once and
+    // an unreached file is still reported.
+    let mut counts = BTreeMap::from([
+        ("parent.rs".to_owned(), 1),
+        ("target_like.rs".to_owned(), 1),
+    ]);
+    counts.extend(nested);
+    let files = BTreeSet::from([
+        "parent.rs".to_owned(),
+        "child_e2e.rs".to_owned(),
+        "target_like.rs".to_owned(),
+        "grandchild.rs".to_owned(),
+        "orphan.rs".to_owned(),
+    ]);
+    assert_eq!(
+        coverage_errors(&files, &counts),
+        ["orphan.rs: expected one registered module/target, found 0"]
+    );
+
+    // Two includers of one root file compile it into two binaries.
+    let mut twice = sources.clone();
+    twice.insert(
+        "tests/helpers/deep.rs",
+        "#[path = \"../grandchild.rs\"]\nmod grandchild;\n#[path = \"../child_e2e.rs\"]\nmod child;\n",
+    );
+    let read_twice = |path: &Path| {
+        path.to_str()
+            .and_then(|key| twice.get(key))
+            .map(|s| s.to_string())
+    };
+    let nested = nested_root_includes(&targets, &suites, read_twice);
+    assert_eq!(nested.get("child_e2e.rs"), Some(&2));
 }
 
 /// bd-reality-core-convergence-1azkt.5 bullet 7: a `#[test]`-bearing file that
