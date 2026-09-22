@@ -231,8 +231,10 @@ SESSION_PAYLOAD="$(jq -cn \
   --arg session "bd-2vq2z-21-session" \
   '{hook_event_name:"SessionStart",cwd:$cwd,session_id:$session,task:"delivery e2e ambient orientation"}')"
 run_hook "ambient_session_orient_first" "$SESSION_ORIENT_CMD" "$SESSION_PAYLOAD" "$ROOT/session_orient_1.json" "$ROOT/session_orient_1.stderr" "$AMBIENT_BEAD"
+# 278ad8271 keeps diagnostic response envelopes out of injected context, so
+# the orientation must carry the ambient header and NOT an ee.response.v2 body.
 assert_jq "ambient_session_orient_injects_context" "$ROOT/session_orient_1.json" \
-  '.hookSpecificOutput.hookEventName == "SessionStart" and (.hookSpecificOutput.additionalContext | contains("ee ambient_context") and contains("surface=session_start_orient") and contains("schema=ee.ambient_context.v1") and contains("provenance=ee:ee.ambient_context.v1") and contains("ee.response.v2"))' \
+  '.hookSpecificOutput.hookEventName == "SessionStart" and (.hookSpecificOutput.additionalContext | contains("ee ambient_context") and contains("surface=session_start_orient") and contains("schema=ee.ambient_context.v1") and contains("provenance=ee:ee.ambient_context.v1") and (contains("ee.response.v2") | not))' \
   "$AMBIENT_BEAD"
 run_hook "ambient_session_orient_duplicate" "$SESSION_ORIENT_CMD" "$SESSION_PAYLOAD" "$ROOT/session_orient_duplicate.json" "$ROOT/session_orient_duplicate.stderr" "$AMBIENT_BEAD"
 assert_empty_file "ambient_session_orient_duplicate_suppressed" "$ROOT/session_orient_duplicate.json" "$AMBIENT_BEAD"
@@ -248,7 +250,7 @@ E2E_CURRENT_BEAD="$AMBIENT_BEAD" run_ee "remember_ambient_anchor" remember \
   --workspace "$WORKSPACE" \
   --level procedural \
   --kind rule \
-  --source "test://bd-2vq2z.10/pre-edit-recall" \
+  --source "manual://bd-2vq2z.10/pre-edit-recall" \
   --json > "$ROOT/remember_ambient_anchor.json"
 assert_jq "ambient_anchor_remember_schema" "$ROOT/remember_ambient_anchor.json" \
   '.schema == "ee.response.v2" and .success == true and .data.kind == "rule"' \
@@ -348,7 +350,7 @@ E2E_CURRENT_BEAD="$ANTI_BEAD" run_ee "remember_anti_pattern" remember \
   --level procedural \
   --kind anti-pattern \
   --tags delivery,anti-pattern-first,batch-verify \
-  --source "test://bd-2vq2z.11/anti-pattern-first" \
+  --source "manual://bd-2vq2z.11/anti-pattern-first" \
   --json > "$ROOT/remember_antipattern.json"
 
 assert_jq "anti_pattern_remember_schema" "$ROOT/remember_antipattern.json" \
@@ -364,7 +366,7 @@ E2E_CURRENT_BEAD="$ANTI_BEAD" run_ee "remember_supporting_rule" remember \
   --level procedural \
   --kind rule \
   --tags delivery,anti-pattern-first,batch-verify \
-  --source "test://bd-2vq2z.11/supporting-rule" \
+  --source "manual://bd-2vq2z.11/supporting-rule" \
   --json > "$ROOT/remember_supporting_rule.json"
 
 assert_jq "supporting_rule_remember_schema" "$ROOT/remember_supporting_rule.json" \
@@ -403,7 +405,7 @@ assert_jq "anti_pattern_reserved_item" "$ROOT/pack_antipattern_1.json" \
   "$ANTI_BEAD"
 
 assert_jq "anti_pattern_provenance_uri" "$ROOT/pack_antipattern_1.json" \
-  "any(.data.pack.items[]?; .memoryId == \"$ANTI_MEMORY_ID\" and any(.provenance[]?; .uri == \"test://bd-2vq2z.11/anti-pattern-first\"))" \
+  "any(.data.pack.items[]?; .memoryId == \"$ANTI_MEMORY_ID\" and any(.provenance[]?; .uri == \"manual://bd-2vq2z.11/anti-pattern-first\"))" \
   "$ANTI_BEAD"
 
 assert_jq "anti_pattern_markdown_section" "$ROOT/pack_antipattern_1.json" \
