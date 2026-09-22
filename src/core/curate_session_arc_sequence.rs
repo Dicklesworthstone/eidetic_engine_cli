@@ -291,7 +291,11 @@ fn append_pairs(
 ) {
     // Builders emit anti-pattern/rule pairs in order. Deduplicate both or
     // neither, preserving content-bound IDs and reciprocal metadata.
-    for pair in candidates.chunks_exact(2) {
+    //
+    // `as_chunks::<2>().0` is the complete-pairs half, so a trailing odd
+    // candidate is still dropped exactly as `chunks_exact(2)` dropped it
+    // (bd-4aw2d: clippy::chunks_exact_to_as_chunks, the last lib blocker).
+    for pair in candidates.as_chunks::<2>().0 {
         if pair
             .iter()
             .any(|candidate| emitted.contains(&candidate.candidate_id))
