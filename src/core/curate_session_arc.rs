@@ -2,6 +2,8 @@
 
 use super::*;
 
+#[path = "curate_session_arc_clauses.rs"]
+mod clauses;
 #[path = "curate_session_arc_text.rs"]
 mod text;
 
@@ -42,9 +44,9 @@ pub(super) fn inline_candidates(
 
 fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
     let mut failure: Option<&str> = None;
-    // Split only at visible clause/sentence boundaries. A bare occurrence of
+    // Technical tokens and quoted commands stay intact. A bare occurrence of
     // both keywords in a single clause is not evidence of temporal ordering.
-    for part in excerpt.split_inclusive(['\n', ';', '.']) {
+    for part in clauses::split(excerpt) {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -68,28 +70,34 @@ fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Negative or failed repair attempts must not become positive lessons merely
-/// because they mention `fixed`, `green`, or `passed`.
+/// Negative or predicted repairs must not become positive lessons merely
+/// because they mention `fixed`, `green`, or `passed`. This is conservative
+/// lexical admission, not proof that an arbitrary natural-language claim is true.
 pub(super) fn resolution_signal(excerpt: &str) -> bool {
     if !session_arc_resolution_signal(excerpt) {
         return false;
     }
-    let lowercase = excerpt.to_ascii_lowercase();
+    let lowercase = excerpt.to_ascii_lowercase().replace('’', "'");
     let words: Vec<_> = lowercase
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\'')
+        .map(|word| word.trim_matches('\''))
         .filter(|word| !word.is_empty())
         .collect();
     if words.iter().any(|word| {
         matches!(
             *word,
             "failed" | "failing" | "broken" | "blocked" | "timeout" | "panic" | "denied"
+                | "unsuccessful" | "unverified" | "unresolved"
         )
     }) {
         return false;
     }
     !words.iter().enumerate().any(|(index, word)| {
-        matches!(*word, "not" | "never" | "cannot")
-            && words.iter().skip(index + 1).take(3).any(|next| {
+        let negated = matches!(*word, "not" | "never" | "cannot" | "no")
+            || word.ends_with("n't");
+        let predicted = matches!(*word, "will" | "would" | "should" | "could" | "may" | "might");
+        (negated || predicted)
+            && words.iter().skip(index + 1).take(6).any(|next| {
                 matches!(
                     *next,
                     "fixed"
@@ -102,6 +110,9 @@ pub(super) fn resolution_signal(excerpt: &str) -> bool {
                         | "resolved"
                         | "verified"
                         | "works"
+                        | "succeed"
+                        | "succeeded"
+                        | "successful"
                 )
             })
     })
