@@ -98,6 +98,7 @@ jobs:
               pathlib.Path(path).write_bytes(fetch(sha))
           apply('1796ac1d6fca758b153eb099d665e2179414cb07', 'relocation-correction.patch')
           apply('f817259c0cf8d458685ce3fa7dd3040058dcb1c4', 'relocation-contract-correction.patch')
+          apply('f95e548ffbd6bbc46865afe523b6e7c207f2284a', 'relocation-hardlink.patch')
           paths = list(bases) + list(additions)
           rust = [path for path in paths if path.endswith('.rs')]
           subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
@@ -130,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::workspace::relocation::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-unit.log"
-          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log"
+          grep -Fq 'test result: ok. 13 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log"
           cargo test --locked --lib db::tests::workspace_relocation_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-primitive.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-primitive.log"
       - name: Verify the public copy approval reindex and retrieval loop
