@@ -1694,10 +1694,12 @@ mod tests {
     fn l2_warm_cache_benchmark_contract_matches_gate() -> Result<(), String> {
         assert_eq!(L2_WARM_BENCH_GROUP, "ee_context_pack_l2_warm");
         assert_eq!(L2_WARM_BENCH_OPERATION, "ee_context_pack_l2_warm");
-        assert!(
-            L2_WARM_BUDGET_P50_MS > 0.0 && L2_WARM_BUDGET_P99_MS >= L2_WARM_BUDGET_P50_MS,
-            "warm L2 benchmark budgets must be positive and monotonic"
-        );
+        const {
+            assert!(
+                L2_WARM_BUDGET_P50_MS > 0.0 && L2_WARM_BUDGET_P99_MS >= L2_WARM_BUDGET_P50_MS,
+                "warm L2 benchmark budgets must be positive and monotonic"
+            );
+        }
         assert_eq!(L2_CONCURRENT_IDENTICAL_REQUESTS, 4);
         assert_eq!(L2_EXPECTED_FRESH_ASSEMBLIES, 1);
         assert_eq!(L2_EXPECTED_WARM_HITS, 3);
@@ -1721,10 +1723,13 @@ mod tests {
             ARENA_MODE_BENCH_OPERATION,
             "ee_context_arena_workspace_reuse"
         );
-        assert!(
-            ARENA_MODE_BUDGET_P50_MS > 0.0 && ARENA_MODE_BUDGET_P99_MS >= ARENA_MODE_BUDGET_P50_MS,
-            "arena mode benchmark budgets must be positive and monotonic"
-        );
+        const {
+            assert!(
+                ARENA_MODE_BUDGET_P50_MS > 0.0
+                    && ARENA_MODE_BUDGET_P99_MS >= ARENA_MODE_BUDGET_P50_MS,
+                "arena mode benchmark budgets must be positive and monotonic"
+            );
+        }
         assert_eq!(ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, 1);
         assert_eq!(arena_fixture_coverage_fill().len(), 20);
         assert_eq!(arena_fixture_provenance_heavy().len(), 9);
@@ -1741,11 +1746,13 @@ mod tests {
             PACK_DNA_ORCHESTRATION_OPERATION,
             "ee_context_pack_dna_attach"
         );
-        assert!(
-            PACK_DNA_ORCHESTRATION_BUDGET_P50_MS > 0.0
-                && PACK_DNA_ORCHESTRATION_BUDGET_P99_MS >= PACK_DNA_ORCHESTRATION_BUDGET_P50_MS,
-            "Pack DNA orchestration benchmark budgets must be positive and monotonic"
-        );
+        const {
+            assert!(
+                PACK_DNA_ORCHESTRATION_BUDGET_P50_MS > 0.0
+                    && PACK_DNA_ORCHESTRATION_BUDGET_P99_MS >= PACK_DNA_ORCHESTRATION_BUDGET_P50_MS,
+                "Pack DNA orchestration benchmark budgets must be positive and monotonic"
+            );
+        }
         assert_eq!(PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT, 1);
 
         let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
@@ -1770,11 +1777,13 @@ mod tests {
             "ee_context_zstd_pack_dictionary_l2"
         );
         assert_eq!(ZSTD_PACK_DICTIONARY_SAMPLE_COUNT, 96);
-        assert!(
-            ZSTD_PACK_DICTIONARY_BUDGET_P50_MS > 0.0
-                && ZSTD_PACK_DICTIONARY_BUDGET_P99_MS >= ZSTD_PACK_DICTIONARY_BUDGET_P50_MS,
-            "zstd dictionary benchmark budgets must be positive and monotonic"
-        );
+        const {
+            assert!(
+                ZSTD_PACK_DICTIONARY_BUDGET_P50_MS > 0.0
+                    && ZSTD_PACK_DICTIONARY_BUDGET_P99_MS >= ZSTD_PACK_DICTIONARY_BUDGET_P50_MS,
+                "zstd dictionary benchmark budgets must be positive and monotonic"
+            );
+        }
 
         let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
         let (dictionary_cache, dictionary_key, dictionary_id, dictionary_report) =
@@ -1857,19 +1866,25 @@ mod tests {
             (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
             "tiered recall proof must not request the whole corpus"
         );
-        assert!(
-            TIERED_RECALL_CANDIDATE_POOL > 128,
-            "bounded pool should still cross the hot tier budget and exercise warm admission"
-        );
-        assert!(
-            TIERED_RECALL_MEMORY_COUNT > 640,
-            "default_swarm hot+warm budgets are 640, so the fixture must force a cold tier"
-        );
+        const {
+            assert!(
+                TIERED_RECALL_CANDIDATE_POOL > 128,
+                "bounded pool should still cross the hot tier budget and exercise warm admission"
+            );
+        }
+        const {
+            assert!(
+                TIERED_RECALL_MEMORY_COUNT > 640,
+                "default_swarm hot+warm budgets are 640, so the fixture must force a cold tier"
+            );
+        }
         assert_eq!(TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, 1);
-        assert!(
-            TIERED_RECALL_BUDGET_P50_MS > 0.0
-                && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
-            "tiered recall benchmark budgets must be positive and monotonic"
-        );
+        const {
+            assert!(
+                TIERED_RECALL_BUDGET_P50_MS > 0.0
+                    && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
+                "tiered recall benchmark budgets must be positive and monotonic"
+            );
+        }
     }
 }

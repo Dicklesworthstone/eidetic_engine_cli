@@ -209,7 +209,12 @@ mod tests {
 
     #[test]
     fn compare_scale_exercises_large_top_k_graph() {
-        assert!(super::COMPARE_SCALE >= 10_000);
+        const {
+            assert!(
+                super::COMPARE_SCALE >= 10_000,
+                "compare benchmark must stay large enough to exercise a top-k graph"
+            );
+        }
     }
 
     #[test]
