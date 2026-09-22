@@ -12,6 +12,7 @@
 enum Token {
     Text(String),
     Scalar { unit: String },
+    Categorical,
 }
 
 #[derive(Debug)]
@@ -23,7 +24,7 @@ struct Claim {
 /// Detect a different numeric or categorical setting in the same affirmative claim.
 /// Prose uses the caller's shared polarity detector, not another vocabulary
 /// of negation words. Exact setting syntax instead binds identifiers as keys:
-/// `NO_RETRY=1` is an assignment, not an English prohibition.
+/// `NO_RETRY=1` and `NO_RETRY=enabled` are assignments, not English prohibitions.
 /// Decimal canonicalization uses strings, never floating point or integer
 /// parsing, so sign, fractional precision and arbitrarily large values survive.
 pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negated: bool) -> bool {
@@ -100,15 +101,52 @@ fn setting_claim(text: &str) -> Option<Claim> {
     }) {
         return None;
     }
-    let (value, unit) = scalar(value.trim())?;
+    let (value, slot) = setting_value(value.trim())?;
     Some(Claim {
         template: vec![
             Token::Text(key.to_owned()),
             Token::Text(operator.to_owned()),
-            Token::Scalar { unit },
+            slot,
         ],
         value,
     })
+}
+
+/// Configuration literals are not prose: a `false` value or a `NO_` key does
+/// not negate the assignment. Keep symbolic values case-sensitive, including
+/// quoted spellings, and retain a distinct slot from numeric values with units.
+/// Unknown values, expressions, lists and malformed quotes grant no inference.
+fn setting_value(raw: &str) -> Option<(String, Token)> {
+    if let Some((value, unit)) = scalar(raw) {
+        return Some((value, Token::Scalar { unit }));
+    }
+    let value = match raw.chars().next()? {
+        quote @ ('`' | '\'' | '"') => raw.strip_prefix(quote)?.strip_suffix(quote)?,
+        _ => raw,
+    };
+    if !value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic())
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "unknown"
+                | "unspecified"
+                | "unavailable"
+                | "undetermined"
+                | "unset"
+                | "unconfigured"
+                | "pending"
+                | "tbd"
+                | "either"
+        )
+    {
+        return None;
+    }
+    Some((value.to_owned(), Token::Categorical))
 }
 
 fn claim(text: &str) -> Option<Claim> {
@@ -404,6 +442,9 @@ mod tests {
             ("timeout: -0ms", "timeout : +00.000ms"),
             ("ratio=1.2500", "ratio=+01.25"),
             ("`limit=10`", "limit = 10;"),
+            ("backend: 'sqlite'", "backend : sqlite"),
+            ("`--backend=sqlite`", "--backend = \"sqlite\""),
+            ("NO_RETRY=enabled", "NO_RETRY = `enabled`"),
         ] {
             assert!(!disagreement(left, right), "{left} / {right}");
         }
@@ -420,6 +461,10 @@ mod tests {
             ("timeout=30ms", "timeout=40s"),
             ("power=10MW", "power=20mW"),
             ("port=5432", "The port is 6432."),
+            ("backend: sqlite", "Backend: postgres"),
+            ("production.backend: sqlite", "staging.backend: postgres"),
+            ("backend=sqlite", "backend: postgres"),
+            ("backend=sqlite", "--backend=postgres"),
         ] {
             assert!(!disagreement(left, right), "{left} / {right}");
         }
@@ -432,6 +477,10 @@ mod tests {
             let right = format!("{key}=2");
             assert!(crate::core::ask::has_negation(&left));
             assert!(conflicts(&left, true, &right, true));
+            let left = format!("{key}=enabled");
+            let right = format!("{key}=disabled");
+            assert!(conflicts(&left, true, &right, true));
+            assert!(conflicts(&right, true, &left, true));
         }
         assert!(!conflicts(
             "Do not use PORT=5432.",
@@ -439,6 +488,47 @@ mod tests {
             "Do not use PORT=6432.",
             true,
         ));
+        assert!(!conflicts(
+            "Do not use backend=sqlite.",
+            true,
+            "Do not use backend=postgres.",
+            true,
+        ));
+    }
+
+    #[test]
+    fn categorical_setting_literals_bind_exact_values_not_prose_polarity() {
+        for (left, right) in [
+            ("backend: sqlite", "backend : postgres"),
+            ("--backend=sqlite", "--backend = postgres"),
+            ("`backend: sqlite`", "``backend: postgres``"),
+            ("CACHE_ENABLED=true", "CACHE_ENABLED=false"),
+            ("profile: Release", "profile: release"),
+            ("backend:\t'sqlite'", "backend: \"postgres\""),
+        ] {
+            assert!(
+                conflicts(
+                    left,
+                    crate::core::ask::has_negation(left),
+                    right,
+                    crate::core::ask::has_negation(right),
+                ),
+                "{left} / {right}"
+            );
+            assert!(disagreement(right, left), "symmetric settings");
+        }
+    }
+
+    #[test]
+    fn symbolic_literals_do_not_accept_expressions_or_unknowns() {
+        for value in [
+            "", "'sqlite", "sqlite'", "sqlite or postgres", "sqlite/mysql",
+            "${BACKEND}", "[sqlite,postgres]", "{backend:sqlite}", "unknown",
+            "unspecified", "sqlite\nMODE=async", "sqlite;MODE=async",
+        ] {
+            assert!(setting_value(value).is_none(), "{value:?}");
+            assert!(setting_claim(&format!("backend: {value}")).is_none());
+        }
     }
 
     #[test]
@@ -477,6 +567,10 @@ mod tests {
             ("timeout: 30ms", "timeout: 40ms", "timeout"),
             ("NO_RETRY=1", "NO_RETRY=2", "NO_RETRY"),
             ("BACKEND=sqlite", "BACKEND=postgres", "BACKEND"),
+            ("backend: sqlite", "backend: postgres", "backend"),
+            ("--backend=sqlite", "--backend=postgres", "backend"),
+            ("NO_RETRY=enabled", "NO_RETRY=disabled", "NO_RETRY"),
+            ("CACHE_ENABLED=true", "CACHE_ENABLED=false", "CACHE_ENABLED"),
             (
                 "RUST_TOOLCHAIN=\"nightly\"",
                 "RUST_TOOLCHAIN=\"stable\"",
@@ -538,6 +632,8 @@ mod tests {
         for (left, right, question) in [
             ("PORT=5432", "PORT = 6432", "PORT"),
             ("BACKEND=sqlite", "BACKEND=postgres", "BACKEND"),
+            ("backend: sqlite", "backend: postgres", "backend"),
+            ("NO_RETRY=enabled", "NO_RETRY=disabled", "NO_RETRY"),
         ] {
             let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
                 .map(|index| AskCandidate {
