@@ -59,6 +59,9 @@ use sqlmodel_core::Value as SqlValue;
 #[path = "index_storage.rs"]
 mod storage;
 
+#[path = "index_source_snapshot.rs"]
+mod source_snapshot;
+
 #[cfg(unix)]
 #[path = "index_read_lease.rs"]
 mod read_lease;
@@ -1679,7 +1682,11 @@ pub async fn rebuild_index_with_cx(
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
-    let db = DbConnection::open_file(&database_path)?;
+    let db = if options.dry_run {
+        DbConnection::open_file_read_only(&database_path)?
+    } else {
+        DbConnection::open_file(&database_path)?
+    };
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let _publish_lock = if options.dry_run {
         None
@@ -1827,6 +1834,9 @@ pub async fn reembed_index_with_cx(
     cx: &asupersync::Cx,
     options: &IndexReembedOptions,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
+    if options.dry_run {
+        return source_snapshot::reembed_dry_run(cx, options);
+    }
     let db = DbConnection::open_file(&options.resolve_database_path())?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let (stack, stack_provenance) = workspace_embedder_stack(&db, &workspace_id)?;
@@ -1845,7 +1855,11 @@ async fn reembed_index_with_cx_and_stack(
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
-    let db = DbConnection::open_file(&database_path)?;
+    let db = if options.dry_run {
+        DbConnection::open_file_read_only(&database_path)?
+    } else {
+        DbConnection::open_file(&database_path)?
+    };
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let _publish_lock = if options.dry_run {
         None
@@ -3742,14 +3756,14 @@ struct WorkspaceIndexSourceSnapshot {
     open_job_ids: BTreeSet<String>,
 }
 
-/// Capture one writer-fenced source snapshot for every index publisher.
+/// Capture one coherent source snapshot for publishers and dry-run inspection.
 ///
-/// Generation is read before any corpus table. The surrounding
-/// `BEGIN IMMEDIATE` prevents a source writer from committing midway through
-/// the multi-table projection, while still releasing the database before
-/// expensive embedding and filesystem publication. A writer that commits
-/// after this function returns necessarily advances beyond `generation`, so
-/// the just-published manifest is truthfully stale rather than falsely ready.
+/// Generation is read before any corpus table. Writable rebuilds use
+/// `BEGIN IMMEDIATE` to fence source writers; read-only callers pin a database
+/// snapshot without acquiring a writer transaction. Both release the database
+/// before expensive embedding and filesystem publication. A writer that commits
+/// after capture advances beyond `generation`, so a published manifest remains
+/// truthfully stale rather than falsely ready.
 fn collect_workspace_index_source_snapshot(
     db: &DbConnection,
     workspace_id: &str,
@@ -3764,7 +3778,7 @@ fn collect_workspace_index_source_snapshot_with_limit(
     workspace_id: &str,
     max_documents: Option<u32>,
 ) -> Result<Option<WorkspaceIndexSourceSnapshot>, IndexRebuildError> {
-    db.with_transaction_error(|| {
+    source_snapshot::capture(db, || {
         // Enforce the interactive ceiling before hydrating source bodies, in
         // the same transaction as the generation and corpus reads. A writer
         // cannot grow a previously small corpus between admission and capture.
@@ -3900,17 +3914,23 @@ fn memory_documents_with_anchors(
         // never downgrades a cass_import/curate_apply source to index_rebuild.
         let mut anchors = db.list_memory_anchors(&memory.id)?;
         if anchors.is_empty() {
-            db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
-            anchors = db.list_memory_anchors(&memory.id)?;
+            if db.mode() == crate::db::DatabaseOpenMode::ReadOnly {
+                anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);
+            } else {
+                db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
+                anchors = db.list_memory_anchors(&memory.id)?;
+            }
         }
         // ADR 0064: the anchor reverse index is rebuilt alongside the
         // search documents so `ee index rebuild` restores it from
         // scratch and its MAX(generation) advances with the rebuild.
-        db.refresh_memory_anchor_index_for_memory(
-            &memory.workspace_id,
-            &memory.id,
-            &memory.content,
-        )?;
+        if db.mode() != crate::db::DatabaseOpenMode::ReadOnly {
+            db.refresh_memory_anchor_index_for_memory(
+                &memory.workspace_id,
+                &memory.id,
+                &memory.content,
+            )?;
+        }
         let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
         documents.push(memory_to_document_with_context_anchors_and_typed_fields(
             memory,

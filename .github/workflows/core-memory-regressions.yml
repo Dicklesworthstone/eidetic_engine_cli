@@ -130,6 +130,9 @@ jobs:
           context-index core::context::tests::readonly_pack_preserves_stale_queued_index_while_writable_pack_reconciles
           index-workspace core::index::tests::process_index_jobs_respects_requested_workspace_over_newest_row
           index-repair core::index::tests::requested_index_repair_
+          index-source-snapshot core::index::source_snapshot::tests::
+          index-anchor-backfill core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory
+          index-reembed core::index::tests::index_reembed_
           index-isolation core::index::tests::index_mutations_refuse_unregistered_workspace_in_shared_database
           index-snapshot-recovery core::index::tests::snapshot_generation_
           index-publication-exchange core::index::tests::publication_exchange_
