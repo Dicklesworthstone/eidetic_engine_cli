@@ -843,19 +843,39 @@ fn core_source_excludes_ambient_randomness_patterns() {
 /// list exist and nothing holds them equal.
 ///
 ///   `FORBIDDEN_CRATES` in this file          enforced by this test target
-///   `scripts/check-forbidden-deps.sh`        enforced four times over
-///                                            (ci-static, ci, release, verify.sh)
+///   `scripts/check-forbidden-deps.sh`        a BASELINE FLOOR, not the
+///                                            operative list -- see below
 ///   `AGENTS.md` forbidden-dependency table   documentation
-///   `deny.toml` `[bans]`                     NOT ENFORCED -- CI runs only
-///                                            `cargo deny check advisories`
+///   `deny.toml` `[bans]`                     THE SOURCE the shell gate reads
+///
+/// THE LINE ABOVE USED TO SAY `deny.toml` `[bans]` WAS "NOT ENFORCED -- CI
+/// runs only `cargo deny check advisories`". That was true when written and
+/// is false now, in both halves. Corrected under bd-wstau after measuring it
+/// rather than re-reading it:
+///
+///   - 2a05a90fe (2026-09-22) made `scripts/check-forbidden-deps.sh` load its
+///     ban list FROM `deny.toml` `[bans].deny`, keeping its own array only as
+///     a floor it refuses to drop below. So `deny.toml` is no longer a copy
+///     nothing reads; it is the input to the gate that does run. Measured:
+///     adding `{ name = "serde" }` to `[bans].deny` makes that script exit 2
+///     naming serde, and a version-qualified entry it cannot express exits 3
+///     rather than being silently discarded.
+///   - "CI runs only `cargo deny check advisories`" is wrong twice. `ci.yml`
+///     has carried `command: check bans sources` since b92333910, and neither
+///     it nor `release.yml` executes at all -- both are `disabled_manually`.
+///     `ci-static.yml`, the workflow that does run on push, contains ZERO
+///     cargo-deny invocations of any kind. No cargo-deny check -- advisories,
+///     bans, sources or licenses -- runs on the push path today.
+///
+/// So the enforcement that exists is the shell gate in `ci-static.yml`, which
+/// reads `deny.toml`. The `cargo deny` COMMAND is what nothing runs; the
+/// `[bans]` POLICY is enforced. Those are different claims and this comment
+/// previously conflated them.
 ///
 /// They agree at the time of writing; that was measured with set diffs rather
 /// than length comparisons, which is the check that would have missed a swap
-/// of equal size. But agreeing today is a statement about the calendar. The
-/// copy with the most conventional authority to an outside reviewer --
-/// `deny.toml`, the standard supply-chain artifact -- is the one copy that
-/// cannot fail a build, so a crate added there in good faith is not banned
-/// and nothing says so.
+/// of equal size. But agreeing today is a statement about the calendar, which
+/// is why this test exists regardless of which copy is authoritative.
 ///
 /// This test does not decide WHICH list is authoritative. Equality does not
 /// require primacy: naming the authority decides where a future edit should
