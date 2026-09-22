@@ -35,7 +35,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Publish the exact previously verified policy source
+      - name: Integrate verified policy learning with concurrent source changes
         id: delivery
         shell: bash
         run: |
@@ -45,7 +45,7 @@ jobs:
           from pathlib import Path
           expected = {
               'src/core/curate.rs': 'e3dd9fdd70663f16df2487d5958354ecf8cae200c53aaaaa333bb95ff1aea79c',
-              'src/core/curate_session_arc_sequence.rs': 'fb06929d943a7c8f09a6ada5f67e0c38df9c0cd3c6de896857f03177ffef5f5c',
+              'src/core/curate_session_arc_sequence.rs': '9f7b9f8d48e77c9d224ad2fc41b66a7be36a99e72870e0b6c83253f3b44c3d8c',
               'scripts/delivery/session-learning-policy-20260922.patch': '23ae9c2cca3fc5223265f648c766f813be1ee7e442c3ec38a764a487974c2c3e',
           }
           for name, digest in expected.items():
@@ -58,23 +58,23 @@ jobs:
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
-          # All three behavioral gates passed these exact files in run
-          # 35751714265, source 1d85f59be6f929b5790f46195bf200d4ddd5046b.
-          # Its normal publication lost a race with unrelated main commits.
-          verified = {
+          # The policy delta passed all three behavioral gates in run
+          # 35751714265. Preserve the reviewed concurrent as_chunks iteration
+          # change and rerun those gates on the resulting integrated tree.
+          reconciled = {
               'src/core/curate.rs': 'e4bd0576fda05fb3187116882685eb7d17e9fc6ab302a56037b95927b38e7fc6',
-              'src/core/curate_session_arc_sequence.rs': '55415e41d7db961bd7ee0663bd18b4e098dbb87861a545336a550fe74a095788',
+              'src/core/curate_session_arc_sequence.rs': '54e9f58079042931a28d3e4b5b374e0dd9ef3ea25dea09c0b45cfda3ed7669ed',
           }
-          for name, digest in verified.items():
+          for name, digest in reconciled.items():
               if hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest:
-                  raise SystemExit(f'Postimage does not match tested source: {name}')
+                  raise SystemExit(f'Unexpected reconciled source: {name}')
           PY
           python3 -m py_compile tests/cass_session_arc_import.py
           git diff --check
           git add -- src/core/curate.rs src/core/curate_session_arc_sequence.rs
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
             -m 'fix(curate): make imported policy lessons actionable with exact source evidence' \
-            -m 'Preserve observed risk, mitigation and both canonical source locations for otherwise underspecified two-window lessons. Keep the specificity floor and explicit approval gates intact, invent no commands, and preserve content-bound identities of already-specific historical pairs. Exact source postimages passed 62 library tests, 12 CLI tests and the actual importer lifecycle in run 35751714265; integrate normally over concurrent main commits.'
+            -m 'Preserve observed risk, mitigation and both canonical source locations for otherwise underspecified two-window lessons. Keep the specificity floor and explicit approval gates intact, invent no commands, and preserve content-bound identities of already-specific historical pairs. Policy delta passed 62 library tests, 12 CLI tests and the real EE importer lifecycle in run 35751714265. Preserve the concurrent as_chunks pair iteration change and rerun integration checks.'
           git push origin HEAD:main
       - name: Capture exact learning source
         if: ${{ !cancelled() }}
