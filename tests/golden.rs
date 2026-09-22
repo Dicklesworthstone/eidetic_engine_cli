@@ -295,17 +295,19 @@ mod tests {
         ensure_status_typed_subtrees(&expected, "deterministic status golden")?;
         ensure_status_typed_subtrees(&actual, "live status response")?;
         ensure_same_json_shape(&actual, &expected, "/")?;
-        for pointer in [
-            "/data/posture",
-            "/data/capabilities",
-            "/data/verificationPosture",
-            "/data/verificationLedger",
-            "/data/degraded",
-            "/degraded",
-        ] {
-            ensure_equal_pointer(&actual, &expected, pointer, "status")?;
-        }
-        Ok(())
+        ensure_equal_pointers(
+            &actual,
+            &expected,
+            &[
+                "/data/posture",
+                "/data/capabilities",
+                "/data/verificationPosture",
+                "/data/verificationLedger",
+                "/data/degraded",
+                "/degraded",
+            ],
+            "status",
+        )
     }
 
     fn assert_doctor_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
@@ -348,16 +350,18 @@ mod tests {
         }
 
         ensure_same_json_shape(&actual, &expected, "/")?;
-        for pointer in [
-            "/data/posture",
-            "/data/healthy",
-            "/data/advisories",
-            "/data/checks",
-            "/degraded",
-        ] {
-            ensure_equal_pointer(&actual, &expected, pointer, "doctor")?;
-        }
-        Ok(())
+        ensure_equal_pointers(
+            &actual,
+            &expected,
+            &[
+                "/data/posture",
+                "/data/healthy",
+                "/data/advisories",
+                "/data/checks",
+                "/degraded",
+            ],
+            "doctor",
+        )
     }
 
     /// Keep the Linux doctor contract exact while making the same golden
@@ -441,16 +445,37 @@ mod tests {
         }
     }
 
-    fn ensure_equal_pointer(
+    /// Compare every stable field and report ALL drift, with both values.
+    ///
+    /// The earlier form stopped at the first mismatched pointer and printed
+    /// only its name, so a red said which field moved but not what it moved
+    /// to, and every later field went unchecked. That made it impossible to
+    /// tell a stale golden from a product regression without re-running with a
+    /// debugger (bd-j4njd). Pass and fail are unchanged; only the report is.
+    fn ensure_equal_pointers(
         actual: &serde_json::Value,
         expected: &serde_json::Value,
-        pointer: &str,
+        pointers: &[&str],
         context: &str,
     ) -> TestResult {
-        ensure(
-            actual.pointer(pointer) == expected.pointer(pointer),
-            format!("{context}: stable field {pointer} drifted from its golden contract"),
-        )
+        let render = |value: Option<&serde_json::Value>| {
+            value.map_or_else(
+                || "<absent>".to_owned(),
+                |value| serde_json::to_string(value).unwrap_or_else(|error| error.to_string()),
+            )
+        };
+        let drifted: Vec<String> = pointers
+            .iter()
+            .filter(|pointer| actual.pointer(pointer) != expected.pointer(pointer))
+            .map(|pointer| {
+                format!(
+                    "{context}: stable field {pointer} drifted from its golden contract\n  expected: {}\n  actual:   {}",
+                    render(expected.pointer(pointer)),
+                    render(actual.pointer(pointer)),
+                )
+            })
+            .collect();
+        ensure(drifted.is_empty(), drifted.join("\n"))
     }
 
     fn scrub_environment_paths(value: &mut serde_json::Value) {
