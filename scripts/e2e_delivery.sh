@@ -161,9 +161,11 @@ assert_le() {
 
 hook_command_for() {
   local snippet_id="$1"
+  # Generated hook commands span many lines; select the first matching snippet
+  # in jq rather than truncating the raw output to its first line.
   jq -r --arg id "$snippet_id" \
-    '.data.harnessInstall.snippets[]? | select(.id == $id) | .command' \
-    "$ROOT/hook_plan.json" | head -n 1
+    'first(.data.harnessInstall.snippets[]? | select(.id == $id) | .command) // empty' \
+    "$ROOT/hook_plan.json"
 }
 
 hook_context_word_count() {
@@ -220,6 +222,9 @@ CAPTURE_SUGGEST_CMD="$(hook_command_for "ee-ambient-session-capture-suggest")"
 assert_equal "ambient_session_orient_command_present" "$SESSION_ORIENT_CMD" "$SESSION_ORIENT_CMD" "$AMBIENT_BEAD"
 assert_equal "ambient_pre_edit_command_present" "$PRE_EDIT_CMD" "$PRE_EDIT_CMD" "$AMBIENT_BEAD"
 assert_equal "ambient_capture_suggest_command_present" "$CAPTURE_SUGGEST_CMD" "$CAPTURE_SUGGEST_CMD" "$AMBIENT_BEAD"
+assert_equal "ambient_session_orient_command_parses" "parses" "$(bash -n -c "$SESSION_ORIENT_CMD" 2>/dev/null && echo parses || echo syntax_error)" "$AMBIENT_BEAD"
+assert_equal "ambient_pre_edit_command_parses" "parses" "$(bash -n -c "$PRE_EDIT_CMD" 2>/dev/null && echo parses || echo syntax_error)" "$AMBIENT_BEAD"
+assert_equal "ambient_capture_suggest_command_parses" "parses" "$(bash -n -c "$CAPTURE_SUGGEST_CMD" 2>/dev/null && echo parses || echo syntax_error)" "$AMBIENT_BEAD"
 
 SESSION_PAYLOAD="$(jq -cn \
   --arg cwd "$WORKSPACE" \
