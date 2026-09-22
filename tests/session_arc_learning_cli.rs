@@ -368,11 +368,19 @@ impl MultiEpisodeFixture {
         let proposed = run(
             &workspace,
             &[
-                "review", "session", &session_id, "--propose", "--limit", "4",
-                "--min-confidence", "0.8",
+                "review",
+                "session",
+                &session_id,
+                "--propose",
+                "--limit",
+                "4",
+                "--min-confidence",
+                "0.8",
             ],
         )?;
-        let proposed = proposed["candidates"].as_array().ok_or("candidates missing")?;
+        let proposed = proposed["candidates"]
+            .as_array()
+            .ok_or("candidates missing")?;
         assert_eq!(proposed.len(), 4, "{proposed:?}");
         let mut candidates = Vec::new();
         for failure in [FAILURE, LATER_FAILURE] {
@@ -409,22 +417,39 @@ impl MultiEpisodeFixture {
     }
 
     fn candidate_id(&self, index: usize) -> TestResult<&str> {
-        Ok(self.candidates[index]["candidateId"].as_str().ok_or("candidate ID missing")?)
+        Ok(self.candidates[index]["candidateId"]
+            .as_str()
+            .ok_or("candidate ID missing")?)
     }
 
     fn validate(&self, index: usize) -> TestResult {
         let validated = run(
             &self.workspace,
-            &["curate", "validate", self.candidate_id(index)?, "--actor", "ArcCli"],
+            &[
+                "curate",
+                "validate",
+                self.candidate_id(index)?,
+                "--actor",
+                "ArcCli",
+            ],
         )?;
-        assert_eq!(validated["validation"]["decision"], "approved", "{validated}");
+        assert_eq!(
+            validated["validation"]["decision"], "approved",
+            "{validated}"
+        );
         Ok(())
     }
 
     fn apply(&self, index: usize) -> TestResult<String> {
         let applied = run(
             &self.workspace,
-            &["curate", "apply", self.candidate_id(index)?, "--actor", "ArcCli"],
+            &[
+                "curate",
+                "apply",
+                self.candidate_id(index)?,
+                "--actor",
+                "ArcCli",
+            ],
         )?;
         assert_eq!(applied["application"]["status"], "applied", "{applied}");
         Ok(applied["application"]["createdMemoryId"]
@@ -443,16 +468,26 @@ impl MultiEpisodeFixture {
     fn assert_blocked_without_writes(&self, index: usize, code: &str) -> TestResult {
         let connection = self.connection()?;
         let before_audits = connection.list_audit_entries(Some(&self.workspace_id), None)?;
-        let before_memories = connection.list_memories(&self.workspace_id, None, true)?.len();
-        let before_jobs = connection.list_search_index_jobs(&self.workspace_id, None)?.len();
+        let before_memories = connection
+            .list_memories(&self.workspace_id, None, true)?
+            .len();
+        let before_jobs = connection
+            .list_search_index_jobs(&self.workspace_id, None)?
+            .len();
         let before_source = connection
             .get_evidence_span(&self.evidence_id)?
             .ok_or("source missing")?;
         let before_candidate = connection
             .get_curation_candidate(&self.workspace_id, self.candidate_id(index)?)?
             .ok_or("candidate missing")?;
-        assert_eq!(before_candidate.status, "approved", "exercise apply-time revalidation");
-        let shown = run(&self.workspace, &["curate", "show", self.candidate_id(index)?])?;
+        assert_eq!(
+            before_candidate.status, "approved",
+            "exercise apply-time revalidation"
+        );
+        let shown = run(
+            &self.workspace,
+            &["curate", "show", self.candidate_id(index)?],
+        )?;
         assert_eq!(shown["durableMutation"], false);
         assert_eq!(shown["plannedApplication"]["status"], "blocked", "{shown}");
         for dry_run in [true, false] {
@@ -465,16 +500,36 @@ impl MultiEpisodeFixture {
                 allow_tombstone_load_bearing: false,
             })
             .map_err(|error| error.message())?;
-            assert_eq!(report.application.status, "blocked", "{:?}", report.application.errors);
+            assert_eq!(
+                report.application.status, "blocked",
+                "{:?}",
+                report.application.errors
+            );
             assert!(!report.mutation.persisted);
-            assert!(report.application.errors.iter().any(|issue| issue.code == code));
+            assert!(
+                report
+                    .application
+                    .errors
+                    .iter()
+                    .any(|issue| issue.code == code)
+            );
         }
-        assert_eq!(connection.list_audit_entries(Some(&self.workspace_id), None)?, before_audits);
         assert_eq!(
-            connection.list_memories(&self.workspace_id, None, true)?.len(),
+            connection.list_audit_entries(Some(&self.workspace_id), None)?,
+            before_audits
+        );
+        assert_eq!(
+            connection
+                .list_memories(&self.workspace_id, None, true)?
+                .len(),
             before_memories
         );
-        assert_eq!(connection.list_search_index_jobs(&self.workspace_id, None)?.len(), before_jobs);
+        assert_eq!(
+            connection
+                .list_search_index_jobs(&self.workspace_id, None)?
+                .len(),
+            before_jobs
+        );
         let after_source = connection
             .get_evidence_span(&self.evidence_id)?
             .ok_or("source missing")?;
@@ -503,7 +558,10 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
         fixture.validate(index)?;
         let connection = fixture.connection()?;
         let before = connection.list_audit_entries(Some(&fixture.workspace_id), None)?;
-        let shown = run(&fixture.workspace, &["curate", "show", fixture.candidate_id(index)?])?;
+        let shown = run(
+            &fixture.workspace,
+            &["curate", "show", fixture.candidate_id(index)?],
+        )?;
         assert_eq!(shown["durableMutation"], false);
         let plan = &shown["plannedApplication"];
         assert_eq!(plan["status"], "ready", "{shown}");
@@ -515,30 +573,60 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
             assert_eq!(attachments[0]["evidenceSpanId"], fixture.evidence_id);
             assert!(plan.get("sharedEvidenceSpans").is_none());
         } else {
-            assert!(attachments.is_empty(), "do not advertise source reassignment");
-            let shared = plan["sharedEvidenceSpans"].as_array().ok_or("shared source missing")?;
+            assert!(
+                attachments.is_empty(),
+                "do not advertise source reassignment"
+            );
+            let shared = plan["sharedEvidenceSpans"]
+                .as_array()
+                .ok_or("shared source missing")?;
             assert_eq!(shared.len(), 1);
             assert_eq!(shared[0]["evidenceSpanId"], fixture.evidence_id);
             assert_eq!(shared[0]["contentHash"], source.content_hash);
-            assert_eq!(shared[0]["ownerMemoryId"].as_str(), memories[order[0]].as_deref());
+            assert_eq!(
+                shared[0]["ownerMemoryId"].as_str(),
+                memories[order[0]].as_deref()
+            );
         }
         if let Some(peer) = &memories[index ^ 1] {
             let link = &plan["plannedSessionArcLink"];
-            let peer_endpoint = if index % 2 == 0 { "dstMemoryId" } else { "srcMemoryId" };
+            let peer_endpoint = if index % 2 == 0 {
+                "dstMemoryId"
+            } else {
+                "srcMemoryId"
+            };
             assert_eq!(link[peer_endpoint].as_str(), Some(peer.as_str()));
             assert_eq!(link["relation"], "related");
             assert_eq!(link["directed"], false);
         } else {
-            assert!(plan.get("plannedSessionArcLink").is_none(), "no cross-episode link: {shown}");
+            assert!(
+                plan.get("plannedSessionArcLink").is_none(),
+                "no cross-episode link: {shown}"
+            );
         }
         let preview = run(
             &fixture.workspace,
-            &["curate", "apply", fixture.candidate_id(index)?, "--dry-run", "--actor", "ArcCli"],
+            &[
+                "curate",
+                "apply",
+                fixture.candidate_id(index)?,
+                "--dry-run",
+                "--actor",
+                "ArcCli",
+            ],
         )?;
         assert_eq!(preview["application"]["status"], "ready", "{preview}");
         assert_eq!(preview["mutation"]["persisted"], false);
-        assert_eq!(connection.list_audit_entries(Some(&fixture.workspace_id), None)?, before);
-        assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), step);
+        assert_eq!(
+            connection.list_audit_entries(Some(&fixture.workspace_id), None)?,
+            before
+        );
+        assert_eq!(
+            connection
+                .list_memories(&fixture.workspace_id, None, false)?
+                .len(),
+            step
+        );
         memories[index] = Some(fixture.apply(index)?);
         let owner = memories[order[0]].as_deref().ok_or("first owner missing")?;
         let actual_source = connection
@@ -555,7 +643,14 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
                     fixture.candidate_id(candidate_index)?,
                 )?
                 .ok_or("candidate missing")?;
-            assert_eq!(candidate.status, if memory.is_some() { "applied" } else { "pending" });
+            assert_eq!(
+                candidate.status,
+                if memory.is_some() {
+                    "applied"
+                } else {
+                    "pending"
+                }
+            );
             let Some(memory) = memory else {
                 continue;
             };
@@ -564,23 +659,40 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
             if memories[candidate_index ^ 1].is_some() {
                 assert_eq!(links.len(), 1);
                 let rule = candidate_index & !1;
-                assert_eq!(Some(links[0].src_memory_id.as_str()), memories[rule].as_deref());
-                assert_eq!(Some(links[0].dst_memory_id.as_str()), memories[rule + 1].as_deref());
+                assert_eq!(
+                    Some(links[0].src_memory_id.as_str()),
+                    memories[rule].as_deref()
+                );
+                assert_eq!(
+                    Some(links[0].dst_memory_id.as_str()),
+                    memories[rule + 1].as_deref()
+                );
                 assert!(!links[0].directed);
                 let details: Value = serde_json::from_str(
-                    links[0].metadata_json.as_deref().ok_or("link metadata missing")?,
+                    links[0]
+                        .metadata_json
+                        .as_deref()
+                        .ok_or("link metadata missing")?,
                 )?;
-                assert_eq!(details["ruleCandidateId"].as_str(), Some(fixture.candidate_id(rule)?));
+                assert_eq!(
+                    details["ruleCandidateId"].as_str(),
+                    Some(fixture.candidate_id(rule)?)
+                );
                 assert_eq!(
                     details["antiPatternCandidateId"].as_str(),
                     Some(fixture.candidate_id(rule + 1)?)
                 );
                 assert_eq!(
-                    connection.list_audit_by_target("memory_link", &links[0].id, None)?.len(),
+                    connection
+                        .list_audit_by_target("memory_link", &links[0].id, None)?
+                        .len(),
                     1
                 );
             } else {
-                assert!(links.is_empty(), "unaccepted peers must not become graph edges");
+                assert!(
+                    links.is_empty(),
+                    "unaccepted peers must not become graph edges"
+                );
             }
         }
         let memory = memories[index].as_deref().ok_or("created memory missing")?;
@@ -591,9 +703,18 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
             .collect::<Vec<_>>();
         assert_eq!(creation.len(), 1);
         let details: Value = serde_json::from_str(
-            creation[0].details.as_deref().ok_or("creation details missing")?,
+            creation[0]
+                .details
+                .as_deref()
+                .ok_or("creation details missing")?,
         )?;
-        assert_eq!(details["sourceRefs"].as_array().ok_or("source refs missing")?.len(), 1);
+        assert_eq!(
+            details["sourceRefs"]
+                .as_array()
+                .ok_or("source refs missing")?
+                .len(),
+            1
+        );
         assert_eq!(details["sourceRefs"][0]["id"], fixture.evidence_id);
         assert_eq!(details["sourceRefs"][0]["contentHash"], source.content_hash);
         assert_eq!(
@@ -603,14 +724,31 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
         let audits = connection.list_audit_entries(Some(&fixture.workspace_id), None)?;
         let replay = run(
             &fixture.workspace,
-            &["curate", "apply", fixture.candidate_id(index)?, "--actor", "ArcCli"],
+            &[
+                "curate",
+                "apply",
+                fixture.candidate_id(index)?,
+                "--actor",
+                "ArcCli",
+            ],
         )?;
         assert_eq!(replay["application"]["status"], "already_applied");
-        assert_eq!(connection.list_audit_entries(Some(&fixture.workspace_id), None)?, audits);
-        assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), step + 1);
         assert_eq!(
-            connection.list_search_index_jobs(&fixture.workspace_id, None)?.iter()
-                .filter(|job| job.document_id.as_deref() == Some(memory)).count(),
+            connection.list_audit_entries(Some(&fixture.workspace_id), None)?,
+            audits
+        );
+        assert_eq!(
+            connection
+                .list_memories(&fixture.workspace_id, None, false)?
+                .len(),
+            step + 1
+        );
+        assert_eq!(
+            connection
+                .list_search_index_jobs(&fixture.workspace_id, None)?
+                .iter()
+                .filter(|job| job.document_id.as_deref() == Some(memory))
+                .count(),
             1
         );
         connection.close()?;
@@ -645,13 +783,23 @@ fn public_cli_keeps_rejected_peers_rejected_when_sharing_a_window() -> TestResul
     run(
         &fixture.workspace,
         &[
-            "curate", "reject", fixture.candidate_id(3)?, "--reason",
-            "Keep only the rule", "--actor", "ArcCli",
+            "curate",
+            "reject",
+            fixture.candidate_id(3)?,
+            "--reason",
+            "Keep only the rule",
+            "--actor",
+            "ArcCli",
         ],
     )?;
     let later = fixture.accept(2)?;
     let connection = fixture.connection()?;
-    assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), 2);
+    assert_eq!(
+        connection
+            .list_memories(&fixture.workspace_id, None, false)?
+            .len(),
+        2
+    );
     for (index, status) in [(3, "rejected"), (1, "pending")] {
         assert_eq!(
             connection
@@ -662,7 +810,11 @@ fn public_cli_keeps_rejected_peers_rejected_when_sharing_a_window() -> TestResul
         );
     }
     for memory in [&owner, &later] {
-        assert!(connection.list_memory_links_for_memory(memory, None)?.is_empty());
+        assert!(
+            connection
+                .list_memory_links_for_memory(memory, None)?
+                .is_empty()
+        );
     }
     assert_eq!(
         connection
@@ -693,17 +845,22 @@ fn shared_window_ambiguous_owner_audit_blocks_previously_approved_later_episode(
     let owner = fixture.accept(0)?;
     fixture.validate(2)?;
     let connection = fixture.connection()?;
-    let original = connection.list_audit_by_target("memory", &owner, None)?
-        .into_iter().find(|audit| audit.action == audit_actions::MEMORY_CREATE)
+    let original = connection
+        .list_audit_by_target("memory", &owner, None)?
+        .into_iter()
+        .find(|audit| audit.action == audit_actions::MEMORY_CREATE)
         .ok_or("owner creation missing")?;
-    connection.insert_audit(&generate_audit_id(), &CreateAuditInput {
-        workspace_id: original.workspace_id,
-        actor: Some("CorruptionFixture".to_owned()),
-        action: original.action,
-        target_type: original.target_type,
-        target_id: original.target_id,
-        details: original.details,
-    })?;
+    connection.insert_audit(
+        &generate_audit_id(),
+        &CreateAuditInput {
+            workspace_id: original.workspace_id,
+            actor: Some("CorruptionFixture".to_owned()),
+            action: original.action,
+            target_type: original.target_type,
+            target_id: original.target_id,
+            details: original.details,
+        },
+    )?;
     connection.close()?;
     fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
 }
@@ -718,7 +875,8 @@ fn shared_window_source_hash_drift_blocks_previously_approved_later_episode() ->
     // source corruption between validation and apply on this disposable store.
     connection.execute_raw(&format!(
         "UPDATE evidence_spans SET content_hash = 'blake3:{}' WHERE id = '{}'",
-        blake3::hash(b"different evidence").to_hex(), fixture.evidence_id
+        blake3::hash(b"different evidence").to_hex(),
+        fixture.evidence_id
     ))?;
     connection.close()?;
     fixture.assert_blocked_without_writes(2, "derived_source_evidence_not_admitted")
@@ -734,47 +892,73 @@ fn shared_window_forged_creation_does_not_turn_approval_into_application() -> Te
         .get_curation_candidate(&fixture.workspace_id, fixture.candidate_id(0)?)?
         .ok_or("candidate missing")?;
     let owner = MemoryId::from_uuid(uuid::Uuid::from_u128(0x91b_0003)).to_string();
-    connection.insert_memory(&owner, &CreateMemoryInput {
-        workspace_id: fixture.workspace_id.clone(),
-        level: "procedural".to_owned(),
-        kind: "rule".to_owned(),
-        content: candidate.proposed_content.clone().ok_or("content missing")?,
-        workflow_id: None,
-        confidence: 0.9,
-        utility: 0.5,
-        importance: 0.5,
-        provenance_uri: None,
-        trust_class: "agent_assertion".to_owned(),
-        trust_subclass: None,
-        tags: Vec::new(),
-        valid_from: None,
-        valid_to: None,
-    })?;
+    connection.insert_memory(
+        &owner,
+        &CreateMemoryInput {
+            workspace_id: fixture.workspace_id.clone(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: candidate
+                .proposed_content
+                .clone()
+                .ok_or("content missing")?,
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        },
+    )?;
     let metadata: Value = serde_json::from_str(
-        candidate.derivation_metadata_json.as_deref().ok_or("metadata missing")?,
+        candidate
+            .derivation_metadata_json
+            .as_deref()
+            .ok_or("metadata missing")?,
     )?;
     let refs: Value = serde_json::from_str(
-        candidate.derivation_source_refs_json.as_deref().ok_or("source refs missing")?,
+        candidate
+            .derivation_source_refs_json
+            .as_deref()
+            .ok_or("source refs missing")?,
     )?;
-    connection.insert_audit(&generate_audit_id(), &CreateAuditInput {
-        workspace_id: Some(fixture.workspace_id.clone()),
-        actor: Some("CorruptionFixture".to_owned()),
-        action: audit_actions::MEMORY_CREATE.to_owned(),
-        target_type: Some("memory".to_owned()),
-        target_id: Some(owner.clone()),
-        details: Some(json!({
-            "schema": "ee.audit.derived_memory_created.v1",
-            "candidateId": candidate.id,
-            "createdMemoryId": owner,
-            "producer": "review_session",
-            "producerPayload": metadata["producer"]["producerPayload"],
-            "sourceRefs": refs,
-        }).to_string()),
-    })?;
-    let source = connection.get_evidence_span(&fixture.evidence_id)?.ok_or("source missing")?;
-    assert_eq!(connection.attach_evidence_span_to_memory_if_unlinked(
-        &fixture.workspace_id, &fixture.evidence_id, &source.content_hash, &owner
-    )?, EvidenceSpanMemoryAttachResult::Attached);
+    connection.insert_audit(
+        &generate_audit_id(),
+        &CreateAuditInput {
+            workspace_id: Some(fixture.workspace_id.clone()),
+            actor: Some("CorruptionFixture".to_owned()),
+            action: audit_actions::MEMORY_CREATE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(owner.clone()),
+            details: Some(
+                json!({
+                    "schema": "ee.audit.derived_memory_created.v1",
+                    "candidateId": candidate.id,
+                    "createdMemoryId": owner,
+                    "producer": "review_session",
+                    "producerPayload": metadata["producer"]["producerPayload"],
+                    "sourceRefs": refs,
+                })
+                .to_string(),
+            ),
+        },
+    )?;
+    let source = connection
+        .get_evidence_span(&fixture.evidence_id)?
+        .ok_or("source missing")?;
+    assert_eq!(
+        connection.attach_evidence_span_to_memory_if_unlinked(
+            &fixture.workspace_id,
+            &fixture.evidence_id,
+            &source.content_hash,
+            &owner
+        )?,
+        EvidenceSpanMemoryAttachResult::Attached
+    );
     connection.close()?;
     fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
 }
