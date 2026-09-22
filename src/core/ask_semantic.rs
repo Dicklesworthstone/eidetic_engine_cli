@@ -63,7 +63,7 @@ pub fn evaluate_ask_with_local_model(
     if caller_cx.as_ref().is_some_and(|cx| checkpoint(cx).is_err()) {
         return finish_evaluation(request, candidates, Err(SemanticFailure::Cancelled));
     }
-    let embedder = match crate::core::index::local_ask_embedder(connection, workspace_id) {
+    let embedder = match crate::core::index::local_read_only_embedder(connection, workspace_id) {
         Ok(Some(embedder)) => embedder,
         Ok(None) | Err(_) => return Ok(evaluate_ask(request, candidates)),
     };

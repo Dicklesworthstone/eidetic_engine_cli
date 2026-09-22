@@ -6060,7 +6060,9 @@ fn verify_published_tier_counts(
 #[path = "index_ask.rs"]
 mod ask_model;
 
-pub(crate) use ask_model::local_ask_embedder;
+pub(crate) use ask_model::{
+    local_read_only_embedder, prepare_read_only_search_embedder_for_workspace,
+};
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";

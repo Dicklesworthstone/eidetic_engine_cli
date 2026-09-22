@@ -7,6 +7,7 @@ on:
       - 'src/core/jsonl*.rs'
       - 'src/db/**'
       - 'src/models/**'
+      - .github/workflows/primary-recovery-20260919.yml
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -68,7 +69,7 @@ jobs:
           run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle
           run_group core::backup::recovery::history::maintenance::tests 10 maintenance
           run_group core::backup::recovery::tests 15 inventory
-          run_group core::backup::revision_recovery_tests 11 primary
+          run_group core::backup::revision_recovery_tests 14 primary
           for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
             run_group "core::backup::tests::$filter" 1 "$filter"
           done

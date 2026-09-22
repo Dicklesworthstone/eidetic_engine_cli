@@ -58,7 +58,8 @@ use crate::config::{
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::index::{
-    index_corpus_compatibility_is_current, prepare_search_embedder_for_workspace,
+    index_corpus_compatibility_is_current, prepare_read_only_search_embedder_for_workspace,
+    prepare_search_embedder_for_workspace,
 };
 use crate::core::memory_drift::{MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory};
 use crate::core::memory_scope::{
@@ -2483,23 +2484,14 @@ pub fn explain_why_not(
         return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
 
-    let index_dir = crate::config::workspace::resolve_store_index_dir(
-        &options.workspace_path,
-        options.database_path.as_deref(),
-        options.index_dir.as_deref(),
-    );
-    let fast_embedder_override = if options.source_mode.uses_embeddings()
-        && index_dir.exists()
-        && index_corpus_compatibility_is_current(&index_dir)
-    {
+    let fast_embedder_override = if options.source_mode.uses_embeddings() {
         let embedder_database_path = database_path.clone();
         let preparation = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_search_embedder_for_workspace(
+            prepare_read_only_search_embedder_for_workspace(
                 &cx,
                 &options.workspace_path,
                 &embedder_database_path,
             )
-            .await
             .map_err(|error| {
                 ContextPackError::Search(map_frankensearch_error(
                     &cx,
@@ -2903,36 +2895,52 @@ async fn run_context_pack_with_performance_inner(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
     };
-    let mut remote_search = if let Some(provider) = search_provider {
-        let remote_start = Instant::now();
-        let result = provider(&search_options);
-        trace.record_elapsed("daemonRetrieval", remote_start);
-        control.check()?;
-        match result {
-            Ok(handoff) => Some(handoff),
-            Err(fallback) => {
-                push_search_degradations(&mut degraded, &[fallback]);
-                None
+    // The daemon handoff has no cached-only model capability. A read-only
+    // semantic request must prepare its own local model so a worker cannot
+    // trigger first-use downloads or submit the query to a remote embedder.
+    let read_only_embeddings = !options.persist_pack && options.source_mode.uses_embeddings();
+    let mut remote_search =
+        if let Some(provider) = search_provider.filter(|_| !read_only_embeddings) {
+            let remote_start = Instant::now();
+            let result = provider(&search_options);
+            trace.record_elapsed("daemonRetrieval", remote_start);
+            control.check()?;
+            match result {
+                Ok(handoff) => Some(handoff),
+                Err(fallback) => {
+                    push_search_degradations(&mut degraded, &[fallback]);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     if remote_search.is_none() && options.persist_pack {
         reconcile_search_index_before_read_with_cx(control.cx, &search_options, true).await;
     }
     let embedder_preparation = if remote_search.is_none()
         && fast_embedder_override.is_none()
         && options.source_mode.uses_embeddings()
-        && index_dir.exists()
-        && index_corpus_compatibility_is_current(&index_dir)
+        // Snapshot recovery can select a retained generation even when the
+        // live directory is absent or incompatible. Always provide a safe
+        // concrete model for read-only embedding requests on that path too.
+        && (!options.persist_pack
+            || (index_dir.exists() && index_corpus_compatibility_is_current(&index_dir)))
     {
-        let preparation = prepare_search_embedder_for_workspace(
-            control.cx,
-            &options.workspace_path,
-            &database_path,
-        )
-        .await
+        let preparation = if options.persist_pack {
+            prepare_search_embedder_for_workspace(
+                control.cx,
+                &options.workspace_path,
+                &database_path,
+            )
+            .await
+        } else {
+            prepare_read_only_search_embedder_for_workspace(
+                control.cx,
+                &options.workspace_path,
+                &database_path,
+            )
+        }
         .map_err(|error| {
             ContextPackError::Search(map_frankensearch_error(
                 control.cx,
@@ -3602,7 +3610,21 @@ async fn run_context_pack_with_performance_inner(
         }
     }
 
-    let pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
+    let mut evidence_candidates = collect_direct_evidence_pack_candidates(
+        read_connection,
+        &options.workspace_path,
+        &search_report,
+        &request,
+        &effective_filters,
+        &mut degraded,
+    );
+    let pagination_info = apply_pagination(
+        &mut candidates,
+        &mut evidence_candidates,
+        &options.pagination,
+        request.max_results,
+        &mut degraded,
+    );
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
     trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
     trace.candidate_resolution = candidate_metrics;
@@ -3712,15 +3734,7 @@ async fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
-        append_direct_evidence_pack_items(
-            read_connection,
-            &options.workspace_path,
-            &search_report,
-            &request,
-            &effective_filters,
-            &mut draft,
-            &mut degraded,
-        );
+        append_direct_evidence_pack_items(evidence_candidates, &request, &mut draft, &mut degraded);
     }
     if !policy_omissions.is_empty() {
         let omitted_count = policy_omissions.len();
@@ -5294,19 +5308,48 @@ impl PaginationInfo {
 
 fn apply_pagination(
     candidates: &mut Vec<PackCandidate>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
     pagination: &Option<ContextPagination>,
+    max_results: Option<u32>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PaginationInfo {
     let Some(pagination) = pagination else {
         return PaginationInfo::default();
     };
 
-    let total = candidates.len();
+    // The existing selector suppresses evidence represented by a selected
+    // linked memory. Apply that rule to the whole paginated candidate set so
+    // offsets and totals do not depend on which memory happens to be on this
+    // page, and a later page cannot reintroduce its linked evidence duplicate.
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    evidence_candidates.retain(|candidate| {
+        !candidate
+            .linked_memory_id
+            .as_ref()
+            .is_some_and(|memory_id| memory_ids.contains(memory_id))
+    });
+    // Memory candidates were already query-capped before pagination. Apply
+    // the remaining cap to the native tail before calculating page offsets.
+    // Without pagination, selection retains its existing shared result cap.
+    if let Some(max_results) = max_results {
+        let evidence_limit = (max_results as usize).saturating_sub(candidates.len());
+        if evidence_candidates.len() > evidence_limit {
+            let trimmed = evidence_candidates.len() - evidence_limit;
+            evidence_candidates.truncate(evidence_limit);
+            push_direct_evidence_result_limit_degradation(degraded, trimmed);
+        }
+    }
+    let memory_total = candidates.len();
+    let total = memory_total.saturating_add(evidence_candidates.len());
     let offset = pagination.offset as usize;
     let limit = pagination.limit as usize;
 
     if offset >= total {
         candidates.clear();
+        evidence_candidates.clear();
         return PaginationInfo {
             applied: true,
             offset: pagination.offset,
@@ -5326,6 +5369,12 @@ fn apply_pagination(
         .iter()
         .skip(offset)
         .take(limit)
+        .cloned()
+        .collect();
+    *evidence_candidates = evidence_candidates
+        .iter()
+        .skip(offset.saturating_sub(memory_total))
+        .take(page_size.saturating_sub(candidates.len()))
         .cloned()
         .collect();
 
@@ -7694,6 +7743,11 @@ fn context_pack_l2_feature_flags_hash(
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
+    if options.pagination.is_some() {
+        // Cached pages from the memory-only offset policy can repeat native
+        // evidence and claim an empty population. Recompute those pages.
+        hash_labeled_bytes(&mut hasher, "native_evidence_pagination_policy", b"v1");
+    }
     hash_labeled_bool(
         &mut hasher,
         "output_redaction_enabled",
@@ -12794,29 +12848,32 @@ fn rule_linked_memory_id(
     None
 }
 
-fn append_direct_evidence_pack_items(
+#[derive(Clone)]
+struct DirectEvidencePackCandidate {
+    item: PackEvidenceItem,
+    linked_memory_id: Option<String>,
+}
+
+/// Admit and deduplicate native evidence before pagination, without spending
+/// the page's token budget or assigning a selected rank. Pages can therefore
+/// reach every eligible hit, including hits that did not fit an earlier page.
+fn collect_direct_evidence_pack_candidates(
     connection: &DbConnection,
     workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
-    draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
-) {
+) -> Vec<DirectEvidencePackCandidate> {
     if !request.sections.is_empty() && !request.sections.contains(&PackSection::Evidence) {
-        return;
+        return Vec::new();
     }
 
     let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
-    let selected_memory_ids = draft
-        .items
-        .iter()
-        .map(|item| item.memory_id.to_string())
-        .collect::<BTreeSet<_>>();
+    let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
     let mut rejected_live_admission = 0_usize;
     let mut filtered_count = 0_usize;
-    let mut result_limit_count = 0_usize;
 
     for hit in &search_report.results {
         if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {
@@ -12849,28 +12906,7 @@ fn append_direct_evidence_pack_items(
             filtered_count = filtered_count.saturating_add(1);
             continue;
         }
-        if span
-            .memory_id
-            .as_ref()
-            .is_some_and(|memory_id| selected_memory_ids.contains(memory_id))
-        {
-            continue;
-        }
-
-        if request.max_results.is_some_and(|limit| {
-            draft.items.len().saturating_add(draft.evidence_items.len()) >= limit as usize
-        }) {
-            result_limit_count = result_limit_count.saturating_add(1);
-            continue;
-        }
-
         let estimated_tokens = estimate_tokens_default(&span.excerpt).max(1);
-        let Some(next_used_tokens) = draft.used_tokens.checked_add(estimated_tokens) else {
-            continue;
-        };
-        if next_used_tokens > draft.budget.max_tokens() {
-            continue;
-        }
         let Ok(provenance_uri) = ProvenanceUri::from_str(&span.canonical_provenance_uri()) else {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
@@ -12898,14 +12934,6 @@ fn append_direct_evidence_pack_items(
             continue;
         };
         let utility = UnitScore::neutral();
-        let rank = u32::try_from(
-            draft
-                .items
-                .len()
-                .saturating_add(draft.evidence_items.len())
-                .saturating_add(1),
-        )
-        .unwrap_or(u32::MAX);
         let entity_revision = span.pack_entity_revision();
         let why = format!(
             "matched '{}' via {} (relevance {:.4}, utility 0.5000); selected live-admitted imported evidence {}",
@@ -12914,37 +12942,28 @@ fn append_direct_evidence_pack_items(
             hit.relevance_score(),
             span.id
         );
-        draft.evidence_items.push(PackEvidenceItem {
-            rank,
-            evidence_id: span.id,
-            entity_revision,
-            session_id: span.session_id,
-            start_line: span.start_line,
-            end_line: span.end_line,
-            section: PackSection::Evidence,
-            content: span.excerpt,
-            estimated_tokens,
-            relevance,
-            utility,
-            provenance: vec![provenance],
-            why,
-            trust: PackTrustSignal::new(
-                TrustClass::CassEvidence,
-                Some("imported_transcript_excerpt".to_owned()),
-            ),
+        candidates.push(DirectEvidencePackCandidate {
+            linked_memory_id: span.memory_id,
+            item: PackEvidenceItem {
+                rank: 0,
+                evidence_id: span.id,
+                entity_revision,
+                session_id: span.session_id,
+                start_line: span.start_line,
+                end_line: span.end_line,
+                section: PackSection::Evidence,
+                content: span.excerpt,
+                estimated_tokens,
+                relevance,
+                utility,
+                provenance: vec![provenance],
+                why,
+                trust: PackTrustSignal::new(
+                    TrustClass::CassEvidence,
+                    Some("imported_transcript_excerpt".to_owned()),
+                ),
+            },
         });
-        draft.used_tokens = next_used_tokens;
-    }
-
-    if !draft.evidence_items.is_empty() {
-        draft.selection_audit.candidate_count = draft
-            .selection_audit
-            .candidate_count
-            .saturating_add(draft.evidence_items.len());
-        draft.selection_audit.selected_count =
-            draft.items.len().saturating_add(draft.evidence_items.len());
-        draft.selection_audit.budget_used = draft.used_tokens;
-        draft.hash = None;
     }
     if rejected_live_admission > 0 {
         push_degradation(
@@ -12966,6 +12985,70 @@ fn append_direct_evidence_pack_items(
             None,
         );
     }
+    candidates
+}
+
+fn append_direct_evidence_pack_items(
+    candidates: Vec<DirectEvidencePackCandidate>,
+    request: &ContextRequest,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let selected_memory_ids = draft
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut result_limit_count = 0_usize;
+    for candidate in candidates {
+        if candidate
+            .linked_memory_id
+            .as_ref()
+            .is_some_and(|memory_id| selected_memory_ids.contains(memory_id))
+        {
+            continue;
+        }
+        if request.max_results.is_some_and(|limit| {
+            draft.items.len().saturating_add(draft.evidence_items.len()) >= limit as usize
+        }) {
+            result_limit_count = result_limit_count.saturating_add(1);
+            continue;
+        }
+        let mut item = candidate.item;
+        let Some(next_used_tokens) = draft.used_tokens.checked_add(item.estimated_tokens) else {
+            continue;
+        };
+        if next_used_tokens > draft.budget.max_tokens() {
+            continue;
+        }
+        item.rank = u32::try_from(
+            draft
+                .items
+                .len()
+                .saturating_add(draft.evidence_items.len())
+                .saturating_add(1),
+        )
+        .unwrap_or(u32::MAX);
+        draft.evidence_items.push(item);
+        draft.used_tokens = next_used_tokens;
+    }
+    if !draft.evidence_items.is_empty() {
+        draft.selection_audit.candidate_count = draft
+            .selection_audit
+            .candidate_count
+            .saturating_add(draft.evidence_items.len());
+        draft.selection_audit.selected_count =
+            draft.items.len().saturating_add(draft.evidence_items.len());
+        draft.selection_audit.budget_used = draft.used_tokens;
+        draft.hash = None;
+    }
+    push_direct_evidence_result_limit_degradation(degraded, result_limit_count);
+}
+
+fn push_direct_evidence_result_limit_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    result_limit_count: usize,
+) {
     if result_limit_count > 0 {
         push_degradation(
             degraded,
@@ -13637,11 +13720,13 @@ mod tests {
         let mut degraded = Vec::new();
         let info = apply_pagination(
             &mut candidates,
+            &mut Vec::new(),
             &Some(ContextPagination {
                 limit: 1,
                 offset: 1,
                 query_hash: "query-shape".to_owned(),
             }),
+            None,
             &mut degraded,
         );
 
@@ -14498,6 +14583,72 @@ mod tests {
             remembered.memory_id.to_string(),
             guard,
         ))
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn read_only_semantic_pack_keeps_embedding_preparation_local() -> TestResult {
+        let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        options.source_mode = crate::core::search::SearchSourceMode::Hybrid;
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let before = std::fs::read(database).map_err(|error| error.to_string())?;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let provider = |_: &SearchOptions| -> Result<_, SearchDegradation> {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(SearchDegradation::daemon_fallback(
+                "read-only semantic retrieval must not delegate model initialization",
+            ))
+        };
+        let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            run.response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| { item.memory_id.to_string() == memory_id })
+        );
+        assert_eq!(run.response.data.embed_backend, EmbedBackend::HashFallback);
+        assert!(
+            run.response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "embed_model_unavailable" })
+        );
+        assert!(
+            run.response
+                .data
+                .degraded
+                .iter()
+                .all(|entry| { entry.code != "daemon_search_fallback" })
+        );
+        assert_eq!(
+            std::fs::read(database).map_err(|error| error.to_string())?,
+            before
+        );
+        assert!(!options.workspace_path.join(".ee/pack-slots").exists());
+        let connection =
+            DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            0
+        );
+        assert!(
+            connection
+                .list_model_registry_entries(&workspace_id)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .all(
+                    |entry| entry.status != crate::models::ModelRegistryStatus::Available
+                        || entry.provider == crate::models::ModelProvider::Hash
+                )
+        );
+        Ok(())
     }
 
     #[cfg(feature = "lexical-bm25")]
@@ -17085,12 +17236,36 @@ pub fn unrelated_context() -> u64 {{
             )
             .map_err(|error| error.to_string())?;
             let mut degraded = Vec::new();
-            super::append_direct_evidence_pack_items(
+            let evidence_candidates = super::collect_direct_evidence_pack_candidates(
                 &connection,
                 workspace,
                 &search,
                 &request,
                 &filters,
+                &mut degraded,
+            );
+            assert_eq!(evidence_candidates.len(), expected_indices.len(), "{name}");
+            let mut page_evidence = evidence_candidates.clone();
+            let page_info = apply_pagination(
+                &mut Vec::new(),
+                &mut page_evidence,
+                &Some(ContextPagination {
+                    limit: 1,
+                    offset: 0,
+                    query_hash: "filtered-evidence-page".to_owned(),
+                }),
+                None,
+                &mut Vec::new(),
+            );
+            assert_eq!(page_info.total as usize, expected_indices.len(), "{name}");
+            assert_eq!(
+                page_info.page_size as usize,
+                expected_indices.len().min(1),
+                "{name}"
+            );
+            super::append_direct_evidence_pack_items(
+                evidence_candidates,
+                &request,
                 &mut draft,
                 &mut degraded,
             );
@@ -17146,12 +17321,17 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
             assert_eq!(draft.items.len(), usize::from(with_memory));
             let mut degraded = Vec::new();
-            super::append_direct_evidence_pack_items(
+            let evidence_candidates = super::collect_direct_evidence_pack_candidates(
                 &connection,
                 workspace,
                 &search,
                 &limited,
                 &Default::default(),
+                &mut degraded,
+            );
+            super::append_direct_evidence_pack_items(
+                evidence_candidates,
+                &limited,
                 &mut draft,
                 &mut degraded,
             );
@@ -17166,6 +17346,333 @@ pub fn unrelated_context() -> u64 {{
                 assert_eq!(draft.evidence_items[0].evidence_id, evidence_ids[0]);
                 assert_eq!(draft.evidence_items[0].rank, 1);
             }
+        }
+        assert_direct_evidence_pagination(
+            &connection,
+            workspace,
+            &search,
+            &request,
+            &evidence_ids,
+        )?;
+        Ok(())
+    }
+
+    fn assert_direct_evidence_pagination(
+        connection: &DbConnection,
+        workspace: &Path,
+        search: &SearchReport,
+        request: &ContextRequest,
+        evidence_ids: &[String],
+    ) -> TestResult {
+        for with_memory in [false, true] {
+            for max_results in [None, Some(1), Some(2)] {
+                for limit in [1, 2] {
+                    let mut limited = request.clone();
+                    limited.max_results = max_results;
+                    let memories = if with_memory {
+                        vec![pagination_candidate(17)?]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut expected = memories
+                        .iter()
+                        .map(|candidate| candidate.memory_id.to_string())
+                        .chain(evidence_ids.iter().cloned())
+                        .collect::<Vec<_>>();
+                    if let Some(max_results) = max_results {
+                        expected.truncate(max_results as usize);
+                    }
+                    let mut selected = Vec::new();
+                    let mut offset = 0;
+                    loop {
+                        let mut candidates = memories.clone();
+                        let mut degraded = Vec::new();
+                        let mut evidence = super::collect_direct_evidence_pack_candidates(
+                            connection,
+                            workspace,
+                            search,
+                            &limited,
+                            &Default::default(),
+                            &mut degraded,
+                        );
+                        assert_eq!(evidence.len(), 2, "duplicate search hits count once");
+                        let info = apply_pagination(
+                            &mut candidates,
+                            &mut evidence,
+                            &Some(ContextPagination {
+                                limit,
+                                offset,
+                                query_hash: "native-evidence-pages".to_owned(),
+                            }),
+                            max_results,
+                            &mut degraded,
+                        );
+                        assert_eq!(info.total as usize, expected.len());
+                        assert_eq!(
+                            info.page_size as usize,
+                            expected
+                                .len()
+                                .saturating_sub(offset as usize)
+                                .min(limit as usize)
+                        );
+                        let mut draft = assemble_draft_with_profile(
+                            limited.profile,
+                            limited.query.clone(),
+                            limited.budget,
+                            candidates,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        super::append_direct_evidence_pack_items(
+                            evidence,
+                            &limited,
+                            &mut draft,
+                            &mut degraded,
+                        );
+                        let page = draft
+                            .items
+                            .iter()
+                            .map(|item| item.memory_id.to_string())
+                            .chain(
+                                draft
+                                    .evidence_items
+                                    .iter()
+                                    .map(|item| item.evidence_id.clone()),
+                            )
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            page,
+                            expected
+                                .iter()
+                                .skip(offset as usize)
+                                .take(limit as usize)
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            "with_memory={with_memory}, max_results={max_results:?}, limit={limit}, offset={offset}"
+                        );
+                        assert!(draft.used_tokens <= draft.budget.max_tokens());
+                        for (index, item) in draft.evidence_items.iter().enumerate() {
+                            assert_eq!(item.rank as usize, draft.items.len() + index + 1);
+                        }
+                        selected.extend(page);
+                        let Some(cursor) = info.next_cursor else {
+                            assert!(!info.has_more);
+                            break;
+                        };
+                        assert!(info.has_more);
+                        let decoded = crate::models::PaginationCursor::decode(&cursor)
+                            .map_err(|error| error.to_string())?;
+                        assert_eq!(decoded.query_hash, "native-evidence-pages");
+                        assert!(decoded.offset > offset);
+                        offset = decoded.offset;
+                    }
+                    assert_eq!(
+                        selected, expected,
+                        "consecutive pages must not repeat evidence"
+                    );
+
+                    let mut candidates = memories;
+                    let mut degraded = Vec::new();
+                    let mut evidence = super::collect_direct_evidence_pack_candidates(
+                        connection,
+                        workspace,
+                        search,
+                        &limited,
+                        &Default::default(),
+                        &mut degraded,
+                    );
+                    let info = apply_pagination(
+                        &mut candidates,
+                        &mut evidence,
+                        &Some(ContextPagination {
+                            limit,
+                            offset: expected.len() as u32,
+                            query_hash: "native-evidence-pages".to_owned(),
+                        }),
+                        max_results,
+                        &mut degraded,
+                    );
+                    assert_eq!(info.page_size, 0);
+                    assert_eq!(info.total as usize, expected.len());
+                    assert!(!info.has_more);
+                    assert!(info.next_cursor.is_none());
+                    assert!(candidates.is_empty());
+                    assert!(
+                        evidence.is_empty(),
+                        "exhausted pages cannot append the native tail"
+                    );
+                }
+            }
+        }
+
+        let mut degraded = Vec::new();
+        let all_evidence = super::collect_direct_evidence_pack_candidates(
+            connection,
+            workspace,
+            search,
+            request,
+            &Default::default(),
+            &mut degraded,
+        );
+        let budget = TokenBudget::new(all_evidence[1].item.estimated_tokens)
+            .map_err(|error| error.to_string())?;
+        assert!(all_evidence[0].item.estimated_tokens > budget.max_tokens());
+        for offset in [0, 1] {
+            let mut evidence = all_evidence.clone();
+            let mut memories = Vec::new();
+            let info = apply_pagination(
+                &mut memories,
+                &mut evidence,
+                &Some(ContextPagination {
+                    limit: 1,
+                    offset,
+                    query_hash: "native-evidence-token-pages".to_owned(),
+                }),
+                None,
+                &mut degraded,
+            );
+            assert_eq!(
+                info.total, 2,
+                "token selection must not shrink the page population"
+            );
+            let mut draft = assemble_draft_with_profile(
+                request.profile,
+                request.query.clone(),
+                budget,
+                memories,
+            )
+            .map_err(|error| error.to_string())?;
+            super::append_direct_evidence_pack_items(evidence, request, &mut draft, &mut degraded);
+            assert_eq!(draft.evidence_items.len(), offset as usize);
+            if offset == 1 {
+                assert_eq!(draft.evidence_items[0].evidence_id, evidence_ids[1]);
+                assert_eq!(draft.used_tokens, budget.max_tokens());
+            }
+        }
+        assert_linked_evidence_pagination(connection, workspace, search, request, evidence_ids)?;
+        Ok(())
+    }
+
+    fn assert_linked_evidence_pagination(
+        connection: &DbConnection,
+        workspace: &Path,
+        search: &SearchReport,
+        request: &ContextRequest,
+        evidence_ids: &[String],
+    ) -> TestResult {
+        let memory = pagination_candidate(17)?;
+        let memory_id = memory.memory_id.to_string();
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        connection
+            .insert_memory(
+                &memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Retain the evidence behind the release procedure.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let span = connection
+            .get_evidence_span(&evidence_ids[1])
+            .map_err(|error| error.to_string())?
+            .ok_or("linked evidence fixture")?;
+        assert_eq!(
+            connection
+                .attach_evidence_span_to_memory_if_unlinked(
+                    &workspace_id,
+                    &span.id,
+                    &span.content_hash,
+                    &memory_id,
+                )
+                .map_err(|error| error.to_string())?,
+            crate::db::EvidenceSpanMemoryAttachResult::Attached
+        );
+        let mut degraded = Vec::new();
+        let all_evidence = super::collect_direct_evidence_pack_candidates(
+            connection,
+            workspace,
+            search,
+            request,
+            &Default::default(),
+            &mut degraded,
+        );
+        assert_eq!(all_evidence.len(), 2);
+        assert_eq!(
+            all_evidence[1].linked_memory_id.as_deref(),
+            Some(memory_id.as_str())
+        );
+        for with_memory in [false, true] {
+            let expected = if with_memory {
+                vec![memory_id.clone(), evidence_ids[0].clone()]
+            } else {
+                evidence_ids.to_vec()
+            };
+            let mut selected = Vec::new();
+            for offset in 0..=2 {
+                let mut memories = if with_memory {
+                    vec![memory.clone()]
+                } else {
+                    Vec::new()
+                };
+                let mut evidence = all_evidence.clone();
+                let info = apply_pagination(
+                    &mut memories,
+                    &mut evidence,
+                    &Some(ContextPagination {
+                        limit: 1,
+                        offset,
+                        query_hash: "linked-evidence-pages".to_owned(),
+                    }),
+                    None,
+                    &mut degraded,
+                );
+                assert_eq!(
+                    info.total, 2,
+                    "linked deduplication must precede page totals"
+                );
+                let mut draft = assemble_draft_with_profile(
+                    request.profile,
+                    request.query.clone(),
+                    request.budget,
+                    memories,
+                )
+                .map_err(|error| error.to_string())?;
+                super::append_direct_evidence_pack_items(
+                    evidence,
+                    request,
+                    &mut draft,
+                    &mut degraded,
+                );
+                let page = draft
+                    .items
+                    .iter()
+                    .map(|item| item.memory_id.to_string())
+                    .chain(
+                        draft
+                            .evidence_items
+                            .iter()
+                            .map(|item| item.evidence_id.clone()),
+                    )
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    page.len(),
+                    info.page_size as usize,
+                    "linked evidence must not leave a page hole"
+                );
+                selected.extend(page);
+            }
+            assert_eq!(selected, expected);
         }
         Ok(())
     }

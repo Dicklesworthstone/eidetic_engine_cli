@@ -87,11 +87,11 @@ jobs:
           }
           run_group retrieval-admission 'core::search::rule_admission::' 14
           run_group diagnostic-snapshot 'core::search::diagnostic_snapshot::' 14
-          run_group headship-admission 'core::jsonl_import::recovery_regression_tests::' 8
+          run_group headship-admission 'core::jsonl_import::recovery_regression_tests::' 13
           run_group ambiguous-heads 'core::jsonl_import::revisions::head_tests::' 4
           run_group record-graph 'core::jsonl_import::recovery::tests::' 13
           run_group ordinary-import 'core::jsonl_import::tests::' 61
-          run_group backup-publication 'backup_revision_recovery_' 2
+          run_group backup-publication 'backup_revision_recovery_' 4
           exit "$failed"
       - name: Execute real CLI revision search and context acceptance
         if: ${{ !cancelled() }}
