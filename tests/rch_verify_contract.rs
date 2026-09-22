@@ -5356,6 +5356,87 @@ fn proof_broker_explicit_bypass_runs_remote_and_records_reason() -> TestResult {
     Ok(())
 }
 
+/// bd-jui80. The env-var bypass with NO ledger takes the
+/// `PROOF_BROKER_ENABLED=0` branch, which is a DIFFERENT path from the ledger
+/// bypass covered by `proof_broker_explicit_bypass_runs_remote_and_records_reason`
+/// -- that one supplies `--proof-broker-ledger` and never reaches this code.
+///
+/// Before 27b1fa578 this branch emitted a fixed JSON literal whose `reason` was
+/// always the mechanism string, so a DECLARED bypass and an UNDECLARED one were
+/// byte-identical and no gate could refuse the undeclared case.
+///
+/// BOTH ARMS RUN HERE ON PURPOSE: a single arm cannot demonstrate a difference,
+/// and the property under test is that the two are distinguishable. The
+/// discriminating assertion is that the declared arm does NOT carry the
+/// `_undeclared` code.
+#[test]
+fn env_var_proof_broker_bypass_distinguishes_declared_from_undeclared() -> TestResult {
+    let fake = [
+        (
+            "RCH_VERIFY_FAKE_OUTPUT",
+            "[RCH] remote required; refusing local fallback (contract fixture)\n",
+        ),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+        ("RCH_VERIFY_FAKE_ELAPSED_MS", "7"),
+    ];
+
+    // UNDECLARED. run_script_with_env sets RCH_VERIFY_PROOF_BROKER_ENABLED=0 and
+    // passes no ledger, which is exactly the branch under test.
+    let (_status, stdout, _stderr) =
+        run_script_with_env(&["--", "cargo", "test", "--test", "rch_verify_contract"], &fake)?;
+    let undeclared: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse undeclared bypass report: {error}"))?;
+    if undeclared["proof_broker"]["declared"] != false
+        || !undeclared["proof_broker"]["bypassReason"].is_null()
+    {
+        return Err(format!(
+            "an undeclared bypass must record declared=false and a null reason: {undeclared}"
+        ));
+    }
+    if !degraded_contains(&undeclared, "rch_verify_proof_broker_bypassed")?
+        || !degraded_contains(&undeclared, "rch_verify_proof_broker_bypassed_undeclared")?
+    {
+        return Err(format!(
+            "an undeclared bypass must carry BOTH the bypassed and undeclared codes: {undeclared}"
+        ));
+    }
+
+    // DECLARED. Same branch, one flag added.
+    let (_status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--proof-broker-bypass",
+            "hermetic contract test",
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+        ],
+        &fake,
+    )?;
+    let declared: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse declared bypass report: {error}"))?;
+    if declared["proof_broker"]["declared"] != true
+        || declared["proof_broker"]["bypassReason"] != "hermetic contract test"
+    {
+        return Err(format!(
+            "a declared bypass must record its caller-supplied reason: {declared}"
+        ));
+    }
+    if degraded_contains(&declared, "rch_verify_proof_broker_bypassed_undeclared")? {
+        return Err(format!(
+            "a DECLARED bypass must not carry the undeclared code -- this is the \
+             assertion that fails if the two states collapse again: {declared}"
+        ));
+    }
+    if !degraded_contains(&declared, "rch_verify_proof_broker_bypassed")? {
+        return Err(format!(
+            "a declared bypass must still carry the bypassed code: {declared}"
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn synthetic_local_fallback_refusal_is_not_worker_id() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
