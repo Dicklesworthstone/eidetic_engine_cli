@@ -1,0 +1,43 @@
+name: Core learning-loop regressions
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/outcome*.rs
+      - src/core/rule*.rs
+      - .github/workflows/core-loop-regressions.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: core-learning-loop-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  core-learning-loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Record the exact committed source and open work
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/core-loop-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/core-loop-source.tar.gz" HEAD
+          python3 - <<'PY'
+          import json, os, pathlib
+          source = pathlib.Path('.beads/issues.jsonl')
+          issues = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+          active = [row for row in issues if row.get('status') != 'closed']
+          active.sort(key=lambda row: (row.get('priority', 9), row.get('id', '')))
+          output = pathlib.Path(os.environ['RUNNER_TEMP'], 'core-loop-active-beads.json')
+          output.write_text(json.dumps(active, indent=2))
+          print(f'{len(active)} active beads; complete committed source retained for qualification')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-loop-source
+          path: ${{ runner.temp }}/core-loop-*
+          retention-days: 3
+          if-no-files-found: error
