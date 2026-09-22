@@ -9,30 +9,31 @@
 
 ## Round-trip contract
 
-Per `bd-2oh15`, the fixture lifecycle is:
-
-1. `corrupt.sh` builds an isolated corrupt workspace at
-   `$EE_DOCTOR_FIXTURE_TARGET` and writes the marker
-   `.ee/doctor-fixtures/fm-search_indexes-index_missing.json`, plus a baseline
-   `.fixture_baseline/before.sha256`.
-2. `assert.sh` confirms the marker is present. When
-   `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary is provided in
-   `EE_DOCTOR_FIXTURE_BINARY`, it additionally runs
-   `ee doctor --fix --only fm-search_indexes-index_missing`, then a follow-up
-   `ee doctor` read-back, then `ee doctor undo --last`,
-   and finally compares the post-undo SHA-256 manifest
-   against the pre-fix baseline (round-trip byte-identical).
-
-The shell scripts intentionally NEVER invoke Cargo and NEVER
-delete files. Recovery, including the post-undo step, runs
-through the read-only `corrupt` -> `marker write` -> `doctor`
--> `undo` sequence so an operator can audit every intermediate
-state on disk.
+1. Provide an empty target directory and a real, prebuilt `ee` through
+   `EE_DOCTOR_FIXTURE_BINARY`. `corrupt.sh` refuses nonempty or symlink targets.
+2. It runs `ee init --skip-boilerplate --json` and requires the shared health
+   assertion to pass before altering anything. The database and search index
+   must exist; an uninitialized directory is not a substitute.
+3. It moves `.ee/index` into `.fixture_baseline/healthy-index`, preserving every
+   byte, then captures the corrupted pre-fix content digest. No file is deleted.
+4. Real doctor output must identify `search_index` warning `EE-E300`, with
+   degraded core health and every other core check still `ok`. Both the healthy
+   and corrupted reports are retained under `.fixture_baseline/`.
+5. With `EE_DOCTOR_FIXTURE_RUN_EE=1`, `assert.sh` runs `doctor --fix`, the
+   read-only health assertion, then `doctor --undo <runId>` and the content
+   comparison. Without the flag it refuses; marker-only success is forbidden.
 
 ## Wiring status
 
-`ee doctor --fix --only fm-search_indexes-index_missing` is WIRED. `bd-3boan` (CLI surface for
-the doctor runtime) is closed and `DoctorArgs` carries both `--fix` and
-`--only`, so `scripts/verify-undo.sh` sets `EE_DOCTOR_FIXTURE_RUN_EE=1` and
-the round-trip above runs under the `ee doctor Safety Harness` stage of
-`scripts/verify.sh`.
+`scripts/verify-undo.sh` runs this fixture through the existing safety harness.
+The CLI forbids combining `--fix` with `--only`; they are separate calls in the
+shared helper, and `--only` is currently advisory.
+
+The index rebuild repair is `ee index rebuild --workspace <target> --json`.
+Currently `doctor --fix` selects `RunIndexRebuild`, whose runtime implementation
+only records manual guidance. Thus a successfully induced missing index is
+expected to keep the full doctor round trip **red** until that production path
+actually rebuilds it and supports undo. Do not substitute the explicit rebuild
+into `assert.sh` or change its baseline to make that round trip pass. An explicit
+rebuild can independently establish restored health, but cannot prove doctor
+repair or undo. The cited independent repair spec remains absent (bd-2oh15).

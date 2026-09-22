@@ -47,6 +47,28 @@ doctor_fixture_corrupt() {
     printf 'corrupt fixture prepared: %s\n' "$fm_id" >&2
 }
 
+doctor_fixture_assert_health_report() {
+    local fm_id="${1:?fm id required}"
+    local report="${2:?report required}"
+    # success means the command ran, not that the workspace is healthy.
+    # The default JSON renderer exposes coreChecks (the full renderer uses
+    # checks). Reject missing/empty populations and multiple JSON documents
+    # as well as non-ok health, even when the process exits successfully.
+    if ! jq -es '
+        length == 1 and (.[0] |
+            .schema == "ee.response.v2" and .success == true and
+            .data.command == "doctor" and .data.posture == "ok" and
+            .data.healthy == true and
+            (.data.coreChecks | type == "array" and length > 0 and
+                all(.[]; .tier == "core" and .severity == "ok")) and
+            (.data.actionable | type == "array" and length == 0))
+    ' "$report" >/dev/null; then
+        printf 'fixture assert: post-fix health not established for %s; see %s\n' \
+            "$fm_id" "$report" >&2
+        return 1
+    fi
+}
+
 doctor_fixture_assert() {
     local fm_id="${1:?fm id required}"
     local severity="${2:?severity required}"
@@ -66,23 +88,7 @@ doctor_fixture_assert() {
         # establish per-FM detector coverage. Assert the reported core health.
         "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json"
         "$ee_bin" doctor --workspace "$target" --only "$fm_id" --json > "$target/.fixture_baseline/doctor-after.json"
-        # success means the command ran, not that the workspace is healthy.
-        # The default JSON renderer exposes coreChecks (the full renderer uses
-        # checks). Reject missing/empty populations and multiple JSON documents
-        # as well as non-ok health, even when the process exits successfully.
-        if ! jq -es '
-            length == 1 and (.[0] |
-                .schema == "ee.response.v2" and .success == true and
-                .data.command == "doctor" and .data.posture == "ok" and
-                .data.healthy == true and
-                (.data.coreChecks | type == "array" and length > 0 and
-                    all(.[]; .tier == "core" and .severity == "ok")) and
-                (.data.actionable | type == "array" and length == 0))
-        ' "$target/.fixture_baseline/doctor-after.json" >/dev/null; then
-            printf 'fixture assert: post-fix health not established for %s; see %s\n' \
-                "$fm_id" "$target/.fixture_baseline/doctor-after.json" >&2
-            return 1
-        fi
+        doctor_fixture_assert_health_report "$fm_id" "$target/.fixture_baseline/doctor-after.json"
         local run_id
         run_id="$(jq -r '.runId // .data.runId // empty' "$target/.fixture_baseline/doctor-fix.json")"
         if [ -z "$run_id" ]; then

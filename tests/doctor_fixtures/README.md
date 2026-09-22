@@ -48,8 +48,11 @@ valid round trips. They retain their workspaces and receipts under temporary
 scratch, or under `EE_DOCTOR_ASSERTION_TEST_ROOT` when provided. Passing them
 verifies the assertion helper, not real doctor repairs.
 
-The suite remains incomplete (bd-2oh15): the 25 corruption scripts currently
-write markers rather than their named corruptions; the independently scored
+The suite remains incomplete (bd-2oh15): `fm-search_indexes-index_missing` now
+initializes a real workspace, requires a healthy baseline, preserves the index
+by moving it aside, and requires a real `EE-E300` diagnostic. The other 24
+corruption scripts still write markers rather than their named corruptions.
+The independently scored
 failure-mode population and eight referenced repair specs are absent. Also,
 `doctor --only` is currently advisory, so the after-report does not establish
 per-FM detector coverage. The helper's health check follows the doctor's core
