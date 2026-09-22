@@ -1,0 +1,35 @@
+name: Core source capsule
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/core-source-capsule.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Export committed source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/core-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/core-source/source-sha.txt"
+          test "$(cat "$RUNNER_TEMP/core-source/source-sha.txt")" = "$GITHUB_SHA"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/core-source/source.tar.gz" HEAD
+          sha256sum "$RUNNER_TEMP/core-source/source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-source-${{ github.sha }}
+          path: ${{ runner.temp }}/core-source/
+          retention-days: 1
+          if-no-files-found: error
