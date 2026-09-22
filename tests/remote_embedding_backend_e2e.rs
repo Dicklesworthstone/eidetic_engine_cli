@@ -17,17 +17,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ee::core::remote_embed::{
-    RemoteApiEmbedder, RemoteEmbedSettings, probe_dimension_blocking_with_timeout,
+    RemoteApiEmbedder, RemoteEmbedError, RemoteEmbedSettings, probe_dimension,
+    probe_dimension_blocking_with_timeout,
 };
-use frankensearch::Embedder;
+use frankensearch::{Embedder, SearchError};
 
 /// How a stub server should answer one request.
 #[derive(Clone)]
 enum StubBehavior {
     /// Answer 200 with `dimension`-wide vectors, one per input.
     Embeddings { dimension: usize },
+    /// Reverse each response and encode the input's numeric identity in its
+    /// vector. Optionally corrupt a later HTTP chunk's first input index.
+    IndexedInputs { corrupt_request: Option<usize> },
     /// Answer with a fixed status and body.
     Raw { status: u16, body: String },
+    /// Attempt to move the request to another endpoint.
+    Redirect { status: u16, location: String },
+    /// Send only non-success headers, then wait for the client to disconnect.
+    ErrorHeaders { status: u16 },
     /// Read the request, then never answer.
     Hang,
     /// Send response headers and optionally a body prefix, then stop sending.
@@ -145,9 +153,54 @@ fn handle_connection(
     }
     let body = String::from_utf8_lossy(&body).into_owned();
     seen_auth.lock().expect("auth lock").push(authorization);
-    seen_bodies.lock().expect("body lock").push(body.clone());
+    let request_number = {
+        let mut bodies = seen_bodies.lock().expect("body lock");
+        bodies.push(body.clone());
+        bodies.len()
+    };
 
     let (status, payload) = match behavior {
+        StubBehavior::Redirect { status, location } => {
+            let response = format!(
+                "HTTP/1.1 {status} Redirect\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).expect("redirect");
+            let _ = stream.shutdown(Shutdown::Write);
+            return;
+        }
+        StubBehavior::ErrorHeaders { status } => {
+            let response = format!(
+                "HTTP/1.1 {status} Error\r\ncontent-length: 1024\r\nconnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).expect("error headers");
+            stream.flush().expect("flush error headers");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bounded server teardown");
+            let _ = stream.read(&mut [0_u8; 1]);
+            return;
+        }
+        StubBehavior::IndexedInputs { corrupt_request } => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+            let inputs = parsed["input"].as_array().expect("input array");
+            let mut data: Vec<_> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    let value: u16 = input
+                        .as_str()
+                        .expect("input text")
+                        .parse()
+                        .expect("ordinal");
+                    serde_json::json!({"index": index, "embedding": [value]})
+                })
+                .collect();
+            if *corrupt_request == Some(request_number) {
+                data[0]["index"] = serde_json::Value::Null;
+            }
+            data.reverse();
+            (200, serde_json::json!({"data": data}).to_string())
+        }
         StubBehavior::Hang => {
             // Hold the connection open without answering. The client's timeout
             // is what must end this exchange.
@@ -297,12 +350,18 @@ fn a_dimension_change_under_a_configured_index_is_refused() {
     let settings = server.settings("all-minilm", None, Some("384"));
     let embedder = RemoteApiEmbedder::with_dimension(settings, 384);
 
-    let error = embed_one(&embedder, "hello").expect_err("dimension mismatch must be refused");
-
-    assert!(
-        error.contains("384") && error.contains("512"),
-        "error must name both dimensions: {error}"
-    );
+    let error = ee::core::run_cli_with_cx(Duration::from_secs(20), |cx| async move {
+        embedder.embed(&cx, "hello").await
+    })
+    .expect("runtime")
+    .expect_err("dimension mismatch must be refused");
+    assert!(matches!(
+        error,
+        SearchError::DimensionMismatch {
+            expected: 384,
+            found: 512
+        }
+    ));
 }
 
 #[test]
@@ -397,4 +456,148 @@ fn an_unbound_port_is_reported_as_unreachable() {
         .expect_err("nothing is listening");
 
     assert_eq!(error.code(), "remote_embed_unreachable", "{error}");
+}
+
+#[test]
+fn large_batches_restore_input_identity_across_reversed_http_chunks() {
+    let server = StubServer::start(StubBehavior::IndexedInputs {
+        corrupt_request: None,
+    });
+    let settings = server.settings("ordinal-model", None, Some("1"));
+    let embedder = RemoteApiEmbedder::with_dimension(settings, 1);
+    let inputs: Vec<_> = (0..513_u16).map(|ordinal| ordinal.to_string()).collect();
+    let texts: Vec<_> = inputs.iter().map(String::as_str).collect();
+    let expected: Vec<_> = (0..513_u16).map(|ordinal| vec![f32::from(ordinal)]).collect();
+
+    assert_eq!(embed_many(&embedder, &texts).expect("three chunks"), expected);
+    let sizes: Vec<_> = server
+        .observed_bodies()
+        .iter()
+        .map(|body| count_inputs(body))
+        .collect();
+    assert_eq!(sizes, [256, 256, 1]);
+}
+
+#[test]
+fn a_malformed_later_chunk_aborts_without_partial_vectors_or_further_requests() {
+    let server = StubServer::start(StubBehavior::IndexedInputs {
+        corrupt_request: Some(2),
+    });
+    let settings = server.settings("ordinal-model", None, Some("1"));
+    let embedder = RemoteApiEmbedder::with_dimension(settings, 1);
+    let inputs: Vec<_> = (0..513_u16).map(|ordinal| ordinal.to_string()).collect();
+    let texts: Vec<_> = inputs.iter().map(String::as_str).collect();
+
+    let error = ee::core::run_cli_with_cx(Duration::from_secs(20), |cx| async move {
+        embedder.embed_batch(&cx, &texts).await
+    })
+    .expect("runtime")
+    .expect_err("partial success must not become a batch result");
+    assert!(matches!(error, SearchError::InvalidConfig { .. }));
+    assert_eq!(server.observed_bodies().len(), 2);
+}
+
+#[test]
+fn malformed_response_indexes_are_rejected_by_the_live_embedder() {
+    for index in [
+        serde_json::json!(-1),
+        serde_json::json!(null),
+        serde_json::json!(0.5),
+        serde_json::json!("private-index"),
+    ] {
+        let server = StubServer::start(StubBehavior::Raw {
+            status: 200,
+            body: serde_json::json!({
+                "data": [{"index": index, "embedding": [1.0]}]
+            })
+            .to_string(),
+        });
+        let embedder =
+            RemoteApiEmbedder::with_dimension(server.settings("model", None, Some("1")), 1);
+        let error = ee::core::run_cli_with_cx(Duration::from_secs(20), |cx| async move {
+            embedder.embed(&cx, "private-source-text").await
+        })
+        .expect("runtime")
+        .expect_err("invalid response mapping");
+        assert!(!error.to_string().contains("private-index"));
+        assert!(!error.to_string().contains("private-source-text"));
+        assert!(matches!(error, SearchError::InvalidConfig { .. }));
+        assert_eq!(server.observed_bodies().len(), 1);
+    }
+}
+
+#[test]
+fn redirects_do_not_resubmit_source_content_or_credentials() {
+    for status in [301, 302, 303, 307, 308] {
+        let destination = StubServer::start(StubBehavior::Embeddings { dimension: 4 });
+        let server = StubServer::start(StubBehavior::Redirect {
+            status,
+            location: format!("{}/embeddings", destination.base_url),
+        });
+        let settings = server.settings("model", Some("private-api-token"), Some("4"));
+        let embedder = RemoteApiEmbedder::with_dimension(settings, 4);
+        let error = embed_one(&embedder, "private-workspace-content")
+            .expect_err("redirect must not authorize a new endpoint");
+        assert!(error.contains(&status.to_string()), "{error}");
+        assert!(!error.contains("private-api-token"));
+        assert!(!error.contains("private-workspace-content"));
+        assert_eq!(server.observed_bodies().len(), 1);
+        assert!(destination.observed_bodies().is_empty());
+        assert!(destination.observed_auth().is_empty());
+    }
+}
+
+#[test]
+fn error_status_is_reported_without_waiting_for_its_body() {
+    for status in [401, 503] {
+        let server = StubServer::start(StubBehavior::ErrorHeaders { status });
+        let settings = server.settings("model", None, Some("4"));
+        let embedder = RemoteApiEmbedder::with_dimension(settings, 4)
+            .with_request_timeout(Duration::from_millis(300));
+        let error = embed_one(&embedder, "private-workspace-content")
+            .expect_err("non-success response");
+        assert!(error.contains(&status.to_string()), "{error}");
+        assert!(!error.contains("no complete response"), "{error}");
+        assert_eq!(server.observed_bodies().len(), 1);
+    }
+}
+
+#[test]
+fn cancelled_requests_send_nothing_and_keep_the_cancellation_error_class() {
+    let server = StubServer::start(StubBehavior::Embeddings { dimension: 4 });
+    let settings = server.settings("model", Some("private-api-token"), Some("4"));
+    let embedder = RemoteApiEmbedder::with_dimension(settings.clone(), 4);
+    ee::core::run_cli_with_cx(Duration::from_secs(20), |_runtime_cx| async move {
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(asupersync::CancelReason::user("private-cancel-reason"));
+        let single = embedder.embed(&cx, "private-source-text").await;
+        let batch = embedder.embed_batch(&cx, &["one", "two"]).await;
+        for error in [
+            single.expect_err("cancelled single"),
+            batch.expect_err("cancelled batch"),
+        ] {
+            assert!(!error.to_string().contains("private-cancel-reason"));
+            assert!(matches!(error, SearchError::Cancelled { .. }));
+        }
+        assert!(matches!(
+            probe_dimension(&cx, &settings, Duration::from_secs(1)).await,
+            Err(RemoteEmbedError::Cancelled)
+        ));
+        assert!(matches!(
+            RemoteApiEmbedder::resolve(&cx, settings).await,
+            Err(RemoteEmbedError::Cancelled)
+        ));
+    })
+    .expect("runtime");
+    assert!(server.observed_bodies().is_empty());
+    assert!(server.observed_auth().is_empty());
+}
+
+#[test]
+fn empty_batches_do_not_contact_the_endpoint() {
+    let server = StubServer::start(StubBehavior::Embeddings { dimension: 4 });
+    let settings = server.settings("model", None, Some("4"));
+    let embedder = RemoteApiEmbedder::with_dimension(settings, 4);
+    assert!(embed_many(&embedder, &[]).expect("empty batch").is_empty());
+    assert!(server.observed_bodies().is_empty());
 }

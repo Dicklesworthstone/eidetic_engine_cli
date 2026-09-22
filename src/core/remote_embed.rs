@@ -39,6 +39,10 @@
 //! * `EE_EMBED_REMOTE_API_KEY` — optional bearer token.
 //! * `EE_EMBED_REMOTE_DIMENSION` — optional. When unset, the dimension is
 //!   discovered from the first response.
+//!
+//! Redirects are refused: selecting one endpoint does not authorize sending
+//! query or workspace content to a different POST target. Configure the final
+//! endpoint directly when a gateway responds with a redirect.
 
 use std::fmt;
 use std::pin::Pin;
@@ -362,6 +366,8 @@ fn redact_userinfo(url: &str) -> String {
 /// What went wrong talking to the remote endpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteEmbedError {
+    /// The caller cancelled the operation before its result was admitted.
+    Cancelled,
     /// The endpoint could not be reached, or the exchange timed out.
     Unreachable { detail: String },
     /// The endpoint answered with a non-2xx status.
@@ -377,6 +383,7 @@ impl RemoteEmbedError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::Cancelled => "remote_embed_cancelled",
             Self::Unreachable { .. } => "remote_embed_unreachable",
             Self::Status { .. } => "remote_embed_http_status",
             Self::MalformedResponse { .. } => "remote_embed_malformed_response",
@@ -388,6 +395,7 @@ impl RemoteEmbedError {
 impl fmt::Display for RemoteEmbedError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("remote embedding operation cancelled"),
             Self::Unreachable { detail } => {
                 write!(formatter, "remote embedding endpoint unreachable: {detail}")
             }
@@ -411,6 +419,10 @@ impl fmt::Display for RemoteEmbedError {
 impl RemoteEmbedError {
     fn into_search_error(self, model: &str) -> SearchError {
         match self {
+            Self::Cancelled => SearchError::Cancelled {
+                phase: "remote embedding".to_owned(),
+                reason: "caller cancelled remote embedding".to_owned(),
+            },
             // Dimension drift changes the vector space. Keep its typed error
             // so retrieval cannot mistake it for an inference outage and
             // silently authorize lexical recovery.
@@ -418,12 +430,25 @@ impl RemoteEmbedError {
                 expected,
                 found: actual,
             },
+            // A response without a valid input-to-vector mapping is not an
+            // unavailable model. Do not let an inference fallback hide it.
+            Self::MalformedResponse { detail } => SearchError::InvalidConfig {
+                field: "remote_embedding.response".to_owned(),
+                value: "invalid".to_owned(),
+                reason: format!("remote embedding response malformed: {detail}"),
+            },
             error => SearchError::EmbeddingFailed {
                 model: model.to_owned(),
                 source: error.to_string().into(),
             },
         }
     }
+}
+
+fn remote_checkpoint(cx: &Cx) -> Result<(), RemoteEmbedError> {
+    // Cancellation reasons can contain caller data. Preserve the error class,
+    // not the potentially private reason supplied by another subsystem.
+    cx.checkpoint().map_err(|_| RemoteEmbedError::Cancelled)
 }
 
 /// An OpenAI-compatible remote embedder.
@@ -481,9 +506,10 @@ impl RemoteApiEmbedder {
     ///
     /// # Errors
     ///
-    /// Returns [`RemoteEmbedError`] when the endpoint is unreachable, answers
-    /// with a non-2xx status, or returns a malformed body.
+    /// Returns [`RemoteEmbedError`] when cancelled, when the endpoint is
+    /// unreachable, or when it answers with an unusable response.
     pub async fn resolve(cx: &Cx, settings: RemoteEmbedSettings) -> Result<Self, RemoteEmbedError> {
+        remote_checkpoint(cx)?;
         if let Some(dimension) = settings.dimension {
             return Ok(Self::with_dimension(settings, dimension));
         }
@@ -502,6 +528,7 @@ impl RemoteApiEmbedder {
         cx: &Cx,
         texts: &[&str],
     ) -> Result<Vec<Vec<f32>>, RemoteEmbedError> {
+        remote_checkpoint(cx)?;
         let body = serialize_request(&self.settings.model, texts);
         let payload =
             post_json(cx, &self.client, &self.settings, body, self.request_timeout).await?;
@@ -514,6 +541,7 @@ impl RemoteApiEmbedder {
                 });
             }
         }
+        remote_checkpoint(cx)?;
         Ok(vectors)
     }
 }
@@ -541,6 +569,7 @@ impl Embedder for RemoteApiEmbedder {
         texts: &'a [&'a str],
     ) -> SearchFuture<'a, Vec<Vec<f32>>> {
         Box::pin(async move {
+            remote_checkpoint(cx).map_err(|error| error.into_search_error(&self.id))?;
             let mut out = Vec::with_capacity(texts.len());
             for chunk in texts.chunks(MAX_BATCH_INPUTS) {
                 let vectors = self
@@ -576,7 +605,10 @@ impl Embedder for RemoteApiEmbedder {
 
 fn build_client(request_timeout: Duration) -> HttpClient {
     let mut config = HttpClientConfig::default();
-    config.redirect_policy = RedirectPolicy::Limited(5);
+    // Both query text and indexed workspace content are private. A redirect
+    // must not expand the configured endpoint's authority over that content,
+    // even when the HTTP client strips Authorization on a cross-origin hop.
+    config.redirect_policy = RedirectPolicy::None;
     config.user_agent = Some(format!("ee/{} (remote-embed)", env!("CARGO_PKG_VERSION")));
     config.max_body_size = Some(MAX_RESPONSE_BYTES);
     config.request_timeout = Some(request_timeout);
@@ -614,8 +646,9 @@ async fn post_json(
     body: Vec<u8>,
     request_timeout: Duration,
 ) -> Result<Vec<u8>, RemoteEmbedError> {
+    remote_checkpoint(cx)?;
     let exchange = async {
-        let mut response = client
+        let response = client
             .request_streaming(
                 cx,
                 Method::Post,
@@ -623,15 +656,28 @@ async fn post_json(
                 request_headers(settings),
                 body,
             )
-            .await
-            .map_err(|error| RemoteEmbedError::Unreachable {
-                detail: bounded_detail(&error.to_string()),
-            })?;
+            .await;
+        remote_checkpoint(cx)?;
+        let mut response = response.map_err(|_| RemoteEmbedError::Unreachable {
+            // Transport diagnostics can contain endpoint userinfo or headers.
+            // Keep those out of search errors and public doctor output.
+            detail: "HTTP exchange could not be completed".to_owned(),
+        })?;
 
         let status = response.head.status;
+        // An error response cannot contain usable vectors. Do not download,
+        // parse, or wait for its body (which may echo the submitted content).
+        if !(200..300).contains(&status) {
+            return Err(RemoteEmbedError::Status { status });
+        }
         let mut payload = Vec::new();
-        while let Some(frame) =
-            std::future::poll_fn(|task_cx| Pin::new(&mut response.body).poll_frame(task_cx)).await
+        while let Some(frame) = std::future::poll_fn(|task_cx| {
+            if let Err(error) = remote_checkpoint(cx) {
+                return std::task::Poll::Ready(Err(error));
+            }
+            Pin::new(&mut response.body).poll_frame(task_cx).map(Ok)
+        })
+        .await?
         {
             match frame {
                 Ok(Frame::Data(mut chunk)) => {
@@ -650,23 +696,23 @@ async fn post_json(
                     }
                 }
                 Ok(Frame::Trailers(_)) => {}
-                Err(error) => {
+                Err(_) => {
                     return Err(RemoteEmbedError::Unreachable {
-                        detail: bounded_detail(&error.to_string()),
+                        detail: "response body could not be read".to_owned(),
                     });
                 }
             }
         }
-
-        if !(200..300).contains(&status) {
-            return Err(RemoteEmbedError::Status { status });
-        }
+        remote_checkpoint(cx)?;
         Ok(payload)
     };
     // request_streaming's timeout ends after the headers. Keep one deadline
     // around the complete exchange so a stalled or trickling body cannot
     // outlive the configured request budget.
-    match asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, exchange).await {
+    let result =
+        asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, exchange).await;
+    remote_checkpoint(cx)?;
+    match result {
         Ok(result) => result,
         Err(_elapsed) => Err(RemoteEmbedError::Unreachable {
             detail: format!(
@@ -709,8 +755,8 @@ fn parse_embeddings_response(
     expected_count: usize,
 ) -> Result<Vec<Vec<f32>>, RemoteEmbedError> {
     let parsed: serde_json::Value =
-        serde_json::from_slice(payload).map_err(|error| RemoteEmbedError::MalformedResponse {
-            detail: bounded_detail(&error.to_string()),
+        serde_json::from_slice(payload).map_err(|_| RemoteEmbedError::MalformedResponse {
+            detail: "response body is not valid JSON".to_owned(),
         })?;
     let data = parsed
         .get("data")
@@ -821,10 +867,12 @@ pub async fn probe_dimension(
     settings: &RemoteEmbedSettings,
     request_timeout: Duration,
 ) -> Result<usize, RemoteEmbedError> {
+    remote_checkpoint(cx)?;
     let client = build_client(request_timeout);
     let body = serialize_request(&settings.model, &[DIMENSION_PROBE_INPUT]);
     let payload = post_json(cx, &client, settings, body, request_timeout).await?;
     let vectors = parse_embeddings_response(&payload, 1)?;
+    remote_checkpoint(cx)?;
     Ok(vectors[0].len())
 }
 
@@ -1220,32 +1268,73 @@ mod tests {
 
     #[test]
     fn response_parsing_keeps_input_identity_for_every_three_item_permutation() {
-        let expected = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]];
-        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let expected = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
             let data: Vec<_> = order
                 .into_iter()
                 .map(|index| serde_json::json!({"index": index, "embedding": expected[index]}))
                 .collect();
             let payload = serde_json::to_vec(&serde_json::json!({"data": data}))
                 .expect("response JSON");
-            assert_eq!(parse_embeddings_response(&payload, 3).expect("permutation"), expected);
+            assert_eq!(
+                parse_embeddings_response(&payload, 3).expect("permutation"),
+                expected
+            );
         }
     }
 
     #[test]
     fn response_parsing_accepts_an_empty_response_only_for_an_empty_input() {
-        assert!(parse_embeddings_response(br#"{"data":[]}"#, 0).expect("empty batch").is_empty());
+        assert!(
+            parse_embeddings_response(br#"{"data":[]}"#, 0)
+                .expect("empty batch")
+                .is_empty()
+        );
         assert!(parse_embeddings_response(br#"{"data":[]}"#, 1).is_err());
         assert!(parse_embeddings_response(br#"{"data":[{"embedding":[1.0]}]}"#, 0).is_err());
     }
 
     #[test]
     fn remote_dimension_drift_is_not_a_recoverable_inference_failure() {
-        let error = RemoteEmbedError::DimensionMismatch { expected: 384, actual: 768 }
-            .into_search_error("private-model");
-        assert!(matches!(error, SearchError::DimensionMismatch { expected: 384, found: 768 }));
-        let unavailable = RemoteEmbedError::Unreachable { detail: "offline".to_owned() }
-            .into_search_error("remote-model");
+        let error = RemoteEmbedError::DimensionMismatch {
+            expected: 384,
+            actual: 768,
+        }
+        .into_search_error("private-model");
+        assert!(matches!(
+            error,
+            SearchError::DimensionMismatch {
+                expected: 384,
+                found: 768
+            }
+        ));
+        let unavailable = RemoteEmbedError::Unreachable {
+            detail: "offline".to_owned(),
+        }
+        .into_search_error("remote-model");
         assert!(matches!(unavailable, SearchError::EmbeddingFailed { .. }));
+    }
+
+    #[test]
+    fn malformed_mapping_and_cancellation_are_not_inference_outages() {
+        let malformed = RemoteEmbedError::MalformedResponse {
+            detail: "response entry has an invalid input index".to_owned(),
+        }
+        .into_search_error("private-model");
+        assert!(matches!(malformed, SearchError::InvalidConfig { .. }));
+        let cancelled = RemoteEmbedError::Cancelled.into_search_error("private-model");
+        assert!(!cancelled.to_string().contains("private-model"));
+        assert!(matches!(cancelled, SearchError::Cancelled { .. }));
     }
 }

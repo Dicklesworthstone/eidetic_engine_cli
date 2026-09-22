@@ -12,6 +12,7 @@ on:
       - src/core/curate*.rs
       - src/core/index*.rs
       - src/core/search*.rs
+      - src/core/remote_embed.rs
       - src/db/**
       - src/models/**
       - src/mcp*.rs
@@ -20,6 +21,7 @@ on:
       - tests/e2e_core_workflow.rs
       - tests/no_mocks_e2e.rs
       - tests/retrieval_index_regression_oracle.rs
+      - tests/remote_embedding_backend_e2e.rs
       - tests/session_arc_learning_cli.rs
       - tests/mcp_parity.rs
       - tests/mcp_parity/**
@@ -83,6 +85,21 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
+      - name: Exercise remote embedding protocol and HTTP boundaries
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          log="$RUNNER_TEMP/core-memory/remote-embed-unit.log"
+          timeout 12m cargo test --locked --lib core::remote_embed::tests:: -- --test-threads=2 > "$log" 2>&1 || failed=1
+          tail -n 100 "$log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+          log="$RUNNER_TEMP/core-memory/remote-embed-http.log"
+          timeout 12m cargo test --locked --test integration_n_r remote_embedding_backend_e2e:: -- --test-threads=2 > "$log" 2>&1 || failed=1
+          tail -n 100 "$log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+          printf 'remote-embedding failed=%s\n' "$failed" >> "$RUNNER_TEMP/core-memory/results.log"
+          exit "$failed"
       - name: Exercise import, revision, learning, and context regressions
         if: ${{ !cancelled() }}
         run: |
