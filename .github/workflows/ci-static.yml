@@ -310,3 +310,14 @@ jobs:
       - name: Format (include!-only files)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.include_fmt_self_test.outcome == 'success' }}
         run: ./scripts/check-include-fmt.sh
+
+      # bd-reality-core-convergence-1azkt.7.1. The shipped-binary probe grades a
+      # published archive against pre-registered expectations. The probe itself
+      # needs a release archive and a Model2Vec cache, so it runs at release time
+      # (.19), not here. What runs here is its grader's --self-test: every check
+      # failing in isolation, an empty capture and a non-neural backend reading
+      # as incomplete rather than pass, and a checksum mismatch refusing to
+      # execute. Cargo-free, network-free.
+      - name: Release binary probe --self-test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: ./scripts/release_binary_probe.sh --self-test
