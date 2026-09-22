@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'src/db/memory_temporal*.rs'
+      - 'src/core/memory_revision_typed.rs'
       - 'scripts/delivery/integrate-exact-memory-time.py'
       - '.github/workflows/exact-memory-time.yml'
   workflow_dispatch:
@@ -12,7 +13,7 @@ permissions:
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     timeout-minutes: 8
     permissions:
       contents: write
@@ -27,20 +28,58 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Integrate exact memory-time readers and writers
+      - name: Integrate exact time and typed revision data
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
           python3 scripts/delivery/integrate-exact-memory-time.py
-          files=(src/db/mod.rs src/db/memory_temporal.rs src/db/memory_temporal_tests.rs src/core/memory.rs src/core/jsonl_import.rs)
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/core/memory.rs')
+          text = path.read_text()
+          if 'mod revision_typed;' in text:
+              required = ['revision_typed::Prepared::prepare(', 'typed_revision.check_source(&conn, &original)?;', 'typed_revision.apply(&conn, &new_id)?;']
+              if not all(piece in text for piece in required):
+                  raise SystemExit('Partial typed revision integration; inspect before retrying')
+              raise SystemExit(0)
+          def replace_once(before, after):
+              global text
+              if text.count(before) != 1:
+                  raise SystemExit('Typed revision integration anchor changed: ' + before[:70])
+              text = text.replace(before, after, 1)
+          replace_once('/// A memory with its associated tags for display.', '#[path = "memory_revision_typed.rs"]\nmod revision_typed;\n\n/// A memory with its associated tags for display.')
+          replace_once('    // Determine what fields are changing\n', '''    // Typed data belongs to the immutable revision. Prepare before preview
+              // and recheck the source inside the transaction before publication.
+              let typed_revision = match revision_typed::Prepared::prepare(
+                  &conn, &original, options.content, options.kind,
+              ) {
+                  Ok(prepared) => prepared,
+                  Err(message) => return MemoryReviseReport::error(
+                      options.original_memory_id.to_owned(), message,
+                  ),
+              };
+
+              // Determine what fields are changing
+          ''')
+          replace_once('    // Ordinary revisions retain their no-change rejection.', '''    if typed_revision.changed {
+                  changed_fields.push("typed_fields".to_owned());
+              }
+
+              // Ordinary revisions retain their no-change rejection.''')
+          replace_once('            conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;', '''            typed_revision.check_source(&conn, &original)?;
+                      conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;
+                      typed_revision.apply(&conn, &new_id)?;''')
+          path.write_text(text)
+          PY
+          files=(src/db/mod.rs src/db/memory_temporal.rs src/db/memory_temporal_tests.rs src/core/memory.rs src/core/memory_revision_typed.rs src/core/jsonl_import.rs)
           rustfmt --edition 2024 --config skip_children=true "${files[@]}"
           git diff --check
           git add -- "${files[@]}"
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(memory): preserve exact lifecycle instants across reads and recovery' -m 'Keep validity fractions on remember/import/restore, use exact offset-aware applicability and marker comparisons, and finish rounded recency ties before limiting. Preserve caller-owned read transactions and bind end-marker writes to their prior value. Add real-database nanosecond, pagination, tag, malformed-input and transaction regressions; runtime results reported separately.'
+            git commit -m 'fix(memory): retain typed revisions and exact lifecycle instants' -m 'Preserve typed fields across immutable revisions, validate dry runs, and recheck source data inside the transaction. Preserve validity fractions on remember/import/restore and use exact offset-aware applicability, recency and marker comparisons. New revision sidecars are durable before index reconciliation. Runtime results are recorded by the dependent verification job.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -91,16 +130,24 @@ jobs:
             workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
-      - name: Exercise exact temporal database contracts
+      - name: Exercise exact time and typed revision contracts
         run: |
-          set -o pipefail
-          cargo test --locked --lib db::memory_temporal::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/temporal-db.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/temporal-db.log"
+          set -euo pipefail
+          failed=0
+          for group in db::memory_temporal::tests core::memory::revision_typed::tests; do
+            log="$RUNNER_TEMP/temporal-${group//::/-}.log"
+            if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: temporal-db-results
-          path: ${{ runner.temp }}/temporal-db.log
+          path: ${{ runner.temp }}/temporal-*.log
           retention-days: 7
       - name: Exercise existing import and revision contracts
         if: ${{ !cancelled() }}
