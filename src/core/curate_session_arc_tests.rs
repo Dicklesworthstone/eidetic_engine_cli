@@ -719,3 +719,232 @@ fn session_arc_preview_discloses_link_and_does_not_promise_source_reassignment()
     assert!(!preview.mutation.persisted);
     Ok(())
 }
+
+const LATER_FAILURE: &str =
+    "Failure arc: rewriting evidence ownership would violate the source-provenance policy.";
+const LATER_REPAIR: &str =
+    "Fix: preserve the original evidence owner and audit explicit learning decisions.";
+
+#[test]
+fn multiple_inline_episodes_keep_distinct_reciprocal_ids_and_exact_sources() {
+    let session = synthetic_stored_session();
+    let body = format!("{INLINE_ARC}\n{LATER_FAILURE}\n{LATER_REPAIR}");
+    let span = synthetic_span("ev_multiple_arcs", None, &body);
+    let candidates = super::super::build_session_arc_candidates(
+        &session.workspace_id,
+        &session,
+        std::slice::from_ref(&span),
+        0.0,
+    );
+    assert_eq!(candidates.len(), 4, "both episodes must reach the review path");
+    let ids: std::collections::BTreeSet<_> = candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 4, "one episode must not overwrite another");
+    for candidate in &candidates {
+        assert_eq!(candidate.source_ids, [span.id.clone()]);
+        let arc = candidate.session_arc.as_ref().unwrap();
+        for source in [&arc.failure_span, &arc.resolution_span] {
+            assert_eq!(source.evidence_span_id, span.id);
+            assert_eq!(source.content_hash, span.content_hash);
+            assert_eq!(source.start_line, span.start_line);
+            assert_eq!(source.end_line, span.end_line);
+            assert_eq!(source.provenance_uri, span.canonical_provenance_uri());
+        }
+        let peer = candidates
+            .iter()
+            .find(|peer| peer.candidate_id == arc.linked_candidate_id)
+            .expect("reciprocal proposal");
+        let peer_arc = peer.session_arc.as_ref().unwrap();
+        assert_eq!(peer_arc.linked_candidate_id, candidate.candidate_id);
+        assert_ne!(peer_arc.role, arc.role);
+        assert_eq!(peer_arc.failure_span, arc.failure_span);
+        assert_eq!(peer_arc.resolution_span, arc.resolution_span);
+        if arc.failure_span.excerpt.contains("rewriting evidence ownership") {
+            assert_eq!(arc.failure_span.excerpt, LATER_FAILURE);
+            assert_eq!(arc.resolution_span.excerpt, LATER_REPAIR);
+            assert!(!candidate.proposed_content.contains("no-loop-takeover"));
+        } else {
+            assert!(arc.failure_span.excerpt.contains("no-loop-takeover"));
+            assert!(!candidate.proposed_content.contains("rewriting evidence ownership"));
+        }
+    }
+    for limit in 0..7 {
+        let mut limited = candidates.clone();
+        session_arc::limit_complete_pairs(&mut limited, limit);
+        assert_eq!(limited.len(), limit.min(4) / 2 * 2);
+        for candidate in &limited {
+            let peer_id = &candidate.session_arc.as_ref().unwrap().linked_candidate_id;
+            assert!(limited.iter().any(|peer| &peer.candidate_id == peer_id));
+        }
+    }
+}
+
+#[test]
+fn repeated_inline_episodes_deduplicate_complete_pairs_without_changing_first_ids() {
+    let session = synthetic_stored_session();
+    let span = synthetic_span("ev_repeated_arcs", None, INLINE_ARC);
+    let original = session_arc::inline_candidates(
+        &session.workspace_id,
+        &session,
+        std::slice::from_ref(&span),
+    );
+    let mut repeated = span.clone();
+    // Keep source identity fixed to isolate extraction from evidence revision.
+    repeated.excerpt = format!("{INLINE_ARC}\n").repeat(8);
+    let actual = session_arc::inline_candidates(
+        &session.workspace_id,
+        &session,
+        &[repeated.clone(), repeated],
+    );
+    assert_eq!(actual, original);
+    let mut extended = span;
+    extended.excerpt = format!("{INLINE_ARC}\n{LATER_FAILURE}\n{LATER_REPAIR}");
+    let actual = session_arc::inline_candidates(&session.workspace_id, &session, &[extended]);
+    assert_eq!(actual.len(), 4);
+    assert_eq!(&actual[..2], original.as_slice());
+}
+
+#[test]
+fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier_pair() -> TestResult {
+    let fixture = review_session_fixture()?;
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(9810)).to_string();
+    let source_id = evidence_id(9811);
+    let connection =
+        DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_session(
+            &session,
+            &session_input(&fixture.workspace_id, "multiple-session-arcs"),
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_evidence_span(
+            &source_id,
+            &evidence_span_input(
+                &fixture.workspace_id,
+                &session,
+                None,
+                "multiple-arc-span",
+                60,
+                &format!("{INLINE_ARC}\n{LATER_FAILURE}\n{LATER_REPAIR}"),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    let before = connection
+        .list_memories(&fixture.workspace_id, None, false)
+        .map_err(|error| error.to_string())?
+        .len();
+    connection.close().map_err(|error| error.to_string())?;
+    let report = review_session_proposals(&ReviewSessionOptions {
+        workspace_path: &fixture.workspace_path,
+        database_path: Some(&fixture.database_path),
+        session_id: Some(&session),
+        propose: true,
+        dry_run: false,
+        min_confidence: 0.8,
+        limit: 4,
+    })
+    .map_err(|error| error.message())?;
+    assert_eq!(report.candidate_count, 4, "{:?}", report.candidates);
+    assert!(report.candidates.iter().all(|candidate| candidate.persisted));
+    let connection =
+        DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+    for candidate in &report.candidates {
+        let stored = connection
+            .get_curation_candidate(&fixture.workspace_id, &candidate.candidate_id)
+            .map_err(|error| error.to_string())?
+            .expect("persisted proposal");
+        assert_eq!(stored.status, "pending");
+        // This re-reads the real evidence and verifies the complete source
+        // package, identity and reciprocal metadata, even for later episodes.
+        let peer = session_arc::applied_peer(&connection, &stored)
+            .map_err(|issue| format!("{}: {}", issue.code, issue.message))?;
+        assert!(peer.is_none(), "proposal is not an accepted lesson");
+    }
+    assert_eq!(
+        connection
+            .list_memories(&fixture.workspace_id, None, false)
+            .map_err(|error| error.to_string())?
+            .len(),
+        before
+    );
+    let selected: Vec<_> = report
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.session_arc.as_ref().is_some_and(|arc| {
+                arc.failure_span.excerpt.contains("rewriting evidence ownership")
+            })
+        })
+        .collect();
+    assert_eq!(selected.len(), 2);
+    let mut created = Vec::new();
+    for candidate in &selected {
+        validate_arc(&fixture, &candidate.candidate_id)?;
+        let applied = apply_arc(&fixture, &candidate.candidate_id, false)?;
+        assert_eq!(
+            applied.application.status, "applied",
+            "{:?}", applied.application.errors
+        );
+        created.push(applied.application.created_memory_id.unwrap());
+    }
+    for candidate in &report.candidates {
+        let stored = connection
+            .get_curation_candidate(&fixture.workspace_id, &candidate.candidate_id)
+            .map_err(|error| error.to_string())?
+            .unwrap();
+        let selected = selected
+            .iter()
+            .any(|chosen| chosen.candidate_id == candidate.candidate_id);
+        assert_eq!(stored.status, if selected { "applied" } else { "pending" });
+    }
+    let source = connection
+        .get_evidence_span(&source_id)
+        .map_err(|error| error.to_string())?
+        .unwrap();
+    assert_eq!(source.memory_id.as_deref(), Some(created[0].as_str()));
+    let links = connection
+        .list_memory_links_for_memory(&created[0], Some(MemoryLinkRelation::Related))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(links.len(), 1);
+    let link = &links[0];
+    assert!(!link.directed);
+    for memory_id in &created {
+        assert!(link.src_memory_id == *memory_id || link.dst_memory_id == *memory_id);
+    }
+    let details = link.metadata_json.as_deref().unwrap();
+    for candidate in &selected {
+        assert!(details.contains(&candidate.candidate_id));
+    }
+    let audits = connection
+        .list_audit_by_target("memory_link", &link.id, None)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(audits.len(), 1);
+    let audit_count = connection
+        .list_audit_entries(Some(&fixture.workspace_id), None)
+        .map_err(|error| error.to_string())?
+        .len();
+    for candidate in selected {
+        assert_eq!(
+            apply_arc(&fixture, &candidate.candidate_id, false)?.application.status,
+            "already_applied"
+        );
+    }
+    assert_eq!(
+        connection
+            .list_memories(&fixture.workspace_id, None, false)
+            .map_err(|error| error.to_string())?
+            .len(),
+        before + 2
+    );
+    assert_eq!(
+        connection
+            .list_audit_entries(Some(&fixture.workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len(),
+        audit_count
+    );
+    Ok(())
+}
