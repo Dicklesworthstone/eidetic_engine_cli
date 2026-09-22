@@ -96,6 +96,17 @@ abort_if_strict() {
 
 emit_event "safety_harness_setup" "setup" "passed" "0" "" "fixture_dir=$FIXTURE_DIR"
 
+# Check the shared assertion oracle before trusting any per-FM result. These
+# controls use a test double; they do not establish that real repairs work.
+if python3 "$REPO_ROOT/tests/doctor_fixtures/assertion_contract.py"; then
+    emit_event "safety_harness_sub" "assertion-contract" "passed" "0" "" ""
+else
+    echo "safety harness: doctor fixture assertion contract failed" >&2
+    emit_event "safety_harness_sub" "assertion-contract" "failed" "1" "safety_harness_sub_failed" ""
+    emit_event "safety_harness_summary" "summary" "failed" "1" "safety_harness_sub_failed" "assertion-contract"
+    exit 1
+fi
+
 # Fixture suite gate. While bd-2oh15 is in_progress and the directory
 # is missing or empty, this is the expected condition.
 if [ ! -d "$FIXTURE_DIR" ]; then
