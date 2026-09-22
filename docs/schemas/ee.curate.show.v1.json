@@ -131,7 +131,7 @@
         },
         "sharedEvidenceSpans": {
           "type": "array",
-          "description": "Already owned sources reused only by the exact explicitly approved session-arc peer. These are not new attachments and retain ownerMemoryId.",
+          "description": "Already owned sources retained by their verified original owner. Reuse requires an explicitly applied reciprocal peer, or an independently approved episode reconstructed from the same exact evidence window. Shared sources are not new attachments; unrelated episodes never become reciprocal links.",
           "items": {
             "type": "object",
             "required": ["evidenceSpanId", "contentHash", "ownerMemoryId"],
