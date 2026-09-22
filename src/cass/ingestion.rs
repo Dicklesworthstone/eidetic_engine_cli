@@ -9,6 +9,7 @@
 use crate::policy::{ExternalIngestionScreenReport, screen_external_text_for_ingestion};
 
 pub(super) const MAX_EXCERPT_BYTES: usize = 65_536;
+const MAX_TEXT_BODIES: usize = 256;
 const REDACTED_TAIL: &str = "\n[REDACTED:truncated_source]";
 const TRUNCATED_TAIL: &str = "\n[TRUNCATED]";
 
@@ -31,9 +32,9 @@ pub(super) fn screen_excerpt(content: &str) -> ExternalIngestionScreenReport {
     screen
 }
 
-/// Preserve one existing message-body string, including nested CASS wrappers.
-/// This is an excerpt, not a new transcript record: no field is removed or
-/// reclassified. Source offsets still identify the complete original line.
+/// Preserve existing message text, including typed blocks and CASS wrappers.
+/// This is an excerpt, not a new transcript record: no field or block is removed
+/// or reclassified. Source offsets still identify the complete original line.
 fn bounded_record(screen: &ExternalIngestionScreenReport) -> Option<ExternalIngestionScreenReport> {
     let original_class = crate::policy::classify_transcript_record(&screen.content);
     if screen.instruction_like || !original_class.is_indexable() {
@@ -55,6 +56,8 @@ fn bounded_record(screen: &ExternalIngestionScreenReport) -> Option<ExternalInge
     {
         return None;
     }
+    // A replacement in a decoded object key must not introduce ambiguity.
+    let _: UniqueJson = serde_json::from_str(&projected.content).ok()?;
     projected.redacted |= screen.redacted;
     projected
         .redacted_reasons
@@ -67,28 +70,47 @@ fn bounded_record(screen: &ExternalIngestionScreenReport) -> Option<ExternalInge
 
     let mut value: serde_json::Value = serde_json::from_str(&projected.content).ok()?;
     let mut paths = Vec::new();
-    collect_body_paths(&value, "", 0, &mut paths);
-    if paths.len() != 1 {
+    collect_body_paths(&value, "", 0, &mut paths)?;
+    if paths.is_empty() {
         return None;
     }
-    let path = &paths[0];
-    let body = value.pointer(path)?.as_str()?.to_owned();
-    *value.pointer_mut(path)? = serde_json::Value::String(String::new());
+    let mut bodies = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let body = value.pointer_mut(path)?;
+        let serde_json::Value::String(text) = body.take() else {
+            return None;
+        };
+        *body = serde_json::Value::String(String::new());
+        bodies.push(text);
+    }
     let overhead = serde_json::to_string(&value).ok()?.len();
     let marker = if projected.redacted {
         REDACTED_TAIL
     } else {
         TRUNCATED_TAIL
     };
-    let marker_bytes = serde_json::to_string(marker).ok()?.len().checked_sub(2)?;
+    // Reserve a marker for every body before dividing the byte allowance.
+    // Unchanged short bodies need no marker, so actual output may be smaller.
+    let marker_bytes = json_string_bytes(marker).checked_mul(paths.len())?;
     let budget = MAX_EXCERPT_BYTES
         .checked_sub(overhead)?
         .checked_sub(marker_bytes)?;
-    let prefix = json_string_prefix(&body, budget);
-    if prefix.trim().is_empty() {
+    let lengths: Vec<_> = bodies.iter().map(|body| json_string_bytes(body)).collect();
+    let per_body = shared_text_budget(&lengths, budget);
+    let mut retained_text = false;
+    for (path, body) in paths.iter().zip(&bodies) {
+        let prefix = json_string_prefix(body, per_body);
+        retained_text |= !prefix.trim().is_empty();
+        let text = if prefix.len() == body.len() {
+            body.clone()
+        } else {
+            format!("{prefix}{marker}")
+        };
+        *value.pointer_mut(path)? = serde_json::Value::String(text);
+    }
+    if !retained_text {
         return None;
     }
-    *value.pointer_mut(path)? = serde_json::Value::String(format!("{prefix}{marker}"));
     let excerpt = serde_json::to_string(&value).ok()?;
     if excerpt.len() > MAX_EXCERPT_BYTES
         || crate::policy::classify_transcript_record(&excerpt) != original_class
@@ -99,23 +121,83 @@ fn bounded_record(screen: &ExternalIngestionScreenReport) -> Option<ExternalInge
     Some(projected)
 }
 
+/// Follow only transcript envelope fields. Never visit arbitrary metadata or
+/// quoted objects in a body. Mixed tool/media/unknown arrays are not converted
+/// into text-only messages, even when their large text block would fit alone.
 fn collect_body_paths(
     value: &serde_json::Value,
     prefix: &str,
     depth: usize,
     paths: &mut Vec<String>,
-) {
+) -> Option<()> {
     if depth >= 8 {
-        return;
+        return None;
     }
-    if value.get("content").is_some_and(serde_json::Value::is_string) {
-        paths.push(format!("{prefix}/content"));
+    match value.get("content") {
+        Some(serde_json::Value::String(_)) => paths.push(format!("{prefix}/content")),
+        Some(serde_json::Value::Array(blocks)) => {
+            if blocks.len() > MAX_TEXT_BODIES {
+                return None;
+            }
+            for (index, block) in blocks.iter().enumerate() {
+                if !matches!(
+                    block.get("type").and_then(serde_json::Value::as_str),
+                    Some("text" | "input_text" | "output_text")
+                ) || !block.get("text").is_some_and(serde_json::Value::is_string)
+                {
+                    return None;
+                }
+                paths.push(format!("{prefix}/content/{index}/text"));
+            }
+        }
+        Some(_) => return None,
+        None => {}
+    }
+    // Codex event_msg payloads use message: "..." instead of content: "...".
+    if value.get("message").is_some_and(serde_json::Value::is_string) {
+        paths.push(format!("{prefix}/message"));
+    }
+    if paths.len() > MAX_TEXT_BODIES {
+        return None;
     }
     for field in ["message", "payload"] {
         if let Some(nested) = value.get(field).filter(|nested| nested.is_object()) {
-            collect_body_paths(nested, &format!("{prefix}/{field}"), depth + 1, paths);
+            collect_body_paths(nested, &format!("{prefix}/{field}"), depth + 1, paths)?;
         }
     }
+    Some(())
+}
+
+/// Largest common encoded prefix allowance that fits the total text budget.
+/// Small blocks consume only their actual length, leaving space for long ones.
+/// This keeps later repairs/results reachable without ranking or dropping text.
+fn shared_text_budget(lengths: &[usize], budget: usize) -> usize {
+    let mut low = 0;
+    let mut high = budget;
+    while low < high {
+        let middle = low + (high - low) / 2 + 1;
+        let required = lengths
+            .iter()
+            .fold(0_usize, |sum, length| sum.saturating_add((*length).min(middle)));
+        if required <= budget {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
+}
+
+fn json_char_bytes(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' => 2,
+        '\u{0000}'..='\u{001f}' => 6,
+        _ => ch.len_utf8(),
+    }
+}
+
+fn json_string_bytes(text: &str) -> usize {
+    text.chars().map(json_char_bytes).sum()
 }
 
 /// Largest UTF-8 prefix whose JSON string payload fits, excluding outer quotes.
@@ -123,11 +205,7 @@ fn collect_body_paths(
 fn json_string_prefix(text: &str, mut bytes: usize) -> &str {
     let mut end = 0;
     for (index, ch) in text.char_indices() {
-        let width = match ch {
-            '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' => 2,
-            '\u{0000}'..='\u{001f}' => 6,
-            _ => ch.len_utf8(),
-        };
+        let width = json_char_bytes(ch);
         if width > bytes {
             break;
         }
@@ -368,43 +446,58 @@ mod tests {
                 model: None,
                 started_at: None,
                 ended_at: None,
-                message_count: 2,
+                message_count: 8,
                 token_count: None,
                 content_hash: format!("blake3:{}", blake3::hash(b"structured").to_hex()),
                 metadata_json: None,
             },
         )?;
         let token = format!("{}{}", "ghp_", "Q".repeat(36));
-        for redacted in [false, true] {
-            let id = EvidenceId::from_uuid(Uuid::from_u128(603 + u128::from(redacted))).to_string();
-            let body = format!(
-                "{}{}",
-                "Build succeeded. ".repeat(5000),
-                if redacted { format!("label-{token}") } else { String::new() }
-            );
-            let original = json!({
-                "type": "assistant",
-                "message": {"role": "assistant", "content": body},
-                "metadata": {"finish": "complete", "counts": [1, 2], "cached": false}
-            });
+        let clean = "Build succeeded. ".repeat(5000);
+        let redacted_body = format!("{clean} label-{token}");
+        let records = [
+            (json!({"type": "assistant", "message": {"role": "assistant", "content": clean}, "metadata": {"finish": "complete", "counts": [1, 2], "cached": false}}), false),
+            (json!({"type": "assistant", "message": {"role": "assistant", "content": redacted_body}}), true),
+            (json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": clean}, {"type": "text", "text": "Final repair verified."}]}}), false),
+            (json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": clean}]}}), false),
+            (json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redacted_body}]}}), true),
+            (json!({"type": "event_msg", "payload": {"type": "agent_message", "message": clean}}), false),
+        ];
+        for (index, (original, redacted)) in records.into_iter().enumerate() {
+            let id = EvidenceId::from_uuid(Uuid::from_u128(603 + index as u128)).to_string();
+            let line = 7 + index as u32;
             let raw = original.to_string();
             let old = super::super::truncate_excerpt(&raw, MAX_EXCERPT_BYTES);
             assert!(serde_json::from_str::<serde_json::Value>(&old).is_err());
-            let row = parse(&raw)?;
+            let input_line = json!({"line": line, "content": raw});
+            let row = parse_view_line_value(&input_line, "/tmp/source.jsonl")?;
             let mut decoded: serde_json::Value = serde_json::from_str(&row.excerpt)?;
             assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
             assert_eq!(row.redacted, redacted);
-            assert_eq!((row.start_line, row.end_line), (7, 7));
-            assert_eq!(row.cass_span_id, "/tmp/source.jsonl:7");
-            let retained = decoded["message"]["content"].as_str().ok_or("missing body")?;
-            let marker = if redacted { REDACTED_TAIL } else { TRUNCATED_TAIL };
-            let prefix = retained.strip_suffix(marker).ok_or("missing truncation marker")?;
-            assert!(body.starts_with(prefix));
-            assert!(prefix.starts_with("Build succeeded."));
-            decoded["message"]["content"] = json!(body);
-            assert_eq!(decoded, original, "only the text body may change");
+            assert_eq!((row.start_line, row.end_line), (line, line));
+            assert_eq!(row.cass_span_id, format!("/tmp/source.jsonl:{line}"));
+            let mut paths = Vec::new();
+            collect_body_paths(&original, "", 0, &mut paths).ok_or("unsupported fixture")?;
+            for path in paths {
+                let body = original.pointer(&path).and_then(serde_json::Value::as_str)
+                    .ok_or("missing original body")?;
+                let retained = decoded.pointer(&path).and_then(serde_json::Value::as_str)
+                    .ok_or("missing retained body")?;
+                let marker = if redacted { REDACTED_TAIL } else { TRUNCATED_TAIL };
+                if retained != body {
+                    let prefix = retained.strip_suffix(marker).ok_or("missing marker")?;
+                    assert!(body.starts_with(prefix));
+                    assert!(!prefix.trim().is_empty());
+                }
+                *decoded.pointer_mut(&path).ok_or("missing retained field")? = json!(body);
+            }
+            assert_eq!(decoded, original, "only text bodies may change");
             assert!(!row.excerpt.contains(&token));
-            assert_eq!(parse(&raw)?, row, "repeat imports keep the same content identity");
+            assert_eq!(
+                parse_view_line_value(&input_line, "/tmp/source.jsonl")?,
+                row,
+                "repeat imports keep the same content identity"
+            );
             assert_eq!(
                 row.content_hash,
                 format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex())
@@ -426,6 +519,21 @@ mod tests {
             assert!(doc.content.contains("Build succeeded."));
             assert!(!doc.content.contains(&token));
         }
+        // Unsafe record kinds stay durable but cannot acquire search/pack
+        // authority through the same importer and DB admission boundary.
+        for (index, role) in ["system", "tool"].into_iter().enumerate() {
+            let id = EvidenceId::from_uuid(Uuid::from_u128(620 + index as u128)).to_string();
+            let raw = json!({"type": "message", "role": role, "content": clean}).to_string();
+            let row = parse_view_line_value(
+                &json!({"line": 20 + index, "content": raw}),
+                "/tmp/source.jsonl",
+            )?;
+            db.insert_evidence_span(&id, &evidence_input(&ws, &session, &row))?;
+            let stored = db.get_evidence_span(&id)?.ok_or("missing quarantined evidence")?;
+            assert_eq!(stored.pack_eligibility, "quarantined");
+            assert_eq!(stored.search_eligibility, "quarantined");
+            assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
+        }
         db.close()?;
         Ok(())
     }
@@ -435,6 +543,7 @@ mod tests {
         let mut text: String = (0..=127).filter_map(char::from_u32).collect();
         text.push_str("資料 🦀 café \\\" end");
         let encoded_len = serde_json::to_string(&text)?.len() - 2;
+        assert_eq!(json_string_bytes(&text), encoded_len);
         for budget in 0..=encoded_len + 1 {
             let prefix = json_string_prefix(&text, budget);
             assert!(text.starts_with(prefix));
@@ -454,7 +563,8 @@ mod tests {
         let row = parse(&raw)?;
         let decoded: serde_json::Value = serde_json::from_str(&row.excerpt)?;
         let retained = decoded["content"].as_str().ok_or("missing text")?;
-        assert!(body.starts_with(retained.strip_suffix(TRUNCATED_TAIL).ok_or("missing marker")?));
+        let prefix = retained.strip_suffix(TRUNCATED_TAIL).ok_or("missing marker")?;
+        assert!(body.starts_with(prefix));
         assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
         assert_eq!(screen_excerpt(&row.excerpt).content, row.excerpt);
         Ok(())
@@ -533,6 +643,96 @@ mod tests {
             serde_json::to_string(&body).expect("encode body")
         );
         assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
-        assert!(!crate::policy::classify_transcript_record(&screen_excerpt(&raw).content).is_indexable());
+        let projected_class = crate::policy::classify_transcript_record(&screen_excerpt(&raw).content);
+        assert!(!projected_class.is_indexable());
+    }
+
+    #[test]
+    fn shared_budget_is_bounded_maximal_and_independent_of_block_order() {
+        for lengths in [vec![0, 0], vec![100, 1, 100], vec![1, 2, 3], vec![usize::MAX; 3]] {
+            for budget in 0..256 {
+                let cap = shared_text_budget(&lengths, budget);
+                let used: usize = lengths.iter().map(|length| (*length).min(cap)).sum();
+                assert!(used <= budget);
+                if cap < budget {
+                    let next: usize = lengths.iter().map(|length| (*length).min(cap + 1)).sum();
+                    assert!(next > budget);
+                }
+                let mut reversed = lengths.clone();
+                reversed.reverse();
+                assert_eq!(shared_text_budget(&reversed, budget), cap);
+            }
+        }
+        assert_eq!(shared_text_budget(&[100_000, 10, 100_000], 1010), 500);
+    }
+
+    #[test]
+    fn later_text_blocks_and_short_repairs_survive_large_earlier_blocks() -> TestResult {
+        let first = "Initial investigation. ".repeat(6000);
+        let last = "Later evidence. ".repeat(6000);
+        let short = "Final repair verified.";
+        let original = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": first, "metadata": {"part": "first"}},
+                    {"type": "text", "text": short},
+                    {"type": "text", "text": last, "metadata": {"part": "last"}}
+                ]
+            }
+        });
+        let row = parse(&original.to_string())?;
+        let mut decoded: serde_json::Value = serde_json::from_str(&row.excerpt)?;
+        let blocks = decoded["message"]["content"].as_array().ok_or("missing blocks")?;
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[1]["text"], short);
+        for (index, full) in [(0, &first), (2, &last)] {
+            let text = blocks[index]["text"].as_str().ok_or("missing text")?;
+            let prefix = text.strip_suffix(TRUNCATED_TAIL).ok_or("missing marker")?;
+            assert!(full.starts_with(prefix));
+            assert!(prefix.len() > 20_000, "later blocks get a real excerpt too");
+        }
+        decoded["message"]["content"][0]["text"] = json!(first);
+        decoded["message"]["content"][2]["text"] = json!(last);
+        assert_eq!(decoded, original);
+        assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
+        assert_eq!(parse(&original.to_string())?, row);
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_nontext_blocks_are_never_discarded_to_make_a_message_fit() -> TestResult {
+        let body = "Build succeeded. ".repeat(5000);
+        for kind in ["tool_use", "tool_result", "image", "thinking", "future_block"] {
+            let raw = json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": body},
+                    {"type": kind, "text": "not an ordinary message"}
+                ]}
+            }).to_string();
+            assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
+            let row = parse(&raw)?;
+            assert!(!crate::policy::classify_transcript_record(&row.excerpt).is_indexable());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn block_inventory_and_whole_source_scanning_stay_bounded() -> TestResult {
+        let blocks: Vec<_> = (0..=MAX_TEXT_BODIES)
+            .map(|_| json!({"type": "text", "text": "Build succeeded. ".repeat(20)}))
+            .collect();
+        let raw = json!({"type": "assistant", "content": blocks}).to_string();
+        assert!(raw.len() > MAX_EXCERPT_BYTES);
+        assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
+        assert!(!crate::policy::classify_transcript_record(&parse(&raw)?.excerpt).is_indexable());
+        let raw = json!({"type": "assistant", "content": "Build succeeded. ".repeat(80_000)})
+            .to_string();
+        let row = parse(&raw)?;
+        assert_eq!(row.redacted_reasons, ["external_ingestion_oversized"]);
+        assert!(row.excerpt.len() < 128);
+        Ok(())
     }
 }
