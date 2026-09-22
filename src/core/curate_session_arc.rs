@@ -16,6 +16,7 @@ pub(super) fn inline_candidates(
     spans: &[StoredEvidenceSpan],
 ) -> Vec<ReviewSessionCandidate> {
     let mut candidates = Vec::new();
+    let mut seen_ids = BTreeSet::new();
     for span in spans {
         if span.workspace_id != workspace_id || span.session_id != session.id {
             continue;
@@ -23,33 +24,50 @@ pub(super) fn inline_candidates(
         let Some(message) = text::message_text(&span.excerpt) else {
             continue;
         };
-        let Some((failure, repair)) = inline_pair(message.as_ref()) else {
-            continue;
-        };
-        let mut failure_span = span.clone();
-        failure_span.excerpt = failure.to_owned();
-        let mut repair_span = span.clone();
-        repair_span.excerpt = repair.to_owned();
-        let topic = review_topic_key(&format!("{failure} {repair}"));
-        candidates.extend(build_session_arc_candidate_pair(
-            workspace_id,
-            session,
-            &topic,
-            &failure_span,
-            &repair_span,
-        ));
+        for (failure, repair) in inline_pairs(message.as_ref()) {
+            let mut failure_span = span.clone();
+            failure_span.excerpt = failure.to_owned();
+            let mut repair_span = span.clone();
+            repair_span.excerpt = repair.to_owned();
+            let topic = review_topic_key(&format!("{failure} {repair}"));
+            let pair = build_session_arc_candidate_pair(
+                workspace_id,
+                session,
+                &topic,
+                &failure_span,
+                &repair_span,
+            );
+            // Repeated observations (or equal compacted lesson content) must
+            // not persist duplicate IDs or leave only one reciprocal member.
+            // Keep the builder's content-bound identities and source package.
+            if pair
+                .iter()
+                .any(|candidate| seen_ids.contains(&candidate.candidate_id))
+            {
+                continue;
+            }
+            for candidate in pair {
+                seen_ids.insert(candidate.candidate_id.clone());
+                candidates.push(candidate);
+            }
+        }
     }
     candidates
 }
 
-fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
+/// Walk the complete admitted message without combining independent episodes.
+/// A successful repair consumes its failure; further successes cannot reuse
+/// it. A later failure replaces an unresolved one, preserving the existing
+/// nearest-failure rule rather than inventing links between interleaved tasks.
+/// Each yielded half borrows one exact technical clause from the source text.
+fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
     let mut failure: Option<&str> = None;
     // Technical tokens and quoted commands stay intact. A bare occurrence of
     // both keywords in a single clause is not evidence of temporal ordering.
-    for part in clauses::split(excerpt) {
+    clauses::split(excerpt).filter_map(move |part| {
         let part = part.trim();
         if part.is_empty() {
-            continue;
+            return None;
         }
         if let Some(previous) = failure
             && resolution_signal(part)
@@ -60,14 +78,21 @@ fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
             if explicit_pair
                 || (previous_topic != "noise" && previous_topic == review_topic_key(part))
             {
+                failure = None;
                 return Some((previous, part));
             }
         }
         if session_arc_failure_signal(part) {
             failure = Some(part);
         }
-    }
-    None
+        None
+    })
+}
+
+// Existing clause-boundary tests also pin the historical first-pair behavior.
+#[cfg(test)]
+fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
+    inline_pairs(excerpt).next()
 }
 
 /// Negative or predicted repairs must not become positive lessons merely
@@ -408,4 +433,108 @@ pub(super) fn persist_pair_link(
         )
         .map_err(map_create_derived_insert_audit_db_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod episode_tests {
+    use super::*;
+
+    const FIRST_FAILURE: &str = "Failure arc: M7.cache.lookup in src/cache.rs failed.";
+    const FIRST_REPAIR: &str = "Fix: M7.cache.lookup was repaired by selecting stable identity bytes.";
+    const SECOND_FAILURE: &str = "Failure arc: M8.index.publish in src/index.rs failed.";
+    const SECOND_REPAIR: &str = "Fix: M8.index.publish was repaired by publishing the complete generation.";
+
+    #[test]
+    fn every_complete_episode_survives_in_source_order() {
+        let source = format!(
+            "{FIRST_FAILURE}\n{FIRST_REPAIR}\n{SECOND_FAILURE}\n{SECOND_REPAIR}"
+        );
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(FIRST_FAILURE, FIRST_REPAIR), (SECOND_FAILURE, SECOND_REPAIR)]
+        );
+        assert_eq!(inline_pair(&source), Some((FIRST_FAILURE, FIRST_REPAIR)));
+    }
+
+    #[test]
+    fn resolved_failures_cannot_be_reused_by_later_successes() {
+        let source = format!(
+            "{FIRST_FAILURE} {FIRST_REPAIR} {FIRST_REPAIR} {SECOND_REPAIR}"
+        );
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(FIRST_FAILURE, FIRST_REPAIR)]
+        );
+    }
+
+    #[test]
+    fn latest_unresolved_failure_is_the_only_candidate_for_a_repair() {
+        let source = format!("{FIRST_FAILURE} {SECOND_FAILURE} {SECOND_REPAIR}");
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(SECOND_FAILURE, SECOND_REPAIR)]
+        );
+    }
+
+    #[test]
+    fn leading_successes_and_unresolved_tails_do_not_manufacture_episodes() {
+        let source = format!("{SECOND_REPAIR} {FIRST_FAILURE} {FIRST_REPAIR} {SECOND_FAILURE}");
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(FIRST_FAILURE, FIRST_REPAIR)]
+        );
+        assert!(inline_pairs(SECOND_REPAIR).next().is_none());
+        assert!(inline_pairs(SECOND_FAILURE).next().is_none());
+        assert!(inline_pairs("").next().is_none());
+    }
+
+    #[test]
+    fn negative_and_predicted_repairs_do_not_close_an_episode() {
+        for unobserved in [
+            "Fix: the cache isn't fixed.",
+            "Fix: the cache was not repaired.",
+            "Fix: the cache will be fixed by stable identity bytes.",
+            "Fix: the cache might be repaired by stable identity bytes.",
+        ] {
+            let source = format!("{FIRST_FAILURE} {unobserved}");
+            assert!(inline_pairs(&source).next().is_none(), "{unobserved}");
+            let source = format!("{source} {SECOND_FAILURE} {SECOND_REPAIR}");
+            assert_eq!(
+                inline_pairs(&source).collect::<Vec<_>>(),
+                [(SECOND_FAILURE, SECOND_REPAIR)]
+            );
+        }
+    }
+
+    #[test]
+    fn earlier_repairs_remain_local_when_later_failures_are_added() {
+        let first = format!("{FIRST_FAILURE} {FIRST_REPAIR}");
+        let combined = format!("{first} {SECOND_FAILURE} {SECOND_REPAIR}");
+        let expected = inline_pairs(&first).collect::<Vec<_>>();
+        assert_eq!(inline_pairs(&combined).take(1).collect::<Vec<_>>(), expected);
+        for (failure, repair) in inline_pairs(&combined) {
+            assert!(combined.contains(failure));
+            assert!(combined.contains(repair));
+            assert!(!repair.contains("Failure arc:"));
+        }
+    }
+
+    #[test]
+    fn repeated_source_episodes_are_extracted_without_cross_pairing() {
+        let source = format!("{FIRST_FAILURE} {FIRST_REPAIR} ").repeat(64);
+        let pairs: Vec<_> = inline_pairs(&source).collect();
+        assert_eq!(pairs.len(), 64);
+        assert!(pairs.iter().all(|pair| *pair == (FIRST_FAILURE, FIRST_REPAIR)));
+    }
+
+    #[test]
+    fn technical_clauses_and_unicode_survive_multiple_episodes_exactly() {
+        let failure = "Failure arc: 資料 `cache.read(\"a.b\"); cache.close()` failed.";
+        let repair = "Fix: ``cache.write(`key`, 2.4); cache.close()`` repaired 資料 lookup.";
+        let source = format!("{failure}\r\n{repair}\r\n{SECOND_FAILURE}\r\n{SECOND_REPAIR}");
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(failure, repair), (SECOND_FAILURE, SECOND_REPAIR)]
+        );
+    }
 }
