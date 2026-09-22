@@ -1174,27 +1174,22 @@ fn backup_degraded_data_json(
     .collect()
 }
 
-/// Immediate successor of each superseded revision, keyed by the revision it
-/// supersedes (bd-tmv70, third site).
+/// Successor hints for complete revision families with one durable terminal.
 ///
-/// V123 moved revision headship out of `valid_to` and into `superseded_at`,
-/// which `StoredMemory` does not carry across the archive boundary. But
-/// `ExportMemoryRecord` ALREADY has `superseded_by` and nothing ever populated
-/// it, so every archive written since V123 records no supersession at all and
-/// the import lineage validator sees a chain of live heads.
+/// Only `superseded_at` establishes whether a row is history. Creation times
+/// cannot establish headship: equivalent RFC 3339 spellings sort differently
+/// as text, and an imported terminal may legitimately predate its ancestors.
+/// An invented outgoing edge would supersede that terminal during restore.
 ///
-/// Ordered exactly as V123's own backfill orders a chain -- `(created_at, id)`
-/// -- so the archive agrees with the migration that defined the ordering rather
-/// than inventing a second one.
-///
-/// Scoped to the exported set on purpose. A revision whose successor is not in
-/// this archive is the newest thing the archive knows about, and claiming it is
-/// superseded by a row the importer will never see would be a worse lie than
-/// leaving it as the head.
+/// Order historical rows by creation instant and ID, matching the database's
+/// deterministic tie-break, then place the durable terminal last. Ambiguous
+/// families get no inferred edges; their explicit nullable markers still
+/// export, so omitted hints cannot trigger legacy expiry-based supersession.
 fn superseded_by_within_export(
     memories: &[StoredMemory],
     logical_ids_by_memory: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+    superseded_at_by_memory: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, DomainError> {
     let mut chains: BTreeMap<&str, Vec<&StoredMemory>> = BTreeMap::new();
     for memory in memories {
         let root = logical_ids_by_memory
@@ -1203,20 +1198,34 @@ fn superseded_by_within_export(
         chains.entry(root).or_default().push(memory);
     }
     let mut superseded_by = BTreeMap::new();
-    for (_, mut chain) in chains {
-        if chain.len() < 2 {
+    for (_, chain) in chains {
+        if chain.len() < 2
+            || chain
+                .iter()
+                .filter(|memory| !superseded_at_by_memory.contains_key(&memory.id))
+                .count()
+                != 1
+        {
             continue;
         }
-        chain.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        let mut chain = chain
+            .into_iter()
+            .map(|memory| {
+                let created_at = chrono::DateTime::parse_from_rfc3339(&memory.created_at)
+                    .map_err(|_| work_history_error("invalid durable revision timestamp"))?;
+                Ok((
+                    !superseded_at_by_memory.contains_key(&memory.id),
+                    created_at,
+                    memory.id.as_str(),
+                ))
+            })
+            .collect::<Result<Vec<_>, DomainError>>()?;
+        chain.sort_unstable();
         for pair in chain.windows(2) {
-            superseded_by.insert(pair[0].id.clone(), pair[1].id.clone());
+            superseded_by.insert(pair[0].2.to_owned(), pair[1].2.to_owned());
         }
     }
-    superseded_by
+    Ok(superseded_by)
 }
 
 struct BackupExportData {
@@ -5657,10 +5666,11 @@ fn load_export_data_in_current_snapshot(
         workspace_builder = workspace_builder.name(name);
     }
 
-    let superseded_by_by_memory = superseded_by_within_export(&memories, &logical_ids_by_memory);
     let superseded_at_by_memory = connection
         .list_memory_supersession_markers(&workspace_row.id)
         .map_err(work_history_error)?;
+    let superseded_by_by_memory =
+        superseded_by_within_export(&memories, &logical_ids_by_memory, &superseded_at_by_memory)?;
 
     Ok(BackupExportData {
         workspace_row,
@@ -5726,7 +5736,7 @@ fn render_records(
             // Without this the archive records no headship at all post-V123,
             // and restore cannot tell a superseded revision from the head.
             record.superseded_by = data.superseded_by_by_memory.get(&memory.id).cloned();
-            record.superseded_at = data.superseded_at_by_memory.get(&memory.id).cloned();
+            record.superseded_at = Some(data.superseded_at_by_memory.get(&memory.id).cloned());
             exporter
                 .write_memory(record)
                 .map_err(io_error("write backup memory record"))?;
@@ -15283,17 +15293,11 @@ mod tests {
     fn the_export_chain_order_and_the_database_agree_on_which_revision_is_the_head() -> TestResult {
         // bd-tmv70, the fourth claim in the form that actually applies.
         //
-        // There are now TWO independent ways to decide which revision is the
-        // head of a chain: the database's `superseded_at` column, read through
-        // filter_current_memory_ids, and the export's own (created_at, id)
-        // chain ordering, which is what populates `superseded_by`. The export
-        // does NOT read the first to produce the second, so nothing forces them
-        // to agree -- and a disagreement between two answers to "which row is
-        // current" is precisely the bug class this whole bead is about.
-        //
-        // This asserts they agree on a real chain. If a future change reorders
-        // one of them, this fails rather than silently writing an archive whose
-        // idea of the head differs from the store's.
+        // The export now reads the database's `superseded_at` markers when
+        // constructing successor hints. Its terminal must match the live
+        // authority queried through filter_current_memory_ids, even when
+        // timestamp spellings or restored creation order are misleading.
+        // This integration assertion protects that agreement on a real chain.
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let workspace_record =
@@ -15351,7 +15355,7 @@ mod tests {
             .filter_current_memory_ids(&candidate_ids)
             .map_err(|error| error.to_string())?;
 
-        // Method B: rows the export's chain ordering left without a successor.
+        // Method B: rows the export's durable-marker hints leave terminal.
         let export_heads = data
             .memories
             .iter()

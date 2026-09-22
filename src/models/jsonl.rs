@@ -957,6 +957,15 @@ pub struct ExportAttemptFamilyRecord {
     pub origin: Option<String>,
 }
 
+/// Preserve the distinction between an omitted legacy field and explicit null.
+#[allow(clippy::option_option)]
+fn deserialize_superseded_at<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 /// Export memory record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportMemoryRecord {
@@ -1015,9 +1024,15 @@ pub struct ExportMemoryRecord {
     pub source_agent: Option<String>,
     pub provenance_uri: Option<String>,
     /// Revision supersession is independent of the author's temporal expiry.
-    /// Older archives may carry only `superseded_by` or legacy `valid_to`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub superseded_at: Option<String>,
+    /// Omitted means a legacy archive may require `valid_to` inference; null
+    /// explicitly preserves an unsuperseded row. A timestamp preserves history.
+    #[allow(clippy::option_option)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_superseded_at"
+    )]
+    pub superseded_at: Option<Option<String>>,
     pub superseded_by: Option<String>,
     pub supersedes: Option<String>,
     pub redacted: bool,
@@ -1353,7 +1368,7 @@ impl ExportMemoryRecordBuilder {
             expires_at: self.expires_at,
             source_agent: self.source_agent,
             provenance_uri: self.provenance_uri,
-            superseded_at: self.superseded_at,
+            superseded_at: self.superseded_at.map(Some),
             superseded_by: self.superseded_by,
             supersedes: self.supersedes,
             redacted: self.redacted,
@@ -2486,6 +2501,43 @@ mod tests {
         let decoded: ExportMemoryRecord =
             serde_json::from_str(&encoded).expect("memory deserializes");
         assert_eq!(decoded.content, content);
+    }
+
+    #[test]
+    fn export_memory_supersession_preserves_omission_null_and_timestamp() {
+        let memory = ExportMemoryRecord::builder()
+            .memory_id("mem-001")
+            .workspace_id("ws-123")
+            .level("procedural")
+            .kind("rule")
+            .content("A retained revision.")
+            .created_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("required fields");
+        let legacy = serde_json::to_value(&memory).expect("legacy record serializes");
+        assert!(legacy.get("superseded_at").is_none());
+        for wire_marker in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::Value::String("2026-05-01T12:00:00Z".to_owned())),
+        ] {
+            let mut wire = legacy.clone();
+            if let Some(marker) = wire_marker.as_ref() {
+                wire["superseded_at"] = marker.clone();
+            }
+            let parsed: ExportMemoryRecord =
+                serde_json::from_value(wire).expect("nullable marker parses");
+            let expected = wire_marker
+                .as_ref()
+                .map(|marker| marker.as_str().map(str::to_owned));
+            assert_eq!(parsed.superseded_at, expected);
+            assert_eq!(
+                serde_json::to_value(parsed)
+                    .expect("record reserializes")
+                    .get("superseded_at"),
+                wire_marker.as_ref()
+            );
+        }
     }
 
     #[test]

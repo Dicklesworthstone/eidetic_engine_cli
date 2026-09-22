@@ -225,6 +225,185 @@ fn recovery_rejects_an_unexpected_supersession_even_with_identical_rows() -> Tes
         .expect_err("retiring a live head must block publication");
     assert!(error.message().contains("revision supersession differs"));
     assert!(!error.to_string().contains(head));
+    let audits = fixture
+        .db
+        .list_audit_entries(Some(&fixture.workspace), None)
+        .map_err(|e| e.to_string())?;
+    let repeated =
+        import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+    assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
+    assert!(
+        repeated
+            .issues
+            .iter()
+            .any(|issue| issue.code == "reimport_divergent_revision_chain")
+    );
+    assert_eq!(
+        (repeated.memories_imported, repeated.links_imported),
+        (0, 0)
+    );
+    assert_eq!(
+        fixture
+            .db
+            .list_audit_entries(Some(&fixture.workspace), None)
+            .map_err(|e| e.to_string())?,
+        audits
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_superseded_at(head)
+            .map_err(|e| e.to_string())?
+            .as_deref(),
+        Some("2026-05-04T00:00:00Z")
+    );
+    Ok(())
+}
+
+#[test]
+fn reimport_rejects_corrupted_edge_declared_head_before_any_write() -> TestResult {
+    for reverse_reference in [false, true] {
+        let mut records = rows();
+        let prior = records[1]["memory_id"].clone();
+        let head = records[3]["memory_id"].as_str().ok_or("head")?.to_owned();
+        records[1]["valid_to"] = json!("2028-12-01T00:00:00Z");
+        records[3]["valid_to"] = json!("2029-12-01T00:00:00Z");
+        records[3]["logical_id"] = prior.clone();
+        if reverse_reference {
+            records[3]["supersedes"] = prior;
+        } else {
+            records[1]["superseded_by"] = json!(head);
+        }
+        let fixture = Fixture::new(&records)?;
+        fixture.verify().map_err(|e| e.to_string())?;
+        let before = fixture
+            .db
+            .list_memories(&fixture.workspace, None, true)
+            .map_err(|e| e.to_string())?;
+        let audits = fixture
+            .db
+            .list_audit_entries(Some(&fixture.workspace), None)
+            .map_err(|e| e.to_string())?;
+        assert!(
+            fixture
+                .db
+                .restore_imported_memory_supersession(&head, "2026-05-04T00:00:00Z")
+                .map_err(|e| e.to_string())?
+        );
+        let repeated =
+            import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
+        assert!(
+            repeated
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_revision_chain")
+        );
+        assert_eq!(
+            (repeated.memories_imported, repeated.links_imported),
+            (0, 0)
+        );
+        assert_eq!(
+            fixture
+                .db
+                .get_memory_superseded_at(&head)
+                .map_err(|e| e.to_string())?
+                .as_deref(),
+            Some("2026-05-04T00:00:00Z")
+        );
+        assert_eq!(
+            fixture
+                .db
+                .list_memories(&fixture.workspace, None, true)
+                .map_err(|e| e.to_string())?,
+            before
+        );
+        assert_eq!(
+            fixture
+                .db
+                .list_audit_entries(Some(&fixture.workspace), None)
+                .map_err(|e| e.to_string())?,
+            audits
+        );
+        assert!(fixture.verify().is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn expiring_edge_head_cannot_hide_a_disconnected_current_revision() -> TestResult {
+    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+    for reverse_reference in [false, true] {
+        for explicit_null in [false, true] {
+            let mut records = rows();
+            let prior = records[1]["memory_id"].clone();
+            records[1]["valid_to"] = json!("2028-12-01T00:00:00Z");
+            records[3]["logical_id"] = prior.clone();
+            records[3]["expires_at"] = json!("2029-12-01T00:00:00Z");
+            let mut disconnected = records[3].clone();
+            disconnected["memory_id"] = json!(MemoryId::from_uuid(Uuid::from_u128(44)).to_string());
+            if explicit_null {
+                disconnected["superseded_at"] = JsonValue::Null;
+            } else {
+                disconnected
+                    .as_object_mut()
+                    .ok_or("memory record")?
+                    .remove("expires_at");
+            }
+            if reverse_reference {
+                records[3]["supersedes"] = prior;
+            } else {
+                records[1]["superseded_by"] = records[3]["memory_id"].clone();
+            }
+            records.insert(5, disconnected);
+            records[0]["record_count"] = json!(7);
+            records[7]["total_records"] = json!(8);
+            records[7]["memory_count"] = json!(3);
+            let source = source_text(&records);
+            assert!(!parse_jsonl_source(&source).has_errors());
+            for dry_run in [false, true] {
+                for verified_backup in [false, true] {
+                    let case =
+                        format!("{reverse_reference}-{explicit_null}-{dry_run}-{verified_backup}");
+                    let options = JsonlImportOptions {
+                        workspace_path: root.path().join(format!("workspace-{case}")),
+                        database_path: Some(root.path().join(format!("database-{case}/ee.db"))),
+                        source_path: root.path().join(format!("source-{case}.jsonl")),
+                        dry_run,
+                    };
+                    fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
+                    let report = if verified_backup {
+                        import_verified_backup_jsonl_records(&options)
+                    } else {
+                        import_jsonl_records(&options)
+                    }
+                    .map_err(|e| e.to_string())?;
+                    assert_eq!(report.status, "rejected", "{case}: {:?}", report.issues);
+                    assert!(
+                        report
+                            .issues
+                            .iter()
+                            .any(|issue| issue.code == "invalid_memory_lineage"),
+                        "{case}: {:?}",
+                        report.issues
+                    );
+                    assert_eq!((report.memories_imported, report.links_imported), (0, 0));
+                    assert!(!options.workspace_path.exists(), "{case}");
+                    assert!(
+                        !database_path(&options)
+                            .parent()
+                            .ok_or("database parent")?
+                            .exists(),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&options.source_path).map_err(|e| e.to_string())?,
+                        source
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -254,6 +433,221 @@ fn legacy_expiry_only_history_still_recovers_its_current_head() -> TestResult {
             BTreeSet::from([head])
         );
         fixture.verify().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn expiring_null_head_with_tombstoned_sibling(expiry_field: &str) -> Vec<JsonValue> {
+    let mut records = rows();
+    records[1]["superseded_at"] = JsonValue::Null;
+    records[1][expiry_field] = json!("2099-01-01T00:00:00Z");
+    records[3]["logical_id"] = records[1]["memory_id"].clone();
+    records[3]["superseded_at"] = JsonValue::Null;
+    records[3]["created_at"] = json!("2026-05-02T00:00:00Z");
+    records[3]["tombstoned_at"] = json!("2026-05-03T00:00:00Z");
+    records
+}
+
+#[test]
+fn explicit_null_keeps_expiring_head_while_omission_retains_legacy_inference() -> TestResult {
+    for expiry_field in ["valid_to", "expires_at"] {
+        for explicit_null in [false, true] {
+            let mut records = expiring_null_head_with_tombstoned_sibling(expiry_field);
+            if !explicit_null {
+                for index in [1, 3] {
+                    records[index]
+                        .as_object_mut()
+                        .ok_or("memory record")?
+                        .remove("superseded_at");
+                }
+            }
+            let head = records[1]["memory_id"].as_str().ok_or("head")?.to_owned();
+            let sibling = records[3]["memory_id"]
+                .as_str()
+                .ok_or("sibling")?
+                .to_owned();
+            let fixture = Fixture::new(&records)?;
+            assert_eq!(
+                fixture
+                    .db
+                    .get_memory_superseded_at(&head)
+                    .map_err(|e| e.to_string())?
+                    .as_deref(),
+                if explicit_null {
+                    None
+                } else {
+                    Some("2099-01-01T00:00:00Z")
+                },
+                "{expiry_field}, explicit_null={explicit_null}"
+            );
+            assert!(
+                fixture
+                    .db
+                    .get_memory_superseded_at(&sibling)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+            );
+            assert_eq!(
+                fixture
+                    .db
+                    .get_memory(&head)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("restored head")?
+                    .valid_to
+                    .as_deref(),
+                Some("2099-01-01T00:00:00Z")
+            );
+            assert_eq!(
+                fixture
+                    .db
+                    .filter_current_memory_ids(&[head.clone(), sibling])
+                    .map_err(|e| e.to_string())?,
+                if explicit_null {
+                    BTreeSet::from([head])
+                } else {
+                    BTreeSet::new()
+                },
+                "expiry must not retire a modern head because a later tombstoned sibling exists"
+            );
+            fixture.verify().map_err(|e| e.to_string())?;
+            let repeated = import_verified_backup_jsonl_records(&fixture.options)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(repeated.status, "completed", "{:?}", repeated.issues);
+            assert_eq!(repeated.memories_imported, 0);
+            assert_eq!(repeated.memories_skipped_duplicate, 2);
+            fixture.verify().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_null_expiry_rejects_corrupt_headship_in_verification_and_reimport() -> TestResult {
+    let records = expiring_null_head_with_tombstoned_sibling("valid_to");
+    let fixture = Fixture::new(&records)?;
+    fixture.verify().map_err(|e| e.to_string())?;
+    let head = records[1]["memory_id"].as_str().ok_or("head")?;
+    let before = fixture
+        .db
+        .list_memories(&fixture.workspace, None, true)
+        .map_err(|e| e.to_string())?;
+    let audits = fixture
+        .db
+        .list_audit_entries(Some(&fixture.workspace), None)
+        .map_err(|e| e.to_string())?;
+    assert!(
+        fixture
+            .db
+            .restore_imported_memory_supersession(head, "2026-05-04T00:00:00Z")
+            .map_err(|e| e.to_string())?
+    );
+    assert_eq!(
+        fixture
+            .db
+            .list_memories(&fixture.workspace, None, true)
+            .map_err(|e| e.to_string())?,
+        before
+    );
+    let error = fixture.verify().expect_err(
+        "a modern null marker is an exact recovery obligation even when the row expires",
+    );
+    assert!(error.message().contains("revision supersession differs"));
+    assert!(!error.message().contains(head));
+    let repeated =
+        import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+    assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
+    assert_eq!(
+        (repeated.memories_imported, repeated.links_imported),
+        (0, 0)
+    );
+    assert!(
+        repeated
+            .issues
+            .iter()
+            .any(|issue| issue.code == "reimport_divergent_revision_chain")
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_superseded_at(head)
+            .map_err(|e| e.to_string())?
+            .as_deref(),
+        Some("2026-05-04T00:00:00Z")
+    );
+    assert_eq!(
+        fixture
+            .db
+            .list_audit_entries(Some(&fixture.workspace), None)
+            .map_err(|e| e.to_string())?,
+        audits
+    );
+    assert_eq!(
+        fixture
+            .db
+            .list_memories(&fixture.workspace, None, true)
+            .map_err(|e| e.to_string())?,
+        before
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_null_conflicts_are_rejected_before_destination_creation() -> TestResult {
+    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+    for dry_run in [false, true] {
+        for case in ["multiple_heads", "successor", "predecessor"] {
+            let mut records = rows();
+            records[1]["superseded_at"] = JsonValue::Null;
+            records[1]["valid_to"] = json!("2026-04-30T00:00:00Z");
+            records[3]["logical_id"] = records[1]["memory_id"].clone();
+            records[3]["superseded_at"] = JsonValue::Null;
+            records[3]["expires_at"] = json!("2026-04-30T00:00:00Z");
+            match case {
+                "successor" => records[1]["superseded_by"] = records[3]["memory_id"].clone(),
+                "predecessor" => records[3]["supersedes"] = records[1]["memory_id"].clone(),
+                _ => {}
+            }
+            let options = JsonlImportOptions {
+                workspace_path: root.path().join(format!("workspace-{dry_run}-{case}")),
+                database_path: Some(root.path().join(format!("database-{dry_run}-{case}/ee.db"))),
+                source_path: root.path().join(format!("source-{dry_run}-{case}.jsonl")),
+                dry_run,
+            };
+            let source = source_text(&records);
+            fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
+            let report =
+                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+            assert_eq!(
+                report.status, "rejected",
+                "{case}, dry_run={dry_run}: {:?}",
+                report.issues
+            );
+            let expected_code = if case == "multiple_heads" {
+                "invalid_memory_lineage"
+            } else {
+                "invalid_memory_supersession"
+            };
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == expected_code),
+                "{case}: {:?}",
+                report.issues
+            );
+            assert_eq!((report.memories_imported, report.links_imported), (0, 0));
+            assert!(!options.workspace_path.exists());
+            assert!(
+                !database_path(&options)
+                    .parent()
+                    .ok_or("database parent")?
+                    .exists()
+            );
+            assert_eq!(
+                fs::read_to_string(&options.source_path).map_err(|e| e.to_string())?,
+                source
+            );
+        }
     }
     Ok(())
 }

@@ -102,6 +102,302 @@ fn source() -> Result<(tempfile::TempDir, PathBuf, PathBuf, String, String, Stri
 }
 
 #[test]
+fn backup_successor_hints_use_durable_headship_and_timestamp_instants() -> TestResult {
+    let (_root, _workspace, database, workspace_id, prior, head) = source()?;
+    let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+    let mut memories = db
+        .list_memories(&workspace_id, None, true)
+        .map_err(|e| e.to_string())?;
+    let mut first = memories
+        .iter()
+        .find(|memory| memory.id == prior)
+        .ok_or("prior revision")?
+        .clone();
+    first.id = MemoryId::from_uuid(Uuid::from_u128(20)).to_string();
+    let first_id = first.id.clone();
+    memories.push(first);
+    db.close().map_err(|e| e.to_string())?;
+    let logical_ids = memories
+        .iter()
+        .map(|memory| (memory.id.clone(), prior.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let markers = BTreeMap::from([
+        (first_id.clone(), "2026-06-01T00:00:00Z".to_owned()),
+        (prior.clone(), "2026-06-01T00:00:00Z".to_owned()),
+    ]);
+    for (first_at, prior_at, head_at) in [
+        (
+            "2026-06-01T00:00:00.000+00:00",
+            "2026-06-01T00:00:00+00:00",
+            "2026-06-01T00:00:00Z",
+        ),
+        (
+            "2026-06-01T00:00:00.000Z",
+            "2026-06-01T00:00:00+00:00",
+            "2026-06-01T00:00:00.000+00:00",
+        ),
+        (
+            "2026-06-01T01:00:00+01:00",
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:00+00:00",
+        ),
+        (
+            "2026-06-02T00:00:00Z",
+            "2026-06-03T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+        ),
+    ] {
+        for memory in &mut memories {
+            memory.created_at = if memory.id == first_id {
+                first_at
+            } else if memory.id == prior {
+                prior_at
+            } else {
+                head_at
+            }
+            .to_owned();
+        }
+        assert_eq!(
+            superseded_by_within_export(&memories, &logical_ids, &markers)
+                .map_err(|e| e.to_string())?,
+            BTreeMap::from([
+                (first_id.clone(), prior.clone()),
+                (prior.clone(), head.clone()),
+            ]),
+            "{first_at}, {prior_at}, {head_at}"
+        );
+    }
+    // A guessed ordering must never manufacture headship for an ambiguous
+    // family, or invent a terminal after every stored row was superseded.
+    let mut ambiguous = markers.clone();
+    ambiguous.remove(&prior);
+    assert!(
+        superseded_by_within_export(&memories, &logical_ids, &ambiguous)
+            .map_err(|e| e.to_string())?
+            .is_empty()
+    );
+    let mut malformed = memories.clone();
+    malformed[0].created_at = "PRIVATE_INVALID_TIMESTAMP".to_owned();
+    let error = superseded_by_within_export(&malformed, &logical_ids, &markers)
+        .expect_err("a malformed timestamp must not produce an arbitrary successor ordering");
+    assert!(
+        error
+            .message()
+            .contains("invalid durable revision timestamp")
+    );
+    assert!(!error.message().contains("PRIVATE_INVALID_TIMESTAMP"));
+    let mut no_terminal = markers;
+    no_terminal.insert(head, "2026-06-04T00:00:00Z".to_owned());
+    assert!(
+        superseded_by_within_export(&memories, &logical_ids, &no_terminal)
+            .map_err(|e| e.to_string())?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn backup_revision_recovery_keeps_expiring_head_with_inverted_timestamp_spellings() -> TestResult {
+    for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+        let (root, workspace, database, _workspace_id, prior, head) = source()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        // These are the same instant, but lexical ordering puts the head
+        // first. The current revision also has a future author expiry, which
+        // must not be mistaken for the old supersession encoding.
+        db.execute_raw(&format!(
+            "UPDATE memories SET created_at = '2026-06-01T01:00:00+01:00' \
+             WHERE id = '{prior}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET created_at = '2026-06-01T00:00:00.000Z', \
+             valid_to = '2099-01-01T00:00:00Z' WHERE id = '{head}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        assert_eq!(
+            db.filter_current_memory_ids(&[prior.clone(), head.clone()])
+                .map_err(|e| e.to_string())?,
+            BTreeSet::from([head.clone()])
+        );
+        db.close().map_err(|e| e.to_string())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: redaction,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let backup = PathBuf::from(&created.backup_path);
+        let lines = fs::read_to_string(backup.join(RECORDS_FILE)).map_err(|e| e.to_string())?;
+        let memories = lines
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|value| value["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1)
+            .map(serde_json::from_value::<ExportMemoryRecord>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let exported_head = crate::output::jsonl_export::redact_identifier(&head, redaction);
+        let head_record = memories
+            .iter()
+            .find(|record| record.memory_id == exported_head)
+            .ok_or("exported current revision")?;
+        assert!(head_record.superseded_by.is_none());
+        assert_eq!(head_record.superseded_at, Some(None));
+        assert_eq!(
+            head_record.valid_to.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        let restored_head = import_memory_id(head_record, redaction).map_err(|e| e.message)?;
+        let exported_prior = crate::output::jsonl_export::redact_identifier(&prior, redaction);
+        let prior_record = memories
+            .iter()
+            .find(|record| record.memory_id == exported_prior)
+            .ok_or("exported historical revision")?;
+        assert_eq!(
+            prior_record.superseded_by.as_deref(),
+            Some(exported_head.as_str())
+        );
+        let restored_prior = import_memory_id(prior_record, redaction).map_err(|e| e.message)?;
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: backup,
+            side_path: root
+                .path()
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .join("restored"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let db =
+            DbConnection::open_file(&result.restored_database_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            db.filter_current_memory_ids(&[restored_prior, restored_head.clone()])
+                .map_err(|e| e.to_string())?,
+            BTreeSet::from([restored_head.clone()])
+        );
+        assert!(
+            db.get_memory_superseded_at(&restored_head)
+                .map_err(|e| e.to_string())?
+                .is_none()
+        );
+        assert_eq!(
+            db.get_memory(&restored_head)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored current revision")?
+                .valid_to
+                .as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        db.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_revision_recovery_preserves_null_markers_beside_a_tombstoned_terminal() -> TestResult {
+    for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+        let (root, workspace, database, _workspace_id, prior, head) = source()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        // A tombstoned later row does not retire the live, expiring revision.
+        // Both markers are null, so this family has no safe successor hints.
+        db.execute_raw(&format!(
+            "UPDATE memories SET superseded_at = NULL WHERE id = '{prior}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        db.restore_imported_memory_tombstone(&head, "2026-06-02T00:00:00Z")
+            .map_err(|e| e.to_string())?;
+        assert_eq!(
+            db.filter_current_memory_ids(&[prior.clone(), head.clone()])
+                .map_err(|e| e.to_string())?,
+            BTreeSet::from([prior.clone()])
+        );
+        db.close().map_err(|e| e.to_string())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: redaction,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let backup = PathBuf::from(&created.backup_path);
+        let lines = fs::read_to_string(backup.join(RECORDS_FILE)).map_err(|e| e.to_string())?;
+        let memories = lines
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|value| value["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1)
+            .collect::<Vec<_>>();
+        assert_eq!(memories.len(), 2);
+        let mut restored_ids = Vec::new();
+        let mut current_id = None;
+        for wire in memories {
+            assert_eq!(wire.get("superseded_at"), Some(&JsonValue::Null));
+            let record: ExportMemoryRecord =
+                serde_json::from_value(wire).map_err(|e| e.to_string())?;
+            assert!(record.superseded_by.is_none());
+            let restored_id = import_memory_id(&record, redaction).map_err(|e| e.message)?;
+            if record.tombstoned_at.is_none() {
+                assert_eq!(record.valid_to.as_deref(), Some("2099-01-01T00:00:00Z"));
+                current_id = Some(restored_id.clone());
+            }
+            restored_ids.push(restored_id);
+        }
+        let current_id = current_id.ok_or("current revision")?;
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: backup,
+            side_path: root
+                .path()
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .join("restored"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let db =
+            DbConnection::open_file(&result.restored_database_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            db.filter_current_memory_ids(&restored_ids)
+                .map_err(|e| e.to_string())?,
+            BTreeSet::from([current_id.clone()])
+        );
+        for id in restored_ids {
+            assert!(
+                db.get_memory_superseded_at(&id)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            db.get_memory(&current_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored current revision")?
+                .valid_to
+                .as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        db.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> TestResult {
     for redaction in [
         RedactionLevel::None,
@@ -139,7 +435,10 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
             .iter()
             .find(|m| m.memory_id == exported_prior)
             .ok_or("exported prior")?;
-        assert_eq!(old.superseded_at.as_deref(), Some("2026-06-01T00:00:00Z"));
+        assert_eq!(
+            old.superseded_at.as_ref().and_then(Option::as_deref),
+            Some("2026-06-01T00:00:00Z")
+        );
         assert_eq!(old.superseded_by.as_deref(), Some(exported_head.as_str()));
         let restored_prior = import_memory_id(old, redaction).map_err(|e| e.message)?;
         let restored_head = import_memory_id(

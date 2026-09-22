@@ -620,6 +620,7 @@ struct PreparedMemory {
     tombstoned_at: Option<String>,
     tombstoned_reason: Option<String>,
     superseded_at: Option<String>,
+    supersession_known: bool,
     bayes_posterior: Option<(f64, f64)>,
     /// bd-multiplicity-aware-trust-p0u7g: attempt-family block restored into
     /// the pointer columns and the family ledger after the memory row lands.
@@ -641,6 +642,7 @@ struct ValidatedMemory<'a> {
     kind: MemoryKind,
     content: MemoryContent,
     superseded_at: Option<String>,
+    supersession_known: bool,
     confidence: Option<f32>,
     utility: f32,
     importance: f32,
@@ -1401,8 +1403,8 @@ fn destination_lineage_issues(
         let fields_changed = revision_roots.contains(memory.logical_id.as_str())
             && (reimport_conflict_issue(&existing, memory).is_some()
                 || typed_fields_conflict_issue(connection, memory)?.is_some());
-        let supersession_changed = if let Some(expected) = &memory.superseded_at {
-            connection.get_memory_superseded_at(&memory.id)?.as_ref() != Some(expected)
+        let supersession_changed = if memory.supersession_known || memory.superseded_at.is_some() {
+            connection.get_memory_superseded_at(&memory.id)? != memory.superseded_at
         } else {
             false
         };
@@ -2112,6 +2114,7 @@ fn validate_memories(
         }
     }
     if issues.is_empty() {
+        let legacy_supersession_ids = revisions::legacy_supersession_ids(&memories);
         let by_id = memories
             .iter()
             .map(|memory| (memory.record.memory_id.as_str(), memory))
@@ -2132,29 +2135,11 @@ fn validate_memories(
                 }
                 Some(root) => {
                     logical_ids.push(root.id.clone());
-                    // bd-tmv70, third site. This decides revision HEADSHIP, and
-                    // V123 moved that fact out of `valid_to`: "IDENTITY (which
-                    // row is the current revision?) -> superseded_at, and it
-                    // must ignore valid_to entirely." The archive carries that
-                    // fact as `superseded_by`, which this check never consulted,
-                    // so every post-V123 archive of a revised memory arrived
-                    // looking like a chain of live heads and was REJECTED
-                    // outright -- before derive_supersession_for_memory_ids, the
-                    // post-insert repair meant to resolve it, could ever run.
-                    //
-                    // THIS IS A WIDENING, NOT A TIGHTENING, and the legacy arm
-                    // is why. A PRE-V123 archive encodes supersession in
-                    // `valid_to` because that column carried both facts, so
-                    // keying headship on `superseded_by` alone would reject
-                    // every archive written before the split. Both markers are
-                    // therefore accepted, and a row is history if EITHER says
-                    // so. The gate still refuses the thing it exists to refuse:
-                    // two revisions in one chain that claim headship by
-                    // carrying NO marker at all.
+                    // Only an expiry-only legacy row permits headship
+                    // inference. Explicit nulls and both endpoints of a
+                    // successor edge preserve headship even when they expire.
                     let is_history = memory.superseded_at.is_some()
-                        || record.superseded_by.is_some()
-                        || record.valid_to.is_some()
-                        || record.expires_at.is_some()
+                        || legacy_supersession_ids.contains(&memory.id)
                         || record.tombstoned_at.is_some();
                     if !is_history && !live_heads.insert(root.id.clone()) {
                         Some("revision chain has more than one live head")
@@ -2174,6 +2159,7 @@ fn validate_memories(
         if issues.is_empty() {
             for (memory, logical_id) in memories.iter_mut().zip(logical_ids) {
                 memory.logical_id = logical_id;
+                memory.supersession_known = !legacy_supersession_ids.contains(&memory.id);
             }
         }
     }
@@ -2306,7 +2292,10 @@ fn validate_memory(
         ("created_at", Some(memory.created_at.as_str())),
         ("updated_at", memory.updated_at.as_deref()),
         ("tombstoned_at", memory.tombstoned_at.as_deref()),
-        ("superseded_at", memory.superseded_at.as_deref()),
+        (
+            "superseded_at",
+            memory.superseded_at.as_ref().and_then(Option::as_deref),
+        ),
         ("valid_from", memory.valid_from.as_deref()),
         ("valid_to", memory.valid_to.as_deref()),
         ("expires_at", memory.expires_at.as_deref()),
@@ -2335,6 +2324,7 @@ fn validate_memory(
         kind,
         content,
         superseded_at: None,
+        supersession_known: false,
         confidence,
         utility,
         importance,
@@ -2474,6 +2464,7 @@ fn prepare_memory(
             .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Row)),
         tombstoned_reason: memory.tombstoned_reason.clone(),
         superseded_at: validated.superseded_at,
+        supersession_known: validated.supersession_known,
         bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),
         typed_fields_json: validated.typed_fields_json,

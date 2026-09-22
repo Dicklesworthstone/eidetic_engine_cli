@@ -19,7 +19,8 @@ fn invalid(reason: &'static str) -> JsonlImportIssue {
 /// Imported identities eligible for the pre-V123 expiry-based fallback.
 ///
 /// Call after validation has checked references, family membership and cycles.
-/// An explicit edge defines the headship of BOTH endpoints; its terminal node
+/// An explicit nullable marker preserves the stored supersession state. An
+/// explicit edge defines the headship of BOTH endpoints; its terminal node
 /// can have an author-supplied expiry without being superseded. Protect these
 /// nodes even when creation timestamps disagree with the explicit edge order.
 /// Do not exclude an entire family: a mixed-era archive may still contain an
@@ -65,7 +66,7 @@ pub(super) fn supersession_timestamps(
     let mut markers = BTreeMap::new();
     for memory in memories {
         let record = memory.record;
-        if let Some(at) = &record.superseded_at {
+        if let Some(Some(at)) = &record.superseded_at {
             markers.insert(
                 record.memory_id.clone(),
                 normalize_imported_timestamp(at, TimestampClass::Validity),
@@ -89,6 +90,11 @@ pub(super) fn supersession_timestamps(
             let next = by_id
                 .get(next_id)
                 .ok_or_else(|| invalid("supersession successor is absent from the archive"))?;
+            if prior.superseded_at == Some(None) {
+                return Err(invalid(
+                    "supersession edge contradicts an explicit unsuperseded predecessor",
+                ));
+            }
             if prior_id == next_id
                 || prior.workspace_id != next.workspace_id
                 || prior.logical_id.as_deref().unwrap_or(prior_id)
@@ -138,7 +144,7 @@ pub(super) fn supersession_timestamps(
     for &head_id in predecessors.keys() {
         let head = by_id[head_id];
         if successors.contains_key(head_id)
-            || head.superseded_at.is_some()
+            || head.superseded_at.as_ref().is_some_and(Option::is_some)
             || head.tombstoned_at.is_some()
         {
             continue;
