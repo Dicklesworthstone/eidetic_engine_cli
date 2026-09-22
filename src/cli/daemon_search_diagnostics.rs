@@ -30,9 +30,7 @@ mod tests {
     fn real_decoder_error_survives_fallback_diagnosis() {
         let error = DaemonSearchResult::from_value(serde_json::Value::Null)
             .expect_err("a null reply cannot be a daemon search result");
-        let reason = Err::<(), _>(error.clone())
-            .map_err(DaemonSearchFallbackReason::search_response_drift)
-            .unwrap_err();
+        let reason = DaemonSearchFallbackReason::search_response_drift(error.clone());
         assert_eq!(reason.as_str(), "search response drift");
         let degradation = daemon_search_fallback_degradation(reason);
         assert_eq!(degradation.code, "daemon_search_fallback");
@@ -79,9 +77,7 @@ mod tests {
     fn serde_decoder_errors_use_the_same_lossless_adapter() {
         let error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         let expected = error.to_string();
-        let reason = Err::<(), _>(error)
-            .map_err(DaemonSearchFallbackReason::search_response_drift)
-            .unwrap_err();
+        let reason = DaemonSearchFallbackReason::search_response_drift(error);
         let degradation = daemon_search_fallback_degradation(reason);
         assert!(
             degradation.message.contains(&expected),
