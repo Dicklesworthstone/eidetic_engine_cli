@@ -14,6 +14,7 @@ enum Token {
     Scalar { unit: String },
     CalendarDate,
     LocalTime,
+    Instant,
     Categorical,
 }
 
@@ -278,10 +279,10 @@ fn claim(text: &str) -> Option<Claim> {
     })
 }
 
-/// An unambiguous Gregorian calendar day or local wall-clock literal.
-/// Do not guess locale-specific date order, relative dates, zones, durations,
-/// leap seconds or versions. A clock does not identify an instant and therefore
-/// cannot be compared with a date. Canonicalization never changes source bytes.
+/// An unambiguous Gregorian day, local clock, or qualified timestamp.
+/// Do not guess locale-specific date order, relative dates, named zones,
+/// durations, leap seconds or versions. Dates and local clocks do not identify
+/// instants. Canonicalization is for comparison only, never source rewriting.
 fn temporal_literal(token: &str) -> Option<(String, Token)> {
     fn digits(bytes: &[u8]) -> Option<u32> {
         bytes.iter().try_fold(0, |value, byte| {
@@ -327,7 +328,85 @@ fn temporal_literal(token: &str) -> Option<(String, Token)> {
             Token::LocalTime,
         ));
     }
-    None
+    instant_literal(token)
+}
+
+/// A deliberately bounded RFC3339 subset: a valid civil date, seconds, and an
+/// explicit UTC offset. Keep fractional seconds as decimal digits instead of
+/// rounding through a float or imposing a nanosecond precision limit. The
+/// resulting whole-second/fraction pair is internal; citations retain the
+/// original offset, spelling and precision. `-00:00` specifies a known UTC
+/// instant with an unknown local offset; comparison does not infer that zone.
+fn instant_literal(token: &str) -> Option<(String, Token)> {
+    let bytes = token.as_bytes();
+    if bytes.len() < 20 || !matches!(bytes[10], b'T' | b't') {
+        return None;
+    }
+    let date = token.get(..10)?;
+    let clock = token.get(11..19)?;
+    if temporal_literal(date)?.1 != Token::CalendarDate
+        || temporal_literal(clock)?.1 != Token::LocalTime
+    {
+        return None;
+    }
+
+    let mut zone_start = 19;
+    let mut fraction = "";
+    if bytes.get(zone_start) == Some(&b'.') {
+        zone_start += 1;
+        let fraction_start = zone_start;
+        while bytes.get(zone_start).is_some_and(u8::is_ascii_digit) {
+            zone_start += 1;
+        }
+        if fraction_start == zone_start {
+            return None;
+        }
+        fraction = token.get(fraction_start..zone_start)?.trim_end_matches('0');
+    }
+    let zone = token.get(zone_start..)?;
+    let offset_seconds = if zone.eq_ignore_ascii_case("Z") {
+        0
+    } else {
+        let zone = zone.as_bytes();
+        if zone.len() != 6
+            || !matches!(zone[0], b'+' | b'-')
+            || zone[3] != b':'
+            || !zone[1..3]
+                .iter()
+                .chain(&zone[4..6])
+                .all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        let hours = i64::from((zone[1] - b'0') * 10 + zone[2] - b'0');
+        let minutes = i64::from((zone[4] - b'0') * 10 + zone[5] - b'0');
+        if hours >= 24 || minutes >= 60 {
+            return None;
+        }
+        let seconds = hours * 3600 + minutes * 60;
+        if zone[0] == b'-' { -seconds } else { seconds }
+    };
+
+    // Date/clock validation above guarantees ASCII fields and years 1..=9999.
+    // Count Gregorian days from 0001-01-01, allowing offset subtraction across
+    // midnight and even outside the local civil year without overflow.
+    let year = date[..4].parse::<i64>().ok()?;
+    let month = date[5..7].parse::<usize>().ok()?;
+    let day = date[8..].parse::<i64>().ok()?;
+    let prior_year = year - 1;
+    let month_starts: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let mut days = 365 * prior_year + prior_year / 4 - prior_year / 100 + prior_year / 400
+        + month_starts[month - 1]
+        + day
+        - 1;
+    if month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        days += 1;
+    }
+    let hours = clock[..2].parse::<i64>().ok()?;
+    let minutes = clock[3..5].parse::<i64>().ok()?;
+    let seconds = clock[6..].parse::<i64>().ok()?;
+    let utc_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds - offset_seconds;
+    Some((format!("{utc_seconds}:{fraction}"), Token::Instant))
 }
 
 /// A signed integer or ordinary decimal, optionally followed by an ASCII unit
@@ -720,6 +799,21 @@ mod tests {
             ("LAUNCH=2026-09-22", "LAUNCH=2026-09-23", "LAUNCH"),
             ("time: 09:30", "time: 10:30", "time"),
             (
+                "START=2026-09-22T09:30:00-04:00",
+                "START=2026-09-22T14:30:00Z",
+                "START",
+            ),
+            (
+                "START=2026-09-22T13:30:00.001Z",
+                "START=2026-09-22T13:30:00.002Z",
+                "START",
+            ),
+            (
+                "The deployment timestamp is 2026-09-22T09:30:00-04:00.",
+                "The deployment timestamp is 2026-09-22T14:30:00Z.",
+                "deployment timestamp",
+            ),
+            (
                 "The production launch date is 2026-09-22.",
                 "The production launch date is 2026-09-23.",
                 "production launch date",
@@ -794,6 +888,11 @@ mod tests {
             ("NO_RETRY=enabled", "NO_RETRY=disabled", "NO_RETRY"),
             ("LAUNCH=2026-09-22", "LAUNCH=2026-09-23", "LAUNCH"),
             ("time: 09:30", "time: 10:30", "time"),
+            (
+                "START=2026-09-22T09:30:00-04:00",
+                "START=2026-09-22T14:30:00Z",
+                "START",
+            ),
         ] {
             let mut candidates: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 4)
                 .map(|index| AskCandidate {
@@ -985,6 +1084,7 @@ mod tests {
             "00:00",
             "23:59",
             "23:59:59",
+            "2026-09-22T09:30:00Z",
         ] {
             assert!(temporal_literal(valid).is_some(), "{valid}");
         }
@@ -1009,7 +1109,6 @@ mod tests {
             "09:30Z",
             "09:30:xx",
             "２０２６-09-22",
-            "2026-09-22T09:30:00Z",
         ] {
             assert!(temporal_literal(invalid).is_none(), "{invalid}");
         }
@@ -1027,13 +1126,18 @@ mod tests {
             "The launch is VALUE if approved.",
             "The launch is approximately VALUE.",
         ] {
-            assert!(
-                !disagreement(
-                    &template.replace("VALUE", "2026-09-22"),
-                    &template.replace("VALUE", "2026-09-23"),
-                ),
-                "{template}"
-            );
+            for (left, right) in [
+                ("2026-09-22", "2026-09-23"),
+                ("2026-09-22T09:30:00Z", "2026-09-23T09:30:00Z"),
+            ] {
+                assert!(
+                    !disagreement(
+                        &template.replace("VALUE", left),
+                        &template.replace("VALUE", right),
+                    ),
+                    "{template}"
+                );
+            }
         }
         assert!(!conflicts(
             "The launch date is 2026-09-22.",
@@ -1041,5 +1145,138 @@ mod tests {
             "The launch date is 2026-09-23.",
             true,
         ));
+    }
+
+    #[test]
+    fn timestamp_offsets_and_fractional_spellings_compare_as_exact_instants() {
+        for (left, right) in [
+            ("2026-09-22T09:30:00-04:00", "2026-09-22T13:30:00Z"),
+            ("2026-01-01T00:15:00+01:00", "2025-12-31T23:15:00Z"),
+            ("2000-03-01T00:00:00+00:01", "2000-02-29T23:59:00Z"),
+            ("1900-03-01T00:00:00+00:01", "1900-02-28T23:59:00Z"),
+            ("2026-09-22T19:15:00+05:45", "2026-09-22T13:30:00Z"),
+            (
+                "2026-09-22t13:30:00.00100z",
+                "2026-09-22T13:30:00.001+00:00",
+            ),
+            ("2026-09-22T13:30:00.000-00:00", "2026-09-22T13:30:00Z"),
+            ("0001-01-01T00:01:00+00:01", "0001-01-01T00:00:00Z"),
+            ("9999-12-31T23:59:59-00:00", "9999-12-31T23:59:59Z"),
+        ] {
+            let left_literal = temporal_literal(left).expect(left);
+            let right_literal = temporal_literal(right).expect(right);
+            assert_eq!(left_literal.1, Token::Instant);
+            assert_eq!(left_literal, right_literal, "{left} / {right}");
+            let left = format!("START={left}");
+            let right = format!("START={right}");
+            assert!(!disagreement(&left, &right));
+            assert!(!disagreement(&right, &left));
+            assert!(settings_compatible(&left, &right));
+        }
+    }
+
+    #[test]
+    fn timestamp_differences_do_not_round_away_or_cross_temporal_kinds() {
+        for (left, right) in [
+            ("2026-09-22T09:30:00+01:00", "2026-09-22T09:30:00+02:00"),
+            (
+                "2026-09-22T09:30:00.000000000000000000001Z",
+                "2026-09-22T09:30:00.000000000000000000002Z",
+            ),
+        ] {
+            let left = format!("START={left}");
+            let right = format!("START={right}");
+            assert!(disagreement(&left, &right));
+            assert!(disagreement(&right, &left));
+            assert!(!settings_compatible(&left, &right));
+        }
+        for other in ["2026-09-22", "09:30", "unknown"] {
+            let left = "START=2026-09-22T09:30:00Z";
+            let right = format!("START={other}");
+            assert!(!disagreement(left, &right));
+            assert!(!settings_compatible(left, &right));
+        }
+    }
+
+    #[test]
+    fn malformed_unqualified_and_leap_second_timestamps_are_not_guessed() {
+        for invalid in [
+            "0000-01-01T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-09-22T24:00:00Z",
+            "2026-09-22T23:59:60Z",
+            "2026-09-22T09:30Z",
+            "2026-09-22 09:30:00Z",
+            "2026-09-22T09:30:00",
+            "2026-09-22T09:30:00+24:00",
+            "2026-09-22T09:30:00+00:60",
+            "2026-09-22T09:30:00+0100",
+            "2026-09-22T09:30:00++1:00",
+            "2026-09-22T09:30:00.Z",
+            "2026-09-22T09:30:00.+01:00",
+            "2026-09-22T09:30:00.123",
+            "2026-09-22T09:30:00Zjunk",
+            "2026-09-22T09:30:00UTC",
+            "2026-09-22T09:30:00Z[America/New_York]",
+            "２０２６-09-22T09:30:00Z",
+            "2026-09-22T09:30:00.１２３Z",
+        ] {
+            assert!(temporal_literal(invalid).is_none(), "{invalid}");
+            assert!(setting_claim(&format!("START={invalid}")).is_none());
+        }
+    }
+
+    #[test]
+    fn public_ask_does_not_invent_conflicts_for_equivalent_timestamp_offsets() {
+        use crate::core::ask::{AskCandidate, AskRequest, ask_data_json, evaluate_ask};
+
+        for (left, right) in [
+            (
+                "START=2026-09-22T09:30:00-04:00",
+                "START=2026-09-22T13:30:00Z",
+            ),
+            (
+                "START=2026-09-22T13:30:00.00100Z",
+                "START=2026-09-22T14:30:00.001+01:00",
+            ),
+        ] {
+            let mut candidates: Vec<_> = [left, right]
+                .into_iter()
+                .enumerate()
+                .map(|(index, content)| AskCandidate {
+                    memory_id: format!("timestamp-{index}"),
+                    content: content.to_owned(),
+                    confidence: 1.0,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some(format!("manual://timestamps/{index}")),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    team_provenance: None,
+                })
+                .collect();
+            let request = AskRequest {
+                question: "START".to_owned(),
+                ..AskRequest::default()
+            };
+            let report = evaluate_ask(&request, &candidates);
+            assert!(!report.abstained && !report.extractiveness_violated);
+            assert!(!report.conflict_detected && report.sides.is_none());
+            assert!(!report.citations.is_empty());
+            for citation in &report.citations {
+                let original = candidates
+                    .iter()
+                    .find(|candidate| candidate.memory_id == citation.memory_id)
+                    .expect("original timestamp source");
+                assert_eq!(
+                    original.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str())
+                );
+                assert_eq!(citation.text, original.content);
+            }
+            let expected = ask_data_json(&report);
+            candidates.reverse();
+            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
+        }
     }
 }
