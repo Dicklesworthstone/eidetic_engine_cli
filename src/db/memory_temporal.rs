@@ -118,11 +118,21 @@ pub(super) fn tag_counts(db: &DbConnection, workspace: &str, as_of: &str) -> Res
         if admits_bound(optional_text(row, 1)?, at, |end, at| end >= at) {
             let tag = required_text(row, 0, DbOperation::Query, "tag")?;
             let count = counts.entry(tag.to_owned()).or_default();
-            *count = count.checked_add(1).ok_or_else(|| malformed("Memory tag count overflow"))?;
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| malformed("Memory tag count overflow"))?;
         }
     }
-    let mut result: Vec<_> = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
-    result.sort_by(|left, right| right.count.cmp(&left.count).then_with(|| left.tag.cmp(&right.tag)));
+    let mut result: Vec<_> = counts
+        .into_iter()
+        .map(|(tag, count)| TagCount { tag, count })
+        .collect();
+    result.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.tag.cmp(&right.tag))
+    });
     Ok(result)
 }
 
@@ -136,12 +146,18 @@ struct ReadScope<'a> {
 
 impl<'a> ReadScope<'a> {
     fn begin(db: &'a DbConnection) -> Result<Self> {
-        db.execute_read_snapshot_raw(DbOperation::BeginTransaction, "SAVEPOINT ee_memory_temporal")?;
+        db.execute_read_snapshot_raw(
+            DbOperation::BeginTransaction,
+            "SAVEPOINT ee_memory_temporal",
+        )?;
         Ok(Self { db, active: true })
     }
 
     fn finish(mut self) -> Result<()> {
-        self.db.execute_read_snapshot_raw(DbOperation::CommitTransaction, "RELEASE ee_memory_temporal")?;
+        self.db.execute_read_snapshot_raw(
+            DbOperation::CommitTransaction,
+            "RELEASE ee_memory_temporal",
+        )?;
         self.active = false;
         Ok(())
     }
@@ -150,8 +166,14 @@ impl<'a> ReadScope<'a> {
 impl Drop for ReadScope<'_> {
     fn drop(&mut self) {
         if self.active {
-            let rolled_back = self.db.execute_read_snapshot_raw(DbOperation::RollbackTransaction, "ROLLBACK TO ee_memory_temporal");
-            let released = self.db.execute_read_snapshot_raw(DbOperation::RollbackTransaction, "RELEASE ee_memory_temporal");
+            let rolled_back = self.db.execute_read_snapshot_raw(
+                DbOperation::RollbackTransaction,
+                "ROLLBACK TO ee_memory_temporal",
+            );
+            let released = self.db.execute_read_snapshot_raw(
+                DbOperation::RollbackTransaction,
+                "RELEASE ee_memory_temporal",
+            );
             if rolled_back.is_err() || released.is_err() {
                 tracing::error!("Failed to release exact memory read snapshot");
             }
@@ -189,15 +211,20 @@ pub(super) fn recent(
                 return Err(malformed("Memory creation ordering is not finite"));
             }
             if selected.len() == limit
-                && selected.last_key_value().is_some_and(|(_, (_, day))| coarse < *day)
+                && selected
+                    .last_key_value()
+                    .is_some_and(|(_, (_, day))| coarse < *day)
             {
                 break 'pages;
             }
             let memory = stored_memory_from_row(row)?;
-            let (Some(created), Some(updated)) = (instant(&memory.created_at), instant(&memory.updated_at)) else {
+            let (Some(created), Some(updated)) =
+                (instant(&memory.created_at), instant(&memory.updated_at))
+            else {
                 continue;
             };
-            if created > at || updated > at
+            if created > at
+                || updated > at
                 || !admits_bound(memory.valid_from.as_deref(), at, |start, at| start <= at)
                 || !admits_bound(memory.valid_to.as_deref(), at, |end, at| end >= at)
                 || !admits_bound(optional_text(row, 22)?, at, |end, at| end > at)
@@ -212,7 +239,9 @@ pub(super) fn recent(
         if rows.len() < PAGE_SIZE {
             break;
         }
-        offset = offset.checked_add(rows.len() as u64).ok_or_else(|| malformed("Memory recency page overflow"))?;
+        offset = offset
+            .checked_add(rows.len() as u64)
+            .ok_or_else(|| malformed("Memory recency page overflow"))?;
     }
     snapshot.finish()?;
     Ok(selected.into_values().map(|(memory, _)| memory).collect())
@@ -228,7 +257,12 @@ pub(super) enum EndColumn {
 /// not spellings. Equality is a no-op even across offsets. Compare-and-swap
 /// binds the exact prior value (including NULL); no broad UPDATE can overwrite
 /// a concurrent end-marker change. Persistent contention is an explicit error.
-pub(super) fn tighten_end(db: &DbConnection, id: &str, raw: &str, column: EndColumn) -> Result<bool> {
+pub(super) fn tighten_end(
+    db: &DbConnection,
+    id: &str,
+    raw: &str,
+    column: EndColumn,
+) -> Result<bool> {
     let at = reference(raw)?;
     let column = match column {
         EndColumn::ValidTo => "valid_to",
@@ -239,10 +273,13 @@ pub(super) fn tighten_end(db: &DbConnection, id: &str, raw: &str, column: EndCol
             &format!("SELECT {column} FROM memories WHERE id = ?1 AND tombstoned_at IS NULL"),
             &[Value::Text(id.to_owned())],
         )?;
-        let Some(row) = rows.first() else { return Ok(false); };
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
         let previous = optional_text(row, 0)?;
         if let Some(previous) = previous {
-            let end = instant(previous).ok_or_else(|| malformed("Stored memory end marker is not RFC3339"))?;
+            let end = instant(previous)
+                .ok_or_else(|| malformed("Stored memory end marker is not RFC3339"))?;
             if end <= at {
                 return Ok(false);
             }
@@ -261,7 +298,9 @@ pub(super) fn tighten_end(db: &DbConnection, id: &str, raw: &str, column: EndCol
             return Ok(true);
         }
     }
-    Err(malformed("Memory end marker changed during update; retry against current state"))
+    Err(malformed(
+        "Memory end marker changed during update; retry against current state",
+    ))
 }
 
 #[cfg(test)]

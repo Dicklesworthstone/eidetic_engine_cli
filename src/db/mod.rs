@@ -45,6 +45,7 @@ use crate::models::{
 };
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
+mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
 pub mod shard;
@@ -24244,10 +24245,9 @@ impl DbConnection {
     ///
     /// `as_of` is a parameter, never SQL `now`: a wall-clock predicate cannot
     /// express `--as-of` and would make query results non-deterministic.
-    /// Callers pass the same `SecondsFormat::Secs` UTC spelling the writer
-    /// normalizes to, so the lexical comparison lines up. The boundary matches
-    /// `validity_status_at`, which treats a memory as expired only once
-    /// `valid_to` is strictly before the reference time.
+    /// Endpoints are compared as exact RFC3339 instants, including fractional
+    /// seconds and legacy offsets. The inclusive expiry boundary matches
+    /// `validity_status_at`; malformed expiry values do not grant admission.
     pub fn list_memories_valid_at(
         &self,
         workspace_id: &str,
@@ -24255,28 +24255,7 @@ impl DbConnection {
         include_tombstoned: bool,
         as_of: &str,
     ) -> Result<Vec<StoredMemory>> {
-        let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
-        );
-        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
-
-        if let Some(lvl) = level {
-            sql.push_str(" AND level = ?2");
-            params.push(Value::Text(lvl.to_string()));
-        }
-
-        if !include_tombstoned {
-            params.push(Value::Text(as_of.to_owned()));
-            sql.push_str(&format!(
-                " AND tombstoned_at IS NULL AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to >= ?{})",
-                params.len()
-            ));
-        }
-
-        sql.push_str(" ORDER BY id ASC");
-
-        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
-        rows.iter().map(stored_memory_from_row).collect()
+        memory_temporal::current(self, workspace_id, level, include_tombstoned, as_of)
     }
 
     /// List current revision heads, including rows that have been tombstoned.
@@ -24328,46 +24307,20 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
-    /// Load a deterministic, SQL-bounded window of currently admissible
-    /// memory rows for recency-oriented retrieval.
+    /// Load a deterministic bounded window of currently admissible memories.
     ///
-    /// The source query itself excludes tombstoned, future, expired, and
-    /// post-`as_of` rows before ordering by newest creation time. Callers must
-    /// still run the returned rows through their normal scope, provenance, and
-    /// redaction admission path.
-    ///
-    /// `created_at` / `updated_at` bounds and order use `julianday` (bd-8zzbg):
-    /// `to_rfc3339()` emits variable fractional precision, so `.000+00:00`
-    /// sorts above a fraction-less value at the same instant. Preserve the
-    /// caller's fractional clock for those row bounds. Author validity and
-    /// supersession keep their separate canonical whole-second UTC bound;
-    /// sharing that truncated bound would hide freshly committed rows until
-    /// the following second.
+    /// Exact instant comparisons exclude future, expired, superseded and
+    /// post-`as_of` rows before final ordering and limiting. SQL's Julian day
+    /// only locates coarse creation-time buckets; complete ties are examined
+    /// in bounded pages within one nested read snapshot. Callers still apply
+    /// scope, trust, provenance and redaction admission to the returned rows.
     pub fn list_recent_current_memories_for_retrieval(
         &self,
         workspace_id: &str,
         as_of: &str,
         limit: u32,
     ) -> Result<Vec<StoredMemory>> {
-        let instant = DateTime::parse_from_rfc3339(as_of)
-            .map_err(|_| DbError::MalformedRow {
-                operation: DbOperation::Query,
-                message: "Recency reference time must be RFC3339".to_owned(),
-            })?
-            .with_timezone(&Utc);
-        let row_bound = instant.to_rfc3339();
-        let validity_bound = instant.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let rows = self.query_for(
-            DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) <= julianday(?2) AND julianday(updated_at) <= julianday(?2) AND (valid_from IS NULL OR valid_from <= ?4) AND (superseded_at IS NULL OR superseded_at > ?4) AND (valid_to IS NULL OR valid_to >= ?4) ORDER BY julianday(created_at) DESC, id ASC LIMIT ?3",
-            &[
-                Value::Text(workspace_id.to_owned()),
-                Value::Text(row_bound),
-                Value::from_u64_clamped(u64::from(limit)),
-                Value::Text(validity_bound),
-            ],
-        )?;
-        rows.iter().map(stored_memory_from_row).collect()
+        memory_temporal::recent(self, workspace_id, as_of, limit)
     }
 
     /// List active-workspace retrieval memories plus tag-backed global-scope memories.
@@ -25621,22 +25574,7 @@ impl DbConnection {
     /// [`Self::mark_memory_superseded`] for that; before bd-tmv70 this one
     /// function carried both meanings into the same column.
     pub fn expire_memory_valid_to(&self, id: &str, valid_to: &str) -> Result<bool> {
-        // bd-o22r0: `updated_at` must NOT reuse ?1. `valid_to` arrives in the
-        // validity canon (SecondsFormat::Secs `Z`), while `updated_at` is a
-        // bookkeeping column written in the offset canon. Binding one value to
-        // both put `Z`-spelled values into `updated_at` and mixed the spellings
-        // inside that column, which breaks its lexical ordering.
-        let updated_at = Utc::now().to_rfc3339();
-        let affected = self.execute_for(
-            DbOperation::Execute,
-            "UPDATE memories SET valid_to = ?1, updated_at = ?3 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
-            &[
-                Value::Text(valid_to.to_string()),
-                Value::Text(id.to_string()),
-                Value::Text(updated_at),
-            ],
-        )?;
-        Ok(affected > 0)
+        memory_temporal::tighten_end(self, id, valid_to, memory_temporal::EndColumn::ValidTo)
     }
 
     /// Mark a memory as superseded by a newer revision (bd-tmv70).
@@ -25654,23 +25592,15 @@ impl DbConnection {
     /// past or future, no longer has any bearing on whether a row can be
     /// superseded.
     ///
-    /// The guard still refuses to move an existing marker backwards, so a
-    /// double-supersede is a no-op rather than a silent rewrite of history.
+    /// An equal or later marker is a no-op. An earlier marker tightens the
+    /// end, preserving the existing monotonic contract across offset spellings.
     pub fn mark_memory_superseded(&self, id: &str, superseded_at: &str) -> Result<bool> {
-        // bd-o22r0: same spelling hazard as expire_memory_valid_to. `superseded_at`
-        // arrives in the validity canon; `updated_at` is bookkeeping and must be
-        // written in the offset canon, so it gets its own bind.
-        let updated_at = Utc::now().to_rfc3339();
-        let affected = self.execute_for(
-            DbOperation::Execute,
-            "UPDATE memories SET superseded_at = ?1, updated_at = ?3 WHERE id = ?2 AND tombstoned_at IS NULL AND (superseded_at IS NULL OR superseded_at > ?1)",
-            &[
-                Value::Text(superseded_at.to_string()),
-                Value::Text(id.to_string()),
-                Value::Text(updated_at),
-            ],
-        )?;
-        Ok(affected > 0)
+        memory_temporal::tighten_end(
+            self,
+            id,
+            superseded_at,
+            memory_temporal::EndColumn::SupersededAt,
+        )
     }
 
     /// Insert a memory row as a *revision* of an existing one
@@ -26118,20 +26048,7 @@ impl DbConnection {
         tag: &str,
         as_of: &str,
     ) -> Result<Vec<String>> {
-        let canonical_tag = canonicalize_tag_filter(tag);
-        let rows = self.query_for(
-            DbOperation::Query,
-            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?3) ORDER BY m.id ASC",
-            &[
-                Value::Text(workspace_id.to_string()),
-                Value::Text(canonical_tag),
-                Value::Text(as_of.to_owned()),
-            ],
-        )?;
-
-        rows.iter()
-            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(|s| s.to_string()))
-            .collect()
+        memory_temporal::by_tag(self, workspace_id, tag, as_of)
     }
 
     /// Distinct tags carried by memories that are live AND in force at `as_of`.
@@ -26141,17 +26058,12 @@ impl DbConnection {
     /// and deliberately ignores author expiry. A tag list shown to a user wants
     /// the APPLICABILITY answer, so it must also bound on `valid_to`.
     pub fn list_all_tags_valid_at(&self, workspace_id: &str, as_of: &str) -> Result<Vec<String>> {
-        let rows = self.query_for(
-            DbOperation::Query,
-            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?2) ORDER BY mt.tag ASC",
-            &[
-                Value::Text(workspace_id.to_string()),
-                Value::Text(as_of.to_owned()),
-            ],
-        )?;
-        rows.iter()
-            .map(|row| required_text(row, 0, DbOperation::Query, "tag").map(|s| s.to_string()))
-            .collect()
+        let mut tags: Vec<_> = memory_temporal::tag_counts(self, workspace_id, as_of)?
+            .into_iter()
+            .map(|row| row.tag)
+            .collect();
+        tags.sort();
+        Ok(tags)
     }
 
     /// Tag usage counts over memories that are live AND in force at `as_of`.
@@ -26163,21 +26075,7 @@ impl DbConnection {
         workspace_id: &str,
         as_of: &str,
     ) -> Result<Vec<TagCount>> {
-        let rows = self.query_for(
-            DbOperation::Query,
-            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?2) GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
-            &[
-                Value::Text(workspace_id.to_string()),
-                Value::Text(as_of.to_owned()),
-            ],
-        )?;
-        rows.iter()
-            .map(|row| {
-                let tag = required_text(row, 0, DbOperation::Query, "tag")?.to_string();
-                let count = required_u32(row, 1, DbOperation::Query, "count")?;
-                Ok(TagCount { tag, count })
-            })
-            .collect()
+        memory_temporal::tag_counts(self, workspace_id, as_of)
     }
 
     /// Replace all tags on a memory atomically.

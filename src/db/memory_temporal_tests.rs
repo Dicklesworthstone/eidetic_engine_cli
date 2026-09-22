@@ -10,7 +10,13 @@ const AT: &str = "2026-09-22T12:00:00.123456790Z";
 
 fn setup(db: &DbConnection) -> super::Result<()> {
     db.migrate()?;
-    db.insert_workspace(WORKSPACE, &CreateWorkspaceInput { path: "/temporal-fixture".to_owned(), name: None })?;
+    db.insert_workspace(
+        WORKSPACE,
+        &CreateWorkspaceInput {
+            path: "/temporal-fixture".to_owned(),
+            name: None,
+        },
+    )?;
     Ok(())
 }
 
@@ -37,7 +43,12 @@ fn input() -> CreateMemoryInput {
     }
 }
 
-fn insert(db: &DbConnection, number: u128, created: &str, value: &CreateMemoryInput) -> super::Result<()> {
+fn insert(
+    db: &DbConnection,
+    number: u128,
+    created: &str,
+    value: &CreateMemoryInput,
+) -> super::Result<()> {
     db.insert_memory_with_timestamps(&id(number), value, created, created, &id(number))
 }
 
@@ -63,18 +74,56 @@ fn applicability_and_tag_surfaces_use_exact_inclusive_expiry() -> TestResult {
         insert(&db, number, BASE, &value)?;
     }
     let expected = vec![id(2), id(3), id(5)];
-    assert_eq!(identities(&db.list_memories_valid_at(WORKSPACE, None, false, AT)?), expected);
-    assert_eq!(db.list_memories_by_tag_valid_at(WORKSPACE, "release", AT)?, expected);
-    assert_eq!(db.list_all_tags_valid_at(WORKSPACE, AT)?, ["expiry-2", "expiry-3", "expiry-5", "release"]);
-    assert_eq!(db.get_tag_counts_valid_at(WORKSPACE, AT)?, vec![
-        TagCount { tag: "release".into(), count: 3 },
-        TagCount { tag: "expiry-2".into(), count: 1 },
-        TagCount { tag: "expiry-3".into(), count: 1 },
-        TagCount { tag: "expiry-5".into(), count: 1 },
-    ]);
-    assert_eq!(db.list_memories_valid_at(WORKSPACE, None, true, AT)?.len(), 6);
-    assert!(db.list_memories_valid_at(WORKSPACE, Some("procedural"), false, AT)?.is_empty());
-    assert_eq!(identities(&db.list_memories_valid_at(WORKSPACE, None, false, "2026-09-22T13:00:00.123456790+01:00")?), expected);
+    assert_eq!(
+        identities(&db.list_memories_valid_at(WORKSPACE, None, false, AT)?),
+        expected
+    );
+    assert_eq!(
+        db.list_memories_by_tag_valid_at(WORKSPACE, "release", AT)?,
+        expected
+    );
+    assert_eq!(
+        db.list_all_tags_valid_at(WORKSPACE, AT)?,
+        ["expiry-2", "expiry-3", "expiry-5", "release"]
+    );
+    assert_eq!(
+        db.get_tag_counts_valid_at(WORKSPACE, AT)?,
+        vec![
+            TagCount {
+                tag: "release".into(),
+                count: 3
+            },
+            TagCount {
+                tag: "expiry-2".into(),
+                count: 1
+            },
+            TagCount {
+                tag: "expiry-3".into(),
+                count: 1
+            },
+            TagCount {
+                tag: "expiry-5".into(),
+                count: 1
+            },
+        ]
+    );
+    assert_eq!(
+        db.list_memories_valid_at(WORKSPACE, None, true, AT)?.len(),
+        6
+    );
+    assert!(
+        db.list_memories_valid_at(WORKSPACE, Some("procedural"), false, AT)?
+            .is_empty()
+    );
+    assert_eq!(
+        identities(&db.list_memories_valid_at(
+            WORKSPACE,
+            None,
+            false,
+            "2026-09-22T13:00:00.123456790+01:00"
+        )?),
+        expected
+    );
     Ok(())
 }
 
@@ -91,10 +140,26 @@ fn recency_applies_exact_eligibility_before_limit_and_finishes_coarse_ties() -> 
     insert(&db, 501, "2026-09-22T12:00:00.123456789Z", &input())?;
     insert(&db, 502, "2026-09-22T13:00:00.123456789+01:00", &input())?;
     insert(&db, 503, "2026-09-22T12:00:00.123456788+00:00", &input())?;
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?), [id(501)]);
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 3)?), [id(501), id(502), id(503)]);
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, "2026-09-22T08:00:00.123456790-04:00", 4)?), [id(501), id(502), id(503), id(500)]);
-    assert!(db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 0)?.is_empty());
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?),
+        [id(501)]
+    );
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 3)?),
+        [id(501), id(502), id(503)]
+    );
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(
+            WORKSPACE,
+            "2026-09-22T08:00:00.123456790-04:00",
+            4
+        )?),
+        [id(501), id(502), id(503), id(500)]
+    );
+    assert!(
+        db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 0)?
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -115,9 +180,16 @@ fn recency_distinguishes_one_nanosecond_lifecycle_boundaries() -> TestResult {
         (7, "superseded_at", "2026-09-22T12:00:00.123456791Z"),
         (8, "valid_to", "malformed"),
     ] {
-        db.execute_for(DbOperation::Execute, &format!("UPDATE memories SET {column} = ?1 WHERE id = ?2"), &[Value::Text(value.to_owned()), Value::Text(id(number))])?;
+        db.execute_for(
+            DbOperation::Execute,
+            &format!("UPDATE memories SET {column} = ?1 WHERE id = ?2"),
+            &[Value::Text(value.to_owned()), Value::Text(id(number))],
+        )?;
     }
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 10)?), [id(5), id(6), id(7)]);
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 10)?),
+        [id(5), id(6), id(7)]
+    );
     Ok(())
 }
 
@@ -140,7 +212,13 @@ fn marker_updates_are_instant_monotonic_and_offset_equality_is_read_only() -> Te
         assert!(apply("2026-09-22T12:00:00Z")?);
         assert!(!apply("2026-09-22T12:00:00.000000001Z")?);
     }
-    assert_eq!(db.get_memory(&id(1))?.ok_or("memory missing")?.valid_to.as_deref(), Some(BASE));
+    assert_eq!(
+        db.get_memory(&id(1))?
+            .ok_or("memory missing")?
+            .valid_to
+            .as_deref(),
+        Some(BASE)
+    );
     assert_eq!(db.get_memory_superseded_at(&id(2))?.as_deref(), Some(BASE));
     Ok(())
 }
@@ -153,8 +231,14 @@ fn malformed_references_and_markers_fail_without_mutation() -> TestResult {
     let before = db.get_memory(&id(1))?;
     assert!(db.expire_memory_valid_to(&id(1), "invalid").is_err());
     assert!(db.mark_memory_superseded(&id(1), "invalid").is_err());
-    assert!(db.list_recent_current_memories_for_retrieval(WORKSPACE, "invalid", 1).is_err());
-    assert!(db.list_memories_valid_at(WORKSPACE, None, false, "invalid").is_err());
+    assert!(
+        db.list_recent_current_memories_for_retrieval(WORKSPACE, "invalid", 1)
+            .is_err()
+    );
+    assert!(
+        db.list_memories_valid_at(WORKSPACE, None, false, "invalid")
+            .is_err()
+    );
     assert!(db.list_all_tags_valid_at(WORKSPACE, "invalid").is_err());
     assert_eq!(db.get_memory(&id(1))?, before);
     assert!(!db.expire_memory_valid_to(&id(999), BASE)?);
@@ -171,14 +255,23 @@ fn recency_read_scope_preserves_read_only_and_caller_owned_transactions() -> Tes
     db.close()?;
     let db = DbConnection::open_file_read_only(&path)?;
     db.begin_read_snapshot()?;
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?), [id(1)]);
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?),
+        [id(1)]
+    );
     db.commit_read_snapshot()?;
-    assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?), [id(1)]);
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?),
+        [id(1)]
+    );
     db.close()?;
     let db = DbConnection::open_file(&path)?;
     db.with_transaction(|| {
         insert(&db, 2, "2026-09-22T12:00:00.123456789Z", &input())?;
-        assert_eq!(identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?), [id(2)]);
+        assert_eq!(
+            identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 1)?),
+            [id(2)]
+        );
         Ok(())
     })?;
     assert!(db.get_memory(&id(2))?.is_some());

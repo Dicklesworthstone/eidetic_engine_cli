@@ -64,6 +64,9 @@ use crate::search::simhash::{
 };
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
+#[path = "memory_revision_typed.rs"]
+mod revision_typed;
+
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryDetails {
@@ -3726,15 +3729,12 @@ fn parse_validity_timestamp(
         .transpose()
 }
 
-/// Canonical spelling for the AUTHOR VALIDITY columns (`valid_from`, `valid_to`).
-///
-/// `SecondsFormat::Secs` UTC, i.e. `2099-01-01T00:00:00Z`. These columns are
-/// compared LEXICALLY in SQL, so every writer and every comparison bound must
-/// use this exact spelling or the comparison silently misorders: `Z` is 0x5A
-/// and `+` is 0x2B, so a `...Z` value sorts ABOVE a `...+00:00` value bearing
-/// the same instant (bd-o22r0, bd-60tq7).
+/// Canonical UTC spelling for author validity, preserving nanosecond precision.
+/// Whole-second inputs keep their existing `Z` representation. Reader boundaries
+/// compare parsed instants, never this spelling or a rounded SQL Julian day.
+/// Truncating here would change applicability during import and backup recovery.
 pub(crate) fn normalize_validity_timestamp(timestamp: DateTime<Utc>) -> String {
-    timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+    timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 /// Canonical spelling for the ROW BOOKKEEPING columns (`created_at`,
@@ -9058,12 +9058,9 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
         Err(error) => return MemoryListReport::domain_error(error),
     };
 
-    // bd-tmv70 stopgap: `valid_to` doubles as the revision-supersession marker,
-    // so the plain readers hide any memory the author gave an expiry -- even one
-    // centuries away. Bound the read at now instead, spelled the way the writer
-    // normalizes validity timestamps so the lexical comparison lines up. This
-    // still cannot separate "superseded" from "expired"; bd-tmv70 tracks that.
-    let validity_bound = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    // Use one exact reference for tag membership and memory applicability.
+    // Revision identity and author expiry are separate database fields.
+    let validity_bound = normalize_validity_timestamp(Utc::now());
 
     // If filtering by tag, get memory IDs first
     let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
@@ -9519,7 +9516,7 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
         .map_err(memory_command_storage_error)?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
-    let expires_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let expires_at = normalize_validity_timestamp(Utc::now());
 
     if memory.tombstoned_at.is_some() {
         if !options.include_tombstoned {
@@ -11523,6 +11520,16 @@ where
         }
     }
 
+    // Typed data belongs to the immutable revision. Prepare before preview
+    // and recheck the source inside the transaction before publication.
+    let typed_revision =
+        match revision_typed::Prepared::prepare(&conn, &original, options.content, options.kind) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                return MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
+            }
+        };
+
     // Determine what fields are changing
     let mut changed_fields = Vec::new();
 
@@ -11554,6 +11561,10 @@ where
         if provenance != current {
             changed_fields.push("provenance_uri".to_owned());
         }
+    }
+
+    if typed_revision.changed {
+        changed_fields.push("typed_fields".to_owned());
     }
 
     // Ordinary revisions retain their no-change rejection. Seal reveal is a
@@ -11679,7 +11690,7 @@ where
     let new_id = MemoryId::now().to_string();
     let audit_id = generate_audit_id();
     let index_job_id = generate_search_index_job_id();
-    let revised_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let revised_at = normalize_validity_timestamp(Utc::now());
     let memory_input = CreateMemoryInput {
         workspace_id: original.workspace_id.clone(),
         level: new_level,
@@ -11726,7 +11737,9 @@ where
 
     let result: Result<(), String> = conn
         .with_transaction(|| {
+            typed_revision.check_source(&conn, &original)?;
             conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;
+            typed_revision.apply(&conn, &new_id)?;
             // bd-multiplicity-aware-trust-p0u7g: the live revision inherits
             // the attempt-family pointer; the slot ledger inherits by
             // logical_id and is never copied.

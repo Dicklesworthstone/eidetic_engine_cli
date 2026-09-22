@@ -33,16 +33,21 @@ impl Prepared {
             .map_err(|_| "Original memory kind is invalid; revision was not written".to_owned())?;
         let target_kind = MemoryKind::from_str(kind.unwrap_or(&original.kind))
             .map_err(|_| "Revision memory kind is invalid; revision was not written".to_owned())?;
-        let source_json = db.get_memory_typed_fields_json(&original.id)
-            .map_err(|_| "Could not read original typed fields; revision was not written".to_owned())?;
-        let canonical_source = source_json.as_deref()
+        let source_json = db.get_memory_typed_fields_json(&original.id).map_err(|_| {
+            "Could not read original typed fields; revision was not written".to_owned()
+        })?;
+        let canonical_source = source_json
+            .as_deref()
             .map(|raw| canonicalize_typed_memory_fields_json(&source_kind, raw))
             .transpose()
-            .map_err(|_| "Original typed fields are invalid; revision was not written".to_owned())?;
+            .map_err(|_| {
+                "Original typed fields are invalid; revision was not written".to_owned()
+            })?;
         let body = content.unwrap_or(&original.content);
-        MemoryContent::parse(body)
-            .map_err(|error| format!("Invalid revision content: {error}"))?;
-        let inherited = (source_kind == target_kind).then_some(canonical_source.as_deref()).flatten();
+        MemoryContent::parse(body).map_err(|error| format!("Invalid revision content: {error}"))?;
+        let inherited = (source_kind == target_kind)
+            .then_some(canonical_source.as_deref())
+            .flatten();
         let extracted = if body != original.content || source_kind != target_kind {
             extract_typed_memory_fields_json_with_redactor(&target_kind, body, |text| {
                 crate::policy::redact_secret_like_content(text).content
@@ -53,14 +58,23 @@ impl Prepared {
         };
         // Explicit replacement-body fields win; absent fields are not a request
         // to erase independent structured data supplied with remember --field.
-        let projected_json = merge_typed_memory_fields_json(
-            &target_kind, inherited, extracted.as_deref(),
-        ).map_err(|_| "Cannot project revision typed fields; revision was not written".to_owned())?;
+        let projected_json =
+            merge_typed_memory_fields_json(&target_kind, inherited, extracted.as_deref()).map_err(
+                |_| "Cannot project revision typed fields; revision was not written".to_owned(),
+            )?;
         let changed = canonical_source != projected_json;
-        Ok(Self { source_json, projected_json, changed })
+        Ok(Self {
+            source_json,
+            projected_json,
+            changed,
+        })
     }
 
-    pub(super) fn check_source(&self, db: &DbConnection, original: &StoredMemory) -> crate::db::Result<()> {
+    pub(super) fn check_source(
+        &self,
+        db: &DbConnection,
+        original: &StoredMemory,
+    ) -> crate::db::Result<()> {
         if db.get_memory(&original.id)?.as_ref() != Some(original)
             || db.get_memory_typed_fields_json(&original.id)? != self.source_json
         {
@@ -78,7 +92,8 @@ impl Prepared {
         {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Execute,
-                message: "New revision could not retain typed fields; revision was not written".to_owned(),
+                message: "New revision could not retain typed fields; revision was not written"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -97,7 +112,10 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn fixture(kind: &str, fields: Value) -> Result<(tempfile::TempDir, PathBuf, String), Box<dyn std::error::Error>> {
+    fn fixture(
+        kind: &str,
+        fields: Value,
+    ) -> Result<(tempfile::TempDir, PathBuf, String), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let workspace = temporary.path().canonicalize()?;
         std::fs::create_dir(workspace.join(".ee"))?;
@@ -106,15 +124,33 @@ mod tests {
         db.migrate()?;
         let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(0x7654)).to_string();
         let memory_id = MemoryId::from_uuid(Uuid::from_u128(0x9876)).to_string();
-        db.insert_workspace(&workspace_id, &CreateWorkspaceInput { path: workspace.display().to_string(), name: None })?;
-        db.insert_memory(&memory_id, &CreateMemoryInput {
-            workspace_id, level: "semantic".into(), kind: kind.into(),
-            content: "Retain the structured release choice through later editorial changes.".into(),
-            workflow_id: None, confidence: 0.8, utility: 0.5, importance: 0.5,
-            provenance_uri: Some("manual://revision-fixture".into()),
-            trust_class: "agent_validated".into(), trust_subclass: None,
-            tags: vec!["typed-revision".into()], valid_from: None, valid_to: None,
-        })?;
+        db.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: None,
+            },
+        )?;
+        db.insert_memory(
+            &memory_id,
+            &CreateMemoryInput {
+                workspace_id,
+                level: "semantic".into(),
+                kind: kind.into(),
+                content: "Retain the structured release choice through later editorial changes."
+                    .into(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some("manual://revision-fixture".into()),
+                trust_class: "agent_validated".into(),
+                trust_subclass: None,
+                tags: vec!["typed-revision".into()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
         assert!(db.set_memory_typed_fields_json(&memory_id, Some(&fields.to_string()))?);
         db.close()?;
         Ok((temporary, path, memory_id))
@@ -122,15 +158,24 @@ mod tests {
 
     fn options<'a>(path: &'a std::path::Path, id: &'a str) -> ReviseMemoryOptions<'a> {
         ReviseMemoryOptions {
-            database_path: path, original_memory_id: id, content: None,
-            level: None, kind: None, confidence: None, tags: None,
-            provenance_uri: None, reason: ReviseReason::Refinement,
-            actor: Some("typed-revision-test"), dry_run: false,
+            database_path: path,
+            original_memory_id: id,
+            content: None,
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Refinement,
+            actor: Some("typed-revision-test"),
+            dry_run: false,
         }
     }
 
     fn fields(db: &DbConnection, id: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let raw = db.get_memory_typed_fields_json(id)?.ok_or("typed fields missing")?;
+        let raw = db
+            .get_memory_typed_fields_json(id)?
+            .ok_or("typed fields missing")?;
         Ok(serde_json::from_str::<Value>(&raw)?["fields"].clone())
     }
 
@@ -149,20 +194,32 @@ mod tests {
         let db = DbConnection::open_file(&path)?;
         assert_eq!(fields(&db, new_id)?, expected);
         assert_eq!(db.get_memory_typed_fields_json(&source)?, source_json);
-        assert_eq!(db.get_memory_logical_id(new_id)?.as_deref(), Some(source.as_str()));
+        assert_eq!(
+            db.get_memory_logical_id(new_id)?.as_deref(),
+            Some(source.as_str())
+        );
         assert!(db.get_memory_superseded_at(&source)?.is_some());
         assert_eq!(db.get_memory_tags(new_id)?, ["reviewed"]);
         Ok(())
     }
 
     #[test]
-    fn replacement_fields_override_inherited_values_without_erasing_unmentioned_data() -> TestResult {
-        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite", "options":["SQLite","Postgres"], "rationale":"Offline operation"}))?;
+    fn replacement_fields_override_inherited_values_without_erasing_unmentioned_data() -> TestResult
+    {
+        let (_temp, path, source) = fixture(
+            "decision",
+            json!({"chosen":"SQLite", "options":["SQLite","Postgres"], "rationale":"Offline operation"}),
+        )?;
         let mut request = options(&path, &source);
         request.content = Some("Chosen: Postgres\nRationale: Shared writer coordination");
         let report = revise_memory(&request);
         assert!(report.success, "{:?}", report.error);
-        assert!(report.changed_fields.iter().any(|field| field == "typed_fields"));
+        assert!(
+            report
+                .changed_fields
+                .iter()
+                .any(|field| field == "typed_fields")
+        );
         let db = DbConnection::open_file(&path)?;
         let projected = fields(&db, report.new_id.as_deref().ok_or("new revision missing")?)?;
         assert_eq!(projected["chosen"], "Postgres");
@@ -196,7 +253,12 @@ mod tests {
         request.dry_run = true;
         let report = revise_memory(&request);
         assert!(report.success && report.dry_run);
-        assert!(report.changed_fields.iter().any(|field| field == "typed_fields"));
+        assert!(
+            report
+                .changed_fields
+                .iter()
+                .any(|field| field == "typed_fields")
+        );
         let db = DbConnection::open_file(&path)?;
         assert_eq!(db.count_memory_chain(&source)?, 1);
         assert!(db.get_memory_superseded_at(&source)?.is_none());

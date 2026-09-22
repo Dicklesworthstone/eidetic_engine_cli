@@ -2332,18 +2332,10 @@ fn validate_memory(
     })
 }
 
-/// Re-emit an imported RFC3339 timestamp in this repository's canonical spelling
-/// for its column class (bd-o22r0).
-///
-/// Imported records carry whatever spelling the exporting tool used. Both
-/// `...Z` and `...+00:00` parse, but `created_at`, `valid_from` and `valid_to`
-/// are compared LEXICALLY in SQL, and `Z` (0x5A) sorts above `+` (0x2B). Mixing
-/// spellings inside one column makes a row at the same instant appear NEWER
-/// than its sibling, which is how V123's supersession backfill can leave two
-/// live heads in one revision chain.
-///
-/// An unparseable value is returned unchanged: this function normalizes
-/// spelling, it does not validate. Validation stays where it already is.
+/// Normalize the offset spelling without changing the represented instant.
+/// Authentication has already bound the original transport bytes. Row columns
+/// retain their historical offset form; validity uses UTC `Z`, with fractional
+/// precision preserved in both cases. Validation belongs to the admission pass.
 fn normalize_imported_timestamp(raw: &str, class: TimestampClass) -> String {
     match chrono::DateTime::parse_from_rfc3339(raw) {
         Ok(parsed) => {
@@ -2363,7 +2355,7 @@ fn normalize_imported_timestamp(raw: &str, class: TimestampClass) -> String {
 enum TimestampClass {
     /// `created_at`, `updated_at` -- offset form.
     Row,
-    /// `valid_from`, `valid_to` -- `SecondsFormat::Secs` `Z` form.
+    /// `valid_from`, `valid_to` -- exact UTC `Z` form.
     Validity,
 }
 
@@ -4696,36 +4688,15 @@ mod tests {
         ensure(report.memories_imported, 4, "all chronology cases imported")?;
         let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
             .map_err(|error| error.to_string())?;
-        // bd-o22r0. `cases` above are the ARCHIVE spellings fed in; these are what
-        // import re-emits, and they are deliberately not the same strings.
-        //
-        // Import canonicalizes per COLUMN CLASS (jsonl_import.rs
-        // `normalize_imported_timestamp`): Row columns (`created_at`,
-        // `updated_at`, `tombstoned_at`) take `to_rfc3339()` — offset form,
-        // fractional seconds KEPT — while Validity columns (`valid_from`,
-        // `valid_to`) take `to_rfc3339_opts(Secs, true)` — `Z` form, fractional
-        // seconds DROPPED. The INSTANT is preserved; the SPELLING is not, and
-        // preserving spelling is exactly what bd-o22r0 gave up on purpose: `Z`
-        // (0x5A) sorts above `+` (0x2B), so mixing spellings inside one
-        // lexically-compared column makes a row look newer than its sibling at
-        // the same instant, which is how V123's backfill left two live heads.
-        //
-        // Case 0 is the load-bearing one: it carries non-UTC offsets, so it
-        // exercises timezone conversion AND per-class spelling, and its
-        // `valid_from` (defaulting to `created`) additionally loses its
-        // fractional seconds to `SecondsFormat::Secs`.
-        //
-        // These are hand-computed from the input instants ON PURPOSE. Do NOT
-        // derive them by calling `normalize_row_timestamp` /
-        // `normalize_validity_timestamp` here: that makes the assertion
-        // `normalize(x) == normalize(x)`, which cannot fail and would pass even
-        // if both functions were replaced with the identity.
+        // Hand-computed UTC instants, not values obtained from the production
+        // normalizer. Offsets may change spelling, but the validity inherited
+        // from created_at must retain all nine fractional digits.
         let expected: [(&str, &str, Option<&str>, &str); 4] = [
             (
                 "2020-01-01T21:34:05.123456789+00:00",
                 "2020-02-03T08:05:06.987654321+00:00",
                 None,
-                "2020-01-01T21:34:05Z",
+                "2020-01-01T21:34:05.123456789Z",
             ),
             (
                 "2021-01-02T00:00:00+00:00",
