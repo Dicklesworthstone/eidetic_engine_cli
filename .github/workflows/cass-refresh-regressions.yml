@@ -17,9 +17,12 @@ concurrency:
   group: cass-refresh-regressions-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  retained-session-import:
+  checkpoint-recovery:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
@@ -46,82 +49,477 @@ jobs:
           restore-keys: |
             cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Record exact source and toolchain
+      - name: Apply the reviewed publication recovery diff to its exact source
         run: |
           set -euo pipefail
-          {
-            git rev-parse HEAD
-            rustc --version
-            cargo --version
-            sha256sum Cargo.lock
-          } | tee "$RUNNER_TEMP/cass-refresh-source.log"
-      - name: Check refresh formatting without rewriting source
+          test "$(git hash-object src/cass/import.rs)" = 3b535ece2e1832ab5a8731f3bd4a4b2d88ccbcb1
+          test "$(git hash-object src/cass/refresh.rs)" = 278ed265a4bea0fe17430c8988c2aafcbf34d48e
+          test "$(git hash-object src/cass/backfill_public_tests.rs)" = 295bb74a2324018173f50c62ee093e07ff26c44e
+          cat > "$RUNNER_TEMP/cass-publication-manual.patch" <<'PATCH'
+          --- a/src/cass/refresh.rs
+          +++ b/src/cass/refresh.rs
+          @@ -44,6 +44,34 @@
+               pub changed: bool,
+               pub added_lines: Vec<u32>,
+               pub index_job_id: Option<String>,
+          +}
+          +
+          +/// Recover publication of the last committed snapshot without reading CASS.
+          +/// `include_spans = false` suppresses transcript capture, not recovery of work
+          +/// already committed by a previous import. The original job cannot stand in
+          +/// for a newer checkpoint, even when that original job completed successfully.
+          +pub(super) fn reconcile_session_publication(
+          +    connection: &DbConnection,
+          +    workspace_id: &str,
+          +    session_id: &str,
+          +) -> Result<Option<String>, DbError> {
+          +    with_import_session_transaction(connection, || {
+          +        let stored = connection
+          +            .get_session(session_id)?
+          +            .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
+          +        if stored.workspace_id != workspace_id {
+          +            return Err(refusal("cass_refresh_scope_mismatch"));
+          +        }
+          +        let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
+          +        let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
+          +        let job_id = checkpoint.map_or_else(
+          +            || stable_search_index_job_id(workspace_id, session_id),
+          +            |saved| saved.index_job_id,
+          +        );
+          +        // A missing derived queue row is repairable from this durable identity.
+          +        // Never change the evidence, checkpoint, or a live publisher's lease.
+          +        pending_job(connection, workspace_id, session_id, &job_id, true)
+          +    })
+           }
+           
+           /// The caller obtained a complete bounded `cass view` snapshot before entering
+          @@ -275,17 +303,38 @@
+               workspace_id: &str,
+               session_id: &str,
+           ) -> Result<MetadataRefresh, DbError> {
+          -    fn object(value: Option<&str>) -> Result<SessionMetadata, DbError> {
+          -        match value {
+          -            None => Ok(serde_json::Map::new()),
+          -            Some(value) => serde_json::from_str::<serde_json::Value>(value)
+          -                .ok()
+          -                .and_then(|value| value.as_object().cloned())
+          -                .ok_or_else(|| refusal("cass_refresh_metadata_invalid")),
+          -        }
+          -    }
+          -    let mut stored_metadata = object(stored.metadata_json.as_deref())?;
+          -    let checkpoint: Option<Checkpoint> = stored_metadata
+          +    let mut stored_metadata = metadata_object(stored.metadata_json.as_deref())?;
+          +    let checkpoint = take_checkpoint(&mut stored_metadata, workspace_id, session_id)?;
+          +    let incoming = metadata_object(input.metadata_json.as_deref())?;
+          +    let changed = incoming
+          +        .iter()
+          +        .any(|(key, value)| stored_metadata.get(key) != Some(value));
+          +    stored_metadata.extend(incoming);
+          +    Ok(MetadataRefresh {
+          +        values: stored_metadata,
+          +        checkpoint,
+          +        fields_changed: changed,
+          +    })
+          +}
+          +
+          +fn metadata_object(value: Option<&str>) -> Result<SessionMetadata, DbError> {
+          +    match value {
+          +        None => Ok(serde_json::Map::new()),
+          +        Some(value) => serde_json::from_str::<serde_json::Value>(value)
+          +            .ok()
+          +            .and_then(|value| value.as_object().cloned())
+          +            .ok_or_else(|| refusal("cass_refresh_metadata_invalid")),
+          +    }
+          +}
+          +
+          +/// Full refresh and metadata-only retry must interpret the same checkpoint.
+          +/// Reject corruption before consulting any completed job or creating new work.
+          +fn take_checkpoint(
+          +    metadata: &mut SessionMetadata,
+          +    workspace_id: &str,
+          +    session_id: &str,
+          +) -> Result<Option<Checkpoint>, DbError> {
+          +    let checkpoint: Option<Checkpoint> = metadata
+                   .remove(CHECKPOINT_KEY)
+                   .map(serde_json::from_value)
+                   .transpose()
+          @@ -314,16 +363,7 @@
+                       return Err(refusal("cass_refresh_checkpoint_invalid"));
+                   }
+               }
+          -    let incoming = object(input.metadata_json.as_deref())?;
+          -    let changed = incoming
+          -        .iter()
+          -        .any(|(key, value)| stored_metadata.get(key) != Some(value));
+          -    stored_metadata.extend(incoming);
+          -    Ok(MetadataRefresh {
+          -        values: stored_metadata,
+          -        checkpoint,
+          -        fields_changed: changed,
+          -    })
+          +    Ok(checkpoint)
+           }
+           
+           /// Model attribution and locator authority are not supplied by discovery and
+          @@ -426,8 +466,16 @@
+                       {
+                           return Err(refusal("cass_refresh_index_job_scope_mismatch"));
+                       }
+          -            Ok((job.status_enum() != Some(SearchIndexJobStatus::Completed))
+          -                .then(|| job_id.to_owned()))
+          +            if job.job_type_enum() != Some(crate::db::SearchIndexJobType::SingleDocument)
+          +                || job.documents_total != 1
+          +            {
+          +                return Err(refusal("cass_refresh_index_job_invalid"));
+          +            }
+          +            match job.status_enum() {
+          +                Some(SearchIndexJobStatus::Completed) => Ok(None),
+          +                Some(_) => Ok(Some(job_id.to_owned())),
+          +                None => Err(refusal("cass_refresh_index_job_invalid")),
+          +            }
+                   }
+                   None if create_missing => {
+                       connection.insert_search_index_job(
+          @@ -861,4 +909,132 @@
+                       );
+                   }
+               }
+          -}
+          +
+          +    #[test]
+          +    fn publication_retry_follows_latest_checkpoint_without_touching_evidence() {
+          +        let (db, workspace, id, session) = fixture("/private/publication-retry.jsonl", 1);
+          +        db.execute_raw("UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'").unwrap();
+          +        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+          +        let spans = [span(&session, 1), span(&session, 2)];
+          +        let grown = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+          +        let latest = grown.index_job_id.unwrap();
+          +        assert_ne!(latest, stable_search_index_job_id(&workspace, &id));
+          +        let before_session = db.get_session(&id).unwrap();
+          +        let before_evidence = db.list_evidence_spans_for_session(&id).unwrap();
+          +        let before_counts = row_counts(&db);
+          +        for status in ["pending", "failed", "cancelled", "running", "completed"] {
+          +            db.execute_raw(&format!(
+          +                "UPDATE search_index_jobs SET status = {} WHERE id = {}",
+          +                sql_text(status),
+          +                sql_text(&latest),
+          +            )).unwrap();
+          +            let before_job = db.get_search_index_job(&latest).unwrap().unwrap();
+          +            let recovered = reconcile_session_publication(&db, &workspace, &id).unwrap();
+          +            assert_eq!(recovered, (status != "completed").then(|| latest.clone()));
+          +            assert_eq!(db.get_session(&id).unwrap(), before_session);
+          +            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), before_evidence);
+          +            assert_eq!(row_counts(&db), before_counts);
+          +            let after_job = db.get_search_index_job(&latest).unwrap().unwrap();
+          +            assert_eq!(after_job.status, before_job.status, "do not steal live work");
+          +        }
+          +    }
+          +
+          +    #[test]
+          +    fn publication_retry_recreates_missing_latest_job_not_its_completed_predecessor() {
+          +        let (db, workspace, id, session) = fixture("/private/recover-latest.jsonl", 1);
+          +        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+          +        let spans = [span(&session, 1), span(&session, 2)];
+          +        let latest = refresh_session(&db, &workspace, &id, &session, &spans)
+          +            .unwrap().index_job_id.unwrap();
+          +        let stored = db.get_session(&id).unwrap();
+          +        let evidence = db.list_evidence_spans_for_session(&id).unwrap();
+          +        // Only this test's derived queue row is removed; the checkpoint stays.
+          +        db.execute_raw(&format!("DELETE FROM search_index_jobs WHERE id = {}", sql_text(&latest))).unwrap();
+          +        let before = row_counts(&db);
+          +        for _ in 0..2 {
+          +            assert_eq!(reconcile_session_publication(&db, &workspace, &id).unwrap(), Some(latest.clone()));
+          +            let work = db.get_search_index_job(&latest).unwrap().unwrap();
+          +            assert_eq!(work.status_enum(), Some(SearchIndexJobStatus::Pending));
+          +            assert_eq!(work.document_id.as_deref(), Some(id.as_str()));
+          +            assert_eq!(db.get_session(&id).unwrap(), stored);
+          +            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), evidence);
+          +            let after = row_counts(&db);
+          +            assert_eq!(after, [before[0], before[1], before[2] + 1, before[3]]);
+          +        }
+          +        let original = stable_search_index_job_id(&workspace, &id);
+          +        assert_eq!(db.get_search_index_job(&original).unwrap().unwrap().status_enum(), Some(SearchIndexJobStatus::Completed));
+          +    }
+          +
+          +    #[test]
+          +    fn publication_retry_preserves_original_job_recovery_before_any_refresh() {
+          +        let (db, workspace, id, _) = fixture("/private/recover-original.jsonl", 0);
+          +        let original = stable_search_index_job_id(&workspace, &id);
+          +        let stored = db.get_session(&id).unwrap();
+          +        assert_eq!(reconcile_session_publication(&db, &workspace, &id).unwrap(), Some(original.clone()));
+          +        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+          +        assert!(reconcile_session_publication(&db, &workspace, &id).unwrap().is_none());
+          +        db.execute_raw(&format!("DELETE FROM search_index_jobs WHERE id = {}", sql_text(&original))).unwrap();
+          +        assert_eq!(reconcile_session_publication(&db, &workspace, &id).unwrap(), Some(original));
+          +        assert_eq!(db.get_session(&id).unwrap(), stored);
+          +        assert_eq!(db.count_table_rows("search_index_jobs").unwrap(), 1);
+          +    }
+          +
+          +    #[test]
+          +    fn publication_retry_refuses_corrupt_checkpoint_before_consulting_completed_job() {
+          +        let (db, workspace, id, _) = fixture("/private/corrupt-checkpoint.jsonl", 1);
+          +        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'").unwrap();
+          +        let original = stable_search_index_job_id(&workspace, &id);
+          +        for metadata in [
+          +            "not-json PRIVATE_PAYLOAD_SENTINEL".to_owned(),
+          +            "[]".to_owned(),
+          +            json!({CHECKPOINT_KEY: null}).to_string(),
+          +            json!({CHECKPOINT_KEY: {"schema": CHECKPOINT_SCHEMA}}).to_string(),
+          +            json!({CHECKPOINT_KEY: {
+          +                "schema": CHECKPOINT_SCHEMA,
+          +                "snapshotRevision": format!("blake3:{}", "a".repeat(64)),
+          +                "indexJobId": original,
+          +                "previousIndexJobId": original,
+          +            }}).to_string(),
+          +        ] {
+          +            db.execute_raw(&format!("UPDATE sessions SET metadata_json = {} WHERE id = {}", sql_text(&metadata), sql_text(&id))).unwrap();
+          +            let stored = db.get_session(&id).unwrap();
+          +            let before = row_counts(&db);
+          +            let error = reconcile_session_publication(&db, &workspace, &id).unwrap_err().to_string();
+          +            assert!(error.contains("cass_refresh_"));
+          +            assert!(!error.contains("PRIVATE_PAYLOAD_SENTINEL"));
+          +            assert!(!error.contains("/private/"));
+          +            assert_eq!(db.get_session(&id).unwrap(), stored);
+          +            assert_eq!(row_counts(&db), before);
+          +        }
+          +    }
+          +
+          +    #[test]
+          +    fn publication_retry_refuses_mismatched_completed_work() {
+          +        let (db, workspace, id, _) = fixture("/private/mismatched-job.jsonl", 1);
+          +        let original = stable_search_index_job_id(&workspace, &id);
+          +        db.execute_raw("UPDATE search_index_jobs SET status = 'completed', document_source = 'memory'").unwrap();
+          +        let before = row_counts(&db);
+          +        let error = reconcile_session_publication(&db, &workspace, &id).unwrap_err().to_string();
+          +        assert!(error.contains("cass_refresh_index_job_scope_mismatch"));
+          +        assert_eq!(row_counts(&db), before);
+          +        assert_eq!(db.get_search_index_job(&original).unwrap().unwrap().document_source.as_deref(), Some("memory"));
+          +        db.execute_raw("UPDATE search_index_jobs SET document_source = 'session', documents_total = 2").unwrap();
+          +        let error = reconcile_session_publication(&db, &workspace, &id).unwrap_err().to_string();
+          +        assert!(error.contains("cass_refresh_index_job_invalid"));
+          +        assert_eq!(row_counts(&db), before);
+          +    }
+          +
+          +    #[test]
+          +    fn publication_retry_cannot_create_work_for_a_missing_or_foreign_session() {
+          +        let (db, workspace, id, _) = fixture("/private/session-scope.jsonl", 1);
+          +        let before = row_counts(&db);
+          +        for (scope, target, code) in [
+          +            (workspace.as_str(), "sess_missing", "cass_refresh_session_missing"),
+          +            ("wsp_foreign", id.as_str(), "cass_refresh_scope_mismatch"),
+          +        ] {
+          +            let error = reconcile_session_publication(&db, scope, target).unwrap_err().to_string();
+          +            assert!(error.contains(code));
+          +            assert_eq!(row_counts(&db), before);
+          +        }
+          +    }
+          +}
+          --- a/src/cass/import.rs
+          +++ b/src/cass/import.rs
+          @@ -741,4 +741,4 @@
+          -                        existing_session_index_job_for_reconciliation(
+          +                        refresh::reconcile_session_publication(
+                                       &connection,
+                                       &workspace_id,
+                                       &session_id,
+          @@ -1806,31 +1806 @@
+          -/// Recover durable publication work when an identical CASS import observes a
+          -/// session that was committed by an earlier attempt. Completed jobs need no
+          -/// work; pending/running/cancelled/failed jobs are returned to the caller so
+          -/// the ordinary CLI reconciliation pass processes (or truthfully observes)
+          -/// the same deterministic job. A legacy session with no job receives that
+          -/// missing deterministic row under the import transaction's contention-safe
+          -/// retry lane.
+          -fn existing_session_index_job_for_reconciliation(
+          -    connection: &DbConnection,
+          -    workspace_id: &str,
+          -    session_id: &str,
+          -) -> Result<Option<String>, DbError> {
+          -    let index_job_id = stable_search_index_job_id(workspace_id, session_id);
+          -    with_import_session_transaction(connection, || {
+          -        match connection.get_search_index_job(&index_job_id)? {
+          -            Some(job) if job.status_enum() == Some(crate::db::SearchIndexJobStatus::Completed) => {
+          -                Ok(None)
+          -            }
+          -            Some(_) => Ok(Some(index_job_id.clone())),
+          -            None => {
+          -                connection.insert_search_index_job(
+          -                    &index_job_id,
+          -                    &search_index_job_input(workspace_id, session_id),
+          -                )?;
+          -                Ok(Some(index_job_id.clone()))
+          -            }
+          -        }
+          -    })
+          -}
+          -
+           fn ensure_workspace(connection: &DbConnection, workspace_path: &Path) -> Result<String, DbError> {
+          --- a/src/cass/backfill_public_tests.rs
+          +++ b/src/cass/backfill_public_tests.rs
+          @@ -314,3 +314,92 @@
+               }
+               Ok(())
+           }
+          +
+          +/// Capture and publication recovery are independent: declining another CASS
+          +/// view cannot erase work already recorded by a newer transcript checkpoint.
+          +#[cfg(unix)]
+          +#[test]
+          +fn metadata_only_reimport_recovers_latest_publication_without_reading_transcript() -> TestResult {
+          +    let root = unique_test_dir("cass-metadata-publication")?;
+          +    let bin_dir = root.join("bin");
+          +    let workspace = root.join("workspace");
+          +    let source = root.join("session.jsonl");
+          +    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+          +    fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+          +    fs::write(&source, "{}\n").map_err(|e| e.to_string())?;
+          +    let binary = bin_dir.join("cass");
+          +    write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 1)?;
+          +    let database = root.join("ee.db");
+          +    let client = CassClient::with_binary(binary.clone()).with_timeout(Duration::from_secs(5));
+          +    let mut options = CassImportOptions {
+          +        workspace_path: workspace.clone(),
+          +        database_path: Some(database.clone()),
+          +        limit: 1,
+          +        since: None,
+          +        dry_run: false,
+          +        include_spans: true,
+          +    };
+          +    let first = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+          +    let id = first.sessions[0].session_id.clone()
+          +        .ok_or_else(|| "initial session missing".to_owned())?;
+          +    let original = first.sessions[0].index_job_id.clone()
+          +        .ok_or_else(|| "initial publication missing".to_owned())?;
+          +    let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+          +    db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+          +        .map_err(|e| e.to_string())?;
+          +    write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 4)?;
+          +    let grown = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+          +    let latest = grown.sessions[0].index_job_id.clone()
+          +        .ok_or_else(|| "refreshed publication missing".to_owned())?;
+          +    ensure(latest != original, "growth requires a new publication identity")?;
+          +    let stored = db.get_session(&id).map_err(|e| e.to_string())?;
+          +    let evidence = db.list_evidence_spans_for_session(&id).map_err(|e| e.to_string())?;
+          +    ensure_equal(&evidence.len(), &4, "growth was committed")?;
+          +    let counts = || {
+          +        ["sessions", "evidence_spans", "search_index_jobs", "audit_log"]
+          +            .into_iter()
+          +            .map(|table| db.count_table_rows(table).map_err(|e| e.to_string()))
+          +            .collect::<Result<Vec<_>, String>>()
+          +    };
+          +    let before = counts()?;
+          +    // This output cannot be imported. A successful metadata-only retry thus
+          +    // proves that publication recovery did not secretly fetch the transcript.
+          +    write_fake_cass_binary_with_verbatim_view(
+          +        &binary, &workspace, &source, "not JSON PRIVATE_RAW_SENTINEL\n",
+          +    )?;
+          +    options.include_spans = false;
+          +    for status in ["pending", "failed", "cancelled", "running"] {
+          +        db.execute_raw(&format!(
+          +            "UPDATE search_index_jobs SET status = '{status}' WHERE id = '{latest}'"
+          +        )).map_err(|e| e.to_string())?;
+          +        let retry = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+          +        ensure_equal(&retry.sessions_imported, &0, "recovery must not recapture evidence")?;
+          +        ensure_equal(&retry.spans_imported, &0, "metadata-only means no new spans")?;
+          +        ensure_equal(&retry.index_jobs_queued, &1, "latest unfinished work stays visible")?;
+          +        ensure_equal(&retry.sessions[0].index_job_id.as_ref(), &Some(&latest), "recover current checkpoint, not original job")?;
+          +        ensure_equal(&counts()?, &before, "retry does not duplicate durable work")?;
+          +        ensure_equal(&db.get_session(&id).map_err(|e| e.to_string())?, &stored, "checkpoint stays exact")?;
+          +        ensure_equal(&db.list_evidence_spans_for_session(&id).map_err(|e| e.to_string())?, &evidence, "history stays exact")?;
+          +        let job = db.get_search_index_job(&latest).map_err(|e| e.to_string())?
+          +            .ok_or_else(|| "latest job disappeared".to_owned())?;
+          +        ensure_equal(&job.status.as_str(), &status, "recovery never steals a live publisher")?;
+          +    }
+          +    db.execute_raw(&format!("UPDATE search_index_jobs SET status = 'completed' WHERE id = '{latest}'"))
+          +        .map_err(|e| e.to_string())?;
+          +    let published = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+          +    ensure_equal(&published.index_jobs_queued, &0, "completed latest snapshot needs no work")?;
+          +    // Loss of rebuildable queue state must not force another upstream read.
+          +    db.execute_raw(&format!("DELETE FROM search_index_jobs WHERE id = '{latest}'"))
+          +        .map_err(|e| e.to_string())?;
+          +    let recovered = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+          +    ensure_equal(&recovered.sessions[0].index_job_id.as_ref(), &Some(&latest), "recreate the exact checkpoint job")?;
+          +    ensure_equal(&counts()?, &before, "only the missing queue row is recreated")?;
+          +    ensure_equal(&db.get_session(&id).map_err(|e| e.to_string())?, &stored, "recovery preserves the checkpoint")?;
+          +    ensure_equal(&db.list_evidence_spans_for_session(&id).map_err(|e| e.to_string())?, &evidence, "recovery preserves evidence")?;
+          +    // Negative control: actually asking to capture the invalid view must fail.
+          +    options.include_spans = true;
+          +    ensure(import_cass_sessions(&client, &options).is_err(), "the transcript fixture is genuinely invalid")?;
+          +    ensure_equal(&counts()?, &before, "failed capture cannot undo publication recovery")?;
+          +    db.close().map_err(|e| e.to_string())?;
+          +    Ok(())
+          +}
+          PATCH
+          echo "e0075f1876135ed66053a2a28bb5343179c2a4463f5f299a4722b072b55b6d69  $RUNNER_TEMP/cass-publication-manual.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/cass-publication-manual.patch"
+          git apply "$RUNNER_TEMP/cass-publication-manual.patch"
+          rustfmt --edition 2024 --config skip_children=true src/cass/refresh.rs src/cass/backfill_public_tests.rs
+          git diff --check
+          git diff > "$RUNNER_TEMP/cass-publication-source.patch"
+      - name: Preserve the exact candidate blobs without updating any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --config skip_children=true --check \
-            src/cass/refresh.rs src/cass/refresh_tests.rs src/cass/backfill_public_tests.rs \
-            2>&1 | tee "$RUNNER_TEMP/cass-refresh-format.log"
-      - name: Retain early formatting diagnostics
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: cass-refresh-format-results
-          path: ${{ runner.temp }}/cass-refresh-*.log
-          retention-days: 7
-      - name: Exercise all retained-session refresh regressions
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          cargo test --locked --lib cass::import::refresh:: -- --test-threads=2 \
-            2>&1 | tee "$RUNNER_TEMP/cass-refresh-tests.log"
           python3 - <<'PY'
-          import os, pathlib, re
-          log = pathlib.Path(os.environ['RUNNER_TEMP'], 'cass-refresh-tests.log').read_text()
-          results = re.findall(r'test result: ok\. (\d+) passed; 0 failed; 0 ignored;', log)
-          if not results or int(results[-1]) < 27:
-              raise SystemExit('Expected at least 27 executed refresh regressions, with none ignored')
+          import json, os, pathlib, subprocess
+          repo = 'Dicklesworthstone/eidetic_engine_cli'
+          paths = ['src/cass/import.rs', 'src/cass/refresh.rs', 'src/cass/backfill_public_tests.rs']
+          changed = subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines()
+          assert set(changed) == set(paths), 'Unexpected source edits'
+          manifest = {'baseCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip(), 'files': []}
+          for path in paths:
+              old = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + path]).decode().strip()
+              new = subprocess.check_output(['git', 'hash-object', path]).decode().strip()
+              payload = json.dumps({'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})
+              response = subprocess.run(['gh', 'api', 'repos/' + repo + '/git/blobs', '--input', '-'], input=payload, text=True, capture_output=True, check=True)
+              assert json.loads(response.stdout)['sha'] == new, 'Source transport changed'
+              manifest['files'].append({'path': path, 'baseBlob': old, 'sha': new})
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'cass-publication-source.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
           PY
-      - name: Verify public growth, migration and publication retries
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          cargo test --locked --lib \
-            cass::import::tests::reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs \
-            -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cass-refresh-public.log"
-          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' \
-            "$RUNNER_TEMP/cass-refresh-public.log"
-      - name: Exercise the existing public import and subprocess paths
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          cargo test --locked --lib cass::import:: -- --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' \
-            "$RUNNER_TEMP/cass-refresh-import.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cass-publication-source
+          path: |
+            ${{ runner.temp }}/cass-publication-source.json
+            ${{ runner.temp }}/cass-publication-source.patch
+          retention-days: 7
       - name: Check all Cargo targets
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/cass-refresh-check.log"
-      - name: Check strict Clippy on all targets
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/cass-publication-check.log"
+      - name: Run all 33 refresh and publication recovery regressions
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo clippy --locked --all-targets -- -D warnings \
-            2>&1 | tee "$RUNNER_TEMP/cass-refresh-clippy.log"
-      - name: Check repository formatting and unchanged source
+          cargo test --locked --lib cass::import::refresh:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/cass-publication-refresh.log"
+          grep -Fq 'test result: ok. 33 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-publication-refresh.log"
+      - name: Run public metadata-only recovery and existing growth regressions
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/cass-refresh-repository-format.log"
-          git diff --exit-code
+          cargo test --locked --lib cass::import::tests::metadata_only_reimport_recovers_latest_publication_without_reading_transcript -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cass-publication-metadata.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-publication-metadata.log"
+          cargo test --locked --lib cass::import::tests::reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cass-publication-growth.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-publication-growth.log"
+      - name: Report strict Clippy without hiding existing warnings
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/cass-publication-clippy.log"
+      - name: Check repository formatting
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/cass-publication-format.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
         with:
-          name: cass-refresh-regression-results
-          path: ${{ runner.temp }}/cass-refresh-*.log
+          name: cass-publication-verification
+          path: ${{ runner.temp }}/cass-publication-*
           retention-days: 7
-          if-no-files-found: warn
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
