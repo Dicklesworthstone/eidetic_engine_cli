@@ -183,13 +183,15 @@ pub(super) fn limit_complete_pairs(candidates: &mut Vec<ReviewSessionCandidate>,
     candidates.retain(|candidate| retained.contains(&candidate.candidate_id));
 }
 
-/// The only evidence-sharing exception: the other half of this exact,
-/// source-reconstructed pair has already been explicitly applied and its
-/// original live memory is identified by an unambiguous creation audit.
+/// Verified sharing of source evidence, independently of reciprocal linkage.
+/// `memory` is the immutable first owner used by validation and previews. For
+/// multiple episodes in one window it need not be this candidate's counterpart.
+/// Only `linked_memory` can supply the other endpoint of a failure/repair link.
 #[derive(Clone, Debug)]
 pub(super) struct AppliedPeer {
     pub memory: StoredMemory,
     pub shared_evidence_ids: BTreeSet<String>,
+    linked_memory: Option<StoredMemory>,
     arc: ReviewSessionArcMetadata,
 }
 
@@ -275,30 +277,34 @@ pub(super) fn applied_peer(
         .iter()
         .find(|candidate| candidate.candidate_id == arc.linked_candidate_id)
         .ok_or_else(|| pair_issue("Missing reciprocal session-arc proposal."))?;
-    let Some(peer) = connection
+    let linked_memory = match connection
         .get_curation_candidate(&stored.workspace_id, &arc.linked_candidate_id)
         .map_err(|error| pair_issue(format!("Cannot inspect paired candidate: {error}")))?
-    else {
-        // The other side is still a proposal, not implicit authorization to
-        // create a second memory. Applying this side alone remains permitted.
-        return Ok(None);
-    };
-    verify_candidate(connection, &peer, expected_peer, &session)?;
-    if peer.status != CandidateStatus::Applied.as_str() {
-        return Ok(None);
-    }
-    let memory = load_create_derived_replay_memory(connection, &peer)?;
-    let expected_content =
-        crate::policy::redact_secret_like_content(&expected_peer.proposed_content).content;
-    if memory.tombstoned_at.is_some()
-        || memory.level != "procedural"
-        || memory.kind != review_candidate_derived_memory_kind(expected_peer)
-        || memory.content != expected_content
     {
-        return Err(pair_issue(
-            "The applied peer memory was retired or changed; evidence cannot be reassigned to it.",
-        ));
-    }
+        Some(peer) => applied_memory(connection, &peer, expected_peer, &session)?,
+        None => None,
+    };
+
+    // Additional episodes may reuse exactly one complete window, never an
+    // arbitrary collection of already-owned spans. Reconstruct both lessons
+    // from that window and prove its owner was explicitly applied. Its peer
+    // may still be pending/rejected: source sharing does not accept or link it.
+    let memory = if let [span] = spans.as_slice()
+        && is_inline_candidate(current, span)
+        && let Some(owner_id) = span.memory_id.as_deref()
+    {
+        match linked_memory.as_ref() {
+            Some(memory) if memory.id == owner_id => memory.clone(),
+            _ => applied_window_owner(connection, &session, span, &expected, owner_id)?,
+        }
+    } else {
+        // Two-window arcs retain the exact reciprocal-pair exception. An
+        // unowned first lesson needs neither a peer nor a sharing exception.
+        let Some(memory) = linked_memory.as_ref() else {
+            return Ok(None);
+        };
+        memory.clone()
+    };
     let shared_evidence_ids = spans
         .iter()
         .filter(|span| span.memory_id.as_deref() == Some(memory.id.as_str()))
@@ -307,8 +313,120 @@ pub(super) fn applied_peer(
     Ok(Some(AppliedPeer {
         memory,
         shared_evidence_ids,
+        linked_memory,
         arc: arc.clone(),
     }))
+}
+
+fn is_inline_candidate(candidate: &ReviewSessionCandidate, span: &StoredEvidenceSpan) -> bool {
+    candidate.source_ids.len() == 1
+        && candidate.source_ids[0] == span.id
+        && candidate.session_arc.as_ref().is_some_and(|arc| {
+            arc.failure_span.evidence_span_id == span.id
+                && arc.resolution_span.evidence_span_id == span.id
+        })
+}
+
+/// This is read-only proof, not an approval operation. Both proposal identity
+/// and the applied memory must still match the current source reconstruction.
+fn applied_memory(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    expected: &ReviewSessionCandidate,
+    session: &StoredSession,
+) -> Result<Option<StoredMemory>, CurateValidationIssue> {
+    verify_candidate(connection, stored, expected, session)?;
+    if stored.status != CandidateStatus::Applied.as_str() {
+        return Ok(None);
+    }
+    let memory = load_create_derived_replay_memory(connection, stored)?;
+    let expected_content =
+        crate::policy::redact_secret_like_content(&expected.proposed_content).content;
+    if memory.tombstoned_at.is_some()
+        || memory.level != "procedural"
+        || memory.kind != review_candidate_derived_memory_kind(expected)
+        || memory.content != expected_content
+    {
+        return Err(pair_issue(
+            "An applied session-arc memory was retired or changed; it cannot authorize source sharing or linkage.",
+        ));
+    }
+    Ok(Some(memory))
+}
+
+/// Follow the immutable source owner to its one creation audit. Do not scan
+/// every proposed episode and replay each: admission is bounded to this window
+/// plus the owner/counterpart, irrespective of the number of proposed lessons.
+fn applied_window_owner(
+    connection: &DbConnection,
+    session: &StoredSession,
+    span: &StoredEvidenceSpan,
+    expected: &[ReviewSessionCandidate],
+    owner_id: &str,
+) -> Result<StoredMemory, CurateValidationIssue> {
+    let audits = connection
+        .list_audit_by_target("memory", owner_id, None)
+        .map_err(|error| pair_issue(format!("Cannot inspect source-owner creation: {error}")))?;
+    let mut creations = audits
+        .iter()
+        .filter(|audit| audit.action == audit_actions::MEMORY_CREATE);
+    let audit = creations
+        .next()
+        .ok_or_else(|| pair_issue("The source owner has no memory-creation audit."))?;
+    if creations.next().is_some()
+        || audit.workspace_id.as_deref() != Some(session.workspace_id.as_str())
+    {
+        return Err(pair_issue(
+            "The source owner's creation is ambiguous or belongs to another workspace.",
+        ));
+    }
+    let details: serde_json::Value = serde_json::from_str(
+        audit
+            .details
+            .as_deref()
+            .ok_or_else(|| pair_issue("The source-owner creation audit has no details."))?,
+    )
+    .map_err(|error| pair_issue(format!("Invalid source-owner creation audit: {error}")))?;
+    if details["schema"] != "ee.audit.derived_memory_created.v1"
+        || details["createdMemoryId"].as_str() != Some(owner_id)
+        || details["producer"] != "review_session"
+    {
+        return Err(pair_issue(
+            "The source owner was not created by an explicitly applied session-arc candidate.",
+        ));
+    }
+    let expected_owner = expected
+        .iter()
+        .find(|candidate| {
+            details["candidateId"].as_str() == Some(candidate.candidate_id.as_str())
+                && is_inline_candidate(candidate, span)
+        })
+        .ok_or_else(|| {
+            pair_issue("The source owner is not a reconstructed episode of this exact window.")
+        })?;
+    let owner = connection
+        .get_curation_candidate(&session.workspace_id, &expected_owner.candidate_id)
+        .map_err(|error| pair_issue(format!("Cannot inspect source-owner candidate: {error}")))?
+        .ok_or_else(|| pair_issue("The source-owner candidate is missing."))?;
+    let memory = applied_memory(connection, &owner, expected_owner, session)?
+        .ok_or_else(|| pair_issue("The source-owner candidate has not been explicitly applied."))?;
+    let metadata = parse_derivation_metadata(&owner)?;
+    let source_refs: serde_json::Value = serde_json::from_str(
+        owner
+            .derivation_source_refs_json
+            .as_deref()
+            .ok_or_else(|| pair_issue("The source-owner candidate has no source package."))?,
+    )
+    .map_err(|error| pair_issue(format!("Invalid source-owner source package: {error}")))?;
+    if memory.id != owner_id
+        || details.get("sourceRefs") != Some(&source_refs)
+        || details.get("producerPayload") != metadata.producer.producer_payload.as_ref()
+    {
+        return Err(pair_issue(
+            "The source-owner creation audit does not match its reconstructed memory and evidence package.",
+        ));
+    }
+    Ok(memory)
 }
 
 fn verify_candidate(
@@ -324,7 +442,8 @@ fn verify_candidate(
         Some(session),
     )
     .map_err(|error| pair_issue(error.message()))?;
-    if stored.candidate_type != CandidateType::CreateDerivedMemory.as_str()
+    if stored.workspace_id != session.workspace_id
+        || stored.candidate_type != CandidateType::CreateDerivedMemory.as_str()
         || stored.target_memory_id.is_some()
         || stored.source_type != persisted_review_candidate_source_type(expected)
         || stored.source_id.as_deref() != Some(expected.source_ids.join(",").as_str())
@@ -351,10 +470,11 @@ pub(super) fn planned_pair_link(
     peer: Option<&AppliedPeer>,
 ) -> Option<CurateShowPlannedSessionArcLink> {
     let peer = peer?;
+    let linked_memory = peer.linked_memory.as_ref()?;
     let (rule_id, anti_id) = if peer.arc.role == "rule" {
-        (created_memory_id, peer.memory.id.as_str())
+        (created_memory_id, linked_memory.id.as_str())
     } else {
-        (peer.memory.id.as_str(), created_memory_id)
+        (linked_memory.id.as_str(), created_memory_id)
     };
     Some(CurateShowPlannedSessionArcLink {
         link_id: generate_suggested_link_id(rule_id, anti_id, "related"),
@@ -379,6 +499,9 @@ pub(super) fn persist_pair_link(
     actor: &str,
 ) -> Result<(), DomainError> {
     let Some(peer) = peer else {
+        return Ok(());
+    };
+    let Some(linked_memory) = peer.linked_memory.as_ref() else {
         return Ok(());
     };
     let Some(link) = planned_pair_link(&created.memory_id, Some(peer)) else {
@@ -409,7 +532,7 @@ pub(super) fn persist_pair_link(
                 dst_memory_id: anti_id.clone(),
                 relation: MemoryLinkRelation::Related,
                 weight: 1.0,
-                confidence: created.memory.confidence.min(peer.memory.confidence),
+                confidence: created.memory.confidence.min(linked_memory.confidence),
                 directed: false,
                 evidence_count: u32::try_from(created.evidence_refs.len()).unwrap_or(u32::MAX),
                 last_reinforced_at: Some(applied_at.to_owned()),
