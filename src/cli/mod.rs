@@ -17659,7 +17659,7 @@ fn run_eval_retrieval_queries(
         .fixed_clock
         .clone()
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    seed_pack_quality_workspace(
+    let workspace_id = seed_pack_quality_workspace(
         &workspace_path,
         &database_path,
         source,
@@ -17669,6 +17669,47 @@ fn run_eval_retrieval_queries(
 
     let index_dir = workspace_path.join("index");
     build_eval_search_index(&index_dir, source)?;
+    // bd-j09rg. build_eval_search_index stamps generation 0 via
+    // write_memory_eval_index_metadata, which src/core/index.rs documents as
+    // the NO-DATABASE case: "Database-backed fixtures must stamp the
+    // generation they actually indexed; otherwise the public search path can
+    // correctly interpret the fixture as stale and replace it before the
+    // behavior under test is observed."
+    //
+    // Seeding a store made this evaluator database-backed and left the
+    // no-database stamp, so search saw database generation 12 against index
+    // generation 0 and fell back: sourceModeRequested hybrid,
+    // sourceModeApplied lexical_only, sourceModeFallback true, with
+    // search_index_stale raised once per query. Every retrieval-quality number
+    // the release gate consumes was therefore measured with the semantic tier
+    // disabled. Re-stamp with the generation actually indexed, the way the
+    // pack-quality evaluator already does.
+    let connection =
+        crate::db::DbConnection::open_file_read_only(&database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("failed to open eval store for index generation: {error}"),
+                repair: Some(
+                    "Re-run the evaluation after checking the temporary store.".to_owned(),
+                ),
+            }
+        })?;
+    let generation = connection
+        .get_workspace_generation(&workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to read eval workspace generation: {error}"),
+            repair: Some("Re-run the evaluation after checking the temporary store.".to_owned()),
+        })?
+        .unwrap_or(0);
+    crate::core::index::write_memory_eval_index_metadata_for_generation(
+        &index_dir,
+        generation,
+        u32::try_from(memories.len()).unwrap_or(u32::MAX),
+    )
+    .map_err(|error| DomainError::SearchIndex {
+        message: format!("failed to stamp eval index generation: {error}"),
+        repair: Some("Re-run the evaluation after checking the temporary index path.".to_owned()),
+    })?;
+    drop(connection);
 
     let limit = u32::try_from(memories.len().max(5)).unwrap_or(u32::MAX);
     let mut per_query = Vec::with_capacity(query_expectations.len());
