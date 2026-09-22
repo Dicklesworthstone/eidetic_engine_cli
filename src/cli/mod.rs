@@ -23295,6 +23295,7 @@ fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
         }
 
         let dispatch = match check.error_code.map(|error_code| error_code.id) {
+            Some("EE-E300") => Some(fix_search_index_missing(workspace)),
             Some("EE-E301") => Some(fix_search_index_stale(workspace)),
             Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
             Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
@@ -23354,12 +23355,20 @@ fn doctor_fix_dispatches(
                 let finding_code = dispatch.finding_code;
                 let operation = dispatch.op.kind_str();
                 let path = dispatch.path.display().to_string();
+                // An advisory Op only records its steps in actions.jsonl; nothing
+                // on disk changes. Reporting it as "applied" told agents a repair
+                // happened when the finding was still present (bd-pbyay).
+                let outcome = if dispatch.op.is_advisory() {
+                    "guidance_recorded"
+                } else {
+                    "applied"
+                };
                 match mutate(&mut ctx, &dispatch.path, dispatch.op) {
                     Ok(action) => fixer_results.push(DoctorFixerResult {
                         finding_code,
                         operation,
                         path,
-                        outcome: "applied",
+                        outcome,
                         action_sequence: Some(action.sequence),
                         error: None,
                     }),
@@ -23469,17 +23478,28 @@ fn doctor_fixer_action_count(results: &[DoctorFixerResult]) -> u64 {
         .unwrap_or(0)
 }
 
-fn doctor_fixer_result_counts(results: &[DoctorFixerResult]) -> (usize, usize, usize) {
+/// `(attempted, failed, skipped, guidance_only)`. A `guidance_recorded`
+/// fixer was attempted but repaired nothing, so it is also counted separately.
+fn doctor_fixer_result_counts(results: &[DoctorFixerResult]) -> (usize, usize, usize, usize) {
     let attempted = results
         .iter()
-        .filter(|result| matches!(result.outcome, "applied" | "idempotent_noop" | "failed"))
+        .filter(|result| {
+            matches!(
+                result.outcome,
+                "applied" | "guidance_recorded" | "idempotent_noop" | "failed"
+            )
+        })
         .count();
     let failed = results
         .iter()
         .filter(|result| result.outcome == "failed")
         .count();
+    let guidance_only = results
+        .iter()
+        .filter(|result| result.outcome == "guidance_recorded")
+        .count();
     let skipped = results.len().saturating_sub(attempted);
-    (attempted, failed, skipped)
+    (attempted, failed, skipped, guidance_only)
 }
 
 fn doctor_fix_success_json(
@@ -23491,7 +23511,7 @@ fn doctor_fix_success_json(
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned());
-    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
+    let (attempted, failed, skipped, guidance_only) = doctor_fixer_result_counts(fixer_results);
     let data = serde_json::json!({
         "schema": crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1,
         "doctor_version": env!("CARGO_PKG_VERSION"),
@@ -23506,6 +23526,7 @@ fn doctor_fix_success_json(
         "attemptedFixerCount": attempted,
         "failedFixerCount": failed,
         "skippedFixerCount": skipped,
+        "guidanceOnlyFixerCount": guidance_only,
         "fixerResults": fixer_results,
         "sideEffectFree": false,
         "configMutation": "never",
@@ -23617,7 +23638,7 @@ fn doctor_runtime_error_result(
         ),
     };
 
-    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
+    let (attempted, failed, skipped, guidance_only) = doctor_fixer_result_counts(fixer_results);
     let mut details = serde_json::json!({
         "phase": phase,
         "failurePolicy": "fail_fast",
@@ -23625,6 +23646,7 @@ fn doctor_runtime_error_result(
         "attemptedFixerCount": attempted,
         "failedFixerCount": failed,
         "skippedFixerCount": skipped,
+        "guidanceOnlyFixerCount": guidance_only,
         "fixerResults": fixer_results,
         "recovery": [{
             "priority": 0,
@@ -86809,6 +86831,71 @@ mod tests {
     }
 
     #[test]
+    fn doctor_fix_reports_advisory_ops_as_guidance_not_applied() -> TestResult {
+        use crate::core::doctor_fixers::{FixerDispatch, fix_search_index_missing};
+        use crate::core::doctor_runtime::Op;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let created = workspace.join(".ee").join("doctor-guidance-probe");
+        let dispatches = vec![
+            fix_search_index_missing(&workspace),
+            FixerDispatch {
+                finding_code: "test_real_write",
+                severity: "warning",
+                path: created.clone(),
+                op: Op::CreateDirAll { mode: 0o700 },
+            },
+        ];
+
+        let result = doctor_fix_dispatches(&workspace, dispatches);
+
+        ensure_equal(&result.exit_code, &ProcessExitCode::Success, "fix exit")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        let data = &value["data"];
+        let outcomes = data["fixerResults"]
+            .as_array()
+            .ok_or_else(|| "fixerResults must be an array".to_owned())?
+            .iter()
+            .map(|entry| {
+                (
+                    entry["findingCode"].as_str().unwrap_or_default(),
+                    entry["outcome"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // The index rebuild is advisory: it records steps and changes nothing,
+        // so it must not claim "applied". The write really happened, so it must.
+        ensure_equal(
+            &outcomes,
+            &vec![
+                ("search_index_missing", "guidance_recorded"),
+                ("test_real_write", "applied"),
+            ],
+            "per-fixer outcomes",
+        )?;
+        ensure(created.is_dir(), "the writing op must have created its dir")?;
+        ensure(
+            !workspace.join(".ee").join("index").exists(),
+            "the advisory index op must not have built an index",
+        )?;
+        ensure_equal(
+            &data["attemptedFixerCount"],
+            &serde_json::json!(2),
+            "attempted",
+        )?;
+        ensure_equal(
+            &data["guidanceOnlyFixerCount"],
+            &serde_json::json!(1),
+            "guidance only",
+        )?;
+        ensure_equal(&data["failedFixerCount"], &serde_json::json!(0), "failed")?;
+        ensure_persistent_doctor_lock_released(&workspace)
+    }
+
+    #[test]
     fn doctor_fix_mutation_failure_is_partial_audited_and_undoable() -> TestResult {
         use crate::core::doctor_fixers::FixerDispatch;
         use crate::core::doctor_runtime::Op;
@@ -86819,7 +86906,7 @@ mod tests {
         let outside = root.path().join("outside-doctor-blast-radius");
         let dispatches = vec![
             FixerDispatch {
-                finding_code: "test_applied_before_failure",
+                finding_code: "test_recorded_before_failure",
                 severity: "warning",
                 path: workspace.join(".ee"),
                 op: Op::Manual {
@@ -86889,10 +86976,17 @@ mod tests {
             .iter()
             .map(|entry| entry["outcome"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
+        // The pre-failure dispatch is an advisory Op::Manual: it recorded its
+        // steps and changed nothing, so it is not "applied" (bd-pbyay).
         ensure_equal(
             &outcomes,
-            &vec!["applied", "failed", "skipped_after_failure"],
+            &vec!["guidance_recorded", "failed", "skipped_after_failure"],
             "ordered fixer outcomes",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["guidanceOnlyFixerCount"],
+            &serde_json::json!(1),
+            "guidance-only fixer count",
         )?;
         ensure_equal(
             &value["error"]["details"]["run"]["status"],

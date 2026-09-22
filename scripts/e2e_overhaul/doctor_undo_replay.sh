@@ -278,7 +278,10 @@ run_finish_failure_and_undo() {
          and ($details.failedFixerCount == 0)
          and ($details.skippedFixerCount == 0)
          and all($details.fixerResults[];
-           .outcome == "applied"
+           # An advisory fixer (e.g. the index rebuild) records guidance and
+           # reports guidance_recorded, never applied (bd-pbyay). Both are
+           # completed outcomes whose action must survive the finish failure.
+           (.outcome == "applied" or .outcome == "guidance_recorded")
            and (.actionSequence | type == "number" and . > 0)
          )
          and ($details.run.actionCount ==

@@ -1,6 +1,11 @@
-//! 12 auto-fixable fixers wired through the `doctor_runtime::mutate()`
-//! chokepoint (bd-tu4s8 Pass-2). Each fixer maps a specific repair-spec
-//! finding code to the `Op` that the doctor should call `mutate()` with.
+//! 13 auto-fixable fixers wired through the `doctor_runtime::mutate()`
+//! chokepoint (bd-tu4s8 Pass-2; bd-pbyay added `search_index_missing`). Each
+//! fixer maps a specific repair-spec finding code to the `Op` that the doctor
+//! should call `mutate()` with.
+//!
+//! Only `Op::is_writing` Ops change the filesystem. Advisory Ops (every `RunX`
+//! below) record guidance, and `ee doctor --fix` reports them as
+//! `guidance_recorded`, never `applied`.
 //!
 //! Phase-1 scope: the fixers are pure dispatchers — they return the
 //! `(path, Op)` pair the caller will hand to `mutate()`. They do NOT call
@@ -10,7 +15,7 @@
 //! land, `RunX` Ops record their planned-mutation evidence through the same
 //! `actions.jsonl` channel as `Manual{steps}`.
 //!
-//! The 12 fixers cover the eight repair_specs/ subsystems
+//! The 13 fixers cover the eight repair_specs/ subsystems
 //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
 //! schema_migrations, search_indexes, state_files, workspace_config) plus
 //! WAL checkpoint and snapshot-backup as cross-cutting Ops. Each fixer
@@ -62,7 +67,7 @@ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
     FixerDispatch {
         finding_code: "search_index_stale",
         severity: "warning",
-        path: workspace_root.join(".ee/indexes"),
+        path: search_index_dir(workspace_root),
         op: Op::RunIndexRebuild {
             steps: vec![
                 "ee index rebuild --workspace .".to_string(),
@@ -71,6 +76,30 @@ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
             ],
         },
     }
+}
+
+/// FM-SI (EE-E300): the search index is missing while the source database
+/// exists. Distinct from [`fix_search_index_stale`]: there is no manifest to
+/// compare, so the follow-up check is that doctor stops reporting EE-E300.
+#[must_use]
+pub fn fix_search_index_missing(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch {
+        finding_code: "search_index_missing",
+        severity: "warning",
+        path: search_index_dir(workspace_root),
+        op: Op::RunIndexRebuild {
+            steps: vec![
+                "ee index rebuild --workspace .".to_string(),
+                "Confirm `ee doctor --json` no longer reports search_index EE-E300.".to_string(),
+            ],
+        },
+    }
+}
+
+/// The index directory the doctor's `search_index` detector inspects: no
+/// database or index override, so the workspace default (`.ee/index`).
+fn search_index_dir(workspace_root: &Path) -> PathBuf {
+    crate::config::workspace::resolve_store_index_dir(workspace_root, None, None)
 }
 
 /// FM-GS-01: graph snapshot is stale relative to memory_links activity.
@@ -294,10 +323,12 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
 }
 
 /// The closed set of fixer codes this module exposes. Contract tests
-/// assert that every entry has a matching `fix_*` function above and that
-/// the count matches the bead's "12 auto-fixable" deliverable.
+/// assert that every entry has a matching `fix_*` function above. bd-tu4s8
+/// delivered 12; bd-pbyay split `search_index_missing` out of
+/// `search_index_stale`, because a missing index was being repaired as stale.
 pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_stale",
+    "search_index_missing",
     "graph_snapshot_stale",
     "wal_checkpoint_pending",
     "schema_migration_pending",
@@ -320,8 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn twelve_fixer_codes_are_registered() {
-        assert_eq!(FIXER_FINDING_CODES.len(), 12);
+    fn thirteen_fixer_codes_are_registered() {
+        assert_eq!(FIXER_FINDING_CODES.len(), 13);
         let mut sorted = FIXER_FINDING_CODES.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -343,6 +374,33 @@ mod tests {
         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
         assert!(dispatch.op.is_advisory());
         assert!(!dispatch.op.is_writing());
+    }
+
+    #[test]
+    fn search_index_fixers_target_the_directory_the_detector_inspects() {
+        // bd-pbyay: the fixer used to target `.ee/indexes`, a path nothing
+        // else in the crate reads; the index lives at `.ee/index`.
+        let workspace = root();
+        let expected = crate::config::workspace::resolve_store_index_dir(&workspace, None, None);
+        assert!(expected.ends_with(".ee/index"), "{}", expected.display());
+        for dispatch in [
+            fix_search_index_stale(&workspace),
+            fix_search_index_missing(&workspace),
+        ] {
+            assert_eq!(dispatch.path, expected, "{}", dispatch.finding_code);
+        }
+    }
+
+    #[test]
+    fn search_index_missing_is_its_own_finding() {
+        let dispatch = fix_search_index_missing(&root());
+        assert_eq!(dispatch.finding_code, "search_index_missing");
+        let Op::RunIndexRebuild { steps } = &dispatch.op else {
+            panic!("expected RunIndexRebuild");
+        };
+        assert_eq!(steps[0], "ee index rebuild --workspace .");
+        assert!(steps[1].contains("EE-E300"), "{steps:?}");
+        assert!(dispatch.op.is_advisory());
     }
 
     #[test]
@@ -488,6 +546,7 @@ mod tests {
         let workspace = root();
         let dispatches: Vec<&'static str> = vec![
             fix_search_index_stale(&workspace).finding_code,
+            fix_search_index_missing(&workspace).finding_code,
             fix_graph_snapshot_stale(&workspace).finding_code,
             fix_wal_checkpoint_pending(&workspace).finding_code,
             fix_schema_migration_pending(&workspace, "V001").finding_code,
