@@ -46,6 +46,34 @@ pub(super) struct RefreshReport {
     pub index_job_id: Option<String>,
 }
 
+/// Recover publication of the last committed snapshot without reading CASS.
+/// `include_spans = false` suppresses transcript capture, not recovery of work
+/// already committed by a previous import. The original job cannot stand in
+/// for a newer checkpoint, even when that original job completed successfully.
+pub(super) fn reconcile_session_publication(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<Option<String>, DbError> {
+    with_import_session_transaction(connection, || {
+        let stored = connection
+            .get_session(session_id)?
+            .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
+        if stored.workspace_id != workspace_id {
+            return Err(refusal("cass_refresh_scope_mismatch"));
+        }
+        let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
+        let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
+        let job_id = checkpoint.map_or_else(
+            || stable_search_index_job_id(workspace_id, session_id),
+            |saved| saved.index_job_id,
+        );
+        // A missing derived queue row is repairable from this durable identity.
+        // Never change the evidence, checkpoint, or a live publisher's lease.
+        pending_job(connection, workspace_id, session_id, &job_id, true)
+    })
+}
+
 /// The caller obtained a complete bounded `cass view` snapshot before entering
 /// here. A failure never partially updates this session; earlier successfully
 /// imported sessions remain committed, as in the ordinary import path.
@@ -275,17 +303,38 @@ fn merged_metadata(
     workspace_id: &str,
     session_id: &str,
 ) -> Result<MetadataRefresh, DbError> {
-    fn object(value: Option<&str>) -> Result<SessionMetadata, DbError> {
-        match value {
-            None => Ok(serde_json::Map::new()),
-            Some(value) => serde_json::from_str::<serde_json::Value>(value)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .ok_or_else(|| refusal("cass_refresh_metadata_invalid")),
-        }
+    let mut stored_metadata = metadata_object(stored.metadata_json.as_deref())?;
+    let checkpoint = take_checkpoint(&mut stored_metadata, workspace_id, session_id)?;
+    let incoming = metadata_object(input.metadata_json.as_deref())?;
+    let changed = incoming
+        .iter()
+        .any(|(key, value)| stored_metadata.get(key) != Some(value));
+    stored_metadata.extend(incoming);
+    Ok(MetadataRefresh {
+        values: stored_metadata,
+        checkpoint,
+        fields_changed: changed,
+    })
+}
+
+fn metadata_object(value: Option<&str>) -> Result<SessionMetadata, DbError> {
+    match value {
+        None => Ok(serde_json::Map::new()),
+        Some(value) => serde_json::from_str::<serde_json::Value>(value)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| refusal("cass_refresh_metadata_invalid")),
     }
-    let mut stored_metadata = object(stored.metadata_json.as_deref())?;
-    let checkpoint: Option<Checkpoint> = stored_metadata
+}
+
+/// Full refresh and metadata-only retry must interpret the same checkpoint.
+/// Reject corruption before consulting any completed job or creating new work.
+fn take_checkpoint(
+    metadata: &mut SessionMetadata,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<Option<Checkpoint>, DbError> {
+    let checkpoint: Option<Checkpoint> = metadata
         .remove(CHECKPOINT_KEY)
         .map(serde_json::from_value)
         .transpose()
@@ -314,16 +363,7 @@ fn merged_metadata(
             return Err(refusal("cass_refresh_checkpoint_invalid"));
         }
     }
-    let incoming = object(input.metadata_json.as_deref())?;
-    let changed = incoming
-        .iter()
-        .any(|(key, value)| stored_metadata.get(key) != Some(value));
-    stored_metadata.extend(incoming);
-    Ok(MetadataRefresh {
-        values: stored_metadata,
-        checkpoint,
-        fields_changed: changed,
-    })
+    Ok(checkpoint)
 }
 
 /// Model attribution and locator authority are not supplied by discovery and
@@ -426,8 +466,17 @@ fn pending_job(
             {
                 return Err(refusal("cass_refresh_index_job_scope_mismatch"));
             }
-            Ok((job.status_enum() != Some(SearchIndexJobStatus::Completed))
-                .then(|| job_id.to_owned()))
+            // A single-document intake job may publish a full or coalesced
+            // generation. The publisher updates documents_total to that corpus
+            // size; it is progress, not part of the immutable job identity.
+            if job.job_type_enum() != Some(crate::db::SearchIndexJobType::SingleDocument) {
+                return Err(refusal("cass_refresh_index_job_invalid"));
+            }
+            match job.status_enum() {
+                Some(SearchIndexJobStatus::Completed) => Ok(None),
+                Some(_) => Ok(Some(job_id.to_owned())),
+                None => Err(refusal("cass_refresh_index_job_invalid")),
+            }
         }
         None if create_missing => {
             connection.insert_search_index_job(
@@ -860,5 +909,273 @@ mod canonical_reference_tests {
                 "cass_refresh_invalid_span",
             );
         }
+    }
+
+    #[test]
+    fn publication_retry_follows_latest_checkpoint_without_touching_evidence() {
+        let (db, workspace, id, session) = fixture("/private/publication-retry.jsonl", 1);
+        db.execute_raw(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'",
+        )
+        .unwrap();
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
+        let spans = [span(&session, 1), span(&session, 2)];
+        let grown = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+        let latest = grown.index_job_id.unwrap();
+        assert_ne!(latest, stable_search_index_job_id(&workspace, &id));
+        let before_session = db.get_session(&id).unwrap();
+        let before_evidence = db.list_evidence_spans_for_session(&id).unwrap();
+        let before_counts = row_counts(&db);
+        for status in ["pending", "failed", "cancelled", "running", "completed"] {
+            db.execute_raw(&format!(
+                "UPDATE search_index_jobs SET status = {}, documents_total = 17 WHERE id = {}",
+                sql_text(status),
+                sql_text(&latest),
+            ))
+            .unwrap();
+            let before_job = db.get_search_index_job(&latest).unwrap().unwrap();
+            let recovered = reconcile_session_publication(&db, &workspace, &id).unwrap();
+            assert_eq!(recovered, (status != "completed").then(|| latest.clone()));
+            assert_eq!(db.get_session(&id).unwrap(), before_session);
+            assert_eq!(
+                db.list_evidence_spans_for_session(&id).unwrap(),
+                before_evidence
+            );
+            assert_eq!(row_counts(&db), before_counts);
+            let after_job = db.get_search_index_job(&latest).unwrap().unwrap();
+            assert_eq!(
+                after_job.status, before_job.status,
+                "do not steal live work"
+            );
+            assert_eq!(after_job.documents_total, 17, "retain publisher progress");
+        }
+    }
+
+    #[test]
+    fn publication_retry_recreates_missing_latest_job_not_its_completed_predecessor() {
+        let (db, workspace, id, session) = fixture("/private/recover-latest.jsonl", 1);
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
+        let spans = [span(&session, 1), span(&session, 2)];
+        let latest = refresh_session(&db, &workspace, &id, &session, &spans)
+            .unwrap()
+            .index_job_id
+            .unwrap();
+        let stored = db.get_session(&id).unwrap();
+        let evidence = db.list_evidence_spans_for_session(&id).unwrap();
+        // Only this test's derived queue row is removed; the checkpoint stays.
+        db.execute_raw(&format!(
+            "DELETE FROM search_index_jobs WHERE id = {}",
+            sql_text(&latest)
+        ))
+        .unwrap();
+        let before = row_counts(&db);
+        for _ in 0..2 {
+            assert_eq!(
+                reconcile_session_publication(&db, &workspace, &id).unwrap(),
+                Some(latest.clone())
+            );
+            let work = db.get_search_index_job(&latest).unwrap().unwrap();
+            assert_eq!(work.status_enum(), Some(SearchIndexJobStatus::Pending));
+            assert_eq!(work.document_id.as_deref(), Some(id.as_str()));
+            assert_eq!(db.get_session(&id).unwrap(), stored);
+            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), evidence);
+            let after = row_counts(&db);
+            assert_eq!(after, [before[0], before[1], before[2] + 1, before[3]]);
+        }
+        let original = stable_search_index_job_id(&workspace, &id);
+        assert_eq!(
+            db.get_search_index_job(&original)
+                .unwrap()
+                .unwrap()
+                .status_enum(),
+            Some(SearchIndexJobStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn publication_retry_preserves_original_job_recovery_before_any_refresh() {
+        let (db, workspace, id, _) = fixture("/private/recover-original.jsonl", 0);
+        let original = stable_search_index_job_id(&workspace, &id);
+        let stored = db.get_session(&id).unwrap();
+        assert_eq!(
+            reconcile_session_publication(&db, &workspace, &id).unwrap(),
+            Some(original.clone())
+        );
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
+        assert!(
+            reconcile_session_publication(&db, &workspace, &id)
+                .unwrap()
+                .is_none()
+        );
+        db.execute_raw(&format!(
+            "DELETE FROM search_index_jobs WHERE id = {}",
+            sql_text(&original)
+        ))
+        .unwrap();
+        assert_eq!(
+            reconcile_session_publication(&db, &workspace, &id).unwrap(),
+            Some(original)
+        );
+        assert_eq!(db.get_session(&id).unwrap(), stored);
+        assert_eq!(db.count_table_rows("search_index_jobs").unwrap(), 1);
+    }
+
+    #[test]
+    fn publication_retry_refuses_corrupt_checkpoint_before_consulting_completed_job() {
+        let (db, workspace, id, _) = fixture("/private/corrupt-checkpoint.jsonl", 1);
+        db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+            .unwrap();
+        let original = stable_search_index_job_id(&workspace, &id);
+        let invalid_json = "not-json PRIVATE_PAYLOAD_SENTINEL";
+        let before_invalid = db.get_session(&id).unwrap();
+        assert!(metadata_object(Some(invalid_json)).is_err());
+        // The live schema rejects invalid JSON itself. Exercise that guard
+        // rather than disabling it to manufacture an impossible stored row.
+        assert!(
+            db.execute_raw(&format!(
+                "UPDATE sessions SET metadata_json = {} WHERE id = {}",
+                sql_text(invalid_json),
+                sql_text(&id),
+            ))
+            .is_err()
+        );
+        assert_eq!(db.get_session(&id).unwrap(), before_invalid);
+        for metadata in [
+            "[]".to_owned(),
+            json!({CHECKPOINT_KEY: null}).to_string(),
+            json!({CHECKPOINT_KEY: {"schema": CHECKPOINT_SCHEMA}}).to_string(),
+            json!({CHECKPOINT_KEY: {
+                "schema": CHECKPOINT_SCHEMA,
+                "snapshotRevision": format!("blake3:{}", "a".repeat(64)),
+                "indexJobId": original,
+                "previousIndexJobId": original,
+            }})
+            .to_string(),
+        ] {
+            db.execute_raw(&format!(
+                "UPDATE sessions SET metadata_json = {} WHERE id = {}",
+                sql_text(&metadata),
+                sql_text(&id)
+            ))
+            .unwrap();
+            let stored = db.get_session(&id).unwrap();
+            let before = row_counts(&db);
+            let error = reconcile_session_publication(&db, &workspace, &id)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("cass_refresh_"));
+            assert!(!error.contains("PRIVATE_PAYLOAD_SENTINEL"));
+            assert!(!error.contains("/private/"));
+            assert_eq!(db.get_session(&id).unwrap(), stored);
+            assert_eq!(row_counts(&db), before);
+        }
+    }
+
+    #[test]
+    fn publication_retry_refuses_mismatched_completed_work() {
+        let (db, workspace, id, _) = fixture("/private/mismatched-job.jsonl", 1);
+        let original = stable_search_index_job_id(&workspace, &id);
+        db.execute_raw(
+            "UPDATE search_index_jobs SET status = 'completed', document_source = 'memory'",
+        )
+        .unwrap();
+        let before = row_counts(&db);
+        let error = reconcile_session_publication(&db, &workspace, &id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cass_refresh_index_job_scope_mismatch"));
+        assert_eq!(row_counts(&db), before);
+        assert_eq!(
+            db.get_search_index_job(&original)
+                .unwrap()
+                .unwrap()
+                .document_source
+                .as_deref(),
+            Some("memory")
+        );
+        db.execute_raw(
+            "UPDATE search_index_jobs SET document_source = 'session', job_type = 'full_rebuild'",
+        )
+        .unwrap();
+        let error = reconcile_session_publication(&db, &workspace, &id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cass_refresh_index_job_invalid"));
+        assert_eq!(row_counts(&db), before);
+    }
+
+    #[test]
+    fn publication_retry_cannot_create_work_for_a_missing_or_foreign_session() {
+        let (db, workspace, id, _) = fixture("/private/session-scope.jsonl", 1);
+        let before = row_counts(&db);
+        for (scope, target, code) in [
+            (
+                workspace.as_str(),
+                "sess_missing",
+                "cass_refresh_session_missing",
+            ),
+            ("wsp_foreign", id.as_str(), "cass_refresh_scope_mismatch"),
+        ] {
+            let error = reconcile_session_publication(&db, scope, target)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(code));
+            assert_eq!(row_counts(&db), before);
+        }
+    }
+
+    #[test]
+    fn real_index_publication_round_trips_through_metadata_only_recovery() {
+        let (db, workspace, id, session) = fixture("/private/real-publication.jsonl", 1);
+        let index = tempfile::tempdir().unwrap();
+        let original = stable_search_index_job_id(&workspace, &id);
+        let published =
+            crate::core::index::process_index_job_for_connection(&db, &original, index.path())
+                .unwrap();
+        assert_eq!(published.outcome, "completed", "{published:?}");
+        assert!(
+            published.documents_total > 1,
+            "session and evidence must be indexed"
+        );
+        assert!(
+            reconcile_session_publication(&db, &workspace, &id)
+                .unwrap()
+                .is_none()
+        );
+
+        let spans = [span(&session, 1), span(&session, 2), span(&session, 3)];
+        let growth = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+        let latest = growth.index_job_id.unwrap();
+        assert_ne!(latest, original);
+        assert_eq!(
+            reconcile_session_publication(&db, &workspace, &id).unwrap(),
+            Some(latest.clone())
+        );
+        let before_session = db.get_session(&id).unwrap();
+        let before_evidence = db.list_evidence_spans_for_session(&id).unwrap();
+        let published =
+            crate::core::index::process_index_job_for_connection(&db, &latest, index.path())
+                .unwrap();
+        assert_eq!(published.outcome, "completed", "{published:?}");
+        assert!(published.documents_total > 1);
+        let work = db.get_search_index_job(&latest).unwrap().unwrap();
+        assert_eq!(work.status_enum(), Some(SearchIndexJobStatus::Completed));
+        assert_eq!(work.documents_total, published.documents_total);
+        assert!(
+            reconcile_session_publication(&db, &workspace, &id)
+                .unwrap()
+                .is_none()
+        );
+        let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+        assert!(!retry.changed);
+        assert!(retry.index_job_id.is_none());
+        assert_eq!(db.get_session(&id).unwrap(), before_session);
+        assert_eq!(
+            db.list_evidence_spans_for_session(&id).unwrap(),
+            before_evidence
+        );
     }
 }

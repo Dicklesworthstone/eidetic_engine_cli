@@ -273,3 +273,175 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
     }
     Ok(())
 }
+
+/// Capture and publication recovery are independent: declining another CASS
+/// view cannot erase work already recorded by a newer transcript checkpoint.
+#[cfg(unix)]
+#[test]
+fn metadata_only_reimport_recovers_latest_publication_without_reading_transcript() -> TestResult {
+    let root = unique_test_dir("cass-metadata-publication")?;
+    let bin_dir = root.join("bin");
+    let workspace = root.join("workspace");
+    let source = root.join("session.jsonl");
+    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+    fs::write(&source, "{}\n").map_err(|e| e.to_string())?;
+    let binary = bin_dir.join("cass");
+    write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 1)?;
+    let database = root.join("ee.db");
+    let client = CassClient::with_binary(binary.clone()).with_timeout(Duration::from_secs(5));
+    let mut options = CassImportOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database.clone()),
+        limit: 1,
+        since: None,
+        dry_run: false,
+        include_spans: true,
+    };
+    let first = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+    let id = first.sessions[0]
+        .session_id
+        .clone()
+        .ok_or_else(|| "initial session missing".to_owned())?;
+    let original = first.sessions[0]
+        .index_job_id
+        .clone()
+        .ok_or_else(|| "initial publication missing".to_owned())?;
+    let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+    db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+        .map_err(|e| e.to_string())?;
+    write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 4)?;
+    let grown = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+    let latest = grown.sessions[0]
+        .index_job_id
+        .clone()
+        .ok_or_else(|| "refreshed publication missing".to_owned())?;
+    ensure(
+        latest != original,
+        "growth requires a new publication identity",
+    )?;
+    let stored = db.get_session(&id).map_err(|e| e.to_string())?;
+    let evidence = db
+        .list_evidence_spans_for_session(&id)
+        .map_err(|e| e.to_string())?;
+    ensure_equal(&evidence.len(), &4, "growth was committed")?;
+    let counts = || {
+        [
+            "sessions",
+            "evidence_spans",
+            "search_index_jobs",
+            "audit_log",
+        ]
+        .into_iter()
+        .map(|table| db.count_table_rows(table).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, String>>()
+    };
+    let before = counts()?;
+    // This output cannot be imported. A successful metadata-only retry thus
+    // proves that publication recovery did not secretly fetch the transcript.
+    write_fake_cass_binary_with_verbatim_view(
+        &binary,
+        &workspace,
+        &source,
+        "not JSON PRIVATE_RAW_SENTINEL\n",
+    )?;
+    options.include_spans = false;
+    for status in ["pending", "failed", "cancelled", "running"] {
+        db.execute_raw(&format!(
+            "UPDATE search_index_jobs SET status = '{status}' WHERE id = '{latest}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        let retry = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+        ensure_equal(
+            &retry.sessions_imported,
+            &0,
+            "recovery must not recapture evidence",
+        )?;
+        ensure_equal(
+            &retry.spans_imported,
+            &0,
+            "metadata-only means no new spans",
+        )?;
+        ensure_equal(
+            &retry.index_jobs_queued,
+            &1,
+            "latest unfinished work stays visible",
+        )?;
+        ensure_equal(
+            &retry.sessions[0].index_job_id.as_ref(),
+            &Some(&latest),
+            "recover current checkpoint, not original job",
+        )?;
+        ensure_equal(&counts()?, &before, "retry does not duplicate durable work")?;
+        ensure_equal(
+            &db.get_session(&id).map_err(|e| e.to_string())?,
+            &stored,
+            "checkpoint stays exact",
+        )?;
+        ensure_equal(
+            &db.list_evidence_spans_for_session(&id)
+                .map_err(|e| e.to_string())?,
+            &evidence,
+            "history stays exact",
+        )?;
+        let job = db
+            .get_search_index_job(&latest)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "latest job disappeared".to_owned())?;
+        ensure_equal(
+            &job.status.as_str(),
+            &status,
+            "recovery never steals a live publisher",
+        )?;
+    }
+    db.execute_raw(&format!(
+        "UPDATE search_index_jobs SET status = 'completed' WHERE id = '{latest}'"
+    ))
+    .map_err(|e| e.to_string())?;
+    let published = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+    ensure_equal(
+        &published.index_jobs_queued,
+        &0,
+        "completed latest snapshot needs no work",
+    )?;
+    // Loss of rebuildable queue state must not force another upstream read.
+    db.execute_raw(&format!(
+        "DELETE FROM search_index_jobs WHERE id = '{latest}'"
+    ))
+    .map_err(|e| e.to_string())?;
+    let recovered = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+    ensure_equal(
+        &recovered.sessions[0].index_job_id.as_ref(),
+        &Some(&latest),
+        "recreate the exact checkpoint job",
+    )?;
+    ensure_equal(
+        &counts()?,
+        &before,
+        "only the missing queue row is recreated",
+    )?;
+    ensure_equal(
+        &db.get_session(&id).map_err(|e| e.to_string())?,
+        &stored,
+        "recovery preserves the checkpoint",
+    )?;
+    ensure_equal(
+        &db.list_evidence_spans_for_session(&id)
+            .map_err(|e| e.to_string())?,
+        &evidence,
+        "recovery preserves evidence",
+    )?;
+    // Negative control: actually asking to capture the invalid view must fail.
+    options.include_spans = true;
+    ensure(
+        import_cass_sessions(&client, &options).is_err(),
+        "the transcript fixture is genuinely invalid",
+    )?;
+    ensure_equal(
+        &counts()?,
+        &before,
+        "failed capture cannot undo publication recovery",
+    )?;
+    db.close().map_err(|e| e.to_string())?;
+    Ok(())
+}

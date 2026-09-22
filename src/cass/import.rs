@@ -731,7 +731,7 @@ pub fn import_cass_sessions(
                         }
                         report.index_job_id
                     } else {
-                        existing_session_index_job_for_reconciliation(
+                        refresh::reconcile_session_publication(
                             &connection,
                             &workspace_id,
                             &session_id,
@@ -1809,36 +1809,6 @@ fn search_index_job_input(workspace_id: &str, session_id: &str) -> CreateSearchI
         document_id: Some(session_id.to_string()),
         documents_total: 1,
     }
-}
-
-/// Recover durable publication work when an identical CASS import observes a
-/// session that was committed by an earlier attempt. Completed jobs need no
-/// work; pending/running/cancelled/failed jobs are returned to the caller so
-/// the ordinary CLI reconciliation pass processes (or truthfully observes)
-/// the same deterministic job. A legacy session with no job receives that
-/// missing deterministic row under the import transaction's contention-safe
-/// retry lane.
-fn existing_session_index_job_for_reconciliation(
-    connection: &DbConnection,
-    workspace_id: &str,
-    session_id: &str,
-) -> Result<Option<String>, DbError> {
-    let index_job_id = stable_search_index_job_id(workspace_id, session_id);
-    with_import_session_transaction(connection, || {
-        match connection.get_search_index_job(&index_job_id)? {
-            Some(job) if job.status_enum() == Some(crate::db::SearchIndexJobStatus::Completed) => {
-                Ok(None)
-            }
-            Some(_) => Ok(Some(index_job_id.clone())),
-            None => {
-                connection.insert_search_index_job(
-                    &index_job_id,
-                    &search_index_job_input(workspace_id, session_id),
-                )?;
-                Ok(Some(index_job_id.clone()))
-            }
-        }
-    })
 }
 
 fn ensure_workspace(connection: &DbConnection, workspace_path: &Path) -> Result<String, DbError> {
