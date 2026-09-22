@@ -8,6 +8,7 @@ on:
       - 'tests/session_arc_learning_cli.rs'
       - 'tests/cass_session_arc_import.py'
       - 'scripts/delivery/session-learning-resources-20260922.patch.xz.b64'
+      - 'scripts/delivery/session-learning-policy-20260922.patch'
       - '.github/workflows/session-learning-regressions.yml'
   workflow_dispatch:
 
@@ -48,6 +49,12 @@ jobs:
               raise SystemExit('Sequence source changed; refusing historical patch replay')
           if Path('tests/cass_session_arc_import.py').exists():
               raise SystemExit('Import lifecycle already exists; refusing replacement')
+          parent = Path('src/core/curate.rs')
+          if hashlib.sha256(parent.read_bytes()).hexdigest() != 'e3dd9fdd70663f16df2487d5958354ecf8cae200c53aaaaa333bb95ff1aea79c':
+              raise SystemExit('Curation source changed; refusing overwrite')
+          policy = Path('scripts/delivery/session-learning-policy-20260922.patch').read_bytes()
+          if hashlib.sha256(policy).hexdigest() != '23ae9c2cca3fc5223265f648c766f813be1ee7e442c3ec38a764a487974c2c3e':
+              raise SystemExit('Policy lesson patch checksum mismatch')
           encoded = Path('scripts/delivery/session-learning-resources-20260922.patch.xz.b64').read_text()
           patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
           if hashlib.sha256(patch).hexdigest() != '14278e0358d71a74474ffb362f185abcd64de4755c48491e78eb681d79c4e8d0':
@@ -57,6 +64,9 @@ jobs:
           git apply --check "$RUNNER_TEMP/learning-resources.patch"
           git apply "$RUNNER_TEMP/learning-resources.patch"
           rustfmt --edition 2024 --config skip_children=true src/core/curate_session_arc_sequence.rs
+          git apply --check scripts/delivery/session-learning-policy-20260922.patch
+          git apply scripts/delivery/session-learning-policy-20260922.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc_sequence.rs
           python3 -m py_compile tests/cass_session_arc_import.py
           python3 - <<'PY'
           from pathlib import Path
@@ -74,10 +84,10 @@ jobs:
           path.write_text(text)
           PY
           git diff --check
-          git add -- src/core/curate_session_arc_sequence.rs tests/cass_session_arc_import.py .github/workflows/session-learning-regressions.yml
+          git add -- src/core/curate.rs src/core/curate_session_arc_sequence.rs tests/cass_session_arc_import.py .github/workflows/session-learning-regressions.yml
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
-            -m 'feat(curate): ground ordinary repairs in exact conversation resources' \
-            -m 'Keep interleaved failures on different files independent; bind repairs to exact files or qualified symbols, reject ambiguity and different-resource false joins, and allow only explicit adjacent single-failure coreference. Exercise ordinary prose, immutable source reconstruction and the real EE CASS importer through validation, explicit application and replay. Retire the delivery mutation path and restore read-only verification.'
+            -m 'feat(curate): ground and apply ordinary conversation repairs' \
+            -m 'Keep same-topic failures on different resources independent, pair ordinary repairs through exact resources or narrow adjacent coreference, and refuse ambiguity. Preserve risk, mitigation and both canonical source locations for otherwise underspecified imported policy lessons without weakening validation. Exercise the actual EE importer through explicit application and replay. Keep already-specific historical content identities and retire the delivery mutation path.'
       - name: Capture exact learning source
         if: ${{ !cancelled() }}
         shell: bash
@@ -119,7 +129,7 @@ jobs:
           python3 tests/cass_session_arc_import.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/learning-import.log"
       - name: Execute source reconstruction and application regressions
         id: engine
-        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           cargo test --locked --lib session_arc -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-engine.log"
