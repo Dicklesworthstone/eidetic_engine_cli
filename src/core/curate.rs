@@ -3530,16 +3530,24 @@ fn build_session_arc_candidate_pair(
         compact_excerpt(&failure_span.excerpt),
         compact_excerpt(&resolution_span.excerpt)
     );
-    if failure_span.id == resolution_span.id {
-        // A complete imported window may describe policy rather than a command
-        // or file. Carry the observed risk, mitigation and exact source into
-        // the lesson instead of weakening specificity or inventing a command.
-        // Preserve the historical two-window candidate content/identity.
+    if failure_span.id == resolution_span.id
+        || !crate::curate::specificity_score(&anti_pattern_content).passes_threshold
+        || !crate::curate::specificity_score(&rule_content).passes_threshold
+    {
+        // Imported policy lessons need not mention a command or file. Preserve
+        // the observed risk, mitigation and exact source locations instead of
+        // inventing technical details or weakening the validation threshold.
+        // Retain historical content/IDs for already-specific two-window pairs.
+        let mut evidence = failure_span.canonical_provenance_uri();
+        if failure_span.id != resolution_span.id {
+            evidence.push_str("\nEvidence: ");
+            evidence.push_str(&resolution_span.canonical_provenance_uri());
+        }
         let observed = format!(
             "Risk: {}\nMitigation: {}\nEvidence: {}",
             compact_excerpt(&failure_span.excerpt),
             compact_excerpt(&resolution_span.excerpt),
-            failure_span.canonical_provenance_uri(),
+            evidence,
         );
         anti_pattern_content = format!("Anti-pattern for `{topic_key}`:\n{observed}");
         rule_content = format!(
