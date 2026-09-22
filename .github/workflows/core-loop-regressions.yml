@@ -15,7 +15,7 @@ permissions:
   contents: read
 concurrency:
   group: workspace-relocation-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   workspace-relocation:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -88,16 +88,16 @@ jobs:
               assert git('rev-parse', 'HEAD:' + path) == expected, 'Concurrent source change: ' + path
           for path in additions:
               assert not pathlib.Path(path).exists(), 'Unexpected existing candidate path: ' + path
-          patch = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-reviewed.patch')
-          patch.write_bytes(fetch('6c52c35ce65d6dc2fdd6a8506fcd7819f9205579'))
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
+          def apply(sha, name):
+              path = pathlib.Path(os.environ['RUNNER_TEMP'], name)
+              path.write_bytes(fetch(sha))
+              subprocess.run(['git', 'apply', '--check', str(path)], check=True)
+              subprocess.run(['git', 'apply', str(path)], check=True)
+          apply('6c52c35ce65d6dc2fdd6a8506fcd7819f9205579', 'relocation-wiring.patch')
           for path, sha in additions.items():
               pathlib.Path(path).write_bytes(fetch(sha))
-          correction = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-correction.patch')
-          correction.write_bytes(fetch('1796ac1d6fca758b153eb099d665e2179414cb07'))
-          subprocess.run(['git', 'apply', '--check', str(correction)], check=True)
-          subprocess.run(['git', 'apply', str(correction)], check=True)
+          apply('1796ac1d6fca758b153eb099d665e2179414cb07', 'relocation-correction.patch')
+          apply('f817259c0cf8d458685ce3fa7dd3040058dcb1c4', 'relocation-contract-correction.patch')
           paths = list(bases) + list(additions)
           rust = [path for path in paths if path.endswith('.rs')]
           subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
@@ -112,7 +112,7 @@ jobs:
           output.write_text(json.dumps(manifest, indent=2))
           print(output.read_text())
           subprocess.run(['git', 'add', '--intent-to-add', '--', *additions], check=True)
-          patch.write_text(subprocess.check_output(['git', 'diff'], text=True))
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-reviewed.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
@@ -130,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::workspace::relocation::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-unit.log"
-          grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log"
+          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log"
           cargo test --locked --lib db::tests::workspace_relocation_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-primitive.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-primitive.log"
       - name: Verify the public copy approval reindex and retrieval loop
