@@ -3751,7 +3751,25 @@ fn collect_workspace_index_source_snapshot(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<WorkspaceIndexSourceSnapshot, IndexRebuildError> {
+    collect_workspace_index_source_snapshot_with_limit(db, workspace_id, None)?.ok_or_else(|| {
+        IndexRebuildError::Index("unbounded index source collection was deferred".to_owned())
+    })
+}
+
+fn collect_workspace_index_source_snapshot_with_limit(
+    db: &DbConnection,
+    workspace_id: &str,
+    max_documents: Option<u32>,
+) -> Result<Option<WorkspaceIndexSourceSnapshot>, IndexRebuildError> {
     db.with_transaction_error(|| {
+        // Enforce the interactive ceiling before hydrating source bodies, in
+        // the same transaction as the generation and corpus reads. A writer
+        // cannot grow a previously small corpus between admission and capture.
+        if let Some(limit) = max_documents
+            && !workspace_index_source_rows_fit(db, workspace_id, limit)?
+        {
+            return Ok(None);
+        }
         let captured_generation = db.get_workspace_generation(workspace_id)?;
         let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
         let artifacts = db.list_artifacts(workspace_id, None)?;
@@ -3799,7 +3817,7 @@ fn collect_workspace_index_source_snapshot(
             })
             .map(|job| job.id)
             .collect();
-        Ok(WorkspaceIndexSourceSnapshot {
+        Ok(Some(WorkspaceIndexSourceSnapshot {
             generation: captured_generation.unwrap_or_else(|| u64::from(documents_total)),
             memories_indexed,
             sessions_indexed,
@@ -3811,8 +3829,54 @@ fn collect_workspace_index_source_snapshot(
             documents,
             evidence_admission,
             open_job_ids,
-        })
+        }))
     })
+}
+
+/// A conservative body-free upper bound, including globally tagged memories
+/// that the canonical collector also includes. Ineligible rows may defer an
+/// automatic repair; they must never let a large corpus through the ceiling.
+fn workspace_index_source_rows_fit(
+    db: &DbConnection,
+    workspace_id: &str,
+    max_documents: u32,
+) -> Result<bool, IndexRebuildError> {
+    let mut total = 0_u64;
+    for table in [
+        "memories",
+        "sessions",
+        "artifacts",
+        "procedural_rules",
+        "evidence_spans",
+    ] {
+        let (sql, parameters) = if table == "memories" {
+            (
+                "SELECT COUNT(*) FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))) AND m.tombstoned_at IS NULL".to_owned(),
+                vec![
+                    SqlValue::Text(workspace_id.to_owned()),
+                    SqlValue::Text(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()),
+                    SqlValue::Text(crate::models::HOUSE_RULE_MEMORY_SCOPE_TAG.to_owned()),
+                ],
+            )
+        } else {
+            (
+                format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1"),
+                vec![SqlValue::Text(workspace_id.to_owned())],
+            )
+        };
+        let rows = db.query(&sql, &parameters)?;
+        let count = match rows.first().and_then(|row| row.get(0)) {
+            Some(SqlValue::BigInt(value)) => u64::try_from(*value).ok(),
+            Some(SqlValue::Int(value)) => u64::try_from(*value).ok(),
+            _ => None,
+        }
+        .ok_or_else(|| IndexRebuildError::Index("invalid index source row count".to_owned()))?;
+        total = total.saturating_add(count);
+        if total > u64::from(max_documents) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn memory_documents_with_anchors(
@@ -5590,10 +5654,11 @@ fn evidence_documents(
 }
 
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
-    let rows = db.query(
-        "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
-        &[],
-    )?;
+    let rows = db.query("SELECT id FROM workspaces ORDER BY id LIMIT 2", &[])?;
+
+    if rows.len() > 1 {
+        return Err(IndexRebuildError::NoWorkspace);
+    }
 
     rows.first()
         .and_then(|row| row.get(0).and_then(|v| v.as_str().map(str::to_string)))
@@ -5605,10 +5670,10 @@ fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildErr
 ///
 /// Looks the requested path up by canonical root first and lexical key second
 /// (same contract as `workspace_id_for_index_status`). Only when the path is
-/// not registered at all does it fall back to the newest-created workspace
-/// row, which preserves the historical single-workspace behavior for
-/// databases whose lone workspace row was registered under a different path
-/// spelling.
+/// not registered at all may a database's sole workspace row be selected.
+/// Multiple stored workspaces require an explicit matching identity; choosing
+/// whichever row was created last would publish another workspace's documents
+/// into the requested index and consume that unrelated workspace's jobs.
 fn resolve_index_workspace_id(
     db: &DbConnection,
     workspace_path: &Path,
@@ -9556,18 +9621,12 @@ fn format_bytes(bytes: u64) -> String {
 // operator has historically had to run `ee index rebuild` by hand — every pack
 // in between paying the same degradation (field report 2026-08-24/25).
 //
-// A pack cannot fix that inline. It has a token/latency budget, it may hold a
-// read-only connection, and a synchronous rebuild would block the very request
-// the user is waiting on. So the pack records a durable *request* instead, and
-// the steward's `IndexRebuild` job consumes it out of band.
-//
-// What this is NOT: a promise. The request is a bounded, rate-limited,
-// auditable marker. It is consumed by the steward background scheduler (when a
-// daemon is running) or by `ee maintenance run --job index_rebuild`. With
-// neither running it records the need and nothing acts on it — the degradation
-// stays honest and the repair hint still points at the manual command. This
-// makes the rebuild reachable, not guaranteed, and the degradation is never
-// suppressed on that account.
+// The fallback occurs inside a pinned read snapshot, so that response records
+// a request and remains honestly degraded. A later persisting pack may consume
+// it before opening its snapshot, within the existing interactive deadline and
+// corpus ceiling, using an already available local model. The steward or an
+// explicit maintenance command handles cases outside those bounds. Scheduling
+// work never suppresses the degradation of the response that used fallback.
 
 /// Schema id for the durable index-rebuild request marker.
 pub const INDEX_REBUILD_REQUEST_SCHEMA_V1: &str = "ee.index.rebuild_request.v1";
@@ -9867,6 +9926,211 @@ pub fn pending_index_rebuild_request(workspace_path: &Path) -> Option<IndexRebui
         .filter(IndexRebuildRequest::is_pending)
 }
 
+/// Consume a previous pack's rebuild request before the next pack pins its
+/// read snapshot. The caller supplies the interactive deadline and must opt
+/// in only for a pack that is allowed to persist. Ordinary reads do not call
+/// this path. Large corpora and unavailable models remain steward work.
+pub(crate) async fn repair_requested_index_with_cx_bounded(
+    cx: &asupersync::Cx,
+    options: &IndexRebuildOptions,
+    max_documents: u32,
+) -> Result<bool, IndexRebuildError> {
+    index_checkpoint(cx)?;
+    if options.dry_run
+        || max_documents == 0
+        || configured_embed_backend() == EmbedBackendSelection::Remote
+        || pending_index_rebuild_request(&options.workspace_path).is_none()
+    {
+        return Ok(false);
+    }
+    let database_path = options.resolve_database_path();
+    let index_dir = options.resolve_index_dir();
+    if !database_path.is_file() {
+        return Ok(false);
+    }
+    ensure_index_path_has_no_symlinks(&database_path, "repair requested index")?;
+    ensure_index_path_has_no_symlinks(&index_dir, "repair requested index")?;
+    let db = DbConnection::open_file(&database_path)?;
+    let Some(workspace_id) = workspace_id_for_index_status(&db, &options.workspace_path)? else {
+        return Ok(false);
+    };
+    // Readers, source writers and another repairing process all retain the
+    // normal publication fencing. Recheck both marker and assets after waiting.
+    let owner = IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?;
+    let Some(request) = pending_index_rebuild_request(&options.workspace_path) else {
+        return Ok(false);
+    };
+    let attempt_path = options.workspace_path.join(".ee/index-rebuild-attempt");
+    let fingerprint = requested_index_repair_fingerprint(&request, &database_path, &index_dir);
+    if requested_index_repair_was_attempted(&attempt_path, &fingerprint)? {
+        return Ok(false);
+    }
+    let Some(snapshot) = collect_workspace_index_source_snapshot_with_limit(
+        &db,
+        &workspace_id,
+        Some(max_documents),
+    )?
+    else {
+        return Ok(false);
+    };
+    if parse_index_metadata(&index_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|metadata| {
+            metadata.generation == Some(snapshot.generation)
+                && metadata.document_counts == Some(snapshot.document_counts)
+        })
+        && index_corpus_compatibility_is_current(&index_dir)
+    {
+        return Ok(false);
+    }
+    index_checkpoint(cx)?;
+    let stack = if snapshot.documents_total == 0 {
+        // Clearing a deleted corpus embeds no content and needs no model.
+        // Publishing a complete empty generation also removes old results.
+        hash_fallback_embedder_stack()
+    } else {
+        workspace_embedder_stack(&db, &workspace_id)?.0
+    };
+    // Resolving a lazy selection is inert. Never call embed/initialize on it:
+    // an interactive repair cannot start a download or use a remote endpoint.
+    if snapshot.documents_total > 0 && !requested_index_repair_stack_is_ready_local(&stack) {
+        return Ok(false);
+    }
+    index_checkpoint(cx)?;
+    owner.with_publication_fence(|| {
+        reserve_requested_index_repair_attempt(&attempt_path, &fingerprint)
+    })?;
+    ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
+    publish_full_index_generation_with_stack(
+        &owner,
+        &index_dir,
+        stack,
+        snapshot.documents,
+        snapshot.generation,
+        snapshot.document_counts,
+        || {
+            complete_pending_jobs_covered_by_repair(
+                &db,
+                &snapshot.open_job_ids,
+                snapshot.documents_total,
+            )
+        },
+    )
+    .await?;
+    // Do not consume a newer request another pack recorded while we built.
+    // Failure to acknowledge does not undo an already durable generation.
+    if let Err(reason) = mark_index_rebuild_request_satisfied_matching(
+        &options.workspace_path,
+        &chrono::Utc::now().to_rfc3339(),
+        Some(&request),
+    ) {
+        tracing::warn!(
+            target: "ee::index::rebuild_request",
+            reason = %reason,
+            "published index repair could not acknowledge its request"
+        );
+    }
+    Ok(true)
+}
+
+/// Complete only captured pending jobs, in the publication commit tail. A
+/// writer that enqueues after the source snapshot remains pending, and jobs
+/// owned or cancelled by another operation retain their lifecycle state.
+/// Starting and completing in one transaction also leaves jobs pending if
+/// publishing fails, instead of creating orphaned running work.
+fn complete_pending_jobs_covered_by_repair(
+    db: &DbConnection,
+    captured_job_ids: &BTreeSet<String>,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    db.with_transaction_error(|| {
+        for job_id in captured_job_ids {
+            if db.start_search_index_job(job_id)? {
+                update_running_index_job_total(db, job_id, documents_total)?;
+                let progressed = db.update_search_index_job_progress(job_id, documents_total)?;
+                require_index_job_transition(progressed, job_id, "running_progress_updated")?;
+                let completed = db.complete_search_index_job(job_id, documents_total)?;
+                require_index_job_transition(completed, job_id, "running_completed")?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn requested_index_repair_stack_is_ready_local(stack: &EmbedderStack) -> bool {
+    let fast = stack.fast();
+    fast.is_ready()
+        && fast.is_semantic()
+        && fast.category() == ModelCategory::StaticEmbedder
+        && stack.quality().is_none()
+}
+
+fn requested_index_repair_fingerprint(
+    request: &IndexRebuildRequest,
+    database_path: &Path,
+    index_dir: &Path,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        "ee.index.requested_repair.v1".to_owned(),
+        request.data_json().to_string(),
+        database_path.to_string_lossy().into_owned(),
+        index_dir.to_string_lossy().into_owned(),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn requested_index_repair_was_attempted(
+    path: &Path,
+    fingerprint: &str,
+) -> Result<bool, IndexRebuildError> {
+    use std::io::Read as _;
+
+    ensure_index_path_has_no_symlinks(path, "read index repair attempt")?;
+    ensure_index_metadata_path_is_regular_or_missing(path, "read index repair attempt")?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(IndexRebuildError::Index(error.to_string())),
+    };
+    let mut bytes = Vec::new();
+    file.take(65)
+        .read_to_end(&mut bytes)
+        .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+    Ok(bytes == fingerprint.as_bytes())
+}
+
+/// One attempt per request fingerprint, reserved under the publisher fence.
+/// Failed/cancelled attempts can retry after the normal request cooldown;
+/// concurrent packs cannot spend their full repair budget on the same failure.
+fn reserve_requested_index_repair_attempt(
+    path: &Path,
+    fingerprint: &str,
+) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(path, "reserve index repair attempt")?;
+    ensure_index_metadata_path_is_regular_or_missing(path, "reserve index repair attempt")?;
+    let temporary = unique_index_metadata_temp_path(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+    file.write_all(fingerprint.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+    drop(file);
+    publish_index_metadata_temp_file(path, &temporary)
+}
+
 /// Record a rebuild request for `workspace_path`.
 ///
 /// Infallible by construction — every failure is reported as
@@ -9888,6 +10152,14 @@ pub fn record_index_rebuild_request(
     now: &str,
     cooldown_secs: i64,
 ) -> IndexRebuildRequestOutcome {
+    let _lock = match lock_index_rebuild_request(workspace_path) {
+        Ok(lock) => lock,
+        Err(reason) => {
+            return IndexRebuildRequestOutcome::Skipped(IndexRebuildRequestSkip::Unavailable {
+                reason,
+            });
+        }
+    };
     let previous = match read_index_rebuild_request(workspace_path) {
         Ok(previous) => previous,
         Err(reason) => {
@@ -9953,15 +10225,53 @@ pub fn mark_index_rebuild_request_satisfied(
     workspace_path: &Path,
     satisfied_at: &str,
 ) -> Result<bool, String> {
+    mark_index_rebuild_request_satisfied_matching(workspace_path, satisfied_at, None)
+}
+
+fn mark_index_rebuild_request_satisfied_matching(
+    workspace_path: &Path,
+    satisfied_at: &str,
+    expected: Option<&IndexRebuildRequest>,
+) -> Result<bool, String> {
+    if read_index_rebuild_request(workspace_path)?
+        .as_ref()
+        .is_none_or(|request| !request.is_pending())
+    {
+        return Ok(false);
+    }
+    let _lock = lock_index_rebuild_request(workspace_path)?;
     let Some(mut request) = read_index_rebuild_request(workspace_path)? else {
         return Ok(false);
     };
-    if !request.is_pending() {
+    if !request.is_pending() || expected.is_some_and(|expected| expected != &request) {
         return Ok(false);
     }
     request.satisfied_at = Some(satisfied_at.to_owned());
     write_index_rebuild_request(workspace_path, &request)?;
     Ok(true)
+}
+
+/// Serialize request refresh and matching acknowledgment without blocking a
+/// pack behind another process. Closing the handle releases the OS lock on
+/// Unix and Windows; no stale lock-file deletion or polling is needed.
+fn lock_index_rebuild_request(workspace_path: &Path) -> Result<std::fs::File, String> {
+    let path = workspace_path.join(".ee/index-rebuild-request.lock");
+    ensure_index_path_has_no_symlinks(&path, "lock index rebuild request")
+        .map_err(|error| error.to_string())?;
+    let parent = path.parent().ok_or("index request lock has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    ensure_index_metadata_path_is_regular_or_missing(&path, "lock index rebuild request")
+        .map_err(|error| error.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(|error| error.to_string())?;
+    file.try_lock().map_err(|error| error.to_string())?;
+    Ok(file)
 }
 
 /// Publish the marker atomically: write a unique temp file beside the target,
@@ -10791,6 +11101,588 @@ mod tests {
 
     fn rebuild_request_marker_path(workspace: &Path) -> PathBuf {
         workspace.join(".ee").join("index-rebuild-request.json")
+    }
+
+    struct RequestedIndexRepairFixture {
+        _root: tempfile::TempDir,
+        _embedder: TestWorkspaceEmbedderStackGuard,
+        options: IndexRebuildOptions,
+        workspace_id: String,
+        db: DbConnection,
+    }
+
+    impl RequestedIndexRepairFixture {
+        fn new() -> Result<Self, String> {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let database = workspace.join(".ee/ee.db");
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+            db.insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            let guard = install_test_hash_workspace_embedder(&workspace_id);
+            let fixture = Self {
+                _root: root,
+                _embedder: guard,
+                options: IndexRebuildOptions {
+                    index_dir: Some(workspace.join(".ee/index")),
+                    workspace_path: workspace,
+                    database_path: Some(database),
+                    dry_run: false,
+                },
+                workspace_id,
+                db,
+            };
+            fixture.set_stack(EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::new("requested-repair-unit", 256)),
+                None,
+            ))?;
+            fixture.insert_memory(1, &fixture.workspace_id, Vec::new())?;
+            Ok(fixture)
+        }
+
+        fn set_stack(&self, stack: EmbedderStack) -> TestResult {
+            TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .map_err(|error| error.to_string())?
+                .insert(self.workspace_id.clone(), stack);
+            Ok(())
+        }
+
+        fn insert_memory(&self, n: u32, workspace_id: &str, tags: Vec<String>) -> TestResult {
+            self.db
+                .insert_memory(
+                    &format!("mem_{n:026}"),
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: format!("Copper kestrel generation repair retains memory {n}."),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn request(&self, now: &str) -> TestResult {
+            ensure(
+                record_index_rebuild_request(
+                    &self.options.workspace_path,
+                    IndexRebuildTrigger::IndexMissing,
+                    "context_lexical_fallback",
+                    now,
+                    DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+                )
+                .was_recorded(),
+                "fixture must record a pending repair request",
+            )
+        }
+
+        fn repair(&self, limit: u32) -> Result<bool, String> {
+            crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                repair_requested_index_with_cx_bounded(&cx, &self.options, limit).await
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+        }
+
+        fn queue(&self, n: u32) -> Result<String, String> {
+            let job_id = format!("sidx_{n:026}");
+            self.db
+                .insert_search_index_job(
+                    &job_id,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: self.workspace_id.clone(),
+                        job_type: SearchIndexJobType::FullRebuild,
+                        document_source: None,
+                        document_id: None,
+                        documents_total: 0,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(job_id)
+        }
+
+        fn job(&self, job_id: &str) -> Result<StoredSearchIndexJob, String> {
+            self.db
+                .get_search_index_job(job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing fixture job {job_id}"))
+        }
+
+        fn search_options(&self) -> crate::core::search::SearchOptions {
+            crate::core::search::SearchOptions {
+                workspace_path: self.options.workspace_path.clone(),
+                database_path: self.options.database_path.clone(),
+                index_dir: self.options.index_dir.clone(),
+                query: "Copper kestrel".to_owned(),
+                limit: 5,
+                speed: crate::core::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            }
+        }
+    }
+
+    #[test]
+    fn requested_index_repair_rebuilds_and_retrieves_without_daemon() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let jobs = [fixture.queue(1)?, fixture.queue(2)?];
+        fixture.request("2026-09-22T00:00:00Z")?;
+        assert!(fixture.repair(64)?);
+        for job_id in &jobs {
+            let job = fixture.job(job_id)?;
+            assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Completed));
+            assert_eq!(job.documents_total, 1);
+            assert_eq!(job.documents_indexed, 1);
+            assert!(job.started_at.is_some());
+            assert!(job.completed_at.is_some());
+        }
+        let index = fixture.options.resolve_index_dir();
+        let metadata = parse_index_metadata(&index)?.ok_or("repair omitted index metadata")?;
+        assert_eq!(metadata.document_count, Some(1));
+        assert_eq!(
+            metadata.generation,
+            fixture
+                .db
+                .get_workspace_generation(&fixture.workspace_id)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
+        let request = read_index_rebuild_request(&fixture.options.workspace_path)?
+            .ok_or("repair removed the request ledger")?;
+        assert!(request.satisfied_at.is_some());
+        assert!(
+            requested_index_repair_was_attempted(
+                &fixture
+                    .options
+                    .workspace_path
+                    .join(".ee/index-rebuild-attempt"),
+                &requested_index_repair_fingerprint(
+                    &IndexRebuildRequest {
+                        satisfied_at: None,
+                        ..request
+                    },
+                    &fixture.options.resolve_database_path(),
+                    &index,
+                ),
+            )
+            .map_err(|error| error.to_string())?
+        );
+
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let report = crate::core::search::run_search(&fixture.search_options())
+                .map_err(|error| error.to_string())?;
+            assert_eq!(report.results.len(), 1);
+            assert_eq!(report.results[0].doc_id, format!("mem_{:026}", 1));
+        }
+        let before = index_regular_file_snapshot(&index)?;
+        assert!(!fixture.repair(64)?);
+        assert_eq!(index_regular_file_snapshot(&index)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_preserves_jobs_enqueued_after_snapshot() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let captured = fixture.queue(1)?;
+        let running = fixture.queue(2)?;
+        assert!(
+            fixture
+                .db
+                .start_search_index_job(&running)
+                .map_err(|error| error.to_string())?
+        );
+        let running_before = fixture.job(&running)?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let database = fixture.options.resolve_database_path();
+        let workspace_id = fixture.workspace_id.clone();
+        let late = format!("sidx_{:026}", 3);
+        let late_for_hook = late.clone();
+        let hook_result = Arc::new(Mutex::new(None));
+        let hook_output = Arc::clone(&hook_result);
+        let options = &fixture.options;
+        let repaired = crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            install_before_index_publish_hook(move |_| {
+                let result = (|| -> Result<(), DbError> {
+                    let writer = DbConnection::open_file(&database)?;
+                    writer.insert_search_index_job(
+                        &late_for_hook,
+                        &CreateSearchIndexJobInput {
+                            workspace_id,
+                            job_type: SearchIndexJobType::FullRebuild,
+                            document_source: None,
+                            document_id: None,
+                            documents_total: 0,
+                        },
+                    )
+                })();
+                if let Ok(mut slot) = hook_output.lock() {
+                    *slot = Some(result.map_err(|error| error.to_string()));
+                }
+            });
+            repair_requested_index_with_cx_bounded(&cx, options, 64).await
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        hook_result
+            .lock()
+            .map_err(|error| error.to_string())?
+            .take()
+            .ok_or("late-job hook did not execute")??;
+        assert!(repaired);
+        assert_eq!(
+            fixture.job(&captured)?.status_enum(),
+            Some(SearchIndexJobStatus::Completed)
+        );
+        assert_eq!(fixture.job(&running)?, running_before);
+        assert_eq!(
+            fixture.job(&late)?.status_enum(),
+            Some(SearchIndexJobStatus::Pending)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_publishes_empty_generation_after_last_tombstone() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        assert!(fixture.repair(64)?);
+        assert!(
+            fixture
+                .db
+                .tombstone_memory(&format!("mem_{:026}", 1))
+                .map_err(|error| error.to_string())?
+        );
+        fixture.set_stack(EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::not_ready("absent-local", 256)),
+            None,
+        ))?;
+        fixture.request("2026-09-22T00:15:00Z")?;
+        let options = fixture.search_options();
+        crate::core::search::with_test_search_timeouts(Duration::from_secs(120), || {
+            crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                crate::core::search::reconcile_search_index_before_read_with_cx(
+                    &cx, &options, true,
+                )
+                .await;
+            })
+        })
+        .map_err(|error| error.to_string())?;
+        let index = fixture.options.resolve_index_dir();
+        let metadata = parse_index_metadata(&index)?.ok_or("empty repair omitted metadata")?;
+        assert_eq!(metadata.document_count, Some(0));
+        assert_eq!(
+            metadata.generation,
+            fixture
+                .db
+                .get_workspace_generation(&fixture.workspace_id)
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            open_fast_vector_index_read_only(&index)
+                .map_err(|error| error.detail)?
+                .record_count(),
+            0
+        );
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let report = crate::core::search::run_search(&fixture.search_options())
+                .map_err(|error| error.to_string())?;
+            assert!(report.results.is_empty());
+        }
+        assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_replaces_corrupt_tier_with_current_metadata() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        assert!(fixture.repair(64)?);
+        let index = fixture.options.resolve_index_dir();
+        std::fs::write(index.join(VECTOR_INDEX_FAST_FILE), b"truncated tier")
+            .map_err(|error| error.to_string())?;
+        assert!(!index_corpus_compatibility_is_current(&index));
+        fixture.request("2026-09-22T00:15:00Z")?;
+        assert!(fixture.repair(64)?);
+        assert!(index_corpus_compatibility_is_current(&index));
+        assert_eq!(
+            open_fast_vector_index_read_only(&index)
+                .map_err(|error| error.detail)?
+                .record_count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_does_not_run_for_ordinary_reads_or_dry_run() -> TestResult {
+        let mut fixture = RequestedIndexRepairFixture::new()?;
+        assert!(!fixture.repair(64)?);
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let marker = rebuild_request_marker_path(&fixture.options.workspace_path);
+        let before = std::fs::read(&marker).map_err(|error| error.to_string())?;
+        fixture.options.dry_run = true;
+        assert!(!fixture.repair(64)?);
+        fixture.options.dry_run = false;
+        let options = fixture.search_options();
+        crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            crate::core::search::reconcile_search_index_before_read_with_cx(&cx, &options, false)
+                .await;
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(!fixture.options.resolve_index_dir().exists());
+        assert!(
+            !fixture
+                .options
+                .workspace_path
+                .join(".ee/index-rebuild-attempt")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read(&marker).map_err(|error| error.to_string())?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_consumes_orphaned_index_on_pack_reconciliation() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let index = fixture.options.resolve_index_dir();
+        std::fs::create_dir(&index).map_err(|error| error.to_string())?;
+        std::fs::write(index.join("orphaned-tier"), b"incomplete generation")
+            .map_err(|error| error.to_string())?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let status = get_index_status_with_connection(
+            &IndexStatusOptions {
+                workspace_path: fixture.options.workspace_path.clone(),
+                database_path: fixture.options.database_path.clone(),
+                index_dir: fixture.options.index_dir.clone(),
+            },
+            Some(&fixture.db),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(status.health, IndexHealth::Stale);
+        assert_eq!(status.index_generation, None);
+        assert_eq!(status.last_check_error, None);
+        let options = fixture.search_options();
+        crate::core::search::with_test_search_timeouts(Duration::from_secs(120), || {
+            crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                crate::core::search::reconcile_search_index_before_read_with_cx(
+                    &cx, &options, true,
+                )
+                .await;
+            })
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            parse_index_metadata(&index)?
+                .ok_or("pack did not repair the orphan")?
+                .document_count,
+            Some(1)
+        );
+        assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_bounds_global_source_rows_before_loading_models() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let other = "wsp_00000000000000000000000077";
+        fixture
+            .db
+            .insert_workspace(
+                other,
+                &crate::db::CreateWorkspaceInput {
+                    path: fixture
+                        .options
+                        .workspace_path
+                        .join("other")
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        fixture.insert_memory(
+            2,
+            other,
+            vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()],
+        )?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        assert!(!fixture.repair(1)?);
+        assert!(!fixture.options.resolve_index_dir().exists());
+        assert!(
+            !fixture
+                .options
+                .workspace_path
+                .join(".ee/index-rebuild-attempt")
+                .exists()
+        );
+        assert!(fixture.repair(2)?);
+        assert_eq!(
+            parse_index_metadata(&fixture.options.resolve_index_dir())?
+                .ok_or("bounded repair omitted metadata")?
+                .document_count,
+            Some(2),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_leaves_unavailable_models_pending() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        for stack in [
+            hash_fallback_embedder_stack(),
+            EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::not_ready("pending-local", 256)),
+                None,
+            ),
+            ee_auto_download_embedder(fixture.options.workspace_path.join("absent-model")).stack,
+            EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::new("local-fast", 256)),
+                Some(Arc::new(TestSemanticEmbedder::new("quality", 256))),
+            ),
+        ] {
+            fixture.set_stack(stack)?;
+            assert!(!fixture.repair(64)?);
+            assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_some());
+            assert!(!fixture.options.resolve_index_dir().exists());
+            assert!(
+                !fixture
+                    .options
+                    .workspace_path
+                    .join(".ee/index-rebuild-attempt")
+                    .exists()
+            );
+            assert!(!fixture.options.workspace_path.join("absent-model").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_cancelled_attempt_retries_only_after_request_refresh() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let queued = fixture.queue(1)?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let options = &fixture.options;
+        let cancelled = crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            install_before_index_publish_hook(|cx| {
+                cx.set_cancel_reason(asupersync::CancelReason::user("requested repair cancelled"));
+            });
+            repair_requested_index_with_cx_bounded(&cx, options, 64).await
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(matches!(cancelled, Err(IndexRebuildError::Cancelled(_))));
+        assert_eq!(
+            fixture.job(&queued)?.status_enum(),
+            Some(SearchIndexJobStatus::Pending)
+        );
+        assert!(!fixture.options.resolve_index_dir().exists());
+        assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_some());
+        assert!(!fixture.repair(64)?);
+        fixture.request("2026-09-22T00:15:00Z")?;
+        assert!(fixture.repair(64)?);
+        assert_eq!(
+            fixture.job(&queued)?.status_enum(),
+            Some(SearchIndexJobStatus::Completed)
+        );
+        assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requested_index_repair_refuses_symlinked_attempt_marker() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let outside = fixture.options.workspace_path.join("keep-private.txt");
+        std::fs::write(&outside, b"private canary").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            &outside,
+            fixture
+                .options
+                .workspace_path
+                .join(".ee/index-rebuild-attempt"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(fixture.repair(64).is_err());
+        assert_eq!(
+            std::fs::read(&outside).map_err(|error| error.to_string())?,
+            b"private canary"
+        );
+        assert!(!fixture.options.resolve_index_dir().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_acknowledgment_preserves_refreshed_requests() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        let old = pending_index_rebuild_request(&fixture.options.workspace_path)
+            .ok_or("missing original request")?;
+        let lock = lock_index_rebuild_request(&fixture.options.workspace_path)?;
+        assert!(
+            !record_index_rebuild_request(
+                &fixture.options.workspace_path,
+                IndexRebuildTrigger::IndexMissing,
+                "context_lexical_fallback",
+                "2026-09-22T00:15:00Z",
+                DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+            )
+            .was_recorded()
+        );
+        assert_eq!(
+            pending_index_rebuild_request(&fixture.options.workspace_path),
+            Some(old.clone())
+        );
+        drop(lock);
+        fixture.request("2026-09-22T00:15:00Z")?;
+        assert!(!mark_index_rebuild_request_satisfied_matching(
+            &fixture.options.workspace_path,
+            "2026-09-22T00:16:00Z",
+            Some(&old),
+        )?);
+        let current = pending_index_rebuild_request(&fixture.options.workspace_path)
+            .ok_or("new request was lost")?;
+        assert_eq!(current.request_count, 2);
+        assert_eq!(current.requested_at, "2026-09-22T00:15:00Z");
+        Ok(())
     }
 
     #[test]
@@ -20284,14 +21176,80 @@ mod tests {
 
         let unregistered = root.join("never-registered");
         std::fs::create_dir_all(&unregistered).map_err(|e| e.to_string())?;
-        let fallback =
-            resolve_index_workspace_id(&connection, &unregistered).map_err(|e| e.to_string())?;
-        let newest = get_default_workspace_id(&connection).map_err(|e| e.to_string())?;
-        ensure(
-            fallback == newest,
-            "unregistered path must preserve the newest-row fallback",
-        )?;
+        assert!(matches!(
+            resolve_index_workspace_id(&connection, &unregistered),
+            Err(IndexRebuildError::NoWorkspace)
+        ));
         connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_mutations_refuse_unregistered_workspace_in_shared_database() -> TestResult {
+        let root = unique_test_dir("index-unregistered-workspace");
+        let (_workspace_a, _workspace_b, database) = seed_two_workspace_database(&root)?;
+        let workspace = root.join("unregistered");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let index_dir = workspace.join("index");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        for (n, workspace_id) in [
+            "wsp_multia0000000000000000000a",
+            "wsp_multib0000000000000000000b",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            connection
+                .insert_search_index_job(
+                    &format!("sidx_{n:026}"),
+                    &CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.to_owned(),
+                        job_type: SearchIndexJobType::FullRebuild,
+                        document_source: None,
+                        document_id: None,
+                        documents_total: 0,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        assert!(matches!(
+            rebuild_index(&IndexRebuildOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index_dir.clone()),
+                dry_run: false,
+            }),
+            Err(IndexRebuildError::NoWorkspace)
+        ));
+        assert!(matches!(
+            reembed_index(&IndexReembedOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index_dir.clone()),
+                dry_run: false,
+            }),
+            Err(IndexRebuildError::NoWorkspace)
+        ));
+        assert!(matches!(
+            process_index_jobs(&IndexProcessingOptions {
+                workspace_path: workspace,
+                database_path: Some(database),
+                index_dir: Some(index_dir.clone()),
+                dry_run: false,
+                job_limit: None,
+            }),
+            Err(IndexRebuildError::NoWorkspace)
+        ));
+        assert!(!index_dir.exists());
+        for n in 0..2 {
+            let job = connection
+                .get_search_index_job(&format!("sidx_{n:026}"))
+                .map_err(|error| error.to_string())?
+                .ok_or("unrelated job was removed")?;
+            assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Pending));
+            assert!(job.started_at.is_none());
+            assert!(job.completed_at.is_none());
+        }
+        Ok(())
     }
 
     #[test]

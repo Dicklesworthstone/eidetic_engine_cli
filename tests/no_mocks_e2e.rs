@@ -3654,8 +3654,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         }
     }
 
-    // Hold the actual cross-process pack slot while the CLI runs. Releasing
-    // our descriptor below must restore the ordinary positive evidence path.
+    // Hold the actual cross-process pack slot while the CLI runs. Read-only
+    // packs observe contention through SLO admission while preserving evidence
+    // and pack identity; releasing the descriptor changes only that posture.
     let slots_dir = workspace.join(".ee/pack-slots");
     fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
     let slot = fs::OpenOptions::new()
@@ -3667,6 +3668,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         .map_err(|error| error.to_string())?;
     rustix::fs::flock(&slot, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|error| format!("could not reserve the isolated test pack slot: {error}"))?;
+    let mut contended_pack: Option<(String, Vec<JsonValue>)> = None;
     for (name, blocked) in [
         ("07g_pack_evidence_backoff", true),
         ("07h_pack_evidence_after_backoff", false),
@@ -3703,27 +3705,42 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             &envs,
         )?;
         let items = json_array(&response, "/data/pack/items", name)?;
-        let has_backoff = json_array(&response, "/degraded", name)?
-            .iter()
-            .any(|entry| entry["code"] == "pack_concurrent_limit_reached");
-        ensure_equal(&has_backoff, &blocked, "pack slot response posture")?;
-        if blocked {
-            ensure(
-                items.is_empty(),
-                format!("backoff must not append native evidence: {response}"),
+        ensure_equal(
+            &json_string(&response, "/data/pack/slo/admission/outcome", name)?,
+            &if blocked { "backoff" } else { "admitted" },
+            "read-only pack slot observation",
+        )?;
+        ensure_equal(
+            &response.pointer("/data/pack/slo/admission/queueDepth"),
+            &Some(&json!(usize::from(blocked))),
+            "observed queue depth",
+        )?;
+        ensure(
+            !json_array(&response, "/degraded", name)?
+                .iter()
+                .any(|entry| entry["code"] == "pack_concurrent_limit_reached"),
+            "read-only contention must not enter hash-bearing degradations",
+        )?;
+        ensure(
+            items.iter().any(|item| {
+                item["evidenceSpanId"].as_str() == Some(searchable_evidence_id.as_str())
+            }),
+            format!("native evidence must survive read-only slot contention: {response}"),
+        )?;
+        let pack_hash = json_string(&response, "/data/pack/hash", name)?;
+        if let Some((contended_hash, contended_items)) = &contended_pack {
+            ensure_equal(
+                pack_hash,
+                contended_hash.as_str(),
+                "read-only pack identity must not depend on slot contention",
             )?;
             ensure_equal(
-                &response.pointer("/data/pack/budget/usedTokens"),
-                &Some(&json!(0)),
-                "backoff consumes no pack tokens",
+                items,
+                contended_items,
+                "read-only pack items must not depend on slot contention",
             )?;
         } else {
-            ensure(
-                items.iter().any(|item| {
-                    item["evidenceSpanId"].as_str() == Some(searchable_evidence_id.as_str())
-                }),
-                format!("native evidence must return after slot release: {response}"),
-            )?;
+            contended_pack = Some((pack_hash.to_owned(), items.clone()));
         }
     }
     drop(slot);

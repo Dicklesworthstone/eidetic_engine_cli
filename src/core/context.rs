@@ -175,15 +175,13 @@ enum PackSlotAcquisition {
     /// Concurrent LimitReached otherwise empties the candidate set and forks
     /// `pack.hash` (bd-reality-core-convergence-1azkt.2).
     ///
-    /// The admission posture is DELIBERATELY UNREPORTED on this path, not
-    /// accidentally silent. `degraded[]` is an input to the pack hash
-    /// (`compute_pack_hash_components` folds every entry's code, severity and
-    /// message into the composite hasher), so a load-dependent entry there
-    /// would fork `pack.hash` by how busy the machine was. Restoring the
-    /// signal means a non-hash-bearing channel, not this one: see bd-h2ovu,
-    /// which proposes probing slot availability without acquiring and
-    /// reporting through `PackAssemblySlo::admission`.
-    Bypassed,
+    /// Observe existing slots through `PackAssemblySlo::admission` only.
+    /// `degraded[]` is hash-bearing, so reporting contention there or emptying
+    /// the candidate set would make a read-only pack depend on machine load.
+    /// An unavailable observation stays `None`, not a false admission.
+    Bypassed {
+        admission: Option<PackAdmissionPosture>,
+    },
 }
 
 fn pack_slot_process_gates() -> &'static Mutex<BTreeSet<PathBuf>> {
@@ -202,6 +200,88 @@ fn release_pack_slot_process_gate(path: &Path) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     active_paths.remove(path);
+}
+
+/// Observe admission without creating files, reserving a process slot, or
+/// retaining a lock. This is a point-in-time observation, not a reservation.
+fn probe_pack_slot_admission(
+    workspace_path: &Path,
+    profile: PackResourceProfile,
+) -> Result<PackAdmissionPosture, String> {
+    let concurrent_pack_max = profile.budget_class().concurrent_pack_max;
+    let slots_dir = workspace_path.join(".ee").join("pack-slots");
+    ensure_pack_slot_path_is_not_symlink(&slots_dir, "pack slot directory")?;
+
+    let mut queue_depth = 0_usize;
+    for slot_index in 0..concurrent_pack_max {
+        let slot_path = slots_dir.join(format!("{}-{slot_index:02}.lock", profile.as_str()));
+        ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock")?;
+        ensure_pack_slot_path_is_regular_or_missing(&slot_path, "pack slot lock")?;
+        let process_slot_held = pack_slot_process_gates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&slot_path);
+        if process_slot_held {
+            queue_depth = queue_depth.saturating_add(1);
+            continue;
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        configure_pack_slot_lock_options(&mut options);
+        let file = match options.open(&slot_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(PackAdmissionPosture::admitted(
+                    queue_depth,
+                    concurrent_pack_max,
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to observe pack slot lock '{}': {error}",
+                    slot_path.display()
+                ));
+            }
+        };
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "Failed to inspect opened pack slot lock '{}': {error}",
+                slot_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "Refusing to observe pack slot lock '{}': path is not a regular file",
+                slot_path.display()
+            ));
+        }
+
+        // Writers hold exclusive locks. Shared probes detect those holders
+        // without making simultaneous read-only observers block each other.
+        // The read-only descriptor and its transient lock drop before return.
+        #[cfg(unix)]
+        if let Err(error) = flock(&file, FlockOperation::NonBlockingLockShared) {
+            if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+                queue_depth = queue_depth.saturating_add(1);
+                continue;
+            }
+            return Err(format!(
+                "Failed to probe pack slot lock '{}': {error}",
+                slot_path.display()
+            ));
+        }
+        return Ok(PackAdmissionPosture::admitted(
+            queue_depth,
+            concurrent_pack_max,
+        ));
+    }
+
+    Ok(PackAdmissionPosture::backoff(
+        queue_depth,
+        concurrent_pack_max,
+        PACK_SLOT_RETRY_AFTER_MS,
+    ))
 }
 
 fn try_acquire_pack_slot(
@@ -319,7 +399,8 @@ fn open_pack_slot_lock_file(path: &Path) -> io::Result<File> {
 fn configure_pack_slot_lock_options(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
@@ -2838,7 +2919,7 @@ async fn run_context_pack_with_performance_inner(
         None
     };
     if remote_search.is_none() && options.persist_pack {
-        reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
+        reconcile_search_index_before_read_with_cx(control.cx, &search_options, true).await;
     }
     let embedder_preparation = if remote_search.is_none()
         && fast_embedder_override.is_none()
@@ -3055,10 +3136,10 @@ async fn run_context_pack_with_performance_inner(
             &mut degraded,
         );
         // bd-auto-index-rebuild-on-fallback-x35vi: record a durable rebuild
-        // request so the steward can repair the index out of band, instead of
+        // request so a later pack or the steward can repair the index, instead of
         // every subsequent pack paying this same degradation until an operator
-        // notices. The pack does NOT rebuild inline — it has a latency budget
-        // and a read-only connection — and it does not soften the degradation
+        // notices. This response keeps its existing read snapshot and latency
+        // budget, and it does not soften the degradation
         // below: an agent reading `degraded[]` must still know retrieval was
         // lexical-only for THIS response.
         //
@@ -3533,7 +3614,17 @@ async fn run_context_pack_with_performance_inner(
             options.output_options.resource_profile,
         )
     } else {
-        PackSlotAcquisition::Bypassed
+        let admission = match probe_pack_slot_admission(
+            &options.workspace_path,
+            options.output_options.resource_profile,
+        ) {
+            Ok(admission) => Some(admission),
+            Err(message) => {
+                tracing::debug!(%message, "Read-only pack slot observation unavailable");
+                None
+            }
+        };
+        PackSlotAcquisition::Bypassed { admission }
     };
     let (pack_slot_guard, admission_posture, concurrent_limit_retry_after_ms) =
         match pack_slot_acquisition {
@@ -3575,7 +3666,7 @@ async fn run_context_pack_with_performance_inner(
                 );
                 (None, None, None)
             }
-            PackSlotAcquisition::Bypassed => (None, None, None),
+            PackSlotAcquisition::Bypassed { admission } => (None, admission, None),
         };
 
     let pack_start = Instant::now();
@@ -8718,6 +8809,17 @@ fn candidates_from_search_with_metrics(
                 continue;
             }
         };
+        // A live, undistilled CASS span belongs to the direct-evidence lane.
+        // Deferring it is successful resolution, not a failed memory lookup;
+        // the native admission boundary below owns its selection and denial.
+        let evidence_resolution =
+            resolve_evidence_pack_hit(connection, workspace_path, hit, degraded);
+        if matches!(
+            evidence_resolution.as_ref(),
+            Some(EvidencePackHitResolution::Direct)
+        ) {
+            continue;
+        }
         let resolution = match MemoryId::from_str(&hit.doc_id) {
             Ok(id) => Some((id, None)),
             Err(_) => {
@@ -8729,15 +8831,12 @@ fn candidates_from_search_with_metrics(
                     .or_else(|| {
                         rule_linked_memory_id(connection, workspace_path, hit, degraded)
                     })
-                    // Imported evidence hits hydrate through the memory the
-                    // span was distilled into, when one exists (bd-16imy).
-                    .or_else(|| {
-                        evidence_linked_memory_id(
-                            connection,
-                            workspace_path,
-                            hit,
-                            degraded,
-                        )
+                    .or(match evidence_resolution {
+                        Some(EvidencePackHitResolution::Linked {
+                            memory_id,
+                            evidence_id,
+                        }) => Some((memory_id, Some(evidence_id))),
+                        Some(EvidencePackHitResolution::Direct) | None => None,
                     })
             }
         };
@@ -12910,19 +13009,27 @@ fn direct_evidence_matches_filters(
     true
 }
 
-/// Resolve an imported-evidence search hit to the memory its span was
-/// distilled into so the hit can hydrate into the pack (bd-16imy).
+enum EvidencePackHitResolution {
+    Linked {
+        memory_id: MemoryId,
+        evidence_id: String,
+    },
+    Direct,
+}
+
+/// Resolve imported evidence to its linked memory or defer it to native
+/// evidence admission without reporting a failed memory conversion.
 ///
 /// Search-hit metadata is a derived, staleable asset and therefore never
 /// authorizes pack hydration. Reload the span, session, and linked memory,
 /// verify that the evidence belongs to the requested workspace, and re-run
 /// the current positive-admission policy before returning a memory id.
-fn evidence_linked_memory_id(
+fn resolve_evidence_pack_hit(
     connection: &DbConnection,
     workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Option<(MemoryId, Option<String>)> {
+) -> Option<EvidencePackHitResolution> {
     if !hit.doc_id.starts_with("ev_") {
         return None;
     }
@@ -13026,7 +13133,7 @@ fn evidence_linked_memory_id(
         // Fresh imported evidence is hydrated by the typed direct-evidence
         // boundary after memory-only selection. It is not a degradation and
         // must never receive a synthetic MemoryId (bd-16imy).
-        return None;
+        return Some(EvidencePackHitResolution::Direct);
     };
     let memory_id = match MemoryId::from_str(linked_memory_id) {
         Ok(memory_id) => memory_id,
@@ -13071,7 +13178,10 @@ fn evidence_linked_memory_id(
         }
     };
     if span.is_pack_admitted(&span.workspace_id, &session, &memory) {
-        return Some((memory_id, Some(evidence_id)));
+        return Some(EvidencePackHitResolution::Linked {
+            memory_id,
+            evidence_id,
+        });
     }
 
     push_degradation(
@@ -13415,9 +13525,9 @@ mod tests {
         CommandContext, ContextPagination, ContextPerformanceTrace, PackPersistenceSubspans,
         PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace, apply_pagination,
         candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
-        open_pack_slot_lock_file, pack_assembly_slo_for_run, push_evidence_freshness_degradation,
-        push_pack_budget_too_small_degradation, push_search_degradations, try_acquire_pack_slot,
-        unit_score,
+        open_pack_slot_lock_file, pack_assembly_slo_for_run, probe_pack_slot_admission,
+        push_evidence_freshness_degradation, push_pack_budget_too_small_degradation,
+        push_search_degradations, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::{BudgetDimension, RequestBudget};
@@ -13947,6 +14057,133 @@ mod tests {
     }
 
     #[test]
+    fn pack_slot_probe_does_not_create_missing_workspace_metadata() -> Result<(), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        for profile in [
+            PackResourceProfile::Lean,
+            PackResourceProfile::Standard,
+            PackResourceProfile::SwarmHeavy,
+        ] {
+            assert_eq!(
+                probe_pack_slot_admission(workspace.path(), profile)?,
+                crate::pack::PackAdmissionPosture::admitted(
+                    0,
+                    profile.budget_class().concurrent_pack_max,
+                )
+            );
+        }
+        assert!(
+            !workspace.path().join(".ee").exists(),
+            "read-only admission must not create a slot directory or lock file"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_slot_probe_observes_os_locks_without_mutation_or_reservation() -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        use rustix::fs::{FlockOperation, flock};
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let slots_dir = workspace.path().join(".ee/pack-slots");
+        std::fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
+        let slot_path = slots_dir.join("lean-00.lock");
+        let contents = b"existing writer slot";
+        std::fs::write(&slot_path, contents).map_err(|error| error.to_string())?;
+        let slot = open_pack_slot_lock_file(&slot_path).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&slot_path, std::fs::Permissions::from_mode(0o444))
+            .map_err(|error| error.to_string())?;
+        let modified_before = std::fs::metadata(&slot_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        flock(&slot, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), PackResourceProfile::Lean)?,
+            crate::pack::PackAdmissionPosture::backoff(1, 1, super::PACK_SLOT_RETRY_AFTER_MS),
+            "a held OS lock must be observed without an in-process gate"
+        );
+
+        flock(&slot, FlockOperation::Unlock).map_err(|error| error.to_string())?;
+        let available = crate::pack::PackAdmissionPosture::admitted(0, 1);
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), PackResourceProfile::Lean)?,
+            available,
+            "an existing unlocked file is not contention"
+        );
+        flock(&slot, FlockOperation::NonBlockingLockShared).map_err(|error| error.to_string())?;
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), PackResourceProfile::Lean)?,
+            available,
+            "concurrent shared observers must not report each other as writers"
+        );
+        flock(&slot, FlockOperation::Unlock).map_err(|error| error.to_string())?;
+        flock(&slot, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| format!("probe retained an OS lock: {error}"))?;
+        assert_eq!(
+            std::fs::read(&slot_path).map_err(|error| error.to_string())?,
+            contents
+        );
+        assert_eq!(
+            std::fs::metadata(&slot_path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| error.to_string())?,
+            modified_before,
+            "observing admission must leave the existing slot unchanged"
+        );
+        assert_eq!(
+            std::fs::read_dir(&slots_dir)
+                .map_err(|error| error.to_string())?
+                .count(),
+            1,
+            "probes must not create additional slot files"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_slot_probe_checks_all_slots_before_reporting_backoff() -> Result<(), String> {
+        use rustix::fs::{FlockOperation, flock};
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let slots_dir = workspace.path().join(".ee/pack-slots");
+        std::fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
+        let profile = PackResourceProfile::Standard;
+        let limit = profile.budget_class().concurrent_pack_max;
+        let mut held_slots = Vec::new();
+        for index in 0..limit {
+            assert_eq!(
+                probe_pack_slot_admission(workspace.path(), profile)?,
+                crate::pack::PackAdmissionPosture::admitted(index, limit),
+                "a missing later slot means the pool is not exhausted"
+            );
+            let file =
+                open_pack_slot_lock_file(&slots_dir.join(format!("standard-{index:02}.lock")))
+                    .map_err(|error| error.to_string())?;
+            flock(&file, FlockOperation::NonBlockingLockExclusive)
+                .map_err(|error| error.to_string())?;
+            held_slots.push(file);
+        }
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), profile)?,
+            crate::pack::PackAdmissionPosture::backoff(
+                limit,
+                limit,
+                super::PACK_SLOT_RETRY_AFTER_MS,
+            )
+        );
+        drop(held_slots);
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), profile)?,
+            crate::pack::PackAdmissionPosture::admitted(0, limit)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pack_slot_guard_enforces_lean_profile_limit() -> Result<(), String> {
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
 
@@ -13967,6 +14204,11 @@ mod tests {
             }
         };
 
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), PackResourceProfile::Lean)?,
+            crate::pack::PackAdmissionPosture::backoff(1, 1, super::PACK_SLOT_RETRY_AFTER_MS),
+            "read-only observations must honor the existing in-process gate"
+        );
         match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
             PackSlotAcquisition::LimitReached {
                 retry_after_ms,
@@ -13986,6 +14228,10 @@ mod tests {
 
         drop(first);
 
+        assert_eq!(
+            probe_pack_slot_admission(workspace.path(), PackResourceProfile::Lean)?,
+            crate::pack::PackAdmissionPosture::admitted(0, 1)
+        );
         match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
             PackSlotAcquisition::Acquired {
                 guard: _guard,
@@ -14013,6 +14259,10 @@ mod tests {
         std::os::unix::fs::symlink(&real_metadata, workspace.join(".ee"))
             .map_err(|error| error.to_string())?;
 
+        let probe_error = probe_pack_slot_admission(&workspace, PackResourceProfile::Lean)
+            .err()
+            .ok_or("read-only admission must reject a symlinked metadata parent")?;
+        assert!(probe_error.contains("symbolic link"), "{probe_error}");
         match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
             PackSlotAcquisition::Unavailable { message, .. } => {
                 assert!(
@@ -14043,6 +14293,10 @@ mod tests {
         let slot_path = slots_dir.join(format!("{}-00.lock", PackResourceProfile::Lean.as_str()));
         std::os::unix::fs::symlink(&outside_lock, &slot_path).map_err(|error| error.to_string())?;
 
+        let probe_error = probe_pack_slot_admission(&workspace, PackResourceProfile::Lean)
+            .err()
+            .ok_or("read-only admission must reject a symlinked lock")?;
+        assert!(probe_error.contains("symbolic link"), "{probe_error}");
         match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
             PackSlotAcquisition::Unavailable { message, .. } => {
                 assert!(
@@ -14099,6 +14353,10 @@ mod tests {
         let slot_path = slots_dir.join(format!("{}-00.lock", PackResourceProfile::Lean.as_str()));
         std::fs::create_dir(&slot_path).map_err(|error| error.to_string())?;
 
+        let probe_error = probe_pack_slot_admission(&workspace, PackResourceProfile::Lean)
+            .err()
+            .ok_or("read-only admission must reject a non-regular lock")?;
+        assert!(probe_error.contains("not a regular file"), "{probe_error}");
         match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
             PackSlotAcquisition::Unavailable { message, .. } => {
                 assert!(
@@ -16687,6 +16945,52 @@ pub fn unrelated_context() -> u64 {{
             sections: Vec::new(),
         })
         .map_err(|error| error.to_string())?;
+        let mut resolution_degraded = Vec::new();
+        let (memory_candidates, resolution_metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace,
+            &search,
+            &Default::default(),
+            false,
+            &mut resolution_degraded,
+            None,
+        );
+        assert!(memory_candidates.is_empty());
+        assert_eq!(resolution_metrics.search_hits, 3);
+        assert_eq!(resolution_metrics.skipped_candidates, 0);
+        assert_eq!(resolution_metrics.resolved_memory_ids, 0);
+        assert_eq!(resolution_metrics.memory_batch_reads, 0);
+        assert!(
+            resolution_degraded.is_empty(),
+            "native evidence deferral must not request an unnecessary rebuild: {resolution_degraded:?}"
+        );
+
+        let mut missing = search.results[0].clone();
+        missing.doc_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0xe799)).to_string();
+        let mut malformed = missing.clone();
+        malformed.doc_id = "ev_invalid".to_owned();
+        let rejected_search = ppr_search_report(vec![missing, malformed]);
+        let mut rejected_degraded = Vec::new();
+        let (rejected_candidates, rejected_metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace,
+            &rejected_search,
+            &Default::default(),
+            false,
+            &mut rejected_degraded,
+            None,
+        );
+        assert!(rejected_candidates.is_empty());
+        assert_eq!(rejected_metrics.skipped_candidates, 2);
+        assert!(rejected_degraded.iter().any(|entry| {
+            entry.code == "context_evidence_hit_unhydrated"
+                && entry.message.contains("no live source row")
+        }));
+        assert!(rejected_degraded.iter().any(|entry| {
+            entry.code == "context_evidence_hit_unhydrated"
+                && entry.message.contains("malformed evidence identifier")
+        }));
         let cases = [
             ("unfiltered", serde_json::json!({}), vec![0, 1]),
             (

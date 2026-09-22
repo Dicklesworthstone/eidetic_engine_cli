@@ -103,9 +103,13 @@ jobs:
           jsonl-heads core::jsonl_import::revisions::head_tests::
           jsonl-lineage core::jsonl_import::tests::revision_lineage_
           jsonl-recovery core::jsonl_import::recovery_regression_tests::
+          jsonl-supersession models::jsonl::tests::export_memory_supersession_preserves_omission_null_and_timestamp
           pack-admission pack_slot
           context-index core::context::tests::readonly_pack_preserves_stale_queued_index_while_writable_pack_reconciles
           index-workspace core::index::tests::process_index_jobs_respects_requested_workspace_over_newest_row
+          index-repair core::index::tests::requested_index_repair_
+          index-isolation core::index::tests::index_mutations_refuse_unregistered_workspace_in_shared_database
+          pack-native-evidence core::context::tests::direct_evidence_pack_applies_request_filters_and_combined_limit
           CASES
           exit "$failed"
       - name: Exercise public memory, recovery, and learning contracts

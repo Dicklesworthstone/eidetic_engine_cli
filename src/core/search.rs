@@ -154,7 +154,7 @@ impl Drop for TestSearchIndexAutoReconcileTimeoutGuard {
 }
 
 #[cfg(test)]
-fn with_test_search_timeouts<T>(timeout: Duration, run: impl FnOnce() -> T) -> T {
+pub(crate) fn with_test_search_timeouts<T>(timeout: Duration, run: impl FnOnce() -> T) -> T {
     let previous_reconcile =
         TEST_SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT.with(|slot| slot.borrow_mut().replace(timeout));
     let previous_request =
@@ -7675,8 +7675,13 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     // A retrieval-only daemon worker may outlive its socket client. It must
     // never claim/requeue index jobs or open the source store for repair.
     if !retrieval_only {
-        reconcile_search_index_before_read_with_cx_and_timeout(cx, options, reconcile_timeout)
-            .await;
+        reconcile_search_index_before_read_with_cx_and_timeout(
+            cx,
+            options,
+            reconcile_timeout,
+            false,
+        )
+        .await;
     }
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && options.source_mode.uses_embeddings()
@@ -10746,11 +10751,13 @@ fn cached_index_status_for_search(
 pub(crate) async fn reconcile_search_index_before_read_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
+    allow_requested_repair: bool,
 ) {
     reconcile_search_index_before_read_with_cx_and_timeout(
         cx,
         options,
         search_index_auto_reconcile_timeout(),
+        allow_requested_repair,
     )
     .await;
 }
@@ -10759,11 +10766,13 @@ async fn reconcile_search_index_before_read_with_cx_and_timeout(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     reconcile_timeout: Duration,
+    allow_requested_repair: bool,
 ) {
     let child_scope = cx.scope_with_budget(cx.budget_for_timeout(reconcile_timeout));
     let owned_options = options.clone();
     let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
-        reconcile_search_index_within_budget(&child_cx, &owned_options).await;
+        reconcile_search_index_within_budget(&child_cx, &owned_options, allow_requested_repair)
+            .await;
     }) {
         Ok(task) => task,
         Err(error) => {
@@ -10784,7 +10793,11 @@ async fn reconcile_search_index_before_read_with_cx_and_timeout(
     }
 }
 
-async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &SearchOptions) {
+async fn reconcile_search_index_within_budget(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    allow_requested_repair: bool,
+) {
     if cx.checkpoint().is_err() {
         return;
     }
@@ -10810,16 +10823,6 @@ async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &Sea
             return;
         }
     };
-    let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
-    else {
-        return;
-    };
-    let generation_gap = db_generation.saturating_sub(index_generation);
-    if status.health != IndexHealth::Stale
-        || !search_index_gap_is_auto_reconcilable(db_generation, index_generation)
-    {
-        return;
-    }
     let corpus_documents = u64::from(status.db_memory_count)
         .saturating_add(u64::from(status.db_session_count))
         .saturating_add(u64::from(status.db_artifact_count))
@@ -10828,11 +10831,53 @@ async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &Sea
     if !search_index_corpus_is_auto_reconcilable(corpus_documents) {
         tracing::info!(
             target: "ee::search::index_freshness",
-            generation_gap,
             corpus_documents,
             corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
             "skipped synchronous search-index repair because the complete corpus exceeds the interactive read bound"
         );
+        return;
+    }
+    // A previous persisting pack can request repair even when no usable index
+    // generation exists. Only the pack caller authorizes this extra mutation;
+    // ordinary search, daemon retrieval and read-only packs leave it pending.
+    if allow_requested_repair
+        && (status.health != IndexHealth::Ready
+            || status.last_check_error.is_some()
+            || status.index_generation.is_none())
+    {
+        let repair_options = crate::core::index::IndexRebuildOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        };
+        match crate::core::index::repair_requested_index_with_cx_bounded(
+            cx,
+            &repair_options,
+            u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
+        )
+        .await
+        {
+            Ok(true) => {
+                invalidate_cached_index_status_for_search(options, &index_dir);
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                target: "ee::search::index_freshness",
+                error = %error,
+                "requested index repair did not converge; preserving lexical fallback"
+            ),
+        }
+    }
+    let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
+    else {
+        return;
+    };
+    let generation_gap = db_generation.saturating_sub(index_generation);
+    if status.health != IndexHealth::Stale
+        || !search_index_gap_is_auto_reconcilable(db_generation, index_generation)
+    {
         return;
     }
     if cx.checkpoint().is_err() {
@@ -11608,7 +11653,7 @@ async fn global_store_frankensearch_hits(
         strict_scope: options.strict_scope,
     };
     if reconcile {
-        reconcile_search_index_before_read_with_cx(cx, &global_options).await;
+        reconcile_search_index_before_read_with_cx(cx, &global_options, false).await;
     }
     #[cfg(unix)]
     let generation_lease = match pin_search_generation(cx, &paths.index_dir).await {
