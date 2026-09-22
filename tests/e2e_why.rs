@@ -329,6 +329,76 @@ fn why_returns_stable_envelope_for_existing_memory() -> TestResult {
             .is_some_and(|hash| hash.starts_with("blake3:")),
         format!("why attestation bundle hash must be blake3-prefixed; got {data}"),
     )?;
+
+    // bd-1n0np.22.3: the same memory must yield the same bundle hash on the
+    // direct `ee attest memory` surface and on `why`, and neither surface may
+    // perturb the hash the other reports (why writes an inspection audit).
+    let why_hash = data
+        .pointer("/attestationBundle/bundleHash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("why attestation bundleHash missing; got {data}"))?
+        .to_owned();
+    let why_subject_id = data
+        .pointer("/attestationBundle/subject/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("why attestation subject id missing; got {data}"))?
+        .to_owned();
+    let attest = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "attest",
+        "memory",
+        &memory_id,
+    ])?;
+    ensure(
+        attest.status.success(),
+        format!(
+            "ee attest memory must exit zero; stderr: {}",
+            String::from_utf8_lossy(&attest.stderr)
+        ),
+    )?;
+    let attest_json: Value = serde_json::from_slice(&attest.stdout)
+        .map_err(|error| format!("attest stdout must be JSON: {error}"))?;
+    ensure(
+        attest_json
+            .pointer("/data/subjectKind")
+            .and_then(Value::as_str)
+            == Some("memory"),
+        format!("attest subject kind must be memory; got {attest_json}"),
+    )?;
+    ensure(
+        attest_json
+            .pointer("/data/subjectId")
+            .and_then(Value::as_str)
+            == Some(why_subject_id.as_str()),
+        format!("attest and why must name the same public subject id; got {attest_json}"),
+    )?;
+    ensure(
+        attest_json
+            .pointer("/data/bundleHash")
+            .and_then(Value::as_str)
+            == Some(why_hash.as_str()),
+        format!("attest memory bundleHash must equal why's ({why_hash}); got {attest_json}"),
+    )?;
+
+    let (again, reparsed) = run_why_json(&workspace_arg, &memory_id, &[])?;
+    ensure(
+        again.status.success(),
+        format!(
+            "second ee why must exit zero; stderr: {}",
+            String::from_utf8_lossy(&again.stderr)
+        ),
+    )?;
+    ensure(
+        reparsed
+            .pointer("/data/attestationBundle/bundleHash")
+            .and_then(Value::as_str)
+            == Some(why_hash.as_str()),
+        format!(
+            "why bundleHash must be stable across why and attest calls ({why_hash}); got {reparsed}"
+        ),
+    )?;
     Ok(())
 }
 

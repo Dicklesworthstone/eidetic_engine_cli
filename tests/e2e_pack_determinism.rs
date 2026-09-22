@@ -653,6 +653,68 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         "pack replay ledger should match requested pack id",
     )?;
 
+    // bd-1n0np.22.3: the same pack must yield the same bundle hash on the
+    // direct `ee attest pack` surface and on `pack replay`, and neither call
+    // may perturb the hash the other reports (pack audits are not filtered).
+    let replay_hash = replay_json
+        .pointer("/data/attestationBundle/bundleHash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "pack replay attestation bundleHash missing".to_owned())?
+        .to_owned();
+    let attest = run_ee(&[
+        "--json",
+        "--workspace",
+        &workspace,
+        "attest",
+        "pack",
+        &first_pack_id,
+    ])?;
+    ensure(
+        attest.status.code() == Some(EXIT_SUCCESS),
+        format!("attest pack failed: {:?}", attest.status.code()),
+    )?;
+    ensure_stderr_empty(&attest, "attest pack")?;
+    let attest_json = stdout_json(&attest)?;
+    ensure(
+        attest_json.pointer("/data/subjectKind") == Some(&serde_json::json!("pack")),
+        format!("attest subject kind must be pack; got {attest_json}"),
+    )?;
+    ensure(
+        attest_json.pointer("/data/subjectId")
+            == replay_json.pointer("/data/attestationBundle/subject/id"),
+        format!("attest and pack replay must name the same public subject id; got {attest_json}"),
+    )?;
+    ensure(
+        attest_json.pointer("/data/bundleHash") == Some(&serde_json::json!(replay_hash.as_str())),
+        format!(
+            "attest pack bundleHash must equal pack replay's ({replay_hash}); got {attest_json}"
+        ),
+    )?;
+    let replay_again = run_ee(&[
+        "--json",
+        "--workspace",
+        &workspace,
+        "pack",
+        "replay",
+        &first_pack_id,
+    ])?;
+    ensure(
+        replay_again.status.code() == Some(EXIT_SUCCESS),
+        format!(
+            "second pack replay failed: {:?}",
+            replay_again.status.code()
+        ),
+    )?;
+    let replay_again_json = stdout_json(&replay_again)?;
+    ensure(
+        replay_again_json.pointer("/data/attestationBundle/bundleHash")
+            == Some(&serde_json::json!(replay_hash.as_str())),
+        format!(
+            "pack replay bundleHash must be stable across replay and attest calls ({replay_hash}); got {:?}",
+            replay_again_json.pointer("/data/attestationBundle/bundleHash")
+        ),
+    )?;
+
     let second_output = run_ee_pack_query_file(&workspace, &query_file)?;
     ensure(
         second_output.status.code() == Some(EXIT_SUCCESS),
