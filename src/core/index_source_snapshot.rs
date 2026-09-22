@@ -93,14 +93,13 @@ pub(super) fn reembed_dry_run(
     let workspace_id = super::resolve_index_workspace_id(&db, &options.workspace_path)?;
     let snapshot = super::collect_workspace_index_source_snapshot(&db, &workspace_id)?;
     super::index_checkpoint(cx)?;
-    let embedding = super::ReembedEmbeddingSummary::from_posture(
-        super::embedding_posture_for_document_count(
+    let embedding =
+        super::ReembedEmbeddingSummary::from_posture(super::embedding_posture_for_document_count(
             &db,
             &workspace_id,
             &index_dir,
             snapshot.documents_total,
-        )?,
-    );
+        )?);
     let idempotency_key = super::reembed_idempotency_key(
         &workspace_id,
         &embedding.fast_model_id,
@@ -244,7 +243,9 @@ mod tests {
     fn errors_release_owned_snapshots_but_failed_nested_begin_preserves_the_callers() {
         let (_root, _db, path) = fixture();
         let read = DbConnection::open_file_read_only(&path).expect("read-only store");
-        let result = capture::<()>(&read, || Err(IndexRebuildError::Index("fixture".to_owned())));
+        let result = capture::<()>(&read, || {
+            Err(IndexRebuildError::Index("fixture".to_owned()))
+        });
         assert!(result.is_err());
         read.begin_read_snapshot()
             .expect("previous snapshot released");
@@ -289,7 +290,9 @@ mod tests {
                 .is_empty()
         );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("endpoint");
-        listener.set_nonblocking(true).expect("nonblocking endpoint");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking endpoint");
         let endpoint = format!(
             "http://{}/v1",
             listener.local_addr().expect("endpoint address")
