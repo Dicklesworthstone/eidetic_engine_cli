@@ -11240,7 +11240,7 @@ mod tests {
                 index_dir: self.options.index_dir.clone(),
                 query: "Copper kestrel".to_owned(),
                 limit: 5,
-                speed: crate::core::search::SpeedMode::Instant,
+                speed: crate::search::SpeedMode::Instant,
                 explain: false,
                 as_of: None,
                 include_tombstoned: false,
