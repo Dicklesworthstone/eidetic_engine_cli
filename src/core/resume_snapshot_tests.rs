@@ -329,19 +329,32 @@ fn precise_row_clock_still_excludes_future_creation_and_updates() {
 }
 
 #[test]
-fn precise_row_clock_preserves_canonical_validity_and_supersession_boundaries() {
+fn precise_row_clock_preserves_exact_validity_and_supersession_boundaries() {
     let fixture = Fixture::new();
     let workspace_id = crate::core::workspace::stable_workspace_id(&fixture.workspace);
-    let at = "2026-08-09T10:00:00Z";
+    let start = "2026-08-09T10:00:00Z";
     let before = "2026-08-09T09:59:59Z";
     let after = "2026-08-09T10:00:01Z";
+    let at = "2026-08-09T10:00:00.750Z";
+    let earlier = "2026-08-09T10:00:00.749999999Z";
+    let later = "2026-08-09T10:00:00.750000001Z";
     for (from, to, superseded, expected) in [
+        (start, after, "NULL".to_owned(), 1),
+        // An expiry at .000 must not remain active at .750. Equality is
+        // inclusive at the exact endpoint, not throughout its rounded second.
+        (start, start, "NULL".to_owned(), 0),
+        (start, at, "NULL".to_owned(), 1),
+        (start, earlier, "NULL".to_owned(), 0),
+        (start, later, "NULL".to_owned(), 1),
         (at, after, "NULL".to_owned(), 1),
-        (at, at, "NULL".to_owned(), 1),
+        (later, after, "NULL".to_owned(), 0),
         (after, after, "NULL".to_owned(), 0),
         (before, before, "NULL".to_owned(), 0),
-        (at, after, format!("'{at}'"), 0),
-        (at, after, format!("'{after}'"), 1),
+        (start, after, format!("'{start}'"), 0),
+        (start, after, format!("'{at}'"), 0),
+        (start, after, format!("'{earlier}'"), 0),
+        (start, after, format!("'{later}'"), 1),
+        (start, after, format!("'{after}'"), 1),
     ] {
         fixture.writer.execute_raw(&format!(
             "UPDATE memories SET created_at = '2026-08-09T10:00:00.500Z', updated_at = '2026-08-09T10:00:00.500Z', valid_from = '{from}', valid_to = '{to}', superseded_at = {superseded} WHERE id = '{}'", fixture.memory_id
