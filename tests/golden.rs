@@ -319,6 +319,7 @@ mod tests {
             .map_err(|error| format!("parse live doctor JSON: {error}"))?;
         normalize_doctor_platform_variants(&mut expected);
         scrub_environment_paths(&mut actual);
+        normalize_workspace_daemon_sockets(&mut actual);
         normalize_doctor_platform_variants(&mut actual);
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
         ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
@@ -367,6 +368,34 @@ mod tests {
     /// Keep the Linux doctor contract exact while making the same golden
     /// portable to targets whose public doctor output intentionally reports
     /// different NUMA and daemon-socket capabilities.
+    /// Replace host-derived per-workspace daemon socket paths in every string.
+    ///
+    /// `daemon_socket_reachable` names `/tmp/ee-<euid>/d-<hash>.sock` on one
+    /// worker and a different path on the next, so the golden stores the
+    /// placeholder (bd-j4njd). The rule itself lives in src/obs/volatile_fields.rs
+    /// with its two-host unit control.
+    fn normalize_workspace_daemon_sockets(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                let (normalized, _replaced) =
+                    ee::obs::normalize_workspace_daemon_socket_paths(text);
+                *text = normalized;
+            }
+            serde_json::Value::Array(items) => {
+                items
+                    .iter_mut()
+                    .for_each(normalize_workspace_daemon_sockets);
+            }
+            serde_json::Value::Object(object) => {
+                object
+                    .values_mut()
+                    .for_each(normalize_workspace_daemon_sockets);
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
     fn normalize_doctor_platform_variants(value: &mut serde_json::Value) {
         normalize_doctor_platform_variants_for_target(
             value,
