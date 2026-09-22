@@ -4,6 +4,152 @@ use crate::core::curate::session_arc;
 const INLINE_ARC: &str = "Failure arc: storing silently would violate the no-loop-takeover policy.\nFix: require accept/reject commands and audit every accepted capture.";
 
 #[test]
+fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() -> TestResult {
+    let fixture = review_session_fixture()?;
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(9820)).to_string();
+    let source_id = evidence_id(9821);
+    let connection =
+        DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_session(
+            &session,
+            &session_input(&fixture.workspace_id, "multi-episode-acceptance"),
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_evidence_span(
+            &source_id,
+            &evidence_span_input(
+                &fixture.workspace_id,
+                &session,
+                None,
+                "multi-episode-acceptance-span",
+                60,
+                &format!("{INLINE_ARC}\n{LATER_FAILURE}\n{LATER_REPAIR}"),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let report = review_session_proposals(&ReviewSessionOptions {
+        workspace_path: &fixture.workspace_path,
+        database_path: Some(&fixture.database_path),
+        session_id: Some(&session),
+        propose: true,
+        dry_run: false,
+        min_confidence: 0.8,
+        limit: 4,
+    })
+    .map_err(|error| error.message())?;
+    assert_eq!(report.candidate_count, 4, "{:?}", report.candidates);
+    assert!(report.candidates.iter().all(|candidate| candidate.persisted));
+
+    let mut first_pair = Vec::new();
+    let mut later_pair = Vec::new();
+    for candidate in &report.candidates {
+        let arc = candidate.session_arc.as_ref().expect("session arc");
+        if arc
+            .failure_span
+            .excerpt
+            .contains("rewriting evidence ownership")
+        {
+            later_pair.push(candidate);
+        } else {
+            first_pair.push(candidate);
+        }
+    }
+    assert_eq!(first_pair.len(), 2);
+    assert_eq!(later_pair.len(), 2);
+
+    validate_arc(&fixture, &first_pair[0].candidate_id)?;
+    let owner = apply_arc(&fixture, &first_pair[0].candidate_id, false)?
+        .application
+        .created_memory_id
+        .expect("first accepted memory");
+
+    validate_arc(&fixture, &later_pair[0].candidate_id)?;
+    let later_first = apply_arc(&fixture, &later_pair[0].candidate_id, false)?
+        .application
+        .created_memory_id
+        .expect("first later memory");
+
+    validate_arc(&fixture, &later_pair[1].candidate_id)?;
+    let shown = super::super::show_curation_candidate(&super::super::CurateShowOptions {
+        workspace_path: &fixture.workspace_path,
+        database_path: Some(&fixture.database_path),
+        candidate_id: &later_pair[1].candidate_id,
+    })
+    .map_err(|error| error.message())?;
+    let plan = shown.planned_application.expect("application preview");
+    assert_eq!(plan.status, "ready", "{:?}", plan.errors);
+    assert!(plan.planned_evidence_attachments.is_empty());
+    assert_eq!(plan.shared_evidence_spans.len(), 1);
+    assert_eq!(plan.shared_evidence_spans[0].evidence_span_id, source_id);
+    assert_eq!(plan.shared_evidence_spans[0].owner_memory_id, owner);
+    let planned_link = plan
+        .planned_session_arc_link
+        .expect("only the current reciprocal pair should link");
+    assert!(
+        planned_link.src_memory_id == later_first
+            || planned_link.dst_memory_id == later_first
+    );
+    assert_ne!(planned_link.src_memory_id, owner);
+    assert_ne!(planned_link.dst_memory_id, owner);
+
+    let later_second = apply_arc(&fixture, &later_pair[1].candidate_id, false)?
+        .application
+        .created_memory_id
+        .expect("second later memory");
+
+    let connection =
+        DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+    assert_eq!(
+        connection
+            .get_evidence_span(&source_id)
+            .map_err(|error| error.to_string())?
+            .expect("shared source")
+            .memory_id
+            .as_deref(),
+        Some(owner.as_str()),
+        "later learning must never rewrite the first accepted evidence owner"
+    );
+    assert_eq!(
+        connection
+            .get_curation_candidate(&fixture.workspace_id, &first_pair[1].candidate_id)
+            .map_err(|error| error.to_string())?
+            .expect("unapplied reciprocal candidate")
+            .status,
+        "pending",
+        "accepting a different episode must not implicitly accept this one"
+    );
+    assert!(
+        connection
+            .list_memory_links_for_memory(&owner, None)
+            .map_err(|error| error.to_string())?
+            .is_empty(),
+        "shared provenance must not manufacture a cross-episode memory link"
+    );
+    let links = connection
+        .list_memory_links_for_memory(&later_first, Some(MemoryLinkRelation::Related))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(links.len(), 1);
+    let link = &links[0];
+    assert!(
+        (link.src_memory_id == later_first && link.dst_memory_id == later_second)
+            || (link.src_memory_id == later_second && link.dst_memory_id == later_first)
+    );
+    assert_eq!(
+        connection
+            .list_audit_by_target("memory_link", &link.id, None)
+            .map_err(|error| error.to_string())?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+
+#[test]
 fn session_arc_within_one_window_retains_exact_source_identity() {
     let session = synthetic_stored_session();
     let span = synthetic_span("ev_arc_window", None, INLINE_ARC);
