@@ -3,7 +3,7 @@
   "success": true,
   "data": {
     "command": "why",
-    "version": "0.14.3",
+    "version": "0.15.2",
     "memoryId": "mem_00000000000000000000000001",
     "found": true,
     "content": "Run cargo fmt --check before release.",
@@ -107,7 +107,7 @@
         "utility": 0.8,
         "why": "Selected because the memory matches release-formatting work.",
         "packHash": "blake3:1b56a8dedc62dabb0004ad59e5652008bdf40a2bc5cb60ce7eced9c33aad2c07",
-        "ledgerHash": "blake3:5e496b83578ace0c05b46739bce27d294c5b0f640d9489bb54fac37b28094394",
+        "ledgerHash": "blake3:8e5a6d35153fdfc1ba21ce834655599ffac921c89f5a9163006214e399b51983",
         "ledgerStatus": "available",
         "ledgerStorage": {
           "mode": "uncompressed_in_row",
