@@ -86,6 +86,26 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
+      - name: Exercise native rule admission and authority
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
+            tail -n 100 "$log"
+            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+          done <<'CASES'
+          pack-rule-admission core::context::rule_admission_tests::
+          pack-rule-authority pack::tests::unsigned_procedural_rule
+          pack-rule-hydration core::context::tests::hybrid_search_hit_relevance_is_normalized_for_pack_candidates
+          CASES
+          exit "$failed"
       - name: Exercise remote embedding protocol and HTTP boundaries
         if: ${{ !cancelled() }}
         run: |
@@ -140,9 +160,6 @@ jobs:
           index-passive-local core::index::tests::local_descriptor_inspection
           ask-candidate-lineage core::ask::selection::diversity::tests
           ask-native-lineage core::ask::corpus::native_tests::native_answer_lineage_survives_the_real_corpus_candidate_budget
-          pack-rule-admission core::context::rule_admission_tests::
-          pack-rule-authority pack::tests::unsigned_procedural_rule
-          pack-rule-hydration core::context::tests::hybrid_search_hit_relevance_is_normalized_for_pack_candidates
           pack-native-evidence core::context::tests::direct_evidence_pack_applies_request_filters_and_combined_limit
           pack-pagination core::context::tests::apply_pagination_preserves_next_cursor_metadata_for_response
           pack-read-only-model core::index::ask_model::tests::

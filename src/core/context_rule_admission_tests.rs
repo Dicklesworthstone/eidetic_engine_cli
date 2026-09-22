@@ -75,7 +75,9 @@ impl Fixture {
             trust_subclass: None,
             provenance_uri: Some(format!("manual://rule-admission-{seed}")),
             tags: Vec::new(),
-            valid_from: None,
+            // insert_memory otherwise defaults this to the current clock,
+            // outside the historical validity windows exercised below.
+            valid_from: Some(OLD.to_owned()),
             valid_to: None,
         };
         customize_memory(&mut memory_input);
@@ -600,7 +602,14 @@ fn source_lifecycle_and_seal_requirements_still_guard_rule_hydration() {
             .any(|entry| entry.code == "context_candidate_sealed")
     );
 
-    let expired = f.add(5, |memory| memory.valid_to = Some(OLD.to_owned()), |_| {});
+    let expired = f.add(
+        5,
+        |memory| {
+            memory.valid_from = Some("2019-01-01T00:00:00Z".to_owned());
+            memory.valid_to = Some(OLD.to_owned());
+        },
+        |_| {},
+    );
     let future = f.add(6, |memory| memory.valid_from = Some(NEW.to_owned()), |_| {});
     let resolved = f.resolve(
         &[&live.rule, &expired.rule, &future.rule],
