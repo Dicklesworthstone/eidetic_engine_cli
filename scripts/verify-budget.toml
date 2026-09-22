@@ -387,6 +387,28 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Fuzz Smoke: search query parser (bd-2j2h0)"
+# NOT A MEASUREMENT, AND THE NUMBER SAYS SO ITSELF (bd-vihzq).
+#
+# The stage runs, from fuzz_smoke() in verify.sh:
+#     cargo +nightly fuzz run search_query_parser -- -max_total_time=30 ...
+# and the declared p50 is 30 -- the value of the tool's own `-max_total_time`
+# knob, copied across. A p50 that equals a time LIMIT passed to the command
+# cannot be an observation of the command: it is the one number in the whole
+# invocation that is guaranteed not to include cargo-fuzz's build of the
+# nightly fuzz target, the libFuzzer link, or process startup. Whatever this
+# stage costs, it costs 30s of fuzzing PLUS all of that, so 30 is not a median
+# of anything; it is a lower bound stated as if it were the middle.
+#
+# Left at 30 rather than re-measured: the stage is opt-in behind
+# --include-fuzz-smoke and did not run in this session's lane, and a nightly
+# toolchain plus cargo-fuzz on a declared host is a measurement in its own
+# right rather than a side effect of this one. Timing it is the work that
+# replaces this record and lowers UNVERIFIED_CARGO_P50_ALLOWANCE by one.
+#
+# Worth noting while it sits here: the 30 is charged against the 601s ceiling
+# on every run even though the stage is gated off by default, so an opt-in
+# stage is holding budget that the default path never spends.
+# P50_PROVENANCE inherited_unverified_reason=equals-the-max-total-time-knob declared_p50_s=30
 expected_seconds_p50 = 30
 regression_factor = 1.5
 
@@ -799,6 +821,21 @@ expected_seconds_p50_unmeasured = true
 
 [[stage]]
 name = "MCP Lib Unit Tests (bd-up1hk)"
+# A CARGO STAGE, AND HONESTLY UNMEASURED (bd-vihzq).
+#
+# scripts/mcp_lib_tests.sh runs
+#     cargo test --workspace --features mcp --lib --jobs 1 mcp::
+# which is a SECOND cargo invocation with a DIFFERENT feature set from Gate 5's.
+# `mcp` is not a default feature, so this does not reuse Gate 5's artifacts: it
+# compiles the library again under a different cfg and then re-walks freshness
+# over the whole lock file, which is the cost bd-vihzq is about. It is the one
+# cargo stage in the file whose p50 cannot be guessed from a neighbour, because
+# no other stage builds this feature combination.
+#
+# No p50 is declared, so verify.sh's stage_budget_thresholds fails to resolve
+# and enforce_stage_budget skips it. That is the correct state for a stage
+# nobody has timed, and it stays until someone times it on a named host.
+# P50_PROVENANCE unmeasured_reason=second-feature-set-never-timed
 expected_seconds_p50_unmeasured = true
 
 [[stage]]

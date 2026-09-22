@@ -3968,3 +3968,416 @@ fn bench_test_functions_do_not_accumulate() {
          and say where they went (bd-unreachable-bench-tests-k0le8)."
     );
 }
+
+// ---------------------------------------------------------------------------
+// p50 PROVENANCE FOR CARGO-INVOKING STAGES (bd-vihzq)
+// ---------------------------------------------------------------------------
+//
+// scripts/verify-budget.toml already carried the right convention in prose --
+// "RE-MEASURED <date> ... N samples, load X: a b c -> median M, so p50 = N" --
+// on exactly two of its ninety-two budgeted stages. Nothing checked it, so for
+// every other stage the file could not distinguish a timed number from one
+// somebody picked, and bd-vihzq exists because at least one of them was picked.
+//
+// A stage whose command reaches `cargo build/test/check/bench/clippy/fuzz/run`
+// is the case that matters. Its cost is not its own script's cost: it is
+// dominated by the toolchain re-walking freshness across every crate in the
+// lock file, which is why one warm single-target `cargo test` was measured at
+// 74s on RCH worker hz4 while the stage wrapping it declared far less. Those
+// stages must therefore say where their number came from, in a shape a machine
+// can compare against the number itself.
+//
+// WHAT THIS CATCHES, AND WHAT IT DOES NOT.
+//
+// It catches: a cargo stage with no provenance at all; a provenance record
+// whose restated p50 disagrees with the declared one (so a p50 cannot be
+// retuned without touching its evidence, which is exactly the retune-to-fit
+// that verification_drift_guard.rs calls fiction); a NEW stage that reaches
+// cargo and declares neither provenance nor an exemption; and an exemption
+// that has outlived the stage it excused.
+//
+// It does NOT catch the world getting slower. Nothing static can. verify.sh
+// already reports that at run time through `budget=advisory` and
+// `budget=fail`, and this guard's job is to make sure the p50 those verdicts
+// are computed against is a number somebody observed.
+
+/// Cargo subcommands whose cost is dominated by the toolchain rather than by
+/// the calling script.
+const CARGO_COMPILING_SUBCOMMANDS: [&str; 7] =
+    ["build", "test", "check", "bench", "clippy", "fuzz", "run"];
+
+/// Prefix of the machine-checked provenance record inside a `[[stage]]` block.
+///
+/// Deliberately a COMMENT, and deliberately spelled `declared_p50_s=` rather
+/// than `expected_seconds_p50 =`. Both manifest readers key on the real field:
+/// verify.sh's awk anchors `^expected_seconds_p50[[:space:]]*=` at column zero,
+/// and `budget_stage_p50` in this file trims and then `strip_prefix`es the same
+/// spelling. A record that reused that spelling would be read as a second
+/// declaration by one of them. Verified both ways before committing.
+const P50_PROVENANCE_MARKER: &str = "# P50_PROVENANCE ";
+
+/// Stages the scanner below flags that do NOT actually invoke cargo.
+///
+/// The scanner over-approximates ON PURPOSE. Deciding shell-and-Python quoting
+/// exactly is not worth a fragile gate, so it errs toward flagging, and a false
+/// positive is paid for with one reviewed line here rather than by loosening
+/// the scan until the real cases slip through too. Each entry says why the
+/// match is not an invocation; `exemption_is_still_earned` below fails if one
+/// stops being flagged, so this list cannot quietly outlive its reason.
+/// How many cargo stages may keep a p50 that nobody has timed.
+///
+/// A RATCHET, down only, in the shape of UNMEASURED_STAGE_ALLOWANCE above.
+///
+/// It exists because bd-vihzq found the file in a state with no honest exit.
+/// A cargo stage whose p50 was inherited from before anyone measured has three
+/// possible spellings and two of them are wrong: writing a plausible number is
+/// the fabrication the bead was filed about, and dropping the p50 to declare
+/// the stage `expected_seconds_p50_unmeasured` would push the unmeasured count
+/// past its own down-only allowance -- so the file would punish the honest
+/// move and reward the invented one.
+///
+/// `inherited_unverified_reason=` is the third spelling: the number stays, and
+/// says out loud that it is a guess, and is counted here so the debt is a
+/// figure somebody has to look at rather than a silence. Measuring one means
+/// lowering this by one in the same commit.
+const UNVERIFIED_CARGO_P50_ALLOWANCE: usize = 6;
+
+const CARGO_SCAN_EXEMPTIONS: [(&str, &str); 5] = [
+    (
+        "MCP Lib Unit Tests Guard (bd-up1hk)",
+        "scripts/mcp_lib_tests.sh --self-test returns from its own branch at the \
+         `exit 0` above `cd \"$REPO_ROOT\"`, so it never reaches the cargo line \
+         further down the same file. The scanner reads the file, not the branch. \
+         The RUN arm of the same script is a real cargo stage and is NOT exempt.",
+    ),
+    (
+        "Local Cargo Tripwire Contract",
+        "scripts/check-local-cargo-tripwire.sh CLASSIFIES candidate cargo command \
+         lines against the bd-1h8ji.1 contract. Its self-test fixtures are the \
+         command strings it refuses; running one is the thing it exists to stop.",
+    ),
+    (
+        "RCH Doc Examples Contract",
+        "scripts/check-rch-doc-examples.py LINTS documentation that contains cargo \
+         command lines; the matches are Python string literals it compares against, \
+         not commands it runs.",
+    ),
+    (
+        "RCH Doc Examples Lint",
+        "Same script as the contract arm above, same reason: the cargo text is the \
+         lint's subject matter, not its behaviour.",
+    ),
+    (
+        "Fuzz Target Audit Contract",
+        "fuzz_target_audit_self_test() builds fixture README text containing the \
+         documented `cargo fuzz run ... -max_total_time=300` sweeps and greps for \
+         them. The audit is static; it never runs a fuzz target.",
+    ),
+];
+
+/// The body of a shell function defined in verify.sh, brace-matched.
+fn shell_function_body(script: &str, name: &str) -> Option<String> {
+    let header = format!("\n{name}() {{");
+    let start = script.find(&header)? + header.len();
+    let mut depth = 1usize;
+    let mut end = start;
+    for (offset, ch) in script[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(script[start..end].to_string())
+}
+
+/// The cargo subcommand a shell fragment invokes in COMMAND POSITION, if any.
+///
+/// Strips the prefixes a real invocation wears -- `if`, `!`, `then`, `do`, an
+/// `env`, leading `VAR=value` assignments, and a `NAME=$(` capture -- and then
+/// requires the very next word to be `cargo`. Text that merely mentions cargo
+/// inside `printf '...'`, an echoed transcript or a Python literal does not
+/// reach command position and is not matched here.
+fn cargo_subcommand_in_command_position(fragment: &str) -> Option<&'static str> {
+    let mut rest = fragment.trim();
+    if rest.starts_with('#') {
+        return None;
+    }
+    loop {
+        let before = rest;
+        for prefix in ["if ", "! ", "then ", "do ", "env ", "exec ", "time "] {
+            if let Some(stripped) = rest.strip_prefix(prefix) {
+                rest = stripped.trim_start();
+            }
+        }
+        // A capture such as `OUTPUT=$(cargo test ...` or `x="$(cargo build`.
+        for prefix in ["=$(", "=\"$(", "=`"] {
+            if let Some(index) = rest.find(prefix) {
+                let name = &rest[..index];
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    rest = rest[index + prefix.len()..].trim_start();
+                }
+            }
+        }
+        // A leading `VAR=value` environment assignment.
+        if let Some((head, tail)) = rest.split_once(char::is_whitespace) {
+            if head.contains('=')
+                && !head.starts_with('=')
+                && head
+                    .split_once('=')
+                    .is_some_and(|(k, _)| {
+                        !k.is_empty()
+                            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    })
+            {
+                rest = tail.trim_start();
+            }
+        }
+        if rest == before {
+            break;
+        }
+    }
+    let rest = rest.strip_prefix("cargo ")?.trim_start();
+    // An explicit toolchain, as in `cargo +nightly fuzz run ...`.
+    let rest = match rest.strip_prefix('+') {
+        Some(tail) => tail.split_once(char::is_whitespace)?.1.trim_start(),
+        None => rest,
+    };
+    let word = rest
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or_default();
+    CARGO_COMPILING_SUBCOMMANDS
+        .into_iter()
+        .find(|candidate| *candidate == word)
+}
+
+/// Every stage name in verify.sh whose command reaches a cargo invocation,
+/// mapped to the evidence that says so.
+///
+/// Resolution is DEPTH ONE and that is a stated limit, not an oversight: the
+/// stage's own command line, plus the body of any verify.sh shell function it
+/// names, plus the text of any `scripts/...` file it names. A cargo call three
+/// scripts deep would be missed. Every case in the tree today is depth one, and
+/// a scanner whose reach is knowable beats one whose reach has to be trusted.
+fn stages_reaching_cargo(script: &str, root: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for line in script.lines() {
+        let marker = "run_stage \"";
+        let Some(start) = line.find(marker) else {
+            continue;
+        };
+        let rest = &line[start + marker.len()..];
+        let Some(name_end) = rest.find('"') else {
+            continue;
+        };
+        let name = rest[..name_end].to_string();
+        let command = rest[name_end + 1..].trim().trim_matches('"').to_string();
+
+        let mut sources: Vec<(String, String)> = vec![("<inline>".to_string(), command.clone())];
+
+        for token in command.split(|c: char| !(c.is_ascii_alphanumeric() || "._/-".contains(c))) {
+            // `.` and `/` are both token characters here, so verify.sh's usual
+            // `./scripts/foo.sh` spelling arrives with the leading `./`
+            // attached. Without this strip the prefix test below missed every
+            // stage that calls a script the ordinary way -- three real cargo
+            // stages, including both e2e drivers -- while still matching the
+            // handful invoked as `python3 scripts/foo.py`. The scanner looked
+            // like it was working because the ones it did catch were the loud
+            // ones.
+            let token = token.strip_prefix("./").unwrap_or(token);
+            if token.starts_with("scripts/") && (token.ends_with(".sh") || token.ends_with(".py")) {
+                let path = root.join(token);
+                if let Ok(body) = fs::read_to_string(&path) {
+                    sources.push((token.to_string(), body));
+                }
+            }
+        }
+        for token in command.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if token.len() > 3 {
+                if let Some(body) = shell_function_body(script, token) {
+                    sources.push((format!("fn {token}()"), body));
+                }
+            }
+        }
+
+        for (source, body) in sources {
+            for raw in body.lines() {
+                for fragment in raw.split("&&").flat_map(|f| f.split(';')) {
+                    if let Some(subcommand) = cargo_subcommand_in_command_position(fragment) {
+                        found.entry(name.clone()).or_default().push(format!(
+                            "{source}: cargo {subcommand} -- {}",
+                            fragment.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    found
+}
+
+/// The `# P50_PROVENANCE ...` record in a stage block, as key=value pairs.
+fn stage_p50_provenance(block: &[&str]) -> Option<BTreeMap<String, String>> {
+    let record = block
+        .iter()
+        .find_map(|line| line.trim().strip_prefix(P50_PROVENANCE_MARKER))?;
+    Some(
+        record
+            .split_whitespace()
+            .filter_map(|field| field.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.trim_matches('"').to_string()))
+            .collect(),
+    )
+}
+
+#[test]
+fn every_cargo_invoking_stage_declares_p50_provenance() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let budget_manifest =
+        fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+
+    let flagged = stages_reaching_cargo(&verify_script, project_root());
+
+    // Empty-world guard. A scanner that resolves nothing -- a renamed helper, a
+    // moved scripts/ directory, a run_stage spelling change -- would flag no
+    // stages and this test would pass by finding no work to do. That is the
+    // silent zero this assert exists to convert into a red.
+    assert!(
+        flagged.len() >= 8,
+        "the cargo-stage scanner found only {} stage(s) reaching cargo. verify.sh \
+         has invoked cargo from at least 8 stages since bd-vihzq; a number this \
+         low means the scanner stopped resolving, not that the stages stopped \
+         compiling. Flagged: {:?}",
+        flagged.len(),
+        flagged.keys().collect::<Vec<_>>()
+    );
+
+    let exempt: BTreeMap<&str, &str> = CARGO_SCAN_EXEMPTIONS.into_iter().collect();
+    let blocks = budget_stage_blocks(&budget_manifest);
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut disagreeing: Vec<String> = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
+
+    for (stage, evidence) in &flagged {
+        if exempt.contains_key(stage.as_str()) {
+            continue;
+        }
+
+        let name_line = format!("name = \"{stage}\"");
+        let Some(block) = blocks
+            .iter()
+            .find(|block| block.iter().any(|line| line.trim() == name_line))
+        else {
+            // verify_budget_manifest_declares_every_verify_stage owns this
+            // failure; do not report it twice in different words.
+            continue;
+        };
+
+        let Some(provenance) = stage_p50_provenance(block) else {
+            let via = evidence.first().map_or("(no evidence)", String::as_str);
+            missing.push(format!("{stage} -- reaches cargo via {via}"));
+            continue;
+        };
+
+        let declared = budget_stage_p50(block);
+        let restated = provenance
+            .get("declared_p50_s")
+            .and_then(|value| value.parse::<u64>().ok());
+
+        if provenance.contains_key("inherited_unverified_reason") {
+            unverified.push(stage.clone());
+        }
+
+        match (declared, restated) {
+            (Some(declared), Some(restated)) if declared == restated => {}
+            (None, None) => {
+                // An unmeasured stage: the block carries the marker instead of
+                // a p50, and the record has to say so rather than leave the
+                // reader to infer it.
+                let says_unmeasured = block
+                    .iter()
+                    .any(|line| line.trim().starts_with(P50_PROVENANCE_MARKER))
+                    && provenance.contains_key("unmeasured_reason");
+                if !says_unmeasured {
+                    disagreeing.push(format!(
+                        "{stage} -- no expected_seconds_p50 and no unmeasured_reason= in its \
+                         provenance record"
+                    ));
+                }
+            }
+            (declared, restated) => disagreeing.push(format!(
+                "{stage} -- declares expected_seconds_p50 = {declared:?} but its \
+                 P50_PROVENANCE record restates declared_p50_s={restated:?}"
+            )),
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "these verify.sh stages invoke cargo but declare no `{P50_PROVENANCE_MARKER}` \
+         record in scripts/verify-budget.toml:\n  {}\n\nA cargo stage's cost is the \
+         toolchain's, not its script's, so its p50 has to name the host, the load and \
+         the samples it came from. Add a record of the shape:\n  \
+         {P50_PROVENANCE_MARKER}measured=YYYY-MM-DD host=<host> load=<avg> \
+         samples_s=a,b,c median_s=<m> declared_p50_s=<p50>\n\nIf it has not been \
+         timed, say so instead: `unmeasured_reason=\"...\"` with no \
+         expected_seconds_p50 at all, or -- for a p50 inherited from before this \
+         guard existed -- `inherited_unverified_reason=\"...\" declared_p50_s=<p50>`, \
+         which keeps the number and labels it a guess. Do NOT invent a measurement \
+         to satisfy this; that is the defect bd-vihzq was filed about.",
+        missing.join("\n  ")
+    );
+
+    assert!(
+        disagreeing.is_empty(),
+        "these stages' declared p50 and their own provenance record disagree:\n  {}\n\n\
+         The record restates the p50 precisely so the two cannot drift: editing the \
+         budget without re-measuring now reds here instead of passing silently. \
+         Re-measure and update both, or revert the p50.",
+        disagreeing.join("\n  ")
+    );
+
+    assert!(
+        unverified.len() <= UNVERIFIED_CARGO_P50_ALLOWANCE,
+        "{} cargo stages keep an inherited, never-timed p50, over the allowance of \
+         {UNVERIFIED_CARGO_P50_ALLOWANCE}: {unverified:?}. Measure one and replace \
+         its `inherited_unverified_reason=` with a `measured=` record, lowering the \
+         allowance in the same commit. Do not raise this to admit another guess.",
+        unverified.len()
+    );
+}
+
+#[test]
+fn every_cargo_scan_exemption_is_still_earned() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let flagged = stages_reaching_cargo(&verify_script, project_root());
+
+    let stale: Vec<&str> = CARGO_SCAN_EXEMPTIONS
+        .into_iter()
+        .map(|(stage, _)| stage)
+        .filter(|stage| !flagged.contains_key(*stage))
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "these CARGO_SCAN_EXEMPTIONS no longer match anything the scanner flags: \
+         {stale:?}. Either the stage was renamed or removed, or the text that used to \
+         look like a cargo invocation is gone. Delete the exemption -- an exemption \
+         nobody can see fail is the thing that lets a real cargo stage in later \
+         under a name somebody already excused."
+    );
+}
