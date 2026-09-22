@@ -10,12 +10,12 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: shared-workspace-backup-${{ github.ref }}
+  group: shared-workspace-backup-delivery-v2-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     timeout-minutes: 8
     permissions:
       contents: write
@@ -35,6 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
+          files=(src/core/backup.rs src/core/backup_recovery.rs src/core/backup_scope.rs src/core/backup_scope_tests.rs)
           if ! grep -Fq 'recovery::reconcile_primary(&mut recovery_inventory, &export_data)' src/core/backup.rs; then
             python3 - <<'PY'
           import base64, hashlib, lzma, os
@@ -57,10 +58,20 @@ jobs:
           PY
             git apply --check "$RUNNER_TEMP/workspace-backup.patch"
             git apply "$RUNNER_TEMP/workspace-backup.patch"
-            files=(src/core/backup.rs src/core/backup_recovery.rs src/core/backup_scope.rs src/core/backup_scope_tests.rs)
-            rustfmt --edition 2024 --config skip_children=true "${files[@]}"
-            git diff --check
-            git add -- "${files[@]}"
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/core/backup_scope_tests.rs')
+          text = path.read_text()
+          # The durable schema names memory links link_, not lnk_.
+          text = text.replace('"lnk_{number:026}"', '"link_{number:026}"')
+          text = text.replace('"lnk_00000000000000000000000099"', '"link_00000000000000000000000099"')
+          path.write_text(text)
+          PY
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
             git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
               -m 'feat(backup): recover individual workspaces from shared stores' \
               -m 'Count all 52 durable families through explicit workspace ownership within the captured read snapshot. Preserve shared audit, recorder and TTL history. Reconcile primary carriers and retain cross-workspace edges and unowned episodes as honest coverage gaps. Keep destination-wide population and content fences unchanged. Add real shared-store, typed/rule/evidence round-trip, read-only dry-run and cross-scope refusal regressions.'
