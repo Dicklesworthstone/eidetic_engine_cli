@@ -1,10 +1,12 @@
 # EE-012 — cargo-deny configuration for the forbidden-dependency audit.
 #
 # AGENTS.md mandates that the resolved dependency tree must exclude the
-# crates listed below. The integration test in `tests/forbidden_deps.rs` is
-# the load-bearing gate; this file lets contributors who already use
-# `cargo-deny` (https://embarkstudios.github.io/cargo-deny) get the same
-# signal locally with `cargo deny check bans`.
+# crates listed below. scripts/check-forbidden-deps.sh reads [bans].deny and
+# enforces these names in the locked dependency metadata without compiling.
+# It retains the original 13 bans as a minimum safety floor and rejects
+# missing, malformed, or conditional entries rather than weakening the scan.
+# The integration test in tests/forbidden_deps.rs also checks list agreement.
+# Contributors can additionally run `cargo deny check bans` locally.
 #
 # Schema reference: https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 
