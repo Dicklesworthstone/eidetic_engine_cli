@@ -1,0 +1,259 @@
+--- a/src/core/recall.rs
++++ b/src/core/recall.rs
+@@ -21,6 +21,8 @@
+ 
+ #[path = "recall_admission.rs"]
+ mod admission;
++#[path = "recall_scan.rs"]
++mod scan;
+ 
+ /// Response payload schema carried under `ee.response.v2` `data.recall`.
+ pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
+@@ -48,10 +50,11 @@
+ /// Repair command for a stale or empty reverse index.
+ pub const ANCHOR_INDEX_REPAIR: &str = "ee index rebuild --workspace .";
+ 
+-/// Bounded candidate scan (ADR 0064 §3). The per-path/per-symbol lookups are
+-/// already narrow; this cap is the defensive ceiling for pathological
+-/// workspaces. Callers fetching more rows than this should truncate before
+-/// calling [`evaluate_recall`]; the engine also enforces it.
++/// Bounded candidate set (ADR 0064 §3). Production assembly applies source
++/// admission, selector matching and deduplication before retaining this many
++/// ranked memories. Its separately bounded metadata traversal reports any
++/// incomplete scan. Direct callers of [`evaluate_recall`] must supply bounded
++/// candidates; the pure engine defensively inspects at most this many rows.
+ pub const RECALL_CANDIDATE_SCAN_CAP: usize = 4096;
+ 
+ /// Single-line content preview budget (chars), mirroring the existing
+@@ -764,106 +767,18 @@
+     .unwrap_or(i64::MAX);
+     let index_generation = connection.memory_anchor_index_generation(workspace_id)?;
+ 
+-    let normalized_selectors: Vec<String> = query
+-        .paths
+-        .iter()
+-        .map(|selector| normalize_recall_path_selector(selector))
+-        .collect();
+-    let has_glob_selector = normalized_selectors
+-        .iter()
+-        .any(|selector| selector.contains(['*', '?', '[']));
+-    let mut exact_paths: Vec<String> = normalized_selectors
+-        .iter()
+-        .filter(|selector| !selector.contains(['*', '?', '[']))
+-        .cloned()
+-        .chain(
+-            query
+-                .diff_paths
+-                .iter()
+-                .map(|selector| normalize_recall_path_selector(selector)),
+-        )
+-        .collect();
+-    exact_paths.sort();
+-    exact_paths.dedup();
+-
+-    let mut candidates = Vec::new();
+-    if has_glob_selector {
+-        candidates.extend(connection.query_anchor_index_path_candidates(
+-            workspace_id,
+-            None,
+-            RECALL_CANDIDATE_SCAN_CAP,
+-        )?);
+-    } else if !exact_paths.is_empty() {
+-        candidates.extend(connection.query_anchor_index_path_candidates(
+-            workspace_id,
+-            Some(&exact_paths),
+-            RECALL_CANDIDATE_SCAN_CAP,
+-        )?);
+-    }
+-    if !query.symbols.is_empty() {
+-        candidates.extend(connection.query_anchor_index_symbol_candidates(
+-            workspace_id,
+-            &query.symbols,
+-            RECALL_CANDIDATE_SCAN_CAP,
+-        )?);
+-    }
+-
+-    // The anchor index is a locator, not permission to disclose a memory.
+-    // Recheck the live source even when the index has not been rebuilt since
+-    // a revision, expiry, seal, or workspace-ownership change.
+-    let (candidates, source_degraded) =
+-        admission::admit(connection, workspace_id, candidates, reference)?;
+-    let memory_ids: Vec<&str> = {
+-        let mut ids: Vec<&str> = candidates
+-            .iter()
+-            .map(|candidate| candidate.memory_id.as_str())
+-            .collect();
+-        ids.sort_unstable();
+-        ids.dedup();
+-        ids
+-    };
+-    let tags_by_memory = connection.get_memory_tags_batch(&memory_ids)?;
+-
+-    let rows: Vec<RecallCandidateRow> = candidates
+-        .into_iter()
+-        .map(|candidate| {
+-            let tags = tags_by_memory
+-                .get(&candidate.memory_id)
+-                .cloned()
+-                .unwrap_or_default();
+-            let provenance = candidate
+-                .provenance_uri
+-                .as_ref()
+-                .map(|uri| {
+-                    vec![RecallProvenanceRef {
+-                        uri: uri.clone(),
+-                        source_type: "memory_provenance".to_owned(),
+-                    }]
+-                })
+-                .unwrap_or_default();
+-            RecallCandidateRow {
+-                memory_id: candidate.memory_id,
+-                anchor_kind: candidate.anchor_kind,
+-                normalized_path: candidate.normalized_path,
+-                symbol: candidate.symbol,
+-                freshness_state: candidate.freshness_state,
+-                row_generation: candidate.generation,
+-                level: candidate.level,
+-                kind: candidate.kind,
+-                confidence: candidate.confidence,
+-                content: candidate.content,
+-                tombstoned: candidate.tombstoned,
+-                tags,
+-                provenance,
+-            }
+-        })
+-        .collect();
++    let scan = scan::load(connection, workspace_id, query, reference)?;
+ 
+     // Path and symbol recall only reads the anchor index. Missing embeddings
+     // do not affect these results and must not trigger model loading or an
+     // unrelated per-response degradation (including during daemon warm-up).
+-    let mut report = evaluate_recall(query, &rows, index_generation, db_generation);
+-    report.degraded.extend(source_degraded);
++    let mut report = evaluate_recall(
++        query,
++        &scan.rows,
++        index_generation,
++        db_generation,
++    );
++    report.degraded.extend(scan.degraded);
+     Ok(report)
+ }
+ 
+@@ -1371,8 +1286,7 @@
+     }
+ 
+     fn finish(self) -> Result<(), crate::models::DomainError> {
+-        self.finish_db()
+-            .map_err(|_| recall_snapshot_error("finish"))
++        self.finish_db().map_err(|_| recall_snapshot_error("finish"))
+     }
+ 
+     fn finish_db(mut self) -> crate::db::Result<()> {
+--- a/src/core/recall_admission.rs
++++ b/src/core/recall_admission.rs
+@@ -4,23 +4,14 @@
+ //! seal, body, tags and cursor generation in the caller's one read snapshot.
+ //! No embedding model, index rebuild or durable write is needed for admission.
+ 
+-use std::collections::{BTreeMap, BTreeSet};
++use std::collections::BTreeMap;
+ 
+ use chrono::{DateTime, Utc};
+ use sqlmodel_core::Value;
+ 
+ use super::RecallDegradation;
+-use crate::db::{DbConnection, DbError, DbOperation, StoredAnchorIndexCandidate};
+-
+-const PAGE_SIZE: usize = 256;
+-
+-fn malformed() -> DbError {
+-    DbError::MalformedRow {
+-        operation: DbOperation::Query,
+-        message: "Could not verify anchored recall source authority; no partial result returned"
+-            .to_owned(),
+-    }
+-}
++#[cfg(test)]
++use crate::db::DbConnection;
+ 
+ fn timestamp(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ()> {
+     match value {
+@@ -34,7 +25,7 @@
+ 
+ /// The query projects a fixed binary-owned column layout. Invalid timestamps
+ /// withhold just their own memory; a failed read withholds the whole result.
+-fn denial(
++pub(super) fn denial(
+     row: &sqlmodel_core::Row,
+     id: &str,
+     workspace: &str,
+@@ -82,50 +73,8 @@
+     None
+ }
+ 
+-pub(super) fn admit(
+-    db: &DbConnection,
+-    workspace: &str,
+-    candidates: Vec<StoredAnchorIndexCandidate>,
+-    at: DateTime<Utc>,
+-) -> crate::db::Result<(Vec<StoredAnchorIndexCandidate>, Vec<RecallDegradation>)> {
+-    let ids: Vec<_> = candidates
+-        .iter()
+-        .map(|candidate| candidate.memory_id.as_str())
+-        .collect::<BTreeSet<_>>()
+-        .into_iter()
+-        .collect();
+-    let mut admitted = BTreeSet::new();
+-    let mut excluded = BTreeMap::<&str, usize>::new();
+-    for page in ids.chunks(PAGE_SIZE) {
+-        let placeholders = (1..=page.len())
+-            .map(|index| format!("?{index}"))
+-            .collect::<Vec<_>>()
+-            .join(", ");
+-        let params = page
+-            .iter()
+-            .map(|id| Value::Text((*id).to_owned()))
+-            .collect::<Vec<_>>();
+-        let mut seen = BTreeSet::new();
+-        let sql = format!(
+-            "SELECT m.id, m.workspace_id, m.created_at, m.updated_at, m.valid_from, m.valid_to, m.superseded_at, m.tombstoned_at, s.memory_id, s.revealed_at FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.id IN ({placeholders}) ORDER BY m.id ASC"
+-        );
+-        for row in db.query(&sql, &params).map_err(|_| malformed())? {
+-            let id = row.get(0).and_then(Value::as_str).ok_or_else(malformed)?;
+-            if !page.contains(&id) || !seen.insert(id.to_owned()) {
+-                return Err(malformed());
+-            }
+-            if let Some(reason) = denial(&row, id, workspace, at) {
+-                *excluded.entry(reason).or_default() += 1;
+-            } else {
+-                admitted.insert(id.to_owned());
+-            }
+-        }
+-        let missing = page.len() - seen.len();
+-        if missing > 0 {
+-            *excluded.entry("missing").or_default() += missing;
+-        }
+-    }
+-    let degraded = if excluded.is_empty() {
++pub(super) fn degradations(excluded: BTreeMap<&str, usize>) -> Vec<RecallDegradation> {
++    if excluded.is_empty() {
+         Vec::new()
+     } else {
+         let counts = excluded
+@@ -148,14 +97,7 @@
+             ),
+             repair: None,
+         }]
+-    };
+-    Ok((
+-        candidates
+-            .into_iter()
+-            .filter(|candidate| admitted.contains(&candidate.memory_id))
+-            .collect(),
+-        degraded,
+-    ))
++    }
+ }
+ 
+ #[cfg(test)]

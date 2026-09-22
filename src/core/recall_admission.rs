@@ -4,23 +4,14 @@
 //! seal, body, tags and cursor generation in the caller's one read snapshot.
 //! No embedding model, index rebuild or durable write is needed for admission.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use sqlmodel_core::Value;
 
 use super::RecallDegradation;
-use crate::db::{DbConnection, DbError, DbOperation, StoredAnchorIndexCandidate};
-
-const PAGE_SIZE: usize = 256;
-
-fn malformed() -> DbError {
-    DbError::MalformedRow {
-        operation: DbOperation::Query,
-        message: "Could not verify anchored recall source authority; no partial result returned"
-            .to_owned(),
-    }
-}
+#[cfg(test)]
+use crate::db::DbConnection;
 
 fn timestamp(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ()> {
     match value {
@@ -34,7 +25,7 @@ fn timestamp(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ()> {
 
 /// The query projects a fixed binary-owned column layout. Invalid timestamps
 /// withhold just their own memory; a failed read withholds the whole result.
-fn denial(
+pub(super) fn denial(
     row: &sqlmodel_core::Row,
     id: &str,
     workspace: &str,
@@ -82,50 +73,8 @@ fn denial(
     None
 }
 
-pub(super) fn admit(
-    db: &DbConnection,
-    workspace: &str,
-    candidates: Vec<StoredAnchorIndexCandidate>,
-    at: DateTime<Utc>,
-) -> crate::db::Result<(Vec<StoredAnchorIndexCandidate>, Vec<RecallDegradation>)> {
-    let ids: Vec<_> = candidates
-        .iter()
-        .map(|candidate| candidate.memory_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let mut admitted = BTreeSet::new();
-    let mut excluded = BTreeMap::<&str, usize>::new();
-    for page in ids.chunks(PAGE_SIZE) {
-        let placeholders = (1..=page.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let params = page
-            .iter()
-            .map(|id| Value::Text((*id).to_owned()))
-            .collect::<Vec<_>>();
-        let mut seen = BTreeSet::new();
-        let sql = format!(
-            "SELECT m.id, m.workspace_id, m.created_at, m.updated_at, m.valid_from, m.valid_to, m.superseded_at, m.tombstoned_at, s.memory_id, s.revealed_at FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.id IN ({placeholders}) ORDER BY m.id ASC"
-        );
-        for row in db.query(&sql, &params).map_err(|_| malformed())? {
-            let id = row.get(0).and_then(Value::as_str).ok_or_else(malformed)?;
-            if !page.contains(&id) || !seen.insert(id.to_owned()) {
-                return Err(malformed());
-            }
-            if let Some(reason) = denial(&row, id, workspace, at) {
-                *excluded.entry(reason).or_default() += 1;
-            } else {
-                admitted.insert(id.to_owned());
-            }
-        }
-        let missing = page.len() - seen.len();
-        if missing > 0 {
-            *excluded.entry("missing").or_default() += missing;
-        }
-    }
-    let degraded = if excluded.is_empty() {
+pub(super) fn degradations(excluded: BTreeMap<&str, usize>) -> Vec<RecallDegradation> {
+    if excluded.is_empty() {
         Vec::new()
     } else {
         let counts = excluded
@@ -148,14 +97,7 @@ pub(super) fn admit(
             ),
             repair: None,
         }]
-    };
-    Ok((
-        candidates
-            .into_iter()
-            .filter(|candidate| admitted.contains(&candidate.memory_id))
-            .collect(),
-        degraded,
-    ))
+    }
 }
 
 #[cfg(test)]

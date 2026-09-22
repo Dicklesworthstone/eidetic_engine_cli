@@ -1,0 +1,14 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_scan_incomplete",
+  "introduced_by": {"bead": "bd-u875s.2", "epic_letter": "RECALL"},
+  "surfaces": ["recall"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The metadata scan or admitted candidate retention limit was reached. The response explicitly limits totalMatched and budget cursor claims to retained admitted candidates, and recommends narrower selectors instead of pretending the workspace was searched exhaustively.",
+    "setup_commands": ["Seed more qualifying anchors than the scan or retained result ceiling; bounded equivalents run in core::recall::scan::tests"],
+    "invocation": "ee recall --path '*' --workspace . --json"
+  },
+  "expected_emission": {"code": "recall_scan_incomplete", "severity": "medium", "message_contains": ["not exhaustive workspace recall", "retained admitted candidates"]}
+}

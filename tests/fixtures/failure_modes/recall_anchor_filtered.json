@@ -1,0 +1,14 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_anchor_filtered",
+  "introduced_by": {"bead": "bd-u875s.2", "epic_letter": "RECALL"},
+  "surfaces": ["recall"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A matching reverse-index locator has no canonical anchor, or the normalized path/symbol no longer hashes to the canonical identity. The source remains intact but that locator cannot supply code provenance.",
+    "setup_commands": ["Seed canonical anchors and a substituted derived locator using core::recall::scan::tests::canonical_anchor_hash_prevents_index_locator_substitution"],
+    "invocation": "ee recall --path src/substituted.rs --workspace . --json"
+  },
+  "expected_emission": {"code": "recall_anchor_filtered", "severity": "medium", "message_contains": ["without matching canonical anchors", "cannot invent code provenance"]}
+}

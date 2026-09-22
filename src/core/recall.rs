@@ -21,6 +21,8 @@ use crate::search::scoring::{freshness_drift_multiplier, stale_anchor_floor};
 
 #[path = "recall_admission.rs"]
 mod admission;
+#[path = "recall_scan.rs"]
+mod scan;
 
 /// Response payload schema carried under `ee.response.v2` `data.recall`.
 pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
@@ -48,10 +50,11 @@ pub const RECALL_FILTERED_EMPTY_CODE: &str = "recall_filtered_empty";
 /// Repair command for a stale or empty reverse index.
 pub const ANCHOR_INDEX_REPAIR: &str = "ee index rebuild --workspace .";
 
-/// Bounded candidate scan (ADR 0064 §3). The per-path/per-symbol lookups are
-/// already narrow; this cap is the defensive ceiling for pathological
-/// workspaces. Callers fetching more rows than this should truncate before
-/// calling [`evaluate_recall`]; the engine also enforces it.
+/// Bounded candidate set (ADR 0064 §3). Production assembly applies source
+/// admission, selector matching and deduplication before retaining this many
+/// ranked memories. Its separately bounded metadata traversal reports any
+/// incomplete scan. Direct callers of [`evaluate_recall`] must supply bounded
+/// candidates; the pure engine defensively inspects at most this many rows.
 pub const RECALL_CANDIDATE_SCAN_CAP: usize = 4096;
 
 /// Single-line content preview budget (chars), mirroring the existing
@@ -764,106 +767,13 @@ fn run_recall_in_snapshot(
     .unwrap_or(i64::MAX);
     let index_generation = connection.memory_anchor_index_generation(workspace_id)?;
 
-    let normalized_selectors: Vec<String> = query
-        .paths
-        .iter()
-        .map(|selector| normalize_recall_path_selector(selector))
-        .collect();
-    let has_glob_selector = normalized_selectors
-        .iter()
-        .any(|selector| selector.contains(['*', '?', '[']));
-    let mut exact_paths: Vec<String> = normalized_selectors
-        .iter()
-        .filter(|selector| !selector.contains(['*', '?', '[']))
-        .cloned()
-        .chain(
-            query
-                .diff_paths
-                .iter()
-                .map(|selector| normalize_recall_path_selector(selector)),
-        )
-        .collect();
-    exact_paths.sort();
-    exact_paths.dedup();
-
-    let mut candidates = Vec::new();
-    if has_glob_selector {
-        candidates.extend(connection.query_anchor_index_path_candidates(
-            workspace_id,
-            None,
-            RECALL_CANDIDATE_SCAN_CAP,
-        )?);
-    } else if !exact_paths.is_empty() {
-        candidates.extend(connection.query_anchor_index_path_candidates(
-            workspace_id,
-            Some(&exact_paths),
-            RECALL_CANDIDATE_SCAN_CAP,
-        )?);
-    }
-    if !query.symbols.is_empty() {
-        candidates.extend(connection.query_anchor_index_symbol_candidates(
-            workspace_id,
-            &query.symbols,
-            RECALL_CANDIDATE_SCAN_CAP,
-        )?);
-    }
-
-    // The anchor index is a locator, not permission to disclose a memory.
-    // Recheck the live source even when the index has not been rebuilt since
-    // a revision, expiry, seal, or workspace-ownership change.
-    let (candidates, source_degraded) =
-        admission::admit(connection, workspace_id, candidates, reference)?;
-    let memory_ids: Vec<&str> = {
-        let mut ids: Vec<&str> = candidates
-            .iter()
-            .map(|candidate| candidate.memory_id.as_str())
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
-    let tags_by_memory = connection.get_memory_tags_batch(&memory_ids)?;
-
-    let rows: Vec<RecallCandidateRow> = candidates
-        .into_iter()
-        .map(|candidate| {
-            let tags = tags_by_memory
-                .get(&candidate.memory_id)
-                .cloned()
-                .unwrap_or_default();
-            let provenance = candidate
-                .provenance_uri
-                .as_ref()
-                .map(|uri| {
-                    vec![RecallProvenanceRef {
-                        uri: uri.clone(),
-                        source_type: "memory_provenance".to_owned(),
-                    }]
-                })
-                .unwrap_or_default();
-            RecallCandidateRow {
-                memory_id: candidate.memory_id,
-                anchor_kind: candidate.anchor_kind,
-                normalized_path: candidate.normalized_path,
-                symbol: candidate.symbol,
-                freshness_state: candidate.freshness_state,
-                row_generation: candidate.generation,
-                level: candidate.level,
-                kind: candidate.kind,
-                confidence: candidate.confidence,
-                content: candidate.content,
-                tombstoned: candidate.tombstoned,
-                tags,
-                provenance,
-            }
-        })
-        .collect();
+    let scan = scan::load(connection, workspace_id, query, reference)?;
 
     // Path and symbol recall only reads the anchor index. Missing embeddings
     // do not affect these results and must not trigger model loading or an
     // unrelated per-response degradation (including during daemon warm-up).
-    let mut report = evaluate_recall(query, &rows, index_generation, db_generation);
-    report.degraded.extend(source_degraded);
+    let mut report = evaluate_recall(query, &scan.rows, index_generation, db_generation);
+    report.degraded.extend(scan.degraded);
     Ok(report)
 }
 
