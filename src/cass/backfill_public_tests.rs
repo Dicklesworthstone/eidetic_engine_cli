@@ -445,3 +445,175 @@ fn metadata_only_reimport_recovers_latest_publication_without_reading_transcript
     db.close().map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// A recent source modification must reach the live refresh path even when
+/// both the original start and the retained end predate the --since window.
+#[cfg(unix)]
+#[test]
+fn since_reimport_captures_resumed_session_growth_and_retains_end_provenance() -> TestResult {
+    let root = unique_test_dir("cass-since-resumed")?;
+    let bin_dir = root.join("bin");
+    let workspace = root.join("workspace");
+    let source = root.join("session.jsonl");
+    fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    fs::write(&source, "{}\n").map_err(|error| error.to_string())?;
+    let binary = bin_dir.join("cass");
+    let database = root.join("ee.db");
+    let write_snapshot = |modified: &str, count: u32| -> TestResult {
+        let sessions = json!({"sessions": [{
+            "path": source.to_string_lossy(),
+            "workspace": workspace.to_string_lossy(),
+            "agent": "codex",
+            "started_at": "2026-09-01T00:00:00Z",
+            "ended_at": "2026-09-02T00:00:00Z",
+            "modified": modified,
+            "message_count": count
+        }]});
+        let lines: Vec<_> = (1..=count)
+            .map(|line| json!({"line": line, "content": format!("Resumed build observation {line}.")}))
+            .collect();
+        let view = json!({
+            "path": source.to_string_lossy(),
+            "target_line": 1,
+            "context": DEFAULT_VIEW_CONTEXT,
+            "lines": lines,
+            "total_lines": count
+        });
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{sessions}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{view}\nEE_CASS_VIEW\n;;\n  *) exit 2;;\nesac\n"
+        );
+        fs::write(&binary, script).map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())
+    };
+    write_snapshot("2026-09-02T00:00:00Z", 1)?;
+    let cutoff = DateTime::parse_from_rfc3339("2026-09-20T00:00:00Z")
+        .map_err(|error| error.to_string())?
+        .with_timezone(&Utc);
+    let client = CassClient::with_binary(binary.clone()).with_timeout(Duration::from_secs(5));
+    let mut options = CassImportOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database.clone()),
+        limit: 1,
+        since: Some(cutoff),
+        dry_run: true,
+        include_spans: true,
+    };
+    let old = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+    ensure_equal(&old.sessions_discovered, &0, "old activity is excluded")?;
+    ensure(!database.exists(), "dry-run selection creates no database")?;
+
+    options.since = None;
+    options.dry_run = false;
+    let first = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+    let id = first.sessions[0]
+        .session_id
+        .clone()
+        .ok_or_else(|| "initial session missing".to_owned())?;
+    let original_job = first.sessions[0]
+        .index_job_id
+        .clone()
+        .ok_or_else(|| "initial job missing".to_owned())?;
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let retained = db
+        .list_evidence_spans_for_session(&id)
+        .map_err(|error| error.to_string())?;
+    db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+        .map_err(|error| error.to_string())?;
+
+    // Exactly the cutoff instant in another timezone. Start/end stay old, so
+    // neither can substitute for the independent modification timestamp.
+    write_snapshot("2026-09-19T20:00:00-04:00", 3)?;
+    options.since = Some(cutoff);
+    let grown = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+    ensure_equal(&grown.sessions_imported, &1, "resumed session refreshed")?;
+    ensure_equal(
+        &grown.spans_imported,
+        &2,
+        "only newly observed turns imported",
+    )?;
+    ensure_equal(
+        &grown.index_jobs_queued,
+        &1,
+        "new transcript queues publication",
+    )?;
+    ensure_equal(
+        &grown.sessions[0].session_id.as_ref(),
+        &Some(&id),
+        "stable session identity",
+    )?;
+    let latest_job = grown.sessions[0]
+        .index_job_id
+        .clone()
+        .ok_or_else(|| "resumed snapshot job missing".to_owned())?;
+    ensure(
+        latest_job != original_job,
+        "completed original job cannot publish resumed activity",
+    )?;
+    let stored = db
+        .get_session(&id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "refreshed session missing".to_owned())?;
+    ensure_equal(
+        &stored.started_at.as_deref(),
+        &Some("2026-09-01T00:00:00Z"),
+        "retain start provenance",
+    )?;
+    ensure_equal(
+        &stored.ended_at.as_deref(),
+        &Some("2026-09-02T00:00:00Z"),
+        "retain explicit end provenance",
+    )?;
+    for span in retained {
+        ensure_equal(
+            &db.get_evidence_span(&span.id)
+                .map_err(|error| error.to_string())?,
+            &Some(span),
+            "earlier evidence is unchanged",
+        )?;
+    }
+    for line in 2..=3 {
+        let evidence_id = stable_evidence_id(&id, &format!("{}:{line}", source.to_string_lossy()));
+        ensure(
+            db.get_search_admitted_evidence_span(&evidence_id, &stored.workspace_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "new activity is searchable under its native evidence identity",
+        )?;
+    }
+    let retry = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &retry.sessions_imported,
+        &0,
+        "unchanged recent activity is idempotent",
+    )?;
+    ensure_equal(
+        &retry.spans_imported,
+        &0,
+        "retry does not duplicate evidence",
+    )?;
+    ensure_equal(
+        &retry.sessions[0].index_job_id.as_ref(),
+        &Some(&latest_job),
+        "retry retains pending snapshot work",
+    )?;
+    ensure_equal(
+        &db.count_table_rows("sessions")
+            .map_err(|error| error.to_string())?,
+        &1,
+        "one durable session",
+    )?;
+    ensure_equal(
+        &db.list_evidence_spans_for_session(&id)
+            .map_err(|error| error.to_string())?
+            .len(),
+        &3,
+        "complete durable transcript",
+    )?;
+    db.close().map_err(|error| error.to_string())?;
+    Ok(())
+}
