@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::core::why::{WhyOptions, explain_memory};
 use ee::search::HashEmbedder;
@@ -73,18 +74,26 @@ fn seed_fixture(memory_count: usize) -> Fixture {
     let temp_dir = TempDir::new().unwrap_or_else(|error| {
         panic!("failed to create tempdir for why benchmark fixture: {error}")
     });
-    let workspace_path = temp_dir.path().to_path_buf();
+    let workspace_path = temp_dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("failed to resolve why benchmark workspace: {error}"));
     let db_path = workspace_path.join(".ee").join("ee.db");
 
-    let db_parent = db_path
-        .parent()
-        .unwrap_or_else(|| panic!("database path has no parent: {}", db_path.display()));
-    if let Err(error) = std::fs::create_dir_all(db_parent) {
-        panic!(
-            "failed to create benchmark workspace directory {}: {error}",
-            db_parent.display()
-        );
-    }
+    // Ordinary writes require an existing store; explicit init owns creation.
+    // This fixture defect predates the bench_contracts registration eeec3abb7.
+    let init = init_workspace(&InitOptions {
+        workspace_path: workspace_path.clone(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    assert!(
+        init.status.is_success(),
+        "failed to initialize why benchmark workspace: {init:?}"
+    );
     bind_deterministic_harness();
 
     let mut target_memory_id = MISSING_MEMORY_ID.to_owned();
@@ -270,6 +279,12 @@ mod tests {
     #[test]
     fn quick_regression_check_stays_under_hard_ceiling() {
         let stats = super::gather_latency_stats(100, super::QUICK_ITERATIONS);
+        eprintln!(
+            "why quick latency: p50={:.3}ms, p99={:.3}ms, samples={}",
+            stats.p50_ms,
+            stats.p99_ms,
+            super::QUICK_ITERATIONS
+        );
         assert!(
             stats.p50_ms <= super::HARD_CEILING_MS,
             "quick mode p50 {:.3}ms exceeded hard ceiling {:.3}ms",
