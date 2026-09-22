@@ -491,6 +491,101 @@ fn eval_async_migration_retrieves_the_exact_complete_query_inventory() -> TestRe
     Ok(())
 }
 
+/// Executes one retrieval family and records every empty retrieval it
+/// observes. An `Err` means the family did not produce a complete
+/// measurement; empty retrievals already pushed for it remain recorded.
+fn execute_retrieval_workload(
+    fixtures: &[ee::eval::DiscoveredFixture],
+    fixture_id: &str,
+    expected_queries: &[&str],
+    artifacts: &std::path::Path,
+    empty_retrievals: &mut Vec<String>,
+) -> TestResult {
+    let fixture = fixtures
+        .iter()
+        .find(|fixture| fixture.fixture_id == fixture_id)
+        .ok_or_else(|| format!("missing fixture {fixture_id}"))?;
+    let source = ee::eval::load_source_memories(&fixture.source_memory_path)
+        .map_err(|error| error.to_string())?;
+    let memories =
+        ee::eval::materialize_source_memories(&source).map_err(|error| error.to_string())?;
+    check_source_workload(fixture_id, expected_queries, &memories)?;
+    let output = run_ee(&["--json", "eval", "run", fixture_id])?;
+    std::fs::write(artifacts.join(format!("{fixture_id}.json")), &output.stdout)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(
+        artifacts.join(format!("{fixture_id}.stderr")),
+        &output.stderr,
+    )
+    .map_err(|error| error.to_string())?;
+    if !matches!(output.status.code(), Some(0 | 9)) {
+        return Err(format!(
+            "did not execute retrieval: {:?}\n{}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    ensure_equal(&output.stderr, &Vec::<u8>::new(), "evaluation stderr")?;
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    let metrics = &value["data"]["report"]["metrics"];
+    ensure_equal(
+        &metrics["queries_evaluated"],
+        &json!(expected_queries.len()),
+        "complete executed query count",
+    )?;
+    let queries = metrics["per_query"]
+        .as_array()
+        .ok_or("missing per-query measurements")?;
+    ensure_equal(
+        &queries.len(),
+        &expected_queries.len(),
+        "one result per declared query",
+    )?;
+    let actual_queries = queries
+        .iter()
+        .map(|query| string_field(query, "/query"))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    ensure_equal(
+        &actual_queries,
+        &expected_queries.iter().copied().collect(),
+        "complete executed query inventory",
+    )?;
+    for query in queries {
+        let text = string_field(query, "/query")?;
+        let expected_ids: BTreeSet<_> = memories
+            .iter()
+            .filter(|memory| {
+                memory
+                    .expected_query_match
+                    .iter()
+                    .any(|expected| expected == text)
+            })
+            .map(|memory| memory.id.as_str())
+            .collect();
+        let observed_ids = query["expected_ids"]
+            .as_array()
+            .ok_or("missing expected IDs")?
+            .iter()
+            .map(|id| id.as_str().ok_or("non-string expected ID"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        ensure_equal(
+            &observed_ids,
+            &expected_ids,
+            "every declared expected entity is measured",
+        )?;
+        let retrieved = query["retrieved_ids"]
+            .as_array()
+            .ok_or("missing retrieved IDs")?;
+        if retrieved.is_empty() {
+            empty_retrievals.push(format!(
+                "{fixture_id} executed an empty retrieval for {text:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult {
     let artifacts = tempfile::Builder::new()
@@ -500,90 +595,19 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
         .keep();
     let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
         .map_err(|error| error.to_string())?;
+    // One family failing must not hide another family's empty retrievals:
+    // every family executes, and both lists are reported together.
     let mut empty_retrievals = Vec::new();
+    let mut family_failures = Vec::new();
     for &(fixture_id, expected_queries) in RETRIEVAL_WORKLOADS {
-        let fixture = fixtures
-            .iter()
-            .find(|fixture| fixture.fixture_id == fixture_id)
-            .ok_or_else(|| format!("missing fixture {fixture_id}"))?;
-        let source = ee::eval::load_source_memories(&fixture.source_memory_path)
-            .map_err(|error| error.to_string())?;
-        let memories =
-            ee::eval::materialize_source_memories(&source).map_err(|error| error.to_string())?;
-        check_source_workload(fixture_id, expected_queries, &memories)?;
-        let output = run_ee(&["--json", "eval", "run", fixture_id])?;
-        std::fs::write(artifacts.join(format!("{fixture_id}.json")), &output.stdout)
-            .map_err(|error| error.to_string())?;
-        std::fs::write(
-            artifacts.join(format!("{fixture_id}.stderr")),
-            &output.stderr,
-        )
-        .map_err(|error| error.to_string())?;
-        if !matches!(output.status.code(), Some(0 | 9)) {
-            return Err(format!(
-                "{fixture_id} did not execute retrieval: {:?}\n{}\n{}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        ensure_equal(&output.stderr, &Vec::<u8>::new(), "evaluation stderr")?;
-        let value: Value =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
-        let metrics = &value["data"]["report"]["metrics"];
-        ensure_equal(
-            &metrics["queries_evaluated"],
-            &json!(expected_queries.len()),
-            "complete executed query count",
-        )?;
-        let queries = metrics["per_query"]
-            .as_array()
-            .ok_or("missing per-query measurements")?;
-        ensure_equal(
-            &queries.len(),
-            &expected_queries.len(),
-            "one result per declared query",
-        )?;
-        let actual_queries = queries
-            .iter()
-            .map(|query| string_field(query, "/query"))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        ensure_equal(
-            &actual_queries,
-            &expected_queries.iter().copied().collect(),
-            "complete executed query inventory",
-        )?;
-        for query in queries {
-            let text = string_field(query, "/query")?;
-            let expected_ids: BTreeSet<_> = memories
-                .iter()
-                .filter(|memory| {
-                    memory
-                        .expected_query_match
-                        .iter()
-                        .any(|expected| expected == text)
-                })
-                .map(|memory| memory.id.as_str())
-                .collect();
-            let observed_ids = query["expected_ids"]
-                .as_array()
-                .ok_or("missing expected IDs")?
-                .iter()
-                .map(|id| id.as_str().ok_or("non-string expected ID"))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            ensure_equal(
-                &observed_ids,
-                &expected_ids,
-                "every declared expected entity is measured",
-            )?;
-            let retrieved = query["retrieved_ids"]
-                .as_array()
-                .ok_or("missing retrieved IDs")?;
-            if retrieved.is_empty() {
-                empty_retrievals.push(format!(
-                    "{fixture_id} executed an empty retrieval for {text:?}"
-                ));
-            }
+        if let Err(error) = execute_retrieval_workload(
+            &fixtures,
+            fixture_id,
+            expected_queries,
+            &artifacts,
+            &mut empty_retrievals,
+        ) {
+            family_failures.push(format!("{fixture_id}: {error}"));
         }
     }
     let classified: BTreeSet<_> = RETRIEVAL_WORKLOADS
@@ -594,14 +618,19 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
             "fx.semantic_model_admissibility.v1",
         ])
         .collect();
-    ensure_equal(
+    if let Err(error) = ensure_equal(
         &classified,
         &EXPECTED_FIXTURE_IDS.iter().copied().collect(),
         "every fixture has an explicit execution classification",
-    )?;
-    if !empty_retrievals.is_empty() {
+    ) {
+        family_failures.push(error);
+    }
+    if !family_failures.is_empty() || !empty_retrievals.is_empty() {
         return Err(format!(
-            "{}\ncomplete workload artifacts: {}",
+            "{} family failure(s):\n{}\n{} empty retrieval(s):\n{}\ncomplete workload artifacts: {}",
+            family_failures.len(),
+            family_failures.join("\n"),
+            empty_retrievals.len(),
             empty_retrievals.join("\n"),
             artifacts.display()
         ));
