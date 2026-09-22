@@ -203,7 +203,7 @@ pub(super) fn recent(
     'pages: loop {
         let rows = db.query(
             &format!("SELECT {MEMORY_COLUMNS}, superseded_at, julianday(created_at) AS created_day FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) IS NOT NULL ORDER BY julianday(created_at) DESC, id ASC LIMIT ?2 OFFSET ?3"),
-            &[Value::Text(workspace.to_owned()), Value::Integer(PAGE_SIZE as i64), Value::from_u64_clamped(offset)],
+            &[Value::Text(workspace.to_owned()), Value::BigInt(PAGE_SIZE as i64), Value::from_u64_clamped(offset)],
         )?;
         for row in &rows {
             let coarse = required_f64(row, 23, DbOperation::Query, "created_day")?;

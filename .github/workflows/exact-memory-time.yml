@@ -8,6 +8,7 @@ on:
       - 'src/core/memory.rs'
       - 'src/core/memory_revision_typed.rs'
       - 'src/core/jsonl_import.rs'
+      - 'src/core/resume_snapshot*.rs'
       - '.github/workflows/exact-memory-time.yml'
   workflow_dispatch:
 permissions:
@@ -40,7 +41,8 @@ jobs:
           grep -Fq 'typed_revision.apply(&conn, &new_id)?;' src/core/memory.rs
           git archive --format=tar.gz --output="$RUNNER_TEMP/temporal-source.tar.gz" HEAD \
             src/db/mod.rs src/db/memory_temporal.rs src/db/memory_temporal_tests.rs \
-            src/core/memory.rs src/core/memory_revision_typed.rs src/core/jsonl_import.rs
+            src/core/memory.rs src/core/memory_revision_typed.rs src/core/jsonl_import.rs \
+            src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: temporal-source
@@ -65,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for group in db::memory_temporal::tests core::memory::revision_typed::tests; do
+          for group in db::memory_temporal::tests core::memory::revision_typed::tests core::resume::snapshot::tests; do
             log="$RUNNER_TEMP/temporal-${group//::/-}.log"
             if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1
