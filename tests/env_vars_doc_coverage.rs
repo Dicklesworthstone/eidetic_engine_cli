@@ -103,6 +103,17 @@ fn docs_env_vars_table_matches_registry() -> TestResult {
         })
         .collect::<Vec<_>>();
 
+    // THIS IS CURRENTLY RED, AND HONESTLY SO: bd-hs1dj. With the table
+    // attribution above repaired, this comparison finally runs and reports real
+    // drift -- EE_EMBED_MODEL_FIXTURE_DIR and EE_RERANK_MODEL_FIXTURE_DIR are in
+    // EnvVar::all() and absent from docs/env_vars.md (128 documented vs 130
+    // registered, one-directional). Before the repair this test aborted at
+    // docs/env_vars.md:183 on the build-time table and pointed at nothing.
+    //
+    // Do not silence it by relaxing this equality or by widening the skip
+    // above: the skip is safe only because it cannot swallow a registry row,
+    // and THIS check is what proves that. Fix it by documenting the two
+    // variables in the registry table.
     if documented == expected {
         Ok(())
     } else {

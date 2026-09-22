@@ -134,6 +134,17 @@ fn every_root_test_file_is_registered_exactly_once() -> TestResult {
             }
         }
     }
+    // THIS IS CURRENTLY RED, AND HONESTLY SO: bd-tsrq7. With the module-path
+    // grammar above repaired, this check finally reaches its subject and reports
+    // that tests/mcp_capture_git.rs and tests/snapshot_index_recovery_e2e.rs are
+    // registered in neither Cargo.toml nor any suite. Under autotests = false
+    // that means they never compile and never run -- which is exactly what this
+    // file's docstring says it exists to catch. Before the repair it aborted on
+    // "invalid suite module path" for a legitimate nested helper and pointed at
+    // nothing.
+    //
+    // Do not silence it by narrowing this check. The failure IS the finding;
+    // the fix is to register those files or remove them.
     let errors = coverage_errors(&root_files(&root)?, &counts);
     if !errors.is_empty() {
         return Err(errors.join("\n").into());
