@@ -56,6 +56,18 @@ pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negat
     left.template == right.template && left.value != right.value
 }
 
+/// A lexical near-duplicate may corroborate a recognized assignment only when
+/// both its subject and value agree. Absence of a conflict is insufficient:
+/// different environments, unknown values and qualified prose are not support
+/// for a known setting. Unparsed pairs retain the existing prose safeguards.
+pub(super) fn settings_compatible(left: &str, right: &str) -> bool {
+    match (setting_claim(left), setting_claim(right)) {
+        (Some(left), Some(right)) => left.template == right.template && left.value == right.value,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// One complete, single-line `key=value` or `key: value` statement.
 /// Whitespace around the operator is immaterial; key spelling, namespace,
 /// operator and unit remain exact. A YAML-style colon must be followed by
@@ -522,13 +534,43 @@ mod tests {
     #[test]
     fn symbolic_literals_do_not_accept_expressions_or_unknowns() {
         for value in [
-            "", "'sqlite", "sqlite'", "sqlite or postgres", "sqlite/mysql",
-            "${BACKEND}", "[sqlite,postgres]", "{backend:sqlite}", "unknown",
-            "unspecified", "sqlite\nMODE=async", "sqlite;MODE=async",
+            "",
+            "'sqlite",
+            "sqlite'",
+            "sqlite or postgres",
+            "sqlite/mysql",
+            "${BACKEND}",
+            "[sqlite,postgres]",
+            "{backend:sqlite}",
+            "unknown",
+            "unspecified",
+            "sqlite\nMODE=async",
+            "sqlite;MODE=async",
         ] {
             assert!(setting_value(value).is_none(), "{value:?}");
             assert!(setting_claim(&format!("backend: {value}")).is_none());
         }
+    }
+
+    #[test]
+    fn recognized_settings_require_positive_agreement_for_corroboration() {
+        for (left, right, expected) in [
+            ("backend: sqlite", "backend : 'sqlite'", true),
+            ("NO_RETRY=enabled", "`NO_RETRY = enabled`", true),
+            ("timeout=+030.00ms", "timeout=30ms", true),
+            ("backend: sqlite", "backend: postgres", false),
+            ("backend: sqlite", "Backend: sqlite", false),
+            ("backend: sqlite", "backend=sqlite", false),
+            ("production.backend: sqlite", "staging.backend: sqlite", false),
+            ("backend: sqlite", "backend: unknown", false),
+            ("backend: sqlite", "backend: sqlite if available", false),
+            ("backend: sqlite", "The backend is sqlite.", false),
+            ("profile=Release", "profile=release", false),
+        ] {
+            assert_eq!(settings_compatible(left, right), expected, "{left} / {right}");
+            assert_eq!(settings_compatible(right, left), expected, "symmetry");
+        }
+        assert!(settings_compatible("ordinary prose", "other ordinary prose"));
     }
 
     #[test]

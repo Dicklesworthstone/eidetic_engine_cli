@@ -311,7 +311,14 @@ fn cluster_with_groups_and_observer(
             // Same integer set counts and f32 division as jaccard_similarity.
             // A posting hit guarantees a nonempty union.
             let similarity = intersection as f32 / union as f32;
-            if similarity >= CLUSTER_SIMILARITY_THRESHOLD {
+            // Reuse the exact assignment contract from conflict admission.
+            // YAML-style settings and negative-named keys can evade the prose
+            // parser above; lexical similarity is not positive agreement.
+            // Parse only plausible joins and skip byte-identical repeats.
+            if similarity >= CLUSTER_SIMILARITY_THRESHOLD
+                && (spans[seed].text == spans[other].text
+                    || super::numeric::settings_compatible(&spans[seed].text, &spans[other].text))
+            {
                 assigned[other] = true;
                 supporting_memories.insert(support_key(other));
             }
@@ -684,6 +691,134 @@ mod categorical_tests {
             assert_eq!(signature(&rows), expected);
             rows.reverse();
             assert_eq!(signature(&rows), expected);
+        }
+    }
+
+    #[test]
+    fn exact_configuration_claims_cannot_gain_false_corroboration() {
+        for (left, right) in [
+            (
+                "production.application.database.service.configuration.backend: sqlite",
+                "production.application.database.service.configuration.backend: postgres",
+            ),
+            (
+                "production.application.database.service.configuration.NO_RETRY=enabled",
+                "production.application.database.service.configuration.NO_RETRY=disabled",
+            ),
+            (
+                "--production-application-database-service-configuration-backend=sqlite",
+                "--production-application-database-service-configuration-backend=postgres",
+            ),
+            (
+                "production.application.database.service.configuration.backend: sqlite",
+                "staging.application.database.service.configuration.backend: sqlite",
+            ),
+            (
+                "production.application.database.service.configuration.backend: sqlite",
+                "production.application.database.service.configuration.backend: unknown",
+            ),
+        ] {
+            // Prove these are real old-path joins, not cases already separated
+            // by polarity, numeric literals, the prose parser or low overlap.
+            assert_eq!(has_negation(left), has_negation(right));
+            assert_eq!(numeric_literals(left), numeric_literals(right));
+            assert!(categorical_setting(left).is_none());
+            assert!(categorical_setting(right).is_none());
+            assert!(
+                super::super::jaccard_similarity(
+                    &tokenize_for_ask(left),
+                    &tokenize_for_ask(right),
+                ) >= CLUSTER_SIMILARITY_THRESHOLD
+            );
+            let input = [span("a", left), span("b", right)];
+            let result = cluster_spans(&input);
+            assert_eq!(result.len(), 2, "{left} / {right}");
+            for (actual, original) in result.iter().zip(&input) {
+                assert_eq!(actual.memory_id, original.memory_id);
+                assert_eq!(actual.text, original.text);
+                assert_eq!(actual.byte_start, original.byte_start);
+                assert_eq!(actual.byte_end, original.byte_end);
+                assert_eq!(actual.provenance_uri, original.provenance_uri);
+                assert_eq!(actual.score.to_bits(), original.score.to_bits());
+                assert!(actual.score < super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+            }
+        }
+    }
+
+    #[test]
+    fn matching_configuration_keeps_real_support_and_lineage_deduplication() {
+        let left = "production.application.database.service.configuration.backend: sqlite";
+        let right = "production.application.database.service.configuration.backend : 'sqlite'";
+        let input = [span("a", left), span("b", right)];
+        let independent = cluster_spans(&input);
+        assert_eq!(independent.len(), 1);
+        assert!(independent[0].score > super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+        assert_eq!(independent[0].text, left);
+        let groups = BTreeMap::from([
+            ("a".to_owned(), "session".to_owned()),
+            ("b".to_owned(), "session".to_owned()),
+        ]);
+        let correlated = cluster_spans_with_groups(&input, &groups);
+        assert_eq!(correlated.len(), 1);
+        assert_eq!(correlated[0].score.to_bits(), 0.52_f32.to_bits());
+    }
+
+    #[test]
+    fn public_ask_keeps_near_identical_configuration_opposition_after_admission() {
+        use crate::core::ask::{
+            ASK_CANDIDATE_SCAN_CAP, AskCandidate, AskRequest, ask_data_json, evaluate_ask,
+        };
+
+        let left = "production.application.database.service.configuration.backend: sqlite";
+        let right = "production.application.database.service.configuration.backend: postgres";
+        let request = AskRequest {
+            question: "production application database service configuration backend".to_owned(),
+            ..AskRequest::default()
+        };
+        for copies in [1, ASK_CANDIDATE_SCAN_CAP + 4] {
+            let mut candidates: Vec<_> = (0..copies)
+                .map(|index| AskCandidate {
+                    memory_id: format!("a-setting-{index:05}"),
+                    content: left.to_owned(),
+                    confidence: 1.0,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some(format!("manual://configuration/{index}")),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    team_provenance: None,
+                })
+                .collect();
+            let mut opposing = candidates[0].clone();
+            opposing.memory_id = "z-opposing-configuration".to_owned();
+            opposing.content = right.to_owned();
+            opposing.provenance_uri = Some("manual://configuration/opposing".to_owned());
+            candidates.push(opposing);
+            let report = evaluate_ask(&request, &candidates);
+            assert!(!report.abstained && !report.extractiveness_violated);
+            assert!(report.conflict_detected && report.conflict_link.is_none());
+            assert!(report.answer_text.is_none() && report.citations.is_empty());
+            let sides = report.sides.as_ref().expect("both exact configuration values");
+            assert_eq!(sides.len(), 2);
+            let citations: Vec<_> = sides.iter().flat_map(|side| &side.citations).collect();
+            assert_eq!(citations.len(), 2);
+            assert!(citations.iter().any(|citation| citation.text == left));
+            assert!(citations.iter().any(|citation| {
+                citation.memory_id == "z-opposing-configuration" && citation.text == right
+            }));
+            for citation in citations {
+                let original = candidates
+                    .iter()
+                    .find(|candidate| candidate.memory_id == citation.memory_id)
+                    .expect("cited source");
+                assert_eq!(
+                    original.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str())
+                );
+                assert_eq!(citation.provenance_uri, original.provenance_uri);
+            }
+            let expected = ask_data_json(&report);
+            candidates.reverse();
+            assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)), expected);
         }
     }
 }
