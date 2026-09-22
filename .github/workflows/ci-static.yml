@@ -147,6 +147,32 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      # bd-1idg3. ONE RED MUST NOT HIDE THE REST. Under the default `if:
+      # success()`, the first failing gate SKIPS every step after it. Measured
+      # 2026-09-22: four consecutive runs failed at "Action pins" (a stale
+      # baseline row), and module reachability, Format and the include!-only fmt
+      # checks were all `skipped`. For four runs the only hosted gate did not
+      # check fmt, and nothing said so.
+      #
+      # So every gate below runs after an earlier gate FAILED, while the job
+      # still concludes `failure` (no continue-on-error anywhere). Two
+      # conditions stay in place, deliberately:
+      #   - SETUP IS A PREREQUISITE. The steps above keep the default condition,
+      #     and this marker runs only if all of them succeeded. A gate over a
+      #     half-checked-out tree or a missing toolchain would be a verdict on
+      #     garbage.
+      #   - AN AUDIT STILL REQUIRES ITS OWN SELF-TEST. The self-test-first rule
+      #     (bd-yytkz, bd-niay4, bd-uhml2) exists because a clean audit from an
+      #     instrument whose failure arms are broken is worse than no audit. So
+      #     each audit also requires its self-test's outcome to be `success`. A
+      #     red in an UNRELATED gate no longer silences it.
+      # Format depends only on setup. It does not consume module reachability's
+      # output, and a reachability red is exactly when an fmt verdict on the
+      # reached population is still wanted.
+      - name: Setup complete
+        id: setup
+        run: echo "checkout, franken stack, toolchain and jq all succeeded"
+
       # Self-test BEFORE the audit, for the reason the pinned-definition steps
       # below already give: if the failure arms have stopped working, the audit
       # is a clean answer from a broken instrument. Both of these self-tests
@@ -155,38 +181,51 @@ jobs:
       # audit with their failure arms unexercised. They were never unguarded;
       # their guard ran somewhere else, and that distinction was invisible here.
       - name: Forbidden dependency guard --self-test
+        id: forbidden_deps_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-forbidden-deps.sh --self-test
 
       - name: Forbidden dependency audit
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.forbidden_deps_self_test.outcome == 'success' }}
         run: ./scripts/check-forbidden-deps.sh
 
       - name: Migration registry co-commit invariant
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-migration-registry.sh
 
       - name: Closure linter
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/closure-lint.sh --audit --json
 
       - name: Vision coverage
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: |
           git fetch origin +main:refs/remotes/origin/main --depth=1
           sh ./scripts/vision-coverage.sh --json --compare-ref origin/main
 
       - name: MCP lib unit-test guard --self-test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/mcp_lib_tests.sh --self-test
 
       - name: Contract drift radar guard --self-test
+        id: drift_radar_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/contract-drift-radar.sh --self-test
 
       - name: Contract drift radar
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.drift_radar_self_test.outcome == 'success' }}
         run: ./scripts/contract-drift-radar.sh
 
       # bd-yytkz. Self-test FIRST and as its own step: if the guard's failure
       # arms have stopped working, the audit below is a clean answer from a
       # broken instrument, and a combined step would report that as one green.
       - name: Pinned definition guard --self-test
+        id: pinned_definitions_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-pinned-definitions.sh --self-test
 
       - name: Pinned definitions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.pinned_definitions_self_test.outcome == 'success' }}
         run: ./scripts/check-pinned-definitions.sh
 
       # bd-niay4. Self-test first, same reason as bd-yytkz above. This guard sits
@@ -194,9 +233,12 @@ jobs:
       # depends on WHICH rustfmt ran, and this is the check that the toolchain
       # was chosen rather than resolved on the day.
       - name: Toolchain pin guard --self-test
+        id: toolchain_pins_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-toolchain-pins.sh --self-test
 
       - name: Toolchain pins
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.toolchain_pins_self_test.outcome == 'success' }}
         run: ./scripts/check-toolchain-pins.sh
 
       # bd-uhml2. SIBLING OF THE GUARD ABOVE, AND DELIBERATELY SEPARATE FROM IT.
@@ -207,9 +249,12 @@ jobs:
       # pinned, 187 mutable, and release.yml the only fully pinned file of 43.
       # Self-test first, same reason as its sibling.
       - name: Action pin guard --self-test
+        id: action_pins_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 ./scripts/check-action-pins.py --self-test
 
       - name: Action pins
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.action_pins_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-action-pins.py
 
       # bd-l6h3g. THIS MUST RUN BEFORE Format, NOT AFTER, AND THAT ORDER IS THE
@@ -225,12 +270,16 @@ jobs:
       # 2026-09-18 with nobody to notice. A gate nothing runs is a file, not a
       # gate.
       - name: Module reachability guard --self-test
+        id: mod_reachability_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 scripts/lib/mod_reachability.py --self-test
 
       - name: Module reachability
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.mod_reachability_self_test.outcome == 'success' }}
         run: python3 scripts/lib/mod_reachability.py
 
       - name: Format
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: cargo fmt --check
 
       # bd-39y21. `cargo fmt --check` above walks the module tree via `mod` and
@@ -250,10 +299,14 @@ jobs:
       # step: a grader whose own control never runs is the defect it exists to
       # find, one level up.
       - name: Test-log grader --self-test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 scripts/lib/grade_test_log.py --self-test
 
       - name: Format (include!-only files) --self-test
+        id: include_fmt_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-include-fmt.sh --self-test
 
       - name: Format (include!-only files)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.include_fmt_self_test.outcome == 'success' }}
         run: ./scripts/check-include-fmt.sh
