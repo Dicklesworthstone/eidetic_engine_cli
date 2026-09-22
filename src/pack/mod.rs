@@ -1941,8 +1941,25 @@ impl PackTrustSignal {
     }
 
     #[must_use]
-    pub const fn posture(&self) -> PackTrustPosture {
-        PackTrustPosture::for_class(self.class)
+    pub fn posture(&self) -> PackTrustPosture {
+        if self.subclass.as_deref() == Some("procedural_rule") {
+            PackTrustPosture::Advisory
+        } else {
+            PackTrustPosture::for_class(self.class)
+        }
+    }
+
+    /// Cap procedural-rule ranking at assertion authority without promoting
+    /// weaker evidence or imports. Their source memories' signatures do not
+    /// sign the independently mutable rule body (ADR 0085).
+    fn effective_class(&self) -> TrustClass {
+        if self.subclass.as_deref() == Some("procedural_rule")
+            && PackTrustPosture::for_class(self.class) == PackTrustPosture::Authoritative
+        {
+            TrustClass::AgentAssertion
+        } else {
+            self.class
+        }
     }
 }
 
@@ -2185,7 +2202,7 @@ impl PackDraft {
             .iter()
             .map(|item| GuardedMemory {
                 memory_id: item.memory_id.to_string(),
-                trust_milli: trust_class_rank_milli(item.trust.class),
+                trust_milli: trust_class_rank_milli(item.trust.effective_class()),
                 // Lower selection rank = stronger standing -> higher key.
                 freshness_epoch: -i64::from(item.rank),
             })
@@ -2371,10 +2388,10 @@ impl PackDraft {
     pub fn trust_counts(&self) -> PackTrustCounts {
         let mut counts = PackTrustCounts::default();
         for item in &self.items {
-            counts.add(item.trust.class);
+            counts.add(&item.trust);
         }
         for item in &self.evidence_items {
-            counts.add(item.trust.class);
+            counts.add(&item.trust);
         }
         counts
     }
@@ -3417,11 +3434,14 @@ pub struct PackTrustCounts {
     pub agent_assertion: usize,
     pub cass_evidence: usize,
     pub legacy_import: usize,
+    effective_authoritative: usize,
+    effective_advisory: usize,
+    effective_legacy: usize,
 }
 
 impl PackTrustCounts {
-    fn add(&mut self, class: TrustClass) {
-        match class {
+    fn add(&mut self, trust: &PackTrustSignal) {
+        match trust.class {
             TrustClass::HumanExplicit => {
                 self.human_explicit = self.human_explicit.saturating_add(1);
             }
@@ -3441,23 +3461,27 @@ impl PackTrustCounts {
                 self.legacy_import = self.legacy_import.saturating_add(1);
             }
         }
+        let posture_count = match trust.posture() {
+            PackTrustPosture::Authoritative => &mut self.effective_authoritative,
+            PackTrustPosture::Advisory => &mut self.effective_advisory,
+            PackTrustPosture::LegacyEvidence => &mut self.effective_legacy,
+        };
+        *posture_count = posture_count.saturating_add(1);
     }
 
     #[must_use]
     pub const fn authoritative(&self) -> usize {
-        self.human_explicit
-            .saturating_add(self.peer_human_attested)
-            .saturating_add(self.agent_validated)
+        self.effective_authoritative
     }
 
     #[must_use]
     pub const fn advisory(&self) -> usize {
-        self.agent_assertion.saturating_add(self.cass_evidence)
+        self.effective_advisory
     }
 
     #[must_use]
     pub const fn legacy(&self) -> usize {
-        self.legacy_import
+        self.effective_legacy
     }
 }
 
@@ -4127,7 +4151,7 @@ fn conflict_for_group(items: &[&PackDraftItem], fingerprint: &str) -> Option<Con
 fn producer_for_item(item: &PackDraftItem) -> ConsensusProducer {
     ConsensusProducer {
         agent_name: item.trust.subclass.clone(),
-        trust_class: item.trust.class,
+        trust_class: item.trust.effective_class(),
     }
 }
 
@@ -4308,7 +4332,7 @@ fn recommended_action_for_conflict(
 
 fn has_human_vs_agent_assertion(left: &PackDraftItem, right: &PackDraftItem) -> bool {
     matches!(
-        (left.trust.class, right.trust.class),
+        (left.trust.effective_class(), right.trust.effective_class()),
         (TrustClass::HumanExplicit, TrustClass::AgentAssertion)
             | (TrustClass::AgentAssertion, TrustClass::HumanExplicit)
             | (TrustClass::PeerHumanAttested, TrustClass::AgentAssertion)
@@ -15464,6 +15488,90 @@ mod tests {
                 > trust_class_rank_milli(TrustClass::AgentValidated),
             "peer attestation must outrank agent validation",
         )
+    }
+
+    #[test]
+    fn unsigned_procedural_rules_keep_declared_class_but_render_advisory() -> TestResult {
+        for (class, ranking_class) in [
+            (TrustClass::HumanExplicit, TrustClass::AgentAssertion),
+            (TrustClass::PeerHumanAttested, TrustClass::AgentAssertion),
+            (TrustClass::AgentValidated, TrustClass::AgentAssertion),
+            (TrustClass::AgentAssertion, TrustClass::AgentAssertion),
+            (TrustClass::CassEvidence, TrustClass::CassEvidence),
+            (TrustClass::LegacyImport, TrustClass::LegacyImport),
+        ] {
+            let request = ContextRequest::from_query("check release guidance")
+                .map_err(|error| error.to_string())?;
+            let rule = candidate(401, 0.9, 0.8, 10)?.with_trust_signal(PackTrustSignal::new(
+                class,
+                Some("procedural_rule".to_owned()),
+            ));
+            let draft = assemble_draft(request.query.clone(), request.budget, vec![rule])
+                .map_err(|error| error.to_string())?;
+            let item = draft.items.first().ok_or("expected selected rule")?;
+            assert_eq!(item.trust.class, class);
+            assert_eq!(item.trust.posture(), PackTrustPosture::Advisory);
+            assert_eq!(super::producer_for_item(item).trust_class, ranking_class);
+            let counts = draft.trust_counts();
+            assert_eq!(counts.authoritative(), 0);
+            assert_eq!(counts.advisory(), 1);
+            assert_eq!(counts.legacy(), 0);
+            let declared_count = match class {
+                TrustClass::HumanExplicit => counts.human_explicit,
+                TrustClass::PeerHumanAttested => counts.peer_human_attested,
+                TrustClass::AgentValidated => counts.agent_validated,
+                TrustClass::AgentAssertion => counts.agent_assertion,
+                TrustClass::CassEvidence => counts.cass_evidence,
+                TrustClass::LegacyImport => counts.legacy_import,
+            };
+            assert_eq!(declared_count, 1);
+            let response = ContextResponse::new(request, draft, Vec::new())
+                .map_err(|error| error.to_string())?;
+            let banner = response.data.advisory_banner();
+            assert_eq!(banner.status.as_str(), "advisory");
+            assert_eq!(banner.authoritative_count, 0);
+            assert_eq!(banner.advisory_count, 1);
+            assert_eq!(banner.notes[0].memory_ids, vec![memory_id(401).to_string()]);
+            let markdown = super::render_context_response_markdown(&response);
+            assert!(markdown.contains(&format!("**Trust:** `{}` / `advisory`", class.as_str())));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_procedural_rules_never_gain_contradiction_authority() -> TestResult {
+        for (rule_class, memory_class) in [
+            (TrustClass::HumanExplicit, TrustClass::AgentValidated),
+            (TrustClass::CassEvidence, TrustClass::AgentAssertion),
+            (TrustClass::LegacyImport, TrustClass::CassEvidence),
+        ] {
+            let rule =
+                candidate_with_content(401, 0.99, 0.9, 10, "Enable retries for every request")?
+                    .with_trust_signal(PackTrustSignal::new(
+                        rule_class,
+                        Some("procedural_rule".to_owned()),
+                    ));
+            let memory =
+                candidate_with_content(402, 0.8, 0.7, 10, "Retry only idempotent operations")?
+                    .with_trust_signal(PackTrustSignal::new(memory_class, None));
+            let mut draft = assemble_draft(
+                "request retries",
+                TokenBudget::new(400).map_err(|error| error.to_string())?,
+                vec![rule, memory],
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(draft.items.len(), 2);
+            assert_eq!(
+                draft.apply_contradiction_guard(
+                    &[(memory_id(401).to_string(), memory_id(402).to_string())],
+                    false,
+                ),
+                1
+            );
+            assert_eq!(draft.items[0].memory_id, memory_id(402));
+            assert_eq!(draft.omitted[0].memory_id, memory_id(401));
+        }
+        Ok(())
     }
 
     #[test]
