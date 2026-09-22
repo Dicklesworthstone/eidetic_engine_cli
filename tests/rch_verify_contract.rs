@@ -601,6 +601,29 @@ fn write_silent_ee(name: &str) -> Result<PathBuf, String> {
     )
 }
 
+/// A logging `rch` that refuses everything, for the pinned-lane guard tests.
+///
+/// Without it those tests resolve whatever `rch` the host has. Their control
+/// arms are EXPECTED to get past the guard, and the off-lane one reaches
+/// `rch exec -- cargo check --locked` -- a real remote dispatch from a dev
+/// checkout, or a nested one from an RCH worker, which carries its own
+/// `~/.local/bin/rch`. The log also lets a refused arm prove it dispatched
+/// nothing, which is what "refused" is supposed to mean.
+fn write_refusing_rch(label: &str) -> Result<(PathBuf, PathBuf), String> {
+    let fake = write_fake_rch(
+        &format!("fake-rch-refusing-{label}.sh"),
+        r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf 'fake rch: a pinned-lane guard test must not reach a real worker\n' >&2
+exit 1
+"#,
+    )?;
+    Ok((
+        fake,
+        unique_tmp_path(&format!("rch-refusing-{label}-invocations")),
+    ))
+}
+
 fn read_invocation_lines(path: &Path) -> Result<Vec<String>, String> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -8723,9 +8746,18 @@ fn pinned_lane_refuses_skipped_build_admission() -> TestResult {
     let base_arg = base
         .to_str()
         .ok_or_else(|| "committed-tree base path is not utf-8".to_owned())?;
+    let (fake_rch, invocation_log) = write_refusing_rch("pinned-skip-ba")?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
     let envs = [
         ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
         ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+        ("RCH_BIN", fake_rch_arg),
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
     ];
 
     let (status, stdout, stderr) = run_script_with_env(
@@ -8757,6 +8789,12 @@ fn pinned_lane_refuses_skipped_build_admission() -> TestResult {
             "pinned skipped-admission refusal contract drifted: {report}"
         ));
     }
+    let dispatched = remote_exec_invocation_lines(&invocation_log)?;
+    if !dispatched.is_empty() {
+        return Err(format!(
+            "a refused pinned run still dispatched: {dispatched:?}"
+        ));
+    }
 
     // OVER-BROADNESS CONTROL: same escape, off the pinned lane, must not be
     // refused by THIS code.
@@ -8782,6 +8820,14 @@ fn pinned_lane_refuses_skipped_build_admission() -> TestResult {
     )? {
         return Err(format!(
             "the pinned build-admission guard leaked off the pinned lane: {off_report}"
+        ));
+    }
+    // The off-lane run is allowed through, so it must have reached the fake.
+    // That is what makes the empty-dispatch check above evidence: it proves
+    // the log is written by the rch this test actually resolves.
+    if read_invocation_lines(&invocation_log)?.is_empty() {
+        return Err(format!(
+            "the off-lane run never reached the fake rch, so the refused arm's empty dispatch log proves nothing: {off_report}"
         ));
     }
     Ok(())
@@ -8818,6 +8864,14 @@ fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
         "--locked",
     ];
 
+    let (fake_rch, invocation_log) = write_refusing_rch("pinned-broker-bypass")?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
     // run_script_with_env sets RCH_VERIFY_PROOF_BROKER_ENABLED=0 and declares no
     // reason, which is exactly the undeclared branch.
     let (status, stdout, stderr) = run_script_with_env(
@@ -8825,6 +8879,8 @@ fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
         &[
             ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+            ("RCH_BIN", fake_rch_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
         ],
     )?;
     if status.success() {
@@ -8841,6 +8897,14 @@ fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
             "pinned undeclared-bypass refusal contract drifted: {report}"
         ));
     }
+    // The positive that this log is live is in the skipped-admission test's
+    // off-lane arm: this refusal happens before rch is consulted at all.
+    let dispatched = remote_exec_invocation_lines(&invocation_log)?;
+    if !dispatched.is_empty() {
+        return Err(format!(
+            "a refused pinned run still dispatched: {dispatched:?}"
+        ));
+    }
 
     // CONTROL: the SAME bypass, declared, must get past this guard. It may still
     // be refused further down the lane -- that is asserted by the verdict test
@@ -8850,6 +8914,8 @@ fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
         &[
             ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+            ("RCH_BIN", fake_rch_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
             (
                 "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
                 "hermetic contract test",
@@ -8891,6 +8957,13 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
     let silent_arg = silent
         .to_str()
         .ok_or_else(|| "silent ee stub path is not utf-8".to_owned())?;
+    let (fake_rch, invocation_log) = write_refusing_rch("pinned-ba-verdict")?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
     let envs = [
         ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
         ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
@@ -8898,6 +8971,8 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
             "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
             "hermetic contract test",
         ),
+        ("RCH_BIN", fake_rch_arg),
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
     ];
 
     // THIS TEST SEEDS ITS OWN REPOSITORY, AND THE REASON IS A MEASURED ONE.
@@ -8967,6 +9042,20 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
     {
         return Err(format!(
             "pinned admission-verdict refusal contract drifted: {report}"
+        ));
+    }
+    // This refusal comes AFTER the lane has queried rch, so the same log
+    // carries its own positive: consulted, and never asked to dispatch.
+    let invocations = read_invocation_lines(&invocation_log)?;
+    if invocations.is_empty() {
+        return Err(format!(
+            "the lane never reached the fake rch, so an empty dispatch log proves nothing: {report}"
+        ));
+    }
+    let dispatched = remote_exec_invocation_lines(&invocation_log)?;
+    if !dispatched.is_empty() {
+        return Err(format!(
+            "a refused pinned run still dispatched: {dispatched:?}"
         ));
     }
     Ok(())
