@@ -1,0 +1,82 @@
+--- a/src/core/curate.rs
++++ b/src/core/curate.rs
+@@ -3530,16 +3530,24 @@
+         compact_excerpt(&failure_span.excerpt),
+         compact_excerpt(&resolution_span.excerpt)
+     );
+-    if failure_span.id == resolution_span.id {
+-        // A complete imported window may describe policy rather than a command
+-        // or file. Carry the observed risk, mitigation and exact source into
+-        // the lesson instead of weakening specificity or inventing a command.
+-        // Preserve the historical two-window candidate content/identity.
++    if failure_span.id == resolution_span.id
++        || !crate::curate::specificity_score(&anti_pattern_content).passes_threshold
++        || !crate::curate::specificity_score(&rule_content).passes_threshold
++    {
++        // Imported policy lessons need not mention a command or file. Preserve
++        // the observed risk, mitigation and exact source locations instead of
++        // inventing technical details or weakening the validation threshold.
++        // Retain historical content/IDs for already-specific two-window pairs.
++        let mut evidence = failure_span.canonical_provenance_uri();
++        if failure_span.id != resolution_span.id {
++            evidence.push_str("\nEvidence: ");
++            evidence.push_str(&resolution_span.canonical_provenance_uri());
++        }
+         let observed = format!(
+             "Risk: {}\nMitigation: {}\nEvidence: {}",
+             compact_excerpt(&failure_span.excerpt),
+             compact_excerpt(&resolution_span.excerpt),
+-            failure_span.canonical_provenance_uri(),
++            evidence,
+         );
+         anti_pattern_content = format!("Anti-pattern for `{topic_key}`:\n{observed}");
+         rule_content = format!(
+--- a/src/core/curate_session_arc_sequence.rs
++++ b/src/core/curate_session_arc_sequence.rs
+@@ -591,4 +591,45 @@
+         assert_ne!(resource_keys("src/api.rs"), resource_keys("api.rs"));
+         assert_ne!(resource_keys("src/Cache.rs"), resource_keys("src/cache.rs"));
+     }
+-}
++
++    #[test]
++    fn session_arc_policy_windows_keep_observed_risk_repair_and_both_sources() {
++        let failure = "Failure arc: storing silently would violate the no-loop-takeover policy.";
++        let repair = "Fix: require accept/reject commands and audit every accepted capture.";
++        let sources = [span("policy-failure", 3, failure), span("policy-repair", 4, repair)];
++        let rows = mine(&sources);
++        assert_eq!(rows.len(), 2);
++        for row in &rows {
++            let specificity = crate::curate::specificity_score(&row.proposed_content);
++            assert!(specificity.passes_threshold, "{specificity:?}: {}", row.proposed_content);
++            assert!(specificity.structural_signals.has_provenance_uri);
++            assert!(row.proposed_content.contains(&format!("Risk: {failure}")));
++            assert!(row.proposed_content.contains(&format!("Mitigation: {repair}")));
++            for source in &sources {
++                assert!(row.proposed_content.contains(&source.canonical_provenance_uri()));
++            }
++            assert!(!row.proposed_content.contains("cargo"), "never invent a command to pass specificity");
++            let arc = row.session_arc.as_ref().unwrap();
++            assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
++            assert_eq!(arc.resolution_span.content_hash, sources[1].content_hash);
++        }
++    }
++
++    #[test]
++    fn session_arc_already_specific_two_window_content_keeps_its_identity() {
++        let failure = "cargo test failed because the cache key was stale.";
++        let repair = "Fixed the cache key and cargo test passed.";
++        let sources = [span("failure", 1, failure), span("repair", 2, repair)];
++        let expected = [
++            format!("Anti-pattern for `testing`: this session hit a failure after `{failure}`. The later fix was `{repair}`."),
++            format!("Rule for `testing`: when `{failure}` appears, apply the later repair: `{repair}`."),
++        ];
++        let rows = mine(&sources);
++        assert_eq!(rows.len(), 2);
++        for (row, expected) in rows.iter().zip(expected) {
++            assert!(crate::curate::specificity_score(&expected).passes_threshold);
++            assert_eq!(row.proposed_content, expected);
++            assert_eq!(row.content_hash, format!("blake3:{}", blake3::hash(expected.as_bytes()).to_hex()));
++        }
++    }
++}
