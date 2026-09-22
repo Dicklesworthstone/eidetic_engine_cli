@@ -133,12 +133,15 @@ impl Prepared {
                     action: audit_actions::POLICY_BYPASS.to_owned(),
                     target_type: Some("memory".to_owned()),
                     target_id: Some(new_id.to_owned()),
-                    details: Some(serde_json::json!({
-                        "schema": "ee.audit.policy_bypass.v1",
-                        "command": "ee memory revise",
-                        "originalMemoryId": &self.source_id,
-                        "policyBypass": super::policy_bypass_audit_json(&bypass),
-                    }).to_string()),
+                    details: Some(
+                        serde_json::json!({
+                            "schema": "ee.audit.policy_bypass.v1",
+                            "command": "ee memory revise",
+                            "originalMemoryId": &self.source_id,
+                            "policyBypass": super::policy_bypass_audit_json(&bypass),
+                        })
+                        .to_string(),
+                    ),
                 },
             )?;
         }
@@ -366,13 +369,17 @@ mod tests {
 
     #[test]
     fn configured_revision_exception_is_audited_atomically_and_rollback_removes_it() -> TestResult {
-        use crate::core::memory::{
-            UnchangedRevisionPolicy, revise_memory_with_transaction_hook,
-        };
+        use crate::core::memory::{UnchangedRevisionPolicy, revise_memory_with_transaction_hook};
 
         let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
-        let config = path.parent().ok_or("config directory missing")?.join("config.toml");
-        std::fs::write(&config, "[policy.secret_detector]\nallow_phrases = [\"OAuth refresh token\"]\n")?;
+        let config = path
+            .parent()
+            .ok_or("config directory missing")?
+            .join("config.toml");
+        std::fs::write(
+            &config,
+            "[policy.secret_detector]\nallow_phrases = [\"OAuth refresh token\"]\n",
+        )?;
         let body = "OAuth refresh token fixture uses API_KEY=sk-FAKEabc123def456ghi789jkl012 for documentation.";
         assert!(crate::policy::redact_secret_like_content(body).redacted);
         let mut request = options(&path, &source);
@@ -390,7 +397,13 @@ mod tests {
             UnchangedRevisionPolicy::Reject,
             |db, context| {
                 let audits = db.list_audit_by_target("memory", &context.new_id, None)?;
-                assert_eq!(audits.iter().filter(|row| row.action == audit_actions::POLICY_BYPASS).count(), 1);
+                assert_eq!(
+                    audits
+                        .iter()
+                        .filter(|row| row.action == audit_actions::POLICY_BYPASS)
+                        .count(),
+                    1
+                );
                 assert!(db.get_memory_typed_fields_json(&context.new_id)?.is_some());
                 Err(DbError::MalformedRow {
                     operation: DbOperation::Execute,
@@ -408,12 +421,23 @@ mod tests {
         assert!(report.success, "{:?}", report.error);
         let new_id = report.new_id.as_deref().ok_or("new revision missing")?;
         let db = DbConnection::open_file(&path)?;
-        assert_eq!(db.get_memory(new_id)?.ok_or("revision missing")?.content, body);
+        assert_eq!(
+            db.get_memory(new_id)?.ok_or("revision missing")?.content,
+            body
+        );
         assert_eq!(fields(&db, new_id)?["chosen"], "SQLite");
         let audits = db.list_audit_by_target("memory", new_id, None)?;
-        let exceptions: Vec<_> = audits.iter().filter(|row| row.action == audit_actions::POLICY_BYPASS).collect();
+        let exceptions: Vec<_> = audits
+            .iter()
+            .filter(|row| row.action == audit_actions::POLICY_BYPASS)
+            .collect();
         assert_eq!(exceptions.len(), 1);
-        let details: Value = serde_json::from_str(exceptions[0].details.as_deref().ok_or("exception detail missing")?)?;
+        let details: Value = serde_json::from_str(
+            exceptions[0]
+                .details
+                .as_deref()
+                .ok_or("exception detail missing")?,
+        )?;
         assert_eq!(details["command"], "ee memory revise");
         assert_eq!(details["originalMemoryId"], source);
         assert_eq!(details["policyBypass"]["kind"], "config_phrase");
@@ -427,9 +451,21 @@ mod tests {
         let edited = revise_memory(&metadata);
         assert!(edited.success, "{:?}", edited.error);
         let db = DbConnection::open_file(&path)?;
-        let metadata_id = edited.new_id.as_deref().ok_or("metadata revision missing")?;
-        assert_eq!(db.get_memory(metadata_id)?.ok_or("metadata revision missing")?.content, body);
-        assert!(!db.list_audit_by_target("memory", metadata_id, None)?.iter().any(|row| row.action == audit_actions::POLICY_BYPASS));
+        let metadata_id = edited
+            .new_id
+            .as_deref()
+            .ok_or("metadata revision missing")?;
+        assert_eq!(
+            db.get_memory(metadata_id)?
+                .ok_or("metadata revision missing")?
+                .content,
+            body
+        );
+        assert!(
+            !db.list_audit_by_target("memory", metadata_id, None)?
+                .iter()
+                .any(|row| row.action == audit_actions::POLICY_BYPASS)
+        );
         Ok(())
     }
 }
