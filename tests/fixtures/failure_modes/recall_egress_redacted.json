@@ -1,0 +1,18 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recall_egress_redacted",
+  "introduced_by": {"bead": "bd-provenance-redaction-local-reads-xisfl", "epic_letter": "RECALL"},
+  "surfaces": ["recall"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "A current source contains legacy or explicitly allowed private text, labels or provenance. Recall applies existing public-egress policy before previews and budgeting without changing the stored record. Private origins fall back to labeled native identity, not fabricated source evidence.",
+    "setup_commands": ["Seed legacy private fields through core::recall::scan::tests::private_legacy_fields_are_redacted_before_public_rendering_and_budgeting"],
+    "invocation": "ee recall --path src/release.rs --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "recall_egress_redacted",
+    "severity": "info",
+    "message_contains": ["before previews and token budgeting", "not fabricated source provenance"]
+  }
+}

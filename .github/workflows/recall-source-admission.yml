@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths:
       - 'src/core/recall*.rs'
-      - 'scripts/delivery/recall-admitted-scan-20260922.patch'
+      - 'scripts/delivery/recall-public-egress-20260922.patch'
       - 'tests/recall_source_lifecycle_cli.py'
       - '.github/workflows/recall-source-admission.yml'
   workflow_dispatch:
@@ -28,43 +28,28 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Integrate bounded admitted anchor traversal
+      - name: Integrate source-preserving public recall projection
         id: source
         shell: bash
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          new_files=(src/core/recall_scan.rs scripts/delivery/recall-admitted-scan-20260922.patch tests/recall_source_lifecycle_cli.py tests/fixtures/failure_modes/recall_anchor_filtered.json tests/fixtures/failure_modes/recall_scan_incomplete.json)
-          files=(src/core/recall.rs src/core/recall_admission.rs "${new_files[@]}")
-          if ! grep -Fq 'let scan = scan::load(' src/core/recall.rs; then
-            test "$(git hash-object src/core/recall.rs)" = f46e30453fc59aed49f2203540fe15f0d65bfb04
-            test "$(git hash-object src/core/recall_admission.rs)" = 3911882901f25215fa9bb43acbbc276886c31206
-            reviewed=270a987de2db628af16107ee14ef625266bbb307
-            git fetch --no-tags origin "$reviewed"
-            for file in "${new_files[@]}"; do
-              test ! -L "$file"
-              if test -e "$file"; then
-                test "$(git hash-object "$file")" = "$(git rev-parse "$reviewed:$file")"
-              else
-                mkdir -p "$(dirname "$file")"
-                git show "$reviewed:$file" > "$file"
-              fi
-            done
-            test "$(git hash-object src/core/recall_scan.rs)" = 2e0e2eabfe905d20047aaa7011fa518919da1e42
-            test "$(git hash-object tests/recall_source_lifecycle_cli.py)" = a4e09160eb077987edba8f809047f08ccc7814bc
-            patch=scripts/delivery/recall-admitted-scan-20260922.patch
-            test "$(git hash-object "$patch")" = 53311669eab557e9053308343a7bf76014344b25
+          files=(src/core/recall_scan.rs src/core/recall_projection.rs)
+          if ! grep -Fq 'redacted_memories += usize::from(projection::apply' src/core/recall_scan.rs; then
+            test "$(git hash-object src/core/recall_scan.rs)" = 449bb3db00fd415a254e15434a84e95b510a8994
+            test "$(git hash-object src/core/recall_projection.rs)" = 4739124b0795fccb240b9b88ccf71cb1b5a643f9
+            patch=scripts/delivery/recall-public-egress-20260922.patch
+            test "$(git hash-object "$patch")" = 477cf2035964f058d49368ce01905d8d79303fe1
             git apply --check --whitespace=error-all "$patch"
             git apply "$patch"
           fi
-          rustfmt --edition 2024 --config skip_children=true src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs
-          python3 -m py_compile tests/recall_source_lifecycle_cli.py
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
           git add -- "${files[@]}"
-          git diff --cached --check -- . ':!scripts/delivery/recall-admitted-scan-20260922.patch'
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(recall): page admitted code anchors before ranked retention' -m 'Replace prefix-limited raw anchor reads with fair path/symbol keyset streams, exact source admission, canonical locator validation and ranked retention. Load only retained memory bodies in bounded batches. Preserve existing filters, drift flags, cursor and token-budget behavior; explicitly report incomplete source scans. Add beyond-4096, obsolete-page, late-ranking, selector and locator substitution regressions plus a public capture/revise/seal/reveal journey.'
+            git commit -m 'fix(recall): redact stored private fields before public projection' -m 'Reuse public replay and pack provenance policies before recall previews and budgeting. Preserve raw stored records, safe source URIs and rankings; label private-source fallbacks as native memory identity rather than origin evidence. Reject private code locators rather than inventing redacted paths, and validate native identity and taxonomy. Add five regressions including real database JSON/markdown/Debug egress and token-budget checks.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
