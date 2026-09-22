@@ -1,0 +1,131 @@
+name: Exact memory time
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/db/memory_temporal*.rs'
+      - 'scripts/delivery/integrate-exact-memory-time.py'
+      - '.github/workflows/exact-memory-time.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Integrate exact memory-time readers and writers
+        id: source
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          python3 scripts/delivery/integrate-exact-memory-time.py
+          files=(src/db/mod.rs src/db/memory_temporal.rs src/db/memory_temporal_tests.rs src/core/memory.rs src/core/jsonl_import.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(memory): preserve exact lifecycle instants across reads and recovery' -m 'Keep validity fractions on remember/import/restore, use exact offset-aware applicability and marker comparisons, and finish rounded recency ties before limiting. Preserve caller-owned read transactions and bind end-marker writes to their prior value. Add real-database nanosecond, pagination, tag, malformed-input and transaction regressions; runtime results reported separately.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/temporal-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/temporal-source.tar.gz" HEAD "${files[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: temporal-source
+          path: ${{ runner.temp }}/temporal-source*
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Exercise exact temporal database contracts
+        run: |
+          set -o pipefail
+          cargo test --locked --lib db::memory_temporal::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/temporal-db.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/temporal-db.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: temporal-db-results
+          path: ${{ runner.temp }}/temporal-db.log
+          retention-days: 7
+      - name: Exercise existing import and revision contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for group in core::jsonl_import::tests core::memory::tests::revise core::memory::tests::expire; do
+            log="$RUNNER_TEMP/temporal-${group//::/-}.log"
+            if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: temporal-results
+          path: ${{ runner.temp }}/temporal-*.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
