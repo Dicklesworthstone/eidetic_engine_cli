@@ -62,7 +62,7 @@ pub struct CassImportOptions {
     pub database_path: Option<PathBuf>,
     /// Maximum sessions to ask CASS to return.
     pub limit: u32,
-    /// Only import sessions whose start time is at or after this UTC cutoff.
+    /// Only import sessions with known activity at or after this UTC cutoff.
     pub since: Option<DateTime<Utc>>,
     /// If true, query CASS but do not create files or write the DB.
     pub dry_run: bool,
@@ -1032,20 +1032,28 @@ fn filter_sessions_since(
 fn session_time_for_since_filter(
     session: &CassSessionInfo,
 ) -> Result<Option<DateTime<Utc>>, CassImportError> {
-    let Some(raw_timestamp) = session
-        .started_at
-        .as_deref()
-        .or(session.ended_at.as_deref())
-    else {
-        return Ok(None);
-    };
-    let timestamp = DateTime::parse_from_rfc3339(raw_timestamp).map_err(|error| {
-        CassImportError::InvalidJson {
-            source: "sessions",
-            message: format!("invalid session timestamp `{raw_timestamp}`: {error}"),
-        }
-    })?;
-    Ok(Some(timestamp.with_timezone(&Utc)))
+    // A resumed session may have started before the import window. Compare
+    // instants, not RFC3339 strings: offsets can reverse lexical ordering.
+    // Use only CASS's observed timestamps, never the local file's mtime.
+    let mut latest: Option<DateTime<Utc>> = None;
+    for raw_timestamp in [
+        session.started_at.as_deref(),
+        session.ended_at.as_deref(),
+        session.modified_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let timestamp = DateTime::parse_from_rfc3339(raw_timestamp).map_err(|error| {
+            CassImportError::InvalidJson {
+                source: "sessions",
+                message: format!("invalid session timestamp `{raw_timestamp}`: {error}"),
+            }
+        })?;
+        let timestamp = timestamp.with_timezone(&Utc);
+        latest = Some(latest.map_or(timestamp, |current| current.max(timestamp)));
+    }
+    Ok(latest)
 }
 
 fn view_session_spans(
@@ -1297,12 +1305,19 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
             "sessions",
             "session start timestamp",
         )?;
-        session.ended_at = optional_rfc3339_timestamp(
+        session.modified_at = optional_rfc3339_timestamp_field(
             item,
-            &["ended_at", "modified"],
+            "modified",
+            "sessions",
+            "session modification timestamp",
+        )?;
+        session.ended_at = optional_rfc3339_timestamp_field(
+            item,
+            "ended_at",
             "sessions",
             "session end timestamp",
-        )?;
+        )?
+        .or_else(|| session.modified_at.clone());
         session.message_count = optional_u32(item, "message_count", "sessions")?;
         session.token_count = optional_u32(item, "token_count", "sessions")?;
         if session.message_count.is_none() {
@@ -1428,8 +1443,7 @@ fn optional_rfc3339_timestamp(
     // carries a usable timestamp. A present-but-null or empty/whitespace-only
     // value is treated identically to an absent field (`Ok(None)`), so we keep
     // falling through to the next candidate instead of committing to a hole.
-    // This is what lets `["ended_at", "modified"]` fall back to `modified`
-    // when `ended_at` is null, and vice-versa.
+    // This lets `started` supply the start when `started_at` is null.
     for field in fields {
         if let Some(timestamp) = optional_rfc3339_timestamp_field(item, field, source, label)? {
             return Ok(Some(timestamp));
@@ -3293,15 +3307,114 @@ mod tests {
     }
 
     #[test]
+    fn since_filter_uses_latest_activity_and_preserves_source_timestamps() -> TestResult {
+        let input = json!({
+            "sessions": [
+                {
+                    "path": "/tmp/long-running.jsonl",
+                    "started_at": "2026-03-01T00:00:00Z",
+                    "ended_at": "2026-03-31T20:00:00-04:00"
+                },
+                {
+                    "path": "/tmp/resumed.jsonl",
+                    "started_at": "2026-03-01T00:00:00Z",
+                    "ended_at": "2026-03-02T00:00:00Z",
+                    "modified": "2026-03-31T20:00:00-04:00"
+                },
+                {
+                    "path": "/tmp/recent-start.jsonl",
+                    "started_at": "2026-04-01T00:00:00Z",
+                    "ended_at": "2026-03-02T00:00:00Z",
+                    "modified": "2026-03-03T00:00:00Z"
+                },
+                {
+                    "path": "/tmp/before-cutoff-with-offset.jsonl",
+                    "started_at": "2026-03-01T00:00:00Z",
+                    "modified": "2026-04-01T01:00:00+02:00"
+                },
+                {
+                    "path": "/tmp/old.jsonl",
+                    "started_at": "2026-03-01T00:00:00Z",
+                    "ended_at": "2026-03-02T00:00:00Z",
+                    "modified": "2026-03-03T00:00:00Z"
+                },
+                {"path": "/tmp/unknown.jsonl", "modified": null}
+            ]
+        });
+        let cutoff = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let sessions =
+            parse_sessions_json(input.to_string().as_bytes()).map_err(|error| error.to_string())?;
+        let expected = sessions[..3].to_vec();
+        ensure_equal(
+            &expected[1].ended_at.as_deref(),
+            &Some("2026-03-02T00:00:00Z"),
+            "modification must not replace an explicit source end timestamp",
+        )?;
+        ensure_equal(
+            &expected[1].modified_at.as_deref(),
+            &Some("2026-03-31T20:00:00-04:00"),
+            "retain the separately reported source modification",
+        )?;
+        let filtered =
+            filter_sessions_since(sessions, Some(cutoff)).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &filtered,
+            &expected,
+            "latest activity includes the cutoff and preserves source timestamps",
+        )
+    }
+
+    #[test]
+    fn since_filter_rejects_invalid_activity_even_with_a_valid_start() -> TestResult {
+        let cutoff = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        for invalid in ["not-a-timestamp", "2026-04-01T99:00:00Z"] {
+            for invalid_end in [false, true] {
+                let mut session = CassSessionInfo::new("/tmp/invalid-activity.jsonl");
+                session.started_at = Some("2026-04-02T00:00:00Z".to_owned());
+                if invalid_end {
+                    session.ended_at = Some(invalid.to_owned());
+                } else {
+                    session.modified_at = Some(invalid.to_owned());
+                }
+                ensure(
+                    filter_sessions_since(vec![session], Some(cutoff)).is_err(),
+                    "a valid start cannot hide malformed activity metadata",
+                )?;
+            }
+            let input = json!({"sessions": [{
+                "path": "/tmp/invalid-activity.jsonl",
+                "started_at": "2026-04-02T00:00:00Z",
+                "ended_at": "2026-04-03T00:00:00Z",
+                "modified": invalid
+            }]});
+            ensure(
+                parse_sessions_json(input.to_string().as_bytes()).is_err(),
+                "a valid end cannot hide a malformed modification timestamp",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn since_filter_keeps_legacy_rfc3339_created_at_sessions() -> TestResult {
         let input = br#"{
-          "count": 2,
+          "count": 3,
           "hits": [
             {
               "source_path": "/tmp/recent.jsonl",
               "workspace": "/tmp/project",
               "agent": "codex",
               "created_at": "2026-05-07T06:00:01Z"
+            },
+            {
+              "source_path": "/tmp/recent.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": "2026-03-07T06:00:01Z"
             },
             {
               "source_path": "/tmp/old.jsonl",

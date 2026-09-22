@@ -55,7 +55,8 @@ fn new_defaults_workspace_dir_to_none() -> TestResult {
 fn new_defaults_started_and_ended_at_to_none() -> TestResult {
     let info = CassSessionInfo::new("/path");
     ensure_equal(&info.started_at, &None, "started_at default")?;
-    ensure_equal(&info.ended_at, &None, "ended_at default")
+    ensure_equal(&info.ended_at, &None, "ended_at default")?;
+    ensure_equal(&info.modified_at, &None, "modified_at default")
 }
 
 #[test]
@@ -99,6 +100,7 @@ fn new_returns_full_default_struct() -> TestResult {
         workspace_dir: None,
         started_at: None,
         ended_at: None,
+        modified_at: None,
         message_count: None,
         token_count: None,
         content_hash: None,

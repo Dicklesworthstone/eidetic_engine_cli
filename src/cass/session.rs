@@ -138,6 +138,9 @@ pub struct CassSessionInfo {
     pub started_at: Option<String>,
     /// Session end timestamp (RFC 3339).
     pub ended_at: Option<String>,
+    /// Latest source modification reported by CASS (RFC 3339), independent of
+    /// a retained session end timestamp. Used for incremental import selection.
+    pub modified_at: Option<String>,
     /// Number of messages/turns in the session.
     pub message_count: Option<u32>,
     /// Total tokens in the session (if known).
@@ -161,6 +164,7 @@ impl CassSessionInfo {
             workspace_dir: None,
             started_at: None,
             ended_at: None,
+            modified_at: None,
             message_count: None,
             token_count: None,
             content_hash: None,

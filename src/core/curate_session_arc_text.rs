@@ -292,23 +292,29 @@ mod tests {
 #[cfg(test)]
 mod store_tests {
     use super::super::super::*;
-    use crate::db::{CreateSessionInput, CreateWorkspaceInput};
+    use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput};
     use crate::models::EvidenceId;
     use serde_json::json;
 
     type TestResult = Result<(), String>;
 
     fn fixture(
+        workspace_path: &Path,
         excerpt: &str,
     ) -> Result<(DbConnection, StoredSession, Vec<StoredEvidenceSpan>), String> {
-        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let db = DbConnection::open_file(&workspace_path.join("ee.db"))
+            .map_err(|error| error.to_string())?;
         db.migrate().map_err(|error| error.to_string())?;
-        let workspace = "wsp_01ARZ3NDEKTSV4RRFFQ69G5FEX";
+        let workspace = stable_workspace_id(
+            &workspace_path
+                .canonicalize()
+                .map_err(|error| error.to_string())?,
+        );
         let session_id = "sess_01ARZ3NDEKTSV4RRFFQ69G5FE6";
         db.insert_workspace(
-            workspace,
+            &workspace,
             &CreateWorkspaceInput {
-                path: "/tmp/session-arc-text".to_owned(),
+                path: workspace_path.display().to_string(),
                 name: None,
             },
         )
@@ -375,7 +381,10 @@ mod store_tests {
             json!({"type":"event_msg","payload":{"type":"agent_message","message":text}}),
         ].into_iter().enumerate() {
             let raw = record.to_string();
-            let (db, session, spans) = fixture(&raw)?;
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace_path = tempdir.path();
+            let database_path = workspace_path.join("ee.db");
+            let (db, session, spans) = fixture(workspace_path, &raw)?;
             let workspace = &session.workspace_id;
             assert_eq!(spans.len(), 1);
             let mut candidates = build_session_arc_candidates(workspace, &session, &spans, 0.0);
@@ -385,46 +394,90 @@ mod store_tests {
                 rows.iter().map(|row| row.candidate_id.clone()).collect()
             };
             assert_eq!(identities(&candidates), identities(&direct));
+            let proposed = review_session_proposals(&ReviewSessionOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                session_id: Some(&session.id),
+                propose: true,
+                dry_run: false,
+                min_confidence: 0.8,
+                limit: 2,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(proposed.candidate_count, 2, "wrapper {index}");
+            assert!(proposed.durable_mutation);
+            assert!(proposed.candidates.iter().all(|candidate| candidate.persisted));
+            assert_eq!(identities(&candidates), identities(&proposed.candidates));
+            candidates.sort_by_key(|candidate| {
+                candidate.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE
+            });
             if index % 2 == 1 {
                 candidates.reverse();
             }
             for candidate in &candidates {
                 let arc = candidate.session_arc.as_ref().ok_or("missing session arc")?;
                 for source in [&arc.failure_span, &arc.resolution_span] {
-                    assert_eq!(source.evidence_id, spans[0].id);
-                    assert_eq!(source.excerpt_hash, spans[0].content_hash);
+                    assert_eq!(source.evidence_span_id, spans[0].id);
+                    assert_eq!(source.content_hash, spans[0].content_hash);
                     assert_eq!((source.start_line, source.end_line), (7, 7));
+                    assert_eq!(source.provenance_uri, spans[0].canonical_provenance_uri());
                 }
                 assert!(!candidate.proposed_content.contains("\"role\""));
                 assert!(!candidate.proposed_content.contains("\"payload\""));
-                let input = build_bootstrap_curation_candidate_input(
-                    &db, workspace, candidate, Some(&session),
-                ).map_err(|error| error.to_string())?;
-                db.insert_curation_candidate(&candidate.candidate_id, &input)
-                    .map_err(|error| error.to_string())?;
             }
             let mut memory_ids = BTreeSet::new();
+            let mut first_memory_id = None;
             for candidate in &candidates {
-                let validated = validate_candidate(&db, workspace, &candidate.candidate_id)
-                    .map_err(|error| error.to_string())?;
-                assert!(validated.valid, "{validated:?}");
-                let applied = apply_candidate(&db, workspace, &candidate.candidate_id, false, None)
-                    .map_err(|error| error.to_string())?;
-                assert_eq!(applied.decision, "apply");
-                let memory_id = applied.details.as_ref().and_then(|value|value.get("memoryId"))
-                    .and_then(serde_json::Value::as_str).ok_or("created memory id")?;
-                memory_ids.insert(memory_id.to_owned());
+                let validated = validate_curation_candidate(&CurateValidateOptions {
+                    workspace_path,
+                    database_path: Some(&database_path),
+                    candidate_id: &candidate.candidate_id,
+                    actor: Some("ArcTextLearner"),
+                    dry_run: false,
+                })
+                .map_err(|error| error.message())?;
+                assert!(validated.validation.errors.is_empty(), "{validated:?}");
+                assert_eq!(validated.candidate.status, "approved");
+                let applied = apply_curation_candidate(&CurateApplyOptions {
+                    workspace_path,
+                    database_path: Some(&database_path),
+                    candidate_id: &candidate.candidate_id,
+                    actor: Some("ArcTextLearner"),
+                    dry_run: false,
+                    allow_tombstone_load_bearing: false,
+                })
+                .map_err(|error| error.message())?;
+                assert_eq!(applied.application.status, "applied", "{applied:?}");
+                assert!(applied.mutation.persisted);
+                let memory_id = applied.application.created_memory_id.ok_or("created memory id")?;
+                let memory = db.get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?.ok_or("created memory")?;
+                assert_eq!(memory.level, "procedural");
+                assert_eq!(memory.kind, review_candidate_derived_memory_kind(candidate));
+                first_memory_id.get_or_insert_with(|| memory_id.clone());
+                memory_ids.insert(memory_id);
             }
             assert_eq!(memory_ids.len(), 2);
-            let links = db.list_memory_links_for_workspace(workspace, false)
+            let first_memory_id = first_memory_id.ok_or("first created memory")?;
+            let links = db.list_memory_links_for_memory(&first_memory_id, None)
                 .map_err(|error| error.to_string())?;
             assert_eq!(links.len(), 1, "one audited reciprocal pair, not duplicate lessons");
+            let link = &links[0];
+            assert!(!link.directed);
+            assert!(memory_ids.contains(&link.src_memory_id));
+            assert!(memory_ids.contains(&link.dst_memory_id));
+            assert_ne!(link.src_memory_id, link.dst_memory_id);
+            let audits = db.list_audit_by_target("memory_link", &link.id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].action, audit_actions::MEMORY_LINK_CREATE);
+            assert_eq!(audits[0].actor.as_deref(), Some("ArcTextLearner"));
             let source = db.get_evidence_span(&spans[0].id)
                 .map_err(|error| error.to_string())?.ok_or("source evidence")?;
             assert_eq!(source.excerpt, spans[0].excerpt);
             assert_eq!(source.content_hash, spans[0].content_hash);
             assert_eq!((source.start_line, source.end_line), (7, 7));
-            assert!(source.memory_id.as_ref().is_some_and(|id| memory_ids.contains(id)));
+            assert_eq!(source.memory_id.as_deref(), Some(first_memory_id.as_str()));
             db.close().map_err(|error|error.to_string())?;
         }
         Ok(())
@@ -436,7 +489,8 @@ mod store_tests {
             "Failure arc: M7 cache kept a stale value because invalidation compared display labels.",
             "metadata":{"repair":"Fix: M7 cache key selection was repaired by using stable identity bytes and the retry succeeded."}
         }).to_string();
-        let (db, session, spans) = fixture(&raw)?;
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (db, session, spans) = fixture(tempdir.path(), &raw)?;
         assert!(spans[0].is_search_admitted_for_session(&session.workspace_id, &session));
         assert!(
             super::super::inline_candidates(&session.workspace_id, &session, &spans).is_empty()
