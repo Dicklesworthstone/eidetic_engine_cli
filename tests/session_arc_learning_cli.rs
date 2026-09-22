@@ -3,14 +3,16 @@
 //! validation, application and replay. This is not an external CASS importer test.
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ee::core::curate::{CurateApplyOptions, apply_curation_candidate};
 use ee::db::{
-    CreateEvidenceSpanInput, CreateSessionInput, DbConnection, EvidenceProducerKind,
-    MemoryLinkRelation, audit_actions,
+    CreateAuditInput, CreateEvidenceSpanInput, CreateMemoryInput, CreateSessionInput, DbConnection,
+    EvidenceProducerKind, EvidenceSpanMemoryAttachResult, MemoryLinkRelation, audit_actions,
+    generate_audit_id,
 };
-use ee::models::{EvidenceId, SessionId};
+use ee::models::{EvidenceId, MemoryId, SessionId};
 use serde_json::{Value, json};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -282,4 +284,497 @@ fn public_cli_applies_same_window_failure_repair_pair() -> TestResult {
 #[test]
 fn public_cli_applies_distinct_failure_repair_windows() -> TestResult {
     exercise(false)
+}
+
+const LATER_FAILURE: &str =
+    "Failure arc: rewriting evidence ownership would violate the source-provenance policy.";
+const LATER_REPAIR: &str =
+    "Fix: preserve the original evidence owner and audit explicit learning decisions.";
+
+struct MultiEpisodeFixture {
+    _temporary: tempfile::TempDir,
+    workspace: PathBuf,
+    workspace_id: String,
+    evidence_id: String,
+    // Rule A, anti-pattern A, rule B, anti-pattern B. Never depend on ranking.
+    candidates: Vec<Value>,
+}
+
+impl MultiEpisodeFixture {
+    fn new() -> TestResult<Self> {
+        let temporary = tempfile::Builder::new()
+            .prefix("ee-multiple-episodes-")
+            .tempdir()?;
+        let workspace = temporary.path().canonicalize()?;
+        run(&workspace, &["init"])?;
+        let connection = DbConnection::open_file(&workspace.join(".ee/ee.db"))?;
+        let workspace_id = connection
+            .get_workspace_by_path(workspace.to_str().ok_or("non-UTF8 workspace")?)?
+            .ok_or("workspace missing")?
+            .id;
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x91b_0001)).to_string();
+        let evidence_id = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x91b_0002)).to_string();
+        let messages = [FAILURE, REPAIR, LATER_FAILURE, LATER_REPAIR];
+        let transcript = workspace.join("multiple-episodes.jsonl");
+        let mut transcript_text = String::new();
+        for message in messages {
+            transcript_text.push_str(&json!({"role":"assistant","content":message}).to_string());
+            transcript_text.push('\n');
+        }
+        fs::write(&transcript, &transcript_text)?;
+        connection.insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.clone(),
+                cass_session_id: "multiple-episodes-cli".to_owned(),
+                source_path: Some(transcript.to_string_lossy().into_owned()),
+                agent_name: Some("fixture".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 4,
+                token_count: None,
+                content_hash: format!(
+                    "blake3:{}",
+                    blake3::hash(transcript_text.as_bytes()).to_hex()
+                ),
+                metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_owned()),
+            },
+        )?;
+        let excerpt = messages.join("\n");
+        connection.insert_evidence_span(
+            &evidence_id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.clone(),
+                session_id: session_id.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: "multiple-episodes-window".to_owned(),
+                span_kind: "message".to_owned(),
+                start_line: 1,
+                end_line: 4,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: Some(
+                    r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_owned(),
+                ),
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        connection.close()?;
+        let proposed = run(
+            &workspace,
+            &[
+                "review", "session", &session_id, "--propose", "--limit", "4",
+                "--min-confidence", "0.8",
+            ],
+        )?;
+        let proposed = proposed["candidates"].as_array().ok_or("candidates missing")?;
+        assert_eq!(proposed.len(), 4, "{proposed:?}");
+        let mut candidates = Vec::new();
+        for failure in [FAILURE, LATER_FAILURE] {
+            for kind in ["session_arc_rule", "session_arc_anti_pattern"] {
+                candidates.push(
+                    proposed
+                        .iter()
+                        .find(|candidate| {
+                            candidate["candidateKind"] == kind
+                                && candidate["sessionArc"]["failureSpan"]["excerpt"] == failure
+                        })
+                        .ok_or("missing episode role")?
+                        .clone(),
+                );
+            }
+        }
+        for (index, candidate) in candidates.iter().enumerate() {
+            assert_eq!(
+                candidate["sessionArc"]["linkedCandidateId"],
+                candidates[index ^ 1]["candidateId"]
+            );
+        }
+        Ok(Self {
+            _temporary: temporary,
+            workspace,
+            workspace_id,
+            evidence_id,
+            candidates,
+        })
+    }
+
+    fn connection(&self) -> TestResult<DbConnection> {
+        Ok(DbConnection::open_file(&self.workspace.join(".ee/ee.db"))?)
+    }
+
+    fn candidate_id(&self, index: usize) -> TestResult<&str> {
+        Ok(self.candidates[index]["candidateId"].as_str().ok_or("candidate ID missing")?)
+    }
+
+    fn validate(&self, index: usize) -> TestResult {
+        let validated = run(
+            &self.workspace,
+            &["curate", "validate", self.candidate_id(index)?, "--actor", "ArcCli"],
+        )?;
+        assert_eq!(validated["validation"]["decision"], "approved", "{validated}");
+        Ok(())
+    }
+
+    fn apply(&self, index: usize) -> TestResult<String> {
+        let applied = run(
+            &self.workspace,
+            &["curate", "apply", self.candidate_id(index)?, "--actor", "ArcCli"],
+        )?;
+        assert_eq!(applied["application"]["status"], "applied", "{applied}");
+        Ok(applied["application"]["createdMemoryId"]
+            .as_str()
+            .ok_or("created memory missing")?
+            .to_owned())
+    }
+
+    fn accept(&self, index: usize) -> TestResult<String> {
+        self.validate(index)?;
+        self.apply(index)
+    }
+
+    // The public core returns blocked decisions without depending on the CLI's
+    // error exit-code convention. The preview still traverses the real binary.
+    fn assert_blocked_without_writes(&self, index: usize, code: &str) -> TestResult {
+        let connection = self.connection()?;
+        let before_audits = connection.list_audit_entries(Some(&self.workspace_id), None)?;
+        let before_memories = connection.list_memories(&self.workspace_id, None, true)?.len();
+        let before_jobs = connection.list_search_index_jobs(&self.workspace_id, None)?.len();
+        let before_source = connection
+            .get_evidence_span(&self.evidence_id)?
+            .ok_or("source missing")?;
+        let before_candidate = connection
+            .get_curation_candidate(&self.workspace_id, self.candidate_id(index)?)?
+            .ok_or("candidate missing")?;
+        assert_eq!(before_candidate.status, "approved", "exercise apply-time revalidation");
+        let shown = run(&self.workspace, &["curate", "show", self.candidate_id(index)?])?;
+        assert_eq!(shown["durableMutation"], false);
+        assert_eq!(shown["plannedApplication"]["status"], "blocked", "{shown}");
+        for dry_run in [true, false] {
+            let report = apply_curation_candidate(&CurateApplyOptions {
+                workspace_path: &self.workspace,
+                database_path: None,
+                candidate_id: self.candidate_id(index)?,
+                actor: Some("ArcCli"),
+                dry_run,
+                allow_tombstone_load_bearing: false,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(report.application.status, "blocked", "{:?}", report.application.errors);
+            assert!(!report.mutation.persisted);
+            assert!(report.application.errors.iter().any(|issue| issue.code == code));
+        }
+        assert_eq!(connection.list_audit_entries(Some(&self.workspace_id), None)?, before_audits);
+        assert_eq!(
+            connection.list_memories(&self.workspace_id, None, true)?.len(),
+            before_memories
+        );
+        assert_eq!(connection.list_search_index_jobs(&self.workspace_id, None)?.len(), before_jobs);
+        let after_source = connection
+            .get_evidence_span(&self.evidence_id)?
+            .ok_or("source missing")?;
+        assert_eq!(after_source.memory_id, before_source.memory_id);
+        assert_eq!(after_source.content_hash, before_source.content_hash);
+        assert_eq!(
+            connection
+                .get_curation_candidate(&self.workspace_id, self.candidate_id(index)?)?
+                .ok_or("candidate missing")?
+                .status,
+            before_candidate.status
+        );
+        connection.close()?;
+        Ok(())
+    }
+}
+
+fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    let source = fixture
+        .connection()?
+        .get_evidence_span(&fixture.evidence_id)?
+        .ok_or("source missing")?;
+    let mut memories: [Option<String>; 4] = std::array::from_fn(|_| None);
+    for (step, index) in order.into_iter().enumerate() {
+        fixture.validate(index)?;
+        let connection = fixture.connection()?;
+        let before = connection.list_audit_entries(Some(&fixture.workspace_id), None)?;
+        let shown = run(&fixture.workspace, &["curate", "show", fixture.candidate_id(index)?])?;
+        assert_eq!(shown["durableMutation"], false);
+        let plan = &shown["plannedApplication"];
+        assert_eq!(plan["status"], "ready", "{shown}");
+        let attachments = plan["plannedEvidenceAttachments"]
+            .as_array()
+            .ok_or("attachments missing")?;
+        if step == 0 {
+            assert_eq!(attachments.len(), 1);
+            assert_eq!(attachments[0]["evidenceSpanId"], fixture.evidence_id);
+            assert!(plan.get("sharedEvidenceSpans").is_none());
+        } else {
+            assert!(attachments.is_empty(), "do not advertise source reassignment");
+            let shared = plan["sharedEvidenceSpans"].as_array().ok_or("shared source missing")?;
+            assert_eq!(shared.len(), 1);
+            assert_eq!(shared[0]["evidenceSpanId"], fixture.evidence_id);
+            assert_eq!(shared[0]["contentHash"], source.content_hash);
+            assert_eq!(shared[0]["ownerMemoryId"].as_str(), memories[order[0]].as_deref());
+        }
+        if let Some(peer) = &memories[index ^ 1] {
+            let link = &plan["plannedSessionArcLink"];
+            let peer_endpoint = if index % 2 == 0 { "dstMemoryId" } else { "srcMemoryId" };
+            assert_eq!(link[peer_endpoint].as_str(), Some(peer.as_str()));
+            assert_eq!(link["relation"], "related");
+            assert_eq!(link["directed"], false);
+        } else {
+            assert!(plan.get("plannedSessionArcLink").is_none(), "no cross-episode link: {shown}");
+        }
+        let preview = run(
+            &fixture.workspace,
+            &["curate", "apply", fixture.candidate_id(index)?, "--dry-run", "--actor", "ArcCli"],
+        )?;
+        assert_eq!(preview["application"]["status"], "ready", "{preview}");
+        assert_eq!(preview["mutation"]["persisted"], false);
+        assert_eq!(connection.list_audit_entries(Some(&fixture.workspace_id), None)?, before);
+        assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), step);
+        memories[index] = Some(fixture.apply(index)?);
+        let owner = memories[order[0]].as_deref().ok_or("first owner missing")?;
+        let actual_source = connection
+            .get_evidence_span(&fixture.evidence_id)?
+            .ok_or("source missing")?;
+        assert_eq!(actual_source.memory_id.as_deref(), Some(owner));
+        assert_eq!(actual_source.content_hash, source.content_hash);
+        assert_eq!(actual_source.start_line, source.start_line);
+        assert_eq!(actual_source.end_line, source.end_line);
+        for (candidate_index, memory) in memories.iter().enumerate() {
+            let candidate = connection
+                .get_curation_candidate(
+                    &fixture.workspace_id,
+                    fixture.candidate_id(candidate_index)?,
+                )?
+                .ok_or("candidate missing")?;
+            assert_eq!(candidate.status, if memory.is_some() { "applied" } else { "pending" });
+            let Some(memory) = memory else {
+                continue;
+            };
+            let links = connection
+                .list_memory_links_for_memory(memory, Some(MemoryLinkRelation::Related))?;
+            if memories[candidate_index ^ 1].is_some() {
+                assert_eq!(links.len(), 1);
+                let rule = candidate_index & !1;
+                assert_eq!(Some(links[0].src_memory_id.as_str()), memories[rule].as_deref());
+                assert_eq!(Some(links[0].dst_memory_id.as_str()), memories[rule + 1].as_deref());
+                assert!(!links[0].directed);
+                let details: Value = serde_json::from_str(
+                    links[0].metadata_json.as_deref().ok_or("link metadata missing")?,
+                )?;
+                assert_eq!(details["ruleCandidateId"].as_str(), Some(fixture.candidate_id(rule)?));
+                assert_eq!(
+                    details["antiPatternCandidateId"].as_str(),
+                    Some(fixture.candidate_id(rule + 1)?)
+                );
+                assert_eq!(
+                    connection.list_audit_by_target("memory_link", &links[0].id, None)?.len(),
+                    1
+                );
+            } else {
+                assert!(links.is_empty(), "unaccepted peers must not become graph edges");
+            }
+        }
+        let memory = memories[index].as_deref().ok_or("created memory missing")?;
+        let creation = connection
+            .list_audit_by_target("memory", memory, None)?
+            .into_iter()
+            .filter(|audit| audit.action == audit_actions::MEMORY_CREATE)
+            .collect::<Vec<_>>();
+        assert_eq!(creation.len(), 1);
+        let details: Value = serde_json::from_str(
+            creation[0].details.as_deref().ok_or("creation details missing")?,
+        )?;
+        assert_eq!(details["sourceRefs"].as_array().ok_or("source refs missing")?.len(), 1);
+        assert_eq!(details["sourceRefs"][0]["id"], fixture.evidence_id);
+        assert_eq!(details["sourceRefs"][0]["contentHash"], source.content_hash);
+        assert_eq!(
+            details["producerPayload"]["sessionArc"],
+            fixture.candidates[index]["sessionArc"]
+        );
+        let audits = connection.list_audit_entries(Some(&fixture.workspace_id), None)?;
+        let replay = run(
+            &fixture.workspace,
+            &["curate", "apply", fixture.candidate_id(index)?, "--actor", "ArcCli"],
+        )?;
+        assert_eq!(replay["application"]["status"], "already_applied");
+        assert_eq!(connection.list_audit_entries(Some(&fixture.workspace_id), None)?, audits);
+        assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), step + 1);
+        assert_eq!(
+            connection.list_search_index_jobs(&fixture.workspace_id, None)?.iter()
+                .filter(|job| job.document_id.as_deref() == Some(memory)).count(),
+            1
+        );
+        connection.close()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn public_cli_learns_all_episodes_in_source_order() -> TestResult {
+    exercise_multiple_episodes([0, 1, 2, 3])
+}
+
+#[test]
+fn public_cli_learns_all_episodes_in_reverse_order() -> TestResult {
+    exercise_multiple_episodes([3, 2, 1, 0])
+}
+
+#[test]
+fn public_cli_interleaves_rule_first_episodes_without_cross_linking() -> TestResult {
+    exercise_multiple_episodes([2, 0, 1, 3])
+}
+
+#[test]
+fn public_cli_interleaves_anti_patterns_without_cross_linking() -> TestResult {
+    exercise_multiple_episodes([1, 3, 2, 0])
+}
+
+#[test]
+fn public_cli_keeps_rejected_peers_rejected_when_sharing_a_window() -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    let owner = fixture.accept(0)?;
+    run(
+        &fixture.workspace,
+        &[
+            "curate", "reject", fixture.candidate_id(3)?, "--reason",
+            "Keep only the rule", "--actor", "ArcCli",
+        ],
+    )?;
+    let later = fixture.accept(2)?;
+    let connection = fixture.connection()?;
+    assert_eq!(connection.list_memories(&fixture.workspace_id, None, false)?.len(), 2);
+    for (index, status) in [(3, "rejected"), (1, "pending")] {
+        assert_eq!(
+            connection
+                .get_curation_candidate(&fixture.workspace_id, fixture.candidate_id(index)?)?
+                .ok_or("candidate missing")?
+                .status,
+            status
+        );
+    }
+    for memory in [&owner, &later] {
+        assert!(connection.list_memory_links_for_memory(memory, None)?.is_empty());
+    }
+    assert_eq!(
+        connection
+            .get_evidence_span(&fixture.evidence_id)?
+            .ok_or("source missing")?
+            .memory_id
+            .as_deref(),
+        Some(owner.as_str())
+    );
+    connection.close()?;
+    Ok(())
+}
+
+#[test]
+fn shared_window_owner_retirement_blocks_previously_approved_later_episode() -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    let owner = fixture.accept(0)?;
+    fixture.validate(2)?;
+    let connection = fixture.connection()?;
+    assert!(connection.tombstone_memory(&owner)?);
+    connection.close()?;
+    fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
+}
+
+#[test]
+fn shared_window_ambiguous_owner_audit_blocks_previously_approved_later_episode() -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    let owner = fixture.accept(0)?;
+    fixture.validate(2)?;
+    let connection = fixture.connection()?;
+    let original = connection.list_audit_by_target("memory", &owner, None)?
+        .into_iter().find(|audit| audit.action == audit_actions::MEMORY_CREATE)
+        .ok_or("owner creation missing")?;
+    connection.insert_audit(&generate_audit_id(), &CreateAuditInput {
+        workspace_id: original.workspace_id,
+        actor: Some("CorruptionFixture".to_owned()),
+        action: original.action,
+        target_type: original.target_type,
+        target_id: original.target_id,
+        details: original.details,
+    })?;
+    connection.close()?;
+    fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
+}
+
+#[test]
+fn shared_window_source_hash_drift_blocks_previously_approved_later_episode() -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    fixture.accept(0)?;
+    fixture.validate(2)?;
+    let connection = fixture.connection()?;
+    // IDs are generated by EvidenceId, not user-controlled SQL. Simulate
+    // source corruption between validation and apply on this disposable store.
+    connection.execute_raw(&format!(
+        "UPDATE evidence_spans SET content_hash = 'blake3:{}' WHERE id = '{}'",
+        blake3::hash(b"different evidence").to_hex(), fixture.evidence_id
+    ))?;
+    connection.close()?;
+    fixture.assert_blocked_without_writes(2, "derived_source_evidence_not_admitted")
+}
+
+#[test]
+fn shared_window_forged_creation_does_not_turn_approval_into_application() -> TestResult {
+    let fixture = MultiEpisodeFixture::new()?;
+    fixture.validate(0)?;
+    fixture.validate(2)?;
+    let connection = fixture.connection()?;
+    let candidate = connection
+        .get_curation_candidate(&fixture.workspace_id, fixture.candidate_id(0)?)?
+        .ok_or("candidate missing")?;
+    let owner = MemoryId::from_uuid(uuid::Uuid::from_u128(0x91b_0003)).to_string();
+    connection.insert_memory(&owner, &CreateMemoryInput {
+        workspace_id: fixture.workspace_id.clone(),
+        level: "procedural".to_owned(),
+        kind: "rule".to_owned(),
+        content: candidate.proposed_content.clone().ok_or("content missing")?,
+        workflow_id: None,
+        confidence: 0.9,
+        utility: 0.5,
+        importance: 0.5,
+        provenance_uri: None,
+        trust_class: "agent_assertion".to_owned(),
+        trust_subclass: None,
+        tags: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+    })?;
+    let metadata: Value = serde_json::from_str(
+        candidate.derivation_metadata_json.as_deref().ok_or("metadata missing")?,
+    )?;
+    let refs: Value = serde_json::from_str(
+        candidate.derivation_source_refs_json.as_deref().ok_or("source refs missing")?,
+    )?;
+    connection.insert_audit(&generate_audit_id(), &CreateAuditInput {
+        workspace_id: Some(fixture.workspace_id.clone()),
+        actor: Some("CorruptionFixture".to_owned()),
+        action: audit_actions::MEMORY_CREATE.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(owner.clone()),
+        details: Some(json!({
+            "schema": "ee.audit.derived_memory_created.v1",
+            "candidateId": candidate.id,
+            "createdMemoryId": owner,
+            "producer": "review_session",
+            "producerPayload": metadata["producer"]["producerPayload"],
+            "sourceRefs": refs,
+        }).to_string()),
+    })?;
+    let source = connection.get_evidence_span(&fixture.evidence_id)?.ok_or("source missing")?;
+    assert_eq!(connection.attach_evidence_span_to_memory_if_unlinked(
+        &fixture.workspace_id, &fixture.evidence_id, &source.content_hash, &owner
+    )?, EvidenceSpanMemoryAttachResult::Attached);
+    connection.close()?;
+    fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
 }
