@@ -16,11 +16,11 @@
       {
         "query": "background job queue health and capacity",
         "expected_ids": [
-          "memory-1"
+          "mem_asyncmigration000000000001"
         ],
         "retrieved_ids": [
-          "memory-1",
-          "memory-2"
+          "mem_asyncmigration000000000001",
+          "mem_asyncmigration000000000002"
         ],
         "precision_at_1": 1.0,
         "precision_at_3": 0.5,
@@ -33,12 +33,12 @@
       {
         "query": "production backfill timeout and stuck migration",
         "expected_ids": [
-          "memory-2"
+          "mem_asyncmigration000000000002"
         ],
         "retrieved_ids": [
-          "memory-2",
-          "memory-1",
-          "memory-3"
+          "mem_asyncmigration000000000002",
+          "mem_asyncmigration000000000001",
+          "mem_asyncmigration000000000003"
         ],
         "precision_at_1": 1.0,
         "precision_at_3": 0.3333333333333333,
@@ -51,12 +51,12 @@
       {
         "query": "rollback plan and pre-migration schema checkpoint",
         "expected_ids": [
-          "memory-3"
+          "mem_asyncmigration000000000003"
         ],
         "retrieved_ids": [
-          "memory-3",
-          "memory-2",
-          "memory-1"
+          "mem_asyncmigration000000000003",
+          "mem_asyncmigration000000000002",
+          "mem_asyncmigration000000000001"
         ],
         "precision_at_1": 1.0,
         "precision_at_3": 0.3333333333333333,
