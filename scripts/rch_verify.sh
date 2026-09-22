@@ -5995,40 +5995,55 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
         "admission_blocker": admission_blocker,
     }
 
-def remediation_bead_for(blocker_kind):
+def remediation_guidance_for(blocker_kind):
     mapping = {
-        "cargo_workspace_inheritance": "bd-17c65.10.17.1.3",
-        "cargo_path_dependency_version": "bd-17c65.10.17.1.3",
-        "client_daemon_version_skew": "bd-17c65.10.17.1.4",
-        "remote_checkout_incomplete": "bd-17c65.10.17.1.3",
-        "worker_disk_full": "bd-17c65.10.17",
-        "all_workers_preflight_failed": "bd-17c65.10.19",
-        "worker_health_threshold": "bd-37ugy",
-        "remote_transport_timeout": "bd-37ugy",
-        "active_project_exclusion": "bd-1n3x1.13",
-        "capacity_or_timeout": "bd-17c65.10.17",
-        "topology_blocked": "bd-17c65.10.17.1.2",
-        "local_fallback_refused": "bd-17c65.10.17.1",
+        "cargo_workspace_inheritance": {
+            "unmapped_reason": "The historical workspace-sync implementation is closed; no current remediation owner is established for this inheritance failure.",
+        },
+        "cargo_path_dependency_version": {
+            "unmapped_reason": "The historical workspace-sync implementation is closed; a current dependency-version mismatch needs its own manifest and pin diagnosis.",
+        },
+        "client_daemon_version_skew": {"bead": "bd-k2fkz"},
+        "remote_checkout_incomplete": {
+            "unmapped_reason": "The historical dependency-closure implementation is closed; identify the missing remote checkout before selecting remediation.",
+        },
+        "worker_disk_full": {
+            "unmapped_reason": "The historical fleet ENOSPC incident was resolved; current disk failures need the affected worker and filesystem identified.",
+        },
+        "all_workers_preflight_failed": {
+            "unmapped_reason": "The historical all-worker disk-pressure incident was resolved; this general preflight failure does not identify the current cause.",
+        },
+        "worker_health_threshold": {
+            "unmapped_reason": "The former citation concerned artifact return after Cargo, not worker-health admission; no matching remediation owner is established.",
+        },
+        "remote_transport_timeout": {
+            "unmapped_reason": "Upload, execution, and artifact-return timeouts have different causes; identify the failed transfer phase before selecting remediation.",
+        },
+        "active_project_exclusion": {
+            "unmapped_reason": "The former citation shipped blocker reporting, not a repair for exclusion; use the active-build details to coordinate with its owner.",
+        },
+        "capacity_or_timeout": {
+            "unmapped_reason": "The historical disk/routing incident does not identify this capacity or timeout cause; inspect requested slots and admission evidence.",
+        },
+        "topology_blocked": {
+            "unmapped_reason": "The historical outer-workspace isolation implementation is closed; match the current canonical-root or workspace error before selecting remediation.",
+        },
+        "local_fallback_refused": {
+            "unmapped_reason": "Refusing local fallback preserves remote-only policy; the upstream refusal, not this shared consequence, determines remediation.",
+        },
     }
-    # NO DEFAULT -- bd-sh3ew. This was `mapping.get(blocker_kind, "bd-17c65.10.17.1")`,
-    # answering every UNMAPPED blocker kind with a bead closed 2026-05-21.
-    #
-    # The value is not a hint. It lands in the persisted `known_blocker` entry
-    # beside `retry_after` and `expires_at`, so the receipt tells an operator:
-    # this is known, here is the bead, come back later. Against a closed bead
-    # that instruction costs more than silence -- the operator reads resolved
-    # work as their live blocker, waits out a retry window on nothing, and an
-    # agent treating `known_blocker` as "expected, not mine" excuses a real
-    # failure on a four-month-old closure.
-    #
-    # Deliberately NOT repointed at a fresher id. bd-17c65.10.17.1's own close
-    # reason names two successors for the residual work, bd-17c65.10.17.1.2 and
-    # bd-17c65.10.17.1.4, and BOTH ARE ALSO CLOSED -- there is no live bead in
-    # that chain to pick. Substituting one by inference is how a wrong reference
-    # becomes permanent, which is the rule bd-5d8rx exists to enforce.
-    #
-    # "I have no mapping for this kind" is true and immediately actionable.
-    return mapping.get(blocker_kind)
+    # The contract checker requires an explicit entry for every emitted kind.
+    # An older cache can contain an unknown kind; never invent a bead for it.
+    return mapping.get(blocker_kind, {
+        "unmapped_reason": "This blocker kind is not recognized by the current verifier; inspect its recorded diagnostics before selecting remediation.",
+    })
+
+def attach_remediation_guidance(entry):
+    guidance = remediation_guidance_for(entry.get("blocker_kind"))
+    entry["remediation_bead"] = guidance.get("bead")
+    entry["remediation_bead_status"] = "mapped" if guidance.get("bead") else "unmapped"
+    entry["remediation_reason"] = guidance.get("unmapped_reason")
+    return entry
 
 def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     source_state_hash = (
@@ -6120,11 +6135,6 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
     if ttl_seconds < 60:
         ttl_seconds = 60
     expires_at = now + dt.timedelta(seconds=ttl_seconds)
-    # An absent remediation bead must be legible AS ABSENT (bd-sh3ew). A bare
-    # null reads like a field nobody got round to filling in; "unmapped" says
-    # the verifier looked and has no bead for this kind. Those are two states
-    # and one null cannot carry both.
-    remediation_bead = remediation_bead_for(blocker_kind)
     entry = {
         "schema": "ee.rch.known_blocker.v1",
         "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
@@ -6146,13 +6156,11 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "last_seen": format_time(now),
         "expires_at": format_time(expires_at),
         "retry_after": format_time(expires_at),
-        "remediation_bead": remediation_bead,
-        "remediation_bead_status": "mapped" if remediation_bead else "unmapped",
         "override_used": False,
     }
     if active_project_details:
         entry["active_project_exclusion"] = active_project_details
-    return entry
+    return attach_remediation_guidance(entry)
 
 def persist_known_blocker(entry):
     if os.environ.get("KNOWN_BLOCKER_ENABLED") != "1":
@@ -6570,6 +6578,10 @@ build_admission = proof.get("build_admission") or {}
 if proof.get("known_blocker") in (None, "null"):
     proof["known_blocker"] = None
 known_blocker = proof.get("known_blocker")
+if isinstance(known_blocker, dict):
+    # Cached failures retain their evidence and expiry, but guidance uses the
+    # current table so an old cache cannot resurrect a retired citation.
+    attach_remediation_guidance(known_blocker)
 if status == "rch_environment_failure" and not isinstance(known_blocker, dict):
     blocker_kind = blocker_kind_for(degraded)
     if blocker_kind:
@@ -6724,7 +6736,10 @@ if proof.get("source_bundle_hash"):
 known_blocker = proof.get("known_blocker") or {}
 if isinstance(known_blocker, dict) and known_blocker.get("blocker_fingerprint"):
     summary_lines.append(f"- known_blocker: `{known_blocker.get('blocker_fingerprint')}`")
-    summary_lines.append(f"- remediation_bead: `{known_blocker.get('remediation_bead') or 'unknown'}`")
+    summary_lines.append(f"- remediation_bead: `{known_blocker.get('remediation_bead') or 'none'}`")
+    summary_lines.append(f"- remediation_bead_status: `{known_blocker.get('remediation_bead_status')}`")
+    if known_blocker.get("remediation_reason"):
+        summary_lines.append(f"- remediation_reason: {known_blocker['remediation_reason']}")
     summary_lines.append(f"- retry_after: `{known_blocker.get('retry_after') or 'unknown'}`")
     summary_lines.append(f"- known_blocker_override_used: `{str(bool(known_blocker.get('override_used'))).lower()}`")
     active_project = known_blocker.get("active_project_exclusion") or {}

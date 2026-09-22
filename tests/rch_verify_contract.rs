@@ -21,6 +21,19 @@ fn script_path() -> PathBuf {
     repo_root().join("scripts/rch_verify.sh")
 }
 
+fn assert_unmapped_remediation(report: &Value, reason_fragment: &str) -> TestResult {
+    let blocker = &report["known_blocker"];
+    if blocker.get("remediation_bead") != Some(&Value::Null)
+        || blocker["remediation_bead_status"] != "unmapped"
+        || !blocker["remediation_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.trim().is_empty() && reason.contains(reason_fragment))
+    {
+        return Err(format!("expected explicit unmapped guidance: {blocker}"));
+    }
+    Ok(())
+}
+
 fn target_tmp_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
@@ -5683,15 +5696,12 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         .as_object()
         .ok_or_else(|| format!("active-project exclusion known blocker missing: {report}"))?;
     if known_blocker.get("blocker_kind").and_then(Value::as_str) != Some("active_project_exclusion")
-        || known_blocker
-            .get("remediation_bead")
-            .and_then(Value::as_str)
-            != Some("bd-1n3x1.13")
     {
         return Err(format!(
             "active-project exclusion should be a first-class known blocker: {report}"
         ));
     }
+    assert_unmapped_remediation(&report, "use the active-build details")?;
     let known_active = known_blocker
         .get("active_project_exclusion")
         .and_then(Value::as_object)
@@ -5730,7 +5740,10 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         "worker_posture=`progress_stale`",
         "progress_age_secs=`7`",
         "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
-        "remediation_bead: `bd-1n3x1.13`",
+        "remediation_bead: `none`",
+        "remediation_bead_status: `unmapped`",
+        "remediation_reason: ",
+        "use the active-build details",
         "known_blocker_selector: `active_project_exclusion`",
     ] {
         if !summary.contains(expected) {
@@ -5872,7 +5885,6 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
     if second["status"] != "known_blocker_refused"
         || second["verification_attribution"] != "not_run_known_blocker"
         || second["known_blocker"]["blocker_kind"] != "active_project_exclusion"
-        || second["known_blocker"]["remediation_bead"] != "bd-1n3x1.13"
         || second["rch_invocation"] != serde_json::json!([])
         || second["elapsed_ms"] != 0
     {
@@ -5880,6 +5892,7 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
             "second run did not fail fast with active-project blocker evidence: {second}"
         ));
     }
+    assert_unmapped_remediation(&second, "use the active-build details")?;
     let summary = second["summary_markdown"]
         .as_str()
         .ok_or_else(|| "second active known-blocker summary missing".to_owned())?;
@@ -6266,11 +6279,7 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
             "transport timeout should be worker-state evidence: {report}"
         ));
     }
-    if report["known_blocker"]["remediation_bead"] != "bd-37ugy" {
-        return Err(format!(
-            "transport timeout should point at the RCH blocker bead: {report}"
-        ));
-    }
+    assert_unmapped_remediation(&report, "identify the failed transfer phase")?;
     if report["summary_markdown"]
         .as_str()
         .unwrap_or_default()
@@ -6950,12 +6959,12 @@ exit 2
         .map_err(|error| format!("parse first known-blocker run: {error}"))?;
     if first["status"] != "rch_environment_failure"
         || first["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
-        || first["known_blocker"]["remediation_bead"] != "bd-17c65.10.17.1.3"
     {
         return Err(format!(
             "first run did not record a workspace-inheritance known blocker:\nstdout={first_stdout}\nstderr={first_stderr}"
         ));
     }
+    assert_unmapped_remediation(&first, "no current remediation owner")?;
     let first_fingerprint = first["known_blocker"]["blocker_fingerprint"]
         .as_str()
         .ok_or_else(|| format!("first known blocker missing fingerprint: {first}"))?
@@ -7018,7 +7027,10 @@ exit 2
         .as_str()
         .ok_or_else(|| "known-blocker summary missing".to_owned())?;
     if !summary.contains("known_blocker: `")
-        || !summary.contains("remediation_bead: `bd-17c65.10.17.1.3`")
+        || !summary.contains("remediation_bead: `none`")
+        || !summary.contains("remediation_bead_status: `unmapped`")
+        || !summary.contains("remediation_reason: ")
+        || !summary.contains("no current remediation owner")
         || !summary.contains("known_blocker_override_used: `false`")
     {
         return Err(format!("summary missing known-blocker fields: {summary}"));
@@ -8517,284 +8529,39 @@ fn ledger_no_write_renders_summary_without_appending() -> TestResult {
     Ok(())
 }
 
-/// Every remediation bead the verifier can cite, and whether the tracker says
-/// it is still open. bd-5d8rx.
-///
-/// `remediation_bead_for` maps a blocker kind to a bead id, and that id is
-/// emitted in the receipt as `known_blocker` alongside a retry window. That is
-/// not a hint -- it is an instruction to wait. When the cited bead is closed,
-/// the receipt tells an operator to wait on resolved work, and an agent
-/// treating `known_blocker` as "expected, not mine" excuses a live failure.
-///
-/// Measured 2026-09-19: 13 citations, 8 distinct beads, ALL CLOSED, freshest
-/// closure three months old. The case that exposed it was
-/// `client_daemon_version_skew` -> `bd-17c65.10.17.1.4`, closed 2026-05-19 with
-/// the reason "verifier now fails closed on downstream worker preflight/
-/// critical pressure, NOT client/daemon version skew" -- while a live run
-/// refused on exactly that skew. The citation did not merely rot; it
-/// contradicts the observation it is attached to.
-///
-/// READS THE COMMITTED EXPORT, NOT THE LIVE TRACKER. `.beads/issues.jsonl` is
-/// tracked, so this test is hermetic: same commit, same input, same verdict.
-/// Querying `br` would make the outcome depend on daemon liveness and on edits
-/// made mid-run -- failures that say nothing about the code under test. The
-/// staleness this misses is one sync's lag, which is a delay rather than a
-/// wrong citation, and it is worth missing to keep the test deterministic.
-///
-/// RATCHETS RATHER THAN DEMANDING A BIG BANG. The 13 stale citations are
-/// recorded below as known debt. A NEW stale citation fails, and so does a
-/// baseline entry that is no longer stale -- because a baseline listing debt
-/// that no longer exists is itself a lie about the state of the tree.
-/// Deliberately NOT repointing any mapping at a plausible open bead: guessing a
-/// replacement is how a wrong reference becomes permanent. Whoever owns each
-/// blocker picks its successor.
-#[test]
-fn rch_verify_remediation_beads_are_open_or_recorded_as_stale() -> TestResult {
-    const KNOWN_STALE: &[&str] = &[
-        "bd-17c65.10.17",
-        "bd-17c65.10.17.1",
-        "bd-17c65.10.17.1.2",
-        "bd-17c65.10.17.1.3",
-        "bd-17c65.10.17.1.4",
-        "bd-17c65.10.19",
-        "bd-1n3x1.13",
-        "bd-37ugy",
-    ];
-
-    let script = fs::read_to_string(script_path())
-        .map_err(|error| format!("read rch_verify.sh: {error}"))?;
-
-    // Scope the parse to the mapping function so an unrelated bead id in a
-    // comment elsewhere in a 7000-line script cannot enter the population.
-    // The slice deliberately includes the trailing `mapping.get(kind, default)`
-    // fallback, which is a thirteenth citation and was closed too.
-    let body = script
-        .split_once("def remediation_bead_for(")
-        .and_then(|(_, rest)| rest.split_once("\ndef "))
-        .map(|(body, _)| body)
-        .ok_or_else(|| "remediation_bead_for not found in rch_verify.sh".to_owned())?;
-
-    let mut cited: BTreeSet<String> = BTreeSet::new();
-    let mut rest = body;
-    while let Some(index) = rest.find("\"bd-") {
-        rest = &rest[index + 1..];
-        if let Some(end) = rest.find('"') {
-            cited.insert(rest[..end].to_owned());
-        }
-    }
-
-    // An empty population compares equal to everything. If the mapping's shape
-    // moves, that is a parser failure and must not read as agreement.
-    if cited.len() < 4 {
+/// The same Cargo-free checker is callable locally and by this contract suite.
+/// It reads source plus the tracked JSONL export, never the live tracker/fleet.
+fn check_remediation_guidance(args: &[&str]) -> TestResult {
+    let output = Command::new("python3")
+        .arg("-B")
+        .arg(repo_root().join("scripts/check-rch-remediation-guidance.py"))
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .map_err(|error| format!("run remediation guidance contract: {error}"))?;
+    if !output.status.success() {
         return Err(format!(
-            "parsed only {} remediation beads from rch_verify.sh; the mapping \
-             shape changed and this test can no longer read it",
-            cited.len()
+            "remediation guidance contract failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
-
-    let export_path = repo_root().join(".beads").join("issues.jsonl");
-    let export = fs::read_to_string(&export_path)
-        .map_err(|error| format!("read {}: {error}", export_path.display()))?;
-    let mut status_of: BTreeMap<String, String> = BTreeMap::new();
-    for line in export.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let (Some(id), Some(status)) = (
-            record.get("id").and_then(Value::as_str),
-            record.get("status").and_then(Value::as_str),
-        ) {
-            status_of.insert(id.to_owned(), status.to_owned());
-        }
-    }
-    if status_of.len() < 100 {
-        return Err(format!(
-            "parsed only {} issues from the committed export; the JSONL shape \
-             changed and every citation would read as unknown",
-            status_of.len()
-        ));
-    }
-
-    let baseline: BTreeSet<&str> = KNOWN_STALE.iter().copied().collect();
-    let mut newly_stale = Vec::new();
-    let mut healed = Vec::new();
-
-    for bead in &cited {
-        let stale = match status_of.get(bead) {
-            Some(status) => status == "closed",
-            // A citation naming a bead the export does not contain is worse
-            // than a closed one: it cannot be chased at all.
-            None => true,
-        };
-        let recorded = baseline.contains(bead.as_str());
-        if stale && !recorded {
-            newly_stale.push(format!(
-                "  {bead}: cited by rch_verify.sh, and the committed export says {}",
-                status_of
-                    .get(bead)
-                    .map_or("it does not exist", String::as_str)
-            ));
-        }
-        if !stale && recorded {
-            healed.push(format!(
-                "  {bead}: recorded as stale debt but the export says {}",
-                status_of.get(bead).map_or("?", String::as_str)
-            ));
-        }
-    }
-
-    // A baseline entry that no longer appears in the mapping at all is also
-    // stale bookkeeping -- the citation was removed and nobody pruned the list.
-    for bead in &baseline {
-        if !cited.contains(*bead) {
-            healed.push(format!(
-                "  {bead}: recorded as stale debt but rch_verify.sh no longer cites it"
-            ));
-        }
-    }
-
-    if !newly_stale.is_empty() || !healed.is_empty() {
-        return Err(format!(
-            "the verifier's remediation-bead citations disagree with the \
-             committed tracker export.\nNEW STALE CITATIONS (a refusal would \
-             send an operator to resolved or missing work):\n{}\nBASELINE NO \
-             LONGER TRUE (prune or repoint, deliberately):\n{}",
-            if newly_stale.is_empty() {
-                "  (none)".to_owned()
-            } else {
-                newly_stale.join("\n")
-            },
-            if healed.is_empty() {
-                "  (none)".to_owned()
-            } else {
-                healed.join("\n")
-            },
-        ));
-    }
-
     Ok(())
 }
 
-/// Every blocker kind the verifier can PRODUCE has a remediation mapping, and
-/// there is no substituting default to hide a kind that does not. bd-sh3ew.
-///
-/// WHY THE TEST ABOVE DOES NOT COVER THIS, though it already reads liveness.
-/// Its population is "bead-id literals appearing inside `remediation_bead_for`".
-/// Adding a thirteenth blocker kind without a mapping changes no literal in
-/// that function, so the citation set is identical and the test stays green --
-/// while every run of the new kind cites whatever the fallback returns. Worse,
-/// the fallback's id was itself on that test's KNOWN_STALE baseline, so its
-/// staleness was not merely invisible, it was explicitly excused. A gate can be
-/// correct over a perfect population and still be blind to the thing that
-/// breaks it: this defect fires by changing a set the gate does not read.
-///
-/// So this is a set-difference, in both directions:
-///   - a kind with no mapping would be answered by a default, or by nothing;
-///   - a mapping key no kind can produce is dead weight that reads as coverage.
-///
-/// AND IT ASSERTS THE ABSENT DEFAULT, because the set-difference only has teeth
-/// while there is no fallback. Re-add `mapping.get(kind, "bd-...")` and an
-/// unmapped kind silently resolves again -- the sets would still agree while
-/// the defect this exists to prevent is back. The two assertions are
-/// load-bearing together and neither is sufficient alone.
+/// Every emitted kind has either a live bead or a stated unmapped reason.
+/// No closed-bead grandfathering; missing kinds and parse failures stay red.
+/// The checker also exercises fresh/cached entry fields. bd-5d8rx, bd-sh3ew.
 #[test]
-fn rch_verify_every_blocker_kind_has_a_remediation_mapping() -> TestResult {
-    let script = fs::read_to_string(script_path())
-        .map_err(|error| format!("read rch_verify.sh: {error}"))?;
+fn rch_verify_every_blocker_has_live_bead_or_reason() -> TestResult {
+    check_remediation_guidance(&[])
+}
 
-    // A nested fn with an explicit lifetime, not a closure: a closure returning
-    // `Result<&str, _>` ties the borrow to its `name` argument rather than to
-    // `script`, which does not compile.
-    fn slice_python_fn<'a>(script: &'a str, name: &str) -> Result<&'a str, String> {
-        script
-            .split_once(&format!("def {name}("))
-            .and_then(|(_, rest)| rest.split_once("\ndef "))
-            .map(|(body, _)| body)
-            .ok_or_else(|| format!("{name} not found in rch_verify.sh"))
-    }
-    let slice_fn = |name: &str| slice_python_fn(&script, name);
-
-    // The kinds the verifier can emit: every string literal `blocker_kind_for`
-    // returns. Its `return None` arm is guarded by `if blocker_kind:` at the
-    // call site and needs no mapping.
-    let kind_body = slice_fn("blocker_kind_for")?;
-    let mut kinds: BTreeSet<String> = BTreeSet::new();
-    for chunk in kind_body.split("return \"").skip(1) {
-        if let Some(end) = chunk.find('"') {
-            kinds.insert(chunk[..end].to_owned());
-        }
-    }
-
-    let map_body = slice_fn("remediation_bead_for")?;
-    let mut mapped: BTreeSet<String> = BTreeSet::new();
-    for line in map_body.lines() {
-        let Some(rest) = line.trim().strip_prefix('"') else {
-            continue;
-        };
-        let Some((key, value)) = rest.split_once("\": ") else {
-            continue;
-        };
-        if value.trim_start().starts_with("\"bd-") {
-            mapped.insert(key.to_owned());
-        }
-    }
-
-    // EMPTY-WORLD GUARDS, on both parses. An empty set is a subset of
-    // everything, so either parser breaking would make this test agree with any
-    // tree at all. Asserted before the comparison, not after it.
-    if kinds.len() < 8 {
-        return Err(format!(
-            "parsed only {} blocker kinds from blocker_kind_for; the function's \
-             shape changed and this test can no longer read it",
-            kinds.len()
-        ));
-    }
-    if mapped.len() < 8 {
-        return Err(format!(
-            "parsed only {} mapping keys from remediation_bead_for; the mapping \
-             shape changed and every kind would read as unmapped",
-            mapped.len()
-        ));
-    }
-
-    let unmapped: Vec<&String> = kinds.difference(&mapped).collect();
-    let dead: Vec<&String> = mapped.difference(&kinds).collect();
-    if !unmapped.is_empty() || !dead.is_empty() {
-        return Err(format!(
-            "blocker kinds and remediation mappings disagree.\nKINDS WITH NO \
-             MAPPING (each answered by the fallback, or by nothing): \
-             {unmapped:?}\nMAPPING KEYS NO KIND CAN PRODUCE (dead entries that \
-             read as coverage): {dead:?}"
-        ));
-    }
-
-    // No substituting default. `mapping.get(blocker_kind)` is the contract;
-    // `mapping.get(blocker_kind, "bd-...")` is the defect bd-sh3ew removed.
-    let returns: Vec<&str> = map_body
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("return mapping.get("))
-        .collect();
-    if returns.len() != 1 {
-        return Err(format!(
-            "expected exactly one `return mapping.get(...)` in \
-             remediation_bead_for, found {}: {returns:?}",
-            returns.len()
-        ));
-    }
-    if returns[0] != "return mapping.get(blocker_kind)" {
-        return Err(format!(
-            "remediation_bead_for substitutes a default for unmapped blocker \
-             kinds: `{}`. An unmapped kind must yield NO bead -- a substituted \
-             id is emitted beside retry_after and tells an operator to wait on \
-             work that may already be closed (bd-sh3ew).",
-            returns[0]
-        ));
-    }
-
-    Ok(())
+/// Plant missing guidance, blank reasons, closed/missing beads, and empty
+/// populations in memory. Each must fail the SAME checker used above.
+/// Conversely, all kinds explicitly unmapped is legal, even with zero beads.
+#[test]
+fn rch_verify_remediation_guidance_rejects_planted_gaps() -> TestResult {
+    check_remediation_guidance(&["--self-test"])
 }

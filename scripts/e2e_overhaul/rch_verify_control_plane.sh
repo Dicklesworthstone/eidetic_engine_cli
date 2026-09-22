@@ -264,8 +264,10 @@ if "rch_verify_cargo_workspace_inheritance_blocked" not in (report.get("degraded
 blocker = report.get("known_blocker") or {}
 if blocker.get("blocker_kind") != "cargo_workspace_inheritance":
     raise SystemExit(f"missing workspace-inheritance known blocker: {report}")
-if blocker.get("remediation_bead") != "bd-17c65.10.17.1.3":
-    raise SystemExit(f"known blocker should route to topology remediation: {report}")
+if (blocker.get("remediation_bead") is not None
+        or blocker.get("remediation_bead_status") != "unmapped"
+        or "no current remediation owner" not in str(blocker.get("remediation_reason") or "")):
+    raise SystemExit(f"known blocker must explain the absence of current remediation: {report}")
 if not str(blocker.get("blocker_fingerprint") or "").startswith("sha256:"):
     raise SystemExit(f"missing blocker fingerprint: {report}")
 if blocker.get("override_used") is not False:

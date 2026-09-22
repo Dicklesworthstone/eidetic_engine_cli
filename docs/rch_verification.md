@@ -730,10 +730,25 @@ known-blocker path applies:
   required for matching future refusals.
 - `known_blocker.first_seen`, `known_blocker.last_seen`, `known_blocker.expires_at`,
   and `known_blocker.retry_after`: RFC 3339 timestamps that bound the refusal.
-- `known_blocker.remediation_bead`: Bead ID that owns the root remediation, for
-  example `bd-17c65.10.17.1.3` for path-dependency workspace classification.
+- `known_blocker.remediation_bead`: Live Bead ID that owns the remediation, or
+  `null` when no matching current owner is established. Closed implementation
+  or incident records are not remediation targets.
+- `known_blocker.remediation_bead_status`: `mapped` or `unmapped`.
+- `known_blocker.remediation_reason`: Nonempty explanation required when
+  `unmapped`; `null` when a live bead is mapped. Every emitted blocker kind
+  must have either a live bead or an explicit unmapped reason. Cached refusals
+  refresh these guidance fields from the current table without changing their
+  evidence, fingerprints, or expiry.
 - `known_blocker.override_used`: `true` only when an explicit override launched
   a new remote run despite the active blocker.
+
+The local contract check is `python3 -B scripts/check-rch-remediation-guidance.py`;
+`--self-test` also plants missing guidance, blank reasons, and closed/missing
+beads to verify rejection. The Rust contract suite invokes this same checker.
+It reads the tracked `.beads/issues.jsonl` export and does not probe live RCH or
+the tracker. Bead status alone cannot justify a replacement: reviewers must
+check that its content addresses the emitted blocker kind. The separate
+unconditional six-hour `retry_after` policy is unchanged by this reference repair.
 
 Fingerprint inputs must be narrow enough that fixed or meaningfully different
 work can still verify. At minimum include blocker kind, normalized degraded code
