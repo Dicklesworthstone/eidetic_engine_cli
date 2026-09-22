@@ -4566,7 +4566,14 @@ mod tests {
     }
 
     fn normalize_context_pack_text(text: &str) -> String {
-        let mut normalized = normalize_context_pack_artifact_paths(text);
+        // The markdown twin of the timing scrub in normalize_context_pack_json.
+        // That one reached the JSON golden and the markdown embedded in it, but
+        // not this path, so context_pack.md.golden still read "3 degraded
+        // signals" plus a millisecond bullet on a loaded worker and 2 without it
+        // on an idle one (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
+        // First, while the text is still the renderer's output.
+        let (timing_scrubbed, _dropped) = ee::obs::normalize_pack_timing_markdown(text);
+        let mut normalized = normalize_context_pack_artifact_paths(&timing_scrubbed);
         normalized = normalize_context_pack_hash_comments(&normalized);
         normalized = normalize_context_pack_workspace_ids(&normalized);
         normalized

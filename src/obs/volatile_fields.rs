@@ -335,6 +335,42 @@ fn renumber_degraded_signal_prose(text: &str, dropped: usize) -> String {
     out
 }
 
+/// The markdown half of [`normalize_pack_timing_degradations`], for a pack
+/// rendered with `--format markdown`, where there is no `degraded[]` to count.
+///
+/// The JSON normalizer learns how many entries it dropped from the array and
+/// rewrites the prose by that number. A standalone markdown document has only
+/// the rendered bullets, so the count comes from them instead: each timing
+/// bullet is one entry the "Context includes N degraded signals" sentence
+/// counted. Without this, tests/fixtures/golden/agent/context_pack.md.golden
+/// stayed load-sensitive after the JSON golden was fixed -- it read 3 signals
+/// plus a millisecond bullet on a loaded worker and 2 without it on an idle one
+/// (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
+///
+/// Returns the normalized text and the number of bullets dropped, so a caller
+/// can tell "bit" from "no-op".
+pub fn normalize_pack_timing_markdown(text: &str) -> (String, usize) {
+    let dropped = text
+        .split('\n')
+        .filter(|line| is_timing_degradation_bullet(line))
+        .count();
+    if dropped == 0 {
+        return (text.to_owned(), 0);
+    }
+    let without_bullet = strip_timing_degradation_markdown(text);
+    (
+        renumber_degraded_signal_prose(&without_bullet, dropped),
+        dropped,
+    )
+}
+
+/// One predicate for "this line is the timing bullet", shared by the counter
+/// above and the stripper below so the number subtracted from the prose is
+/// always the number of bullets actually removed.
+fn is_timing_degradation_bullet(line: &str) -> bool {
+    line.trim_start().starts_with("- **[") && line.contains(TIMING_DEGRADED_MESSAGE_PREFIX)
+}
+
 /// Drop the rendered markdown bullet for the timing degradation, and the
 /// `- *Repair:*` line that belongs to it.
 fn strip_timing_degradation_markdown(text: &str) -> String {
@@ -345,7 +381,7 @@ fn strip_timing_degradation_markdown(text: &str) -> String {
     let mut skipping = false;
     for line in text.split('\n') {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("- **[") && line.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+        if is_timing_degradation_bullet(line) {
             skipping = true;
             continue;
         }
@@ -456,7 +492,7 @@ fn log_volatile_strip(report: &VolatileStripReport) {
 mod tests {
     use super::{
         VOLATILE_FIELD_NAMES, is_volatile_field_name, normalize_pack_timing_degradations,
-        strip_volatile_fields,
+        normalize_pack_timing_markdown, strip_volatile_fields,
     };
 
     type TestResult = Result<(), String>;
@@ -646,6 +682,70 @@ mod tests {
             return Err(format!(
                 "document was modified with nothing to drop:\n{value:#}"
             ));
+        }
+        Ok(())
+    }
+
+    /// The same convergence for a pack rendered as markdown, which has no
+    /// `degraded[]` to count and so must take the count from the bullets.
+    ///
+    /// The bodies are the ones `timing_pair` embeds in `/data/pack/text`: the
+    /// renderer produces the same markdown for `--format markdown`, so the two
+    /// normalizers are held to the same fixtures.
+    #[test]
+    fn timing_markdown_reads_the_same_on_a_fast_and_a_slow_host() -> TestResult {
+        let (fast, slow) = timing_pair();
+        let body = |document: &serde_json::Value| {
+            document
+                .pointer("/data/pack/text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or("fixture lost /data/pack/text")
+        };
+        let fast_md = body(&fast)?;
+        let slow_md = body(&slow)?;
+        if fast_md == slow_md {
+            return Err("markdown fixtures are identical; the test proves nothing".into());
+        }
+
+        let (fast_out, fast_dropped) = normalize_pack_timing_markdown(&fast_md);
+        let (slow_out, slow_dropped) = normalize_pack_timing_markdown(&slow_md);
+        if slow_dropped != 1 || fast_dropped != 0 {
+            return Err(format!(
+                "must drop 1 bullet on slow and 0 on fast, dropped {slow_dropped} and {fast_dropped}"
+            ));
+        }
+        if fast_out != fast_md {
+            return Err(format!("fast markdown must be untouched, got:\n{fast_out}"));
+        }
+        if slow_out != fast_out {
+            return Err(format!(
+                "host-dependent markdown:\nfast:\n{fast_out}\n\nslow:\n{slow_out}"
+            ));
+        }
+        if !slow_out.contains("Context includes 2 degraded signals")
+            || !slow_out.contains("Embedding model unavailable")
+        {
+            return Err(format!(
+                "deterministic prose and bullets must survive:\n{slow_out}"
+            ));
+        }
+        println!("normalized markdown:\n{slow_out}");
+        Ok(())
+    }
+
+    /// 2 -> 1 in markdown must re-pluralize exactly as the JSON path does.
+    #[test]
+    fn timing_markdown_dropping_to_one_repluralizes() -> TestResult {
+        let text = "Context includes 2 degraded signals; check the index.\n\n\
+                    - **[low]** Pack assembly took 900ms, over budget.\n  \
+                    - *Repair:* `Re-run.`\n";
+        let (out, dropped) = normalize_pack_timing_markdown(text);
+        if dropped != 1 {
+            return Err(format!("expected to drop 1, dropped {dropped}"));
+        }
+        if out != "Context includes 1 degraded signal; check the index.\n\n" {
+            return Err(format!("unexpected normalized markdown: {out:?}"));
         }
         Ok(())
     }

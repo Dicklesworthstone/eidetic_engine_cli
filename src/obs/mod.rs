@@ -19,7 +19,8 @@ pub use test_log::{
 };
 pub use volatile_fields::{
     VOLATILE_FIELD_NAMES, VolatileStripReport, is_volatile_field_name,
-    normalize_pack_slo_measurements, normalize_pack_timing_degradations, strip_volatile_fields,
+    normalize_pack_slo_measurements, normalize_pack_timing_degradations,
+    normalize_pack_timing_markdown, strip_volatile_fields,
 };
 
 #[must_use]
