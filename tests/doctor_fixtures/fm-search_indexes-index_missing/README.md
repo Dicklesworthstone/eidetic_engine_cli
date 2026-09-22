@@ -11,9 +11,11 @@
 
 1. Provide an empty target directory and a real, prebuilt `ee` through
    `EE_DOCTOR_FIXTURE_BINARY`. `corrupt.sh` refuses nonempty or symlink targets.
-2. It runs `ee init --skip-boilerplate --json` and requires the shared health
-   assertion to pass before altering anything. The database and search index
-   must exist; an uninitialized directory is not a substitute.
+2. It runs `ee init --skip-boilerplate --json`, remembers a real source memory,
+   and rebuilds the index, requiring at least one memory indexed. It requires
+   the shared health assertion to pass before altering anything. The database
+   and populated search index must exist; an empty corpus or uninitialized
+   directory is not a substitute.
 3. It moves `.ee/index` into `.fixture_baseline/healthy-index`, preserving every
    byte, then captures the corrupted pre-fix content digest. No file is deleted.
 4. Real doctor output must identify `search_index` warning `EE-E300`, with

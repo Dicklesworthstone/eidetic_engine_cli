@@ -22,6 +22,13 @@ command -v "$ee_bin" >/dev/null
 mkdir -p "$target/.fixture_baseline"
 "$ee_bin" --workspace "$target" init --skip-boilerplate --json \
     > "$target/.fixture_baseline/init.json"
+"$ee_bin" remember "Preserve this source memory when the derived search index is missing." \
+    --workspace "$target" --level procedural --kind rule --json \
+    > "$target/.fixture_baseline/remember.json"
+"$ee_bin" index rebuild --workspace "$target" --json \
+    > "$target/.fixture_baseline/index-healthy.json"
+jq -e '.schema == "ee.response.v2" and .success == true and .data.memories_indexed >= 1' \
+    "$target/.fixture_baseline/index-healthy.json" >/dev/null
 "$ee_bin" doctor --workspace "$target" --json \
     > "$target/.fixture_baseline/doctor-healthy.json"
 doctor_fixture_assert_health_report "fm-search_indexes-index_missing" \
