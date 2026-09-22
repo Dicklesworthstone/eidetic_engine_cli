@@ -1163,3 +1163,100 @@ fn declared_eval_queries_do_not_drift_toward_lexical_direct_hits() -> TestResult
         "declared queries that appear verbatim in the memory they must retrieve",
     )
 }
+
+/// bd-j09rg. The evaluator used to keep `report.results` and discard the rest
+/// of the SearchReport, so every diagnostic search raised was dropped at the
+/// boundary -- including the orphan filtering that made 40 queries across six
+/// families return nothing while the reports still rendered as ordinary
+/// failures. The carry-through now exists, but its only other coverage is
+/// in-crate unit tests over SYNTHETIC reports, which pass whether or not the
+/// real binary emits anything at all.
+///
+/// So this asserts on OBSERVED OUTPUT of the actual CLI. A test built on a
+/// constructed fixture proves the fixture; this exists solely to go red if the
+/// wire is cut again.
+///
+/// THE LOAD-BEARING ASSERTION IS NOT "degradations exist". It is that they
+/// arrive ATTRIBUTED PER QUERY and cover the fixture's declared inventory
+/// exactly. A severed channel cannot produce that, and neither can a single
+/// collapsed entry -- src/eval/runner.rs states the intent as "Do not collapse
+/// equal codes across queries: that would hide which workload was affected."
+/// Presence alone would still pass if attribution were dropped.
+///
+/// WHEN THIS GOES RED AND THE PLUMBING IS FINE. Every eval search currently
+/// runs on a non-semantic hash embedder stack, so `embed_model_unavailable`
+/// and `rerank_model_unavailable` are raised for every query. If the evaluator
+/// ever gains a real semantic embedder those stop and an empty `degraded` is
+/// legitimate. The failure text names both readings rather than asserting the
+/// wire broke, because an assertion that reds when the feature works is worse
+/// than none if the next reader cannot tell which happened.
+///
+/// This test deliberately does NOT fail the run because degradations exist.
+/// They exist on every run today, so that rule would pin this gate red from
+/// the first minute and teach everyone to ignore it.
+#[test]
+fn eval_run_surfaces_search_degradations_attributed_to_each_query() -> TestResult {
+    const FIXTURE: &str = "fx.dangerous_cleanup.v1";
+    let (_, declared) = RETRIEVAL_WORKLOADS
+        .iter()
+        .find(|(id, _)| *id == FIXTURE)
+        .ok_or_else(|| format!("{FIXTURE} is not a declared retrieval workload"))?;
+
+    let value = command_json(&["--json", "eval", "run", FIXTURE])?;
+    let degraded = value["degraded"]
+        .as_array()
+        .ok_or_else(|| format!("eval run emitted no degraded array at all: {value}"))?;
+
+    if degraded.is_empty() {
+        return Err(format!(
+            "eval run reported zero search degradations for {FIXTURE}. Two readings, \
+             and they need different responses: (1) the per-query carry-through in \
+             compute_search_query_metrics / retrieval_degradations was severed again, \
+             which is the regression this test exists to catch; or (2) the evaluator \
+             gained a real semantic embedder, so embed_model_unavailable and \
+             rerank_model_unavailable legitimately stopped. Check \
+             sourceModeApplied on a manual `ee --json eval run {FIXTURE}` before \
+             assuming the first."
+        ));
+    }
+
+    let mut attributed = BTreeSet::new();
+    let mut codes = BTreeSet::new();
+    for entry in degraded {
+        let code = entry["code"]
+            .as_str()
+            .ok_or_else(|| format!("degradation without a code: {entry}"))?;
+        codes.insert(code.to_owned());
+        let details = &entry["details"];
+        ensure_equal(
+            &details["fixtureId"].as_str(),
+            &Some(FIXTURE),
+            "degradation attributed to its fixture",
+        )?;
+        for field in ["sourceModeRequested", "sourceModeApplied", "searchStatus"] {
+            if !details[field].is_string() {
+                return Err(format!(
+                    "degradation {code} lost {field}; the search layer's own \
+                     classification is what makes a degraded measurement legible: {entry}"
+                ));
+            }
+        }
+        let query = details["query"]
+            .as_str()
+            .ok_or_else(|| format!("degradation {code} is not attributed to a query: {entry}"))?;
+        attributed.insert(query.to_owned());
+    }
+
+    // Printed, not asserted: pinning the exact code set would red on any
+    // honest change to the embedder stack, which is not what this guards.
+    println!(
+        "observed degradation codes for {FIXTURE}: {codes:?} across {} entries",
+        degraded.len()
+    );
+
+    ensure_equal(
+        &attributed,
+        &declared.iter().copied().map(str::to_owned).collect(),
+        "every declared query carries its own search degradation",
+    )
+}
