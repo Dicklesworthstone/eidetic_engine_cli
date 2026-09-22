@@ -1,43 +1,159 @@
-name: Core learning-loop regressions
+name: Workspace relocation regressions
 on:
   push:
     branches: [main]
     paths:
-      - src/core/outcome*.rs
-      - src/core/rule*.rs
+      - src/core/workspace*.rs
+      - src/core/effect.rs
+      - src/db/mod.rs
+      - src/cli/mod.rs
+      - src/policy/store_auth.rs
+      - tests/contracts/workspace_relocation.rs
       - .github/workflows/core-loop-regressions.yml
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: core-learning-loop-${{ github.ref }}
+  group: workspace-relocation-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  core-learning-loop:
+  workspace-relocation:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Record the exact committed source and open work
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: workspace-relocation-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            workspace-relocation-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Assemble the reviewed candidate against exact base blobs
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/core-loop-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/core-loop-source.tar.gz" HEAD
           python3 - <<'PY'
-          import json, os, pathlib
-          source = pathlib.Path('.beads/issues.jsonl')
-          issues = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
-          active = [row for row in issues if row.get('status') != 'closed']
-          active.sort(key=lambda row: (row.get('priority', 9), row.get('id', '')))
-          output = pathlib.Path(os.environ['RUNNER_TEMP'], 'core-loop-active-beads.json')
-          output.write_text(json.dumps(active, indent=2))
-          print(f'{len(active)} active beads; complete committed source retained for qualification')
+          import base64, hashlib, json, os, pathlib, subprocess
+          repo = 'repos/Dicklesworthstone/eidetic_engine_cli/git/blobs/'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def fetch(sha):
+              response = json.loads(subprocess.check_output(['gh', 'api', repo + sha]))
+              data = base64.b64decode(response['content'])
+              digest = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert digest == sha, 'Transport changed candidate bytes'
+              return data
+          bases = {
+            'src/db/mod.rs': '4f5a9f4c13df61cc4ae6229d9be8b2cba20685b9',
+            'src/cli/mod.rs': '4fb7fb6849907a8e9941f4c36d4bc82d2deefdb1',
+            'src/core/workspace.rs': 'ca24468cb084174c2f9be1e2a06af4cd40e4df41',
+            'src/policy/store_auth.rs': '712703b439bece376ab7d4f318a43f93354b6e63',
+            'src/core/effect.rs': '8b28e6226f4307f676fc5187aec9a10e51c1a6ab',
+            'src/output/mod.rs': '2fb2a3e2232319d9608e0092794dd8a0cc9ec534',
+            'tests/contracts.rs': 'f36d38050ec5689dc3a51d72e76e77b186b7661b',
+            'README.md': '51ff2445795140e673cc02727c432a0b4e7569a1',
+          }
+          additions = {
+            'src/core/workspace_relocation.rs': '684a602c3a23de1a08020a48e53f20d9e19fc922',
+            'src/core/workspace_relocation_tests.rs': '96a06986601ac09e18e71d76fa5f65b85cee2316',
+            'tests/contracts/workspace_relocation.rs': '01a64cc6ef25d0229a85a63c45d2d2c17bf75fca',
+            'docs/schemas/ee.workspace.relocate.v1.json': '9883d38dda2d8b394f6489da5fb01debb8589ebe',
+            'docs/adr/0089-authenticated-workspace-relocation.md': '55e22c08e59b67d23fd930a02e83313f1039f442',
+          }
+          for path, expected in bases.items():
+              assert git('rev-parse', 'HEAD:' + path) == expected, 'Concurrent source change: ' + path
+          for path in additions:
+              assert not pathlib.Path(path).exists(), 'Unexpected existing candidate path: ' + path
+          patch = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-reviewed.patch')
+          patch.write_bytes(fetch('6c52c35ce65d6dc2fdd6a8506fcd7819f9205579'))
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, sha in additions.items():
+              pathlib.Path(path).write_bytes(fetch(sha))
+          paths = list(bases) + list(additions)
+          rust = [path for path in paths if path.endswith('.rs')]
+          subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          manifest = {'baseCommit': git('rev-parse', 'HEAD'), 'files': []}
+          for path in paths:
+              data = pathlib.Path(path).read_text()
+              response = json.loads(subprocess.check_output(['gh', 'api', repo.rstrip('/'), '--input', '-'], input=json.dumps({'content': data, 'encoding':'utf-8'}).encode()))
+              assert response['sha'] == git('hash-object', path)
+              manifest['files'].append({'path':path, 'baseBlob':bases.get(path), 'sha':response['sha']})
+          output = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-source.json')
+          output.write_text(json.dumps(manifest, indent=2))
+          print(output.read_text())
+          subprocess.run(['git', 'add', '--intent-to-add', '--', *additions], check=True)
+          patch.write_text(subprocess.check_output(['git', 'diff'], text=True))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
         with:
-          name: core-loop-source
-          path: ${{ runner.temp }}/core-loop-*
+          name: relocation-source
+          path: ${{ runner.temp }}/relocation-*
           retention-days: 3
-          if-no-files-found: error
+      - name: Check all Cargo targets
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/relocation-check.log"
+      - name: Verify relocation and atomicity with real stores
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib core::workspace::relocation::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-unit.log"
+          grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log"
+          cargo test --locked --lib db::tests::workspace_relocation_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-primitive.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-primitive.log"
+      - name: Verify the public copy approval reindex and retrieval loop
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test contracts workspace_relocation:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/relocation-public.log"
+          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-public.log"
+      - name: Report strict Clippy and repository formatting
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/relocation-clippy.log"
+          lint=${PIPESTATUS[0]}
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/relocation-format.log"
+          fmt=${PIPESTATUS[0]}
+          test "$lint" -eq 0 && test "$fmt" -eq 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: relocation-verification
+          path: ${{ runner.temp }}/relocation-*
+          retention-days: 3
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
