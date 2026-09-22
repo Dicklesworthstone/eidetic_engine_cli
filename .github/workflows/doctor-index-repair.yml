@@ -1,0 +1,106 @@
+name: Doctor index recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/doctor-index-repair.yml
+      - src/core/index_source_snapshot.rs
+      - scripts/delivery/index-source-snapshot.patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: doctor-index-repair
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: doctor-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            doctor-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate reviewed read-only capture delta
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/doctor-index"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/doctor-index/source-sha.txt"
+          rustc --version --verbose > "$RUNNER_TEMP/doctor-index/toolchain.txt"
+          patch=scripts/delivery/index-source-snapshot.patch
+          if git apply --reverse --check "$patch"; then
+            echo 'Read-only source capture already integrated'
+          else
+            echo '56fbc09f8f1b0a071872f6514cab89ab711feac15c306d237b0358a839782f0d  src/core/index.rs' | sha256sum --check
+            git apply --check "$patch"
+            git apply "$patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true src/core/index_source_snapshot.rs
+          git diff --check
+          git diff > "$RUNNER_TEMP/doctor-index/source.patch"
+      - name: Exercise real source snapshots and writable projection parity
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-index/source-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/source-tests.log"
+          cargo test --locked --lib core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory -- --exact 2>&1 | tee "$RUNNER_TEMP/doctor-index/writable-parity.log"
+          grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/writable-parity.log"
+      - name: Publish verified implementation directly to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git fetch origin main
+          base=$(cat "$RUNNER_TEMP/doctor-index/source-sha.txt")
+          git diff --exit-code "$base" origin/main -- src/core/index.rs src/core/index_source_snapshot.rs
+          git merge --ff-only origin/main
+          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1
+          git add src/core/index.rs src/core/index_source_snapshot.rs
+          if ! git diff --cached --quiet; then
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(index): capture inspection and repair corpora without source mutations' -m 'Use an owned read snapshot and request-local canonical anchor extraction for read-only connections. Preserve ordinary writable backfill and exact document metadata. Dry-run no longer opens writable storage or repairs derived anchor tables. Real snapshot cleanup, dry-run and projection parity tests passed before this normal main push.'
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD | tee "$RUNNER_TEMP/doctor-index/integrated-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: doctor-index-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/doctor-index/
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

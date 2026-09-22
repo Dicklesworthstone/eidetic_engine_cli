@@ -1,0 +1,65 @@
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -59,6 +59,9 @@
+ #[path = "index_storage.rs"]
+ mod storage;
+ 
++#[path = "index_source_snapshot.rs"]
++mod source_snapshot;
++
+ #[cfg(unix)]
+ #[path = "index_read_lease.rs"]
+ mod read_lease;
+@@ -1679,7 +1682,11 @@
+     let index_dir = options.resolve_index_dir();
+     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+ 
+-    let db = DbConnection::open_file(&database_path)?;
++    let db = if options.dry_run {
++        DbConnection::open_file_read_only(&database_path)?
++    } else {
++        DbConnection::open_file(&database_path)?
++    };
+     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+     let _publish_lock = if options.dry_run {
+         None
+@@ -3764,7 +3771,7 @@
+     workspace_id: &str,
+     max_documents: Option<u32>,
+ ) -> Result<Option<WorkspaceIndexSourceSnapshot>, IndexRebuildError> {
+-    db.with_transaction_error(|| {
++    source_snapshot::capture(db, || {
+         // Enforce the interactive ceiling before hydrating source bodies, in
+         // the same transaction as the generation and corpus reads. A writer
+         // cannot grow a previously small corpus between admission and capture.
+@@ -3900,17 +3907,23 @@
+         // never downgrades a cass_import/curate_apply source to index_rebuild.
+         let mut anchors = db.list_memory_anchors(&memory.id)?;
+         if anchors.is_empty() {
+-            db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
+-            anchors = db.list_memory_anchors(&memory.id)?;
++            if db.mode() == crate::db::DatabaseOpenMode::ReadOnly {
++                anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);
++            } else {
++                db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
++                anchors = db.list_memory_anchors(&memory.id)?;
++            }
+         }
+         // ADR 0064: the anchor reverse index is rebuilt alongside the
+         // search documents so `ee index rebuild` restores it from
+         // scratch and its MAX(generation) advances with the rebuild.
+-        db.refresh_memory_anchor_index_for_memory(
+-            &memory.workspace_id,
+-            &memory.id,
+-            &memory.content,
+-        )?;
++        if db.mode() != crate::db::DatabaseOpenMode::ReadOnly {
++            db.refresh_memory_anchor_index_for_memory(
++                &memory.workspace_id,
++                &memory.id,
++                &memory.content,
++            )?;
++        }
+         let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
+         documents.push(memory_to_document_with_context_anchors_and_typed_fields(
+             memory,
