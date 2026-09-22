@@ -1,0 +1,72 @@
+name: Public memory lifecycle
+on:
+  workflow_run:
+    workflows: [Exact memory time]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-memory-lifecycle-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: memory-lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            memory-lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Build the exact committed binary
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/lifecycle-source.log"
+          grep -Fq 'typed_revision.apply(&conn, &new_id)?;' src/core/memory.rs
+          grep -Fq 'mod memory_temporal;' src/db/mod.rs
+          cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/lifecycle-build.log"
+      - name: Exercise capture, typed revision and two recovery cycles
+        run: |
+          set -euo pipefail
+          python3 tests/memory_lifecycle_cli.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/lifecycle-public.log"
+          grep -q '^PASS: exact lifecycle timestamps' "$RUNNER_TEMP/lifecycle-public.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: memory-lifecycle-results-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/lifecycle-*.log
+            /tmp/ee-lifecycle-cli-*/commands.jsonl
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
