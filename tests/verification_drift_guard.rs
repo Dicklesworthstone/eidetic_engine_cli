@@ -4040,7 +4040,12 @@ const P50_PROVENANCE_MARKER: &str = "# P50_PROVENANCE ";
 /// says out loud that it is a guess, and is counted here so the debt is a
 /// figure somebody has to look at rather than a silence. Measuring one means
 /// lowering this by one in the same commit.
-const UNVERIFIED_CARGO_P50_ALLOWANCE: usize = 6;
+///
+/// Set to 4 on 2026-09-22, the exact number of cargo stages carrying an
+/// inherited p50 after bd-vihzq's pass: "Unit, Contract, and Golden Tests",
+/// "Advanced E2E Scripts", "Basic E2E Scripts" and "Fuzz Smoke: search query
+/// parser". It is not slack -- there is none.
+const UNVERIFIED_CARGO_P50_ALLOWANCE: usize = 4;
 
 const CARGO_SCAN_EXEMPTIONS: [(&str, &str); 5] = [
     (

@@ -22,6 +22,49 @@
 # the marker with a real p50 the first time the stage is timed, and lower
 # UNMEASURED_STAGE_ALLOWANCE in tests/verification_drift_guard.rs in the same
 # commit -- that allowance is a ratchet and only moves down.
+# p50 PROVENANCE FOR CARGO-INVOKING STAGES (bd-vihzq)
+#
+# THE HEADER ABOVE NAMES A HOST THIS REPO FORBIDS FOR THESE STAGES. It says
+# expected_seconds_p50 is "the expected median on a mid-tier dev machine". For
+# a stage that shells out to cargo, that host does not exist here:
+# scripts/check-local-cargo-tripwire.sh classifies a direct `cargo
+# build/check/test/bench/clippy` in this repo as DENIED (verified 2026-09-22:
+# "direct cargo test invocation bypasses the RCH wrapper"), AGENTS.md says not
+# to fall back to local Cargo, and docs/operator-swarm-slo.md names Gate 5 and
+# the other cargo-heavy gates as RCH-only. So the cargo stages' p50s cannot
+# have been measured the way the header says they were measured. That is not a
+# wording quibble; it is the reason nobody noticed the numbers going stale.
+#
+# A cargo stage's cost is NOT its script's cost. It is dominated by the
+# toolchain re-walking freshness across every crate in Cargo.lock (573 today).
+# That walk is paid in full on EVERY entry into cargo and does not amortise
+# between invocations: one WARM single-target `cargo test --locked --test
+# lexical_relevance_contract -- --ignored` on RCH worker hz4 at 82926d4c5 cost
+# 74s with zero Compiling lines and 0.00s of actual test execution.
+#
+# Every stage that reaches cargo therefore carries a machine-checked record:
+#
+#   # P50_PROVENANCE measured=YYYY-MM-DD host=<host> load=<avg> \
+#       samples_s=a,b,c median_s=<m> declared_p50_s=<p50>
+#   # P50_PROVENANCE unmeasured_reason=<token>          (and NO p50 declared)
+#   # P50_PROVENANCE inherited_unverified_reason=<token> declared_p50_s=<p50>
+#
+# The third spelling exists because the file previously had no honest exit. A
+# cargo p50 nobody had timed could be left as a plausible-looking number, which
+# is the fabrication bd-vihzq was filed about, or dropped to `unmeasured`, which
+# pushes the unmeasured count past its own down-only allowance. The file
+# punished the honest move. `inherited_unverified_reason` keeps the number and
+# says out loud that it is a guess, and the count of them is ratcheted by
+# UNVERIFIED_CARGO_P50_ALLOWANCE in tests/verification_drift_guard.rs.
+#
+# `every_cargo_invoking_stage_declares_p50_provenance` enforces this, and it
+# restates declared_p50_s ON PURPOSE: a p50 can no longer be retuned to fit the
+# ceiling without editing the evidence beside it, which is exactly the
+# retune-to-fit that verification_drift_guard.rs:1361 calls fiction. It cannot
+# detect the world getting slower -- nothing static can, and verify.sh already
+# reports that at run time as `budget=advisory` / `budget=fail`. Its job is to
+# make sure the p50 those verdicts are computed against is a number somebody
+# actually observed, on a host they named.
 # REQUIREMENT POLICY (bd-reality-core-convergence-1azkt.5)
 #
 # Every stage is REQUIRED unless it declares otherwise. A stage may declare
@@ -452,6 +495,62 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Unit, Contract, and Golden Tests"
+# THE STAGE bd-vihzq WAS FILED ABOUT. 120 IS NOT A MEASUREMENT.
+#
+# The command is
+#     cargo test --workspace --lib --bins --tests --examples -- --test-threads=1
+# and three independent lines of evidence say 120s cannot be its median.
+#
+# 1. WHAT IT HAS TO RUN. 522 integration test targets under tests/, plus the
+#    lib and bins: 11,080 `#[test]` functions in src/ and 5,176 in tests/,
+#    16,256 in total, executed SERIALLY because of --test-threads=1. For 120s
+#    to be the median, the whole suite would have to average ~7ms per test
+#    INCLUDING 522 separate test-binary process launches and cargo's freshness
+#    walk. Counted 2026-09-22 with `grep -rn '^\s*#\[test\]'`.
+#
+# 2. THE FRESHNESS WALK, WHICH THIS STAGE PAYS ONCE FOR ALL 522 TARGETS. A
+#    WARM single-target `cargo test --locked --test lexical_relevance_contract
+#    -- --ignored` on RCH worker hz4 at 82926d4c5 took 74s with ZERO Compiling
+#    lines and 0.00s of test execution. That 74s is cargo re-walking freshness
+#    across the lock file, and this stage's walk covers every target rather
+#    than one.
+#
+# 3. A DIRECT OBSERVATION, WITH ITS CONTAMINATION STATED. On 2026-09-22 on RCH
+#    worker hz4 (64 cores, load 7.71) the BUILD PHASE ALONE of this stage --
+#    the same command with --no-run, so not a single test executed -- ran for
+#    639s and then failed to link. 639s is 5.3x the declared p50 for the whole
+#    stage. It is NOT offered as the p50: the working tree had just been synced,
+#    so that run compiled rather than only walking freshness, and it terminated
+#    on a build failure rather than completing. It is offered for the one thing
+#    it does establish without needing to be clean -- that the part of this
+#    stage which runs no tests at all does not fit inside 120s.
+#
+# WHY THE NUMBER IS STILL 120.
+#
+# Because every honest replacement is worse, and bd-vihzq says so directly:
+# "do NOT raise the ceiling to accommodate a stage". The non-benchmark p50s
+# total exactly 601 against a 601 ceiling, so there is no headroom; writing the
+# real figure here would red verification_drift_guard.rs for the whole swarm,
+# and writing a smaller-but-larger guess would repeat the original defect with
+# a fresher date on it. Lowering another stage to make room is the retune-to-fit
+# the ceiling comment already calls fiction.
+#
+# So the number stays and is LABELLED, and the two consequences are stated
+# rather than absorbed:
+#   - p50*3 = 360s is a HARD FAIL line derived from a number nobody measured,
+#     sitting under a stage whose no-test build phase alone was observed at
+#     639s. Either this gate has not been failing because full runs are rare,
+#     or it has been failing and being re-run.
+#   - The 601s readiness ceiling is not a budget this suite fits inside. It is
+#     an ASPIRATION. Re-deriving it from measured totals is a decision for
+#     whoever owns the 10-minute target, and bd-vihzq is where that decision
+#     belongs -- not in a drive-by edit from the stage that noticed.
+#
+# TO REPLACE THIS RECORD: time the command end to end on a named host under a
+# named load, several samples, median. Note that it needs more than the 900s
+# rch job timeout, and that local cargo is denied in this repo by
+# scripts/check-local-cargo-tripwire.sh, so it is an RCH measurement or none.
+# P50_PROVENANCE inherited_unverified_reason=build-phase-alone-observed-at-639s declared_p50_s=120
 expected_seconds_p50 = 120
 regression_factor = 1.5
 
@@ -519,6 +618,22 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Basic E2E Scripts"
+# CARGO REACH IS CONDITIONAL HERE, AND THAT IS THE ONLY REASON 20 SURVIVES
+# THIS PASS (bd-vihzq).
+#
+# scripts/e2e_test.sh:149 guards its cargo call:
+#     if [[ ! -x "${EE_BINARY}" ]]; then cargo build --manifest-path ...
+# verify.sh resolves and refuses to run without the candidate binary, so on the
+# normal path the guard is false and this stage never enters cargo at all.
+# Unlike "Advanced E2E Scripts" below, the cargo cost is not on the hot path,
+# and 20s for the e2e driver itself is not obviously impossible.
+#
+# It is still NOT a measurement: nobody timed it, and the number carries no
+# host. It is also a latent trap -- on any run where the binary IS missing this
+# stage silently becomes a full `cargo build` against a 20s p50 and a 60s
+# hard-fail line, and the failure would be read as "the e2e suite got slow"
+# rather than "the build moved into the e2e stage".
+# P50_PROVENANCE inherited_unverified_reason=never-timed-cargo-path-is-conditional declared_p50_s=20
 expected_seconds_p50 = 20
 regression_factor = 1.5
 
@@ -734,6 +849,36 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Advanced E2E Scripts"
+# NOT A MEASUREMENT, AND ARITHMETIC ALONE SETTLES IT (bd-vihzq).
+#
+# scripts/e2e_advanced.sh RE-ENTERS CARGO FOUR TIMES in one stage:
+#   e2e_advanced.sh:160  cargo build --manifest-path ...        (if the binary is absent)
+#   e2e_advanced.sh:729  cargo test --test e2e_backup_restore_roundtrip -- --nocapture
+#   e2e_advanced.sh:782  cargo test --test e2e_daemon_recovery       -- --nocapture
+#   e2e_advanced.sh:836  cargo test --test e2e_multi_agent_writers   -- --nocapture
+#
+# Each `cargo test --test <target>` is a separate entry into cargo, and each one
+# pays the freshness walk over the whole lock file in full -- that walk does not
+# amortise across invocations, which is the entire finding bd-vihzq rests on.
+# The one hard datum in hand: a WARM single-target `cargo test --locked --test
+# lexical_relevance_contract -- --ignored` on RCH worker hz4 at 82926d4c5 took
+# 74s with zero Compiling lines and 0.00s of test execution.
+#
+# Three warm re-entries is therefore ~220s of freshness walking BEFORE any of
+# these three e2e suites does a single second of its own work. The declared p50
+# is 20, and verify.sh hard-fails at p50*3 = 60s. A stage whose unavoidable
+# floor is roughly 3.7x its own hard-fail line has not been timed by anyone; 20s
+# is not a median of this command, it is a number that predates the command
+# gaining three cargo re-entries.
+#
+# NOT CORRECTED TO THE INFERRED FIGURE, on purpose. ~220s is derived from one
+# sample taken on a contended worker, and bd-vihzq exists because inferred
+# figures were written into this file as if they were observations. Replacing a
+# wrong number with a differently-sourced wrong number is the same defect. The
+# number stays put, labelled, until the stage is timed end to end on a named
+# host -- which also needs the ceiling conversation below, because the honest
+# figure does not fit in what is left of 601s.
+# P50_PROVENANCE inherited_unverified_reason=predates-three-cargo-reentries declared_p50_s=20
 expected_seconds_p50 = 20
 regression_factor = 1.5
 
@@ -811,6 +956,19 @@ expected_seconds_p50_unmeasured = true
 
 [[stage]]
 name = "Write Contention E2E (bd-d67os.27)"
+# A CARGO STAGE, AND HONESTLY UNMEASURED (bd-vihzq).
+#
+# Its command opens with `cargo build --locked --bin ee` before the harness
+# runs, so this stage carries a full cargo re-entry of its own -- the same
+# freshness walk every other cargo stage pays, for a binary verify.sh has
+# already resolved and refuses to run without.
+#
+# Left unmeasured rather than given a p50: with no p50 declared,
+# stage_budget_thresholds fails to resolve and enforce_stage_budget skips the
+# stage, so nothing is enforced against a guess. That is the correct state
+# here. Whoever times it should also ask whether the `cargo build` belongs at
+# all, since the candidate binary is a precondition of the run.
+# P50_PROVENANCE unmeasured_reason=cargo-build-reentry-never-timed
 expected_seconds_p50_unmeasured = true
 
 # Wired 2026-09-16 by b7189e54d / 65aa513ad / c66b8f34e (binary pinning, mcp lib tests, invocation audit).
