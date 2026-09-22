@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MANIFEST="$REPO_ROOT/tests/fixtures/swarm_scale/corpus_manifest.json"
 GOLDEN="$REPO_ROOT/tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"
-EVENT_DIR="${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space/tmp}/ee-swarm-fixture-events"
+EVENT_DIR="${TMPDIR:-/tmp}/ee-swarm-fixture-events"
 EVENT_LOG="$EVENT_DIR/swarm_fixture.jsonl"
 
 mkdir -p "$EVENT_DIR"

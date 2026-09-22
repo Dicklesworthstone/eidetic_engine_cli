@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUDGETS="$REPO_ROOT/tests/swarm_scale_budgets.toml"
 MANIFEST="$REPO_ROOT/tests/fixtures/swarm_scale/corpus_manifest.json"
-EVENT_DIR="${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space/tmp}/ee-swarm-scale-events"
+EVENT_DIR="${TMPDIR:-/tmp}/ee-swarm-scale-events"
 EVENT_LOG="$EVENT_DIR/swarm_scale_measurements.jsonl"
 FORCE_FAILURE="${EE_SWARM_SCALE_FORCE_FAILURE:-}"
 

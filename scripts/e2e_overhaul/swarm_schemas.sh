@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCHEMA_DIR="$REPO_ROOT/docs/schemas/swarm"
 FIXTURE="$REPO_ROOT/tests/fixtures/swarm_schemas/all_examples.json"
-EVENT_DIR="${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space/tmp}/ee-swarm-schema-events"
+EVENT_DIR="${TMPDIR:-/tmp}/ee-swarm-schema-events"
 EVENT_LOG="$EVENT_DIR/swarm_schema_check.jsonl"
 
 mkdir -p "$EVENT_DIR"
