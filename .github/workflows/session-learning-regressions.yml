@@ -62,6 +62,11 @@ jobs:
           patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
           if hashlib.sha256(patch).hexdigest() != 'a957b9a4da4503b5470a8e0ecf06974747bf4451ad01114b2a0a95bd838815c3':
               raise SystemExit('Delivery patch checksum mismatch')
+          old = b'+    span.content_hash = content_hash_for_candidate(excerpt);'
+          new = b'+    span.content_hash = super::super::content_hash_for_candidate(excerpt);'
+          if patch.count(old) != 1:
+              raise SystemExit('Unexpected sequence fixture helper preimage')
+          patch = patch.replace(old, new)
           Path(os.environ['RUNNER_TEMP'], 'learning-sequence.patch').write_bytes(patch)
           PY
           git apply --check "$RUNNER_TEMP/learning-sequence.patch"
