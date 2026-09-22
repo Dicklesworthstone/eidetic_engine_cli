@@ -21,7 +21,9 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
             .filter(|stem| {
                 stem.split('/').all(|part| {
                     !part.is_empty()
-                        && part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                        && part
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
                 })
             })
             .ok_or_else(|| format!("invalid suite module path: {file}"))?;
@@ -34,7 +36,9 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
             .and_then(|name| name.strip_suffix(';'))
             .filter(|name| {
                 !name.is_empty()
-                    && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    && name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
             })
             .ok_or_else(|| format!("{file} must be followed by a mod declaration"))?;
         // A path with a directory component is a shared helper compiled once by

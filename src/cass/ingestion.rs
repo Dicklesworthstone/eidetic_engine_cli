@@ -154,7 +154,10 @@ fn collect_body_paths(
         None => {}
     }
     // Codex event_msg payloads use message: "..." instead of content: "...".
-    if value.get("message").is_some_and(serde_json::Value::is_string) {
+    if value
+        .get("message")
+        .is_some_and(serde_json::Value::is_string)
+    {
         paths.push(format!("{prefix}/message"));
     }
     if paths.len() > MAX_TEXT_BODIES {
@@ -176,9 +179,9 @@ fn shared_text_budget(lengths: &[usize], budget: usize) -> usize {
     let mut high = budget;
     while low < high {
         let middle = low + (high - low) / 2 + 1;
-        let required = lengths
-            .iter()
-            .fold(0_usize, |sum, length| sum.saturating_add((*length).min(middle)));
+        let required = lengths.iter().fold(0_usize, |sum, length| {
+            sum.saturating_add((*length).min(middle))
+        });
         if required <= budget {
             low = middle;
         } else {
@@ -456,12 +459,30 @@ mod tests {
         let clean = "Build succeeded. ".repeat(5000);
         let redacted_body = format!("{clean} label-{token}");
         let records = [
-            (json!({"type": "assistant", "message": {"role": "assistant", "content": clean}, "metadata": {"finish": "complete", "counts": [1, 2], "cached": false}}), false),
-            (json!({"type": "assistant", "message": {"role": "assistant", "content": redacted_body}}), true),
-            (json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": clean}, {"type": "text", "text": "Final repair verified."}]}}), false),
-            (json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": clean}]}}), false),
-            (json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redacted_body}]}}), true),
-            (json!({"type": "event_msg", "payload": {"type": "agent_message", "message": clean}}), false),
+            (
+                json!({"type": "assistant", "message": {"role": "assistant", "content": clean}, "metadata": {"finish": "complete", "counts": [1, 2], "cached": false}}),
+                false,
+            ),
+            (
+                json!({"type": "assistant", "message": {"role": "assistant", "content": redacted_body}}),
+                true,
+            ),
+            (
+                json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": clean}, {"type": "text", "text": "Final repair verified."}]}}),
+                false,
+            ),
+            (
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": clean}]}}),
+                false,
+            ),
+            (
+                json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redacted_body}]}}),
+                true,
+            ),
+            (
+                json!({"type": "event_msg", "payload": {"type": "agent_message", "message": clean}}),
+                false,
+            ),
         ];
         for (index, (original, redacted)) in records.into_iter().enumerate() {
             let id = EvidenceId::from_uuid(Uuid::from_u128(603 + index as u128)).to_string();
@@ -479,11 +500,19 @@ mod tests {
             let mut paths = Vec::new();
             collect_body_paths(&original, "", 0, &mut paths).ok_or("unsupported fixture")?;
             for path in paths {
-                let body = original.pointer(&path).and_then(serde_json::Value::as_str)
+                let body = original
+                    .pointer(&path)
+                    .and_then(serde_json::Value::as_str)
                     .ok_or("missing original body")?;
-                let retained = decoded.pointer(&path).and_then(serde_json::Value::as_str)
+                let retained = decoded
+                    .pointer(&path)
+                    .and_then(serde_json::Value::as_str)
                     .ok_or("missing retained body")?;
-                let marker = if redacted { REDACTED_TAIL } else { TRUNCATED_TAIL };
+                let marker = if redacted {
+                    REDACTED_TAIL
+                } else {
+                    TRUNCATED_TAIL
+                };
                 if retained != body {
                     let prefix = retained.strip_suffix(marker).ok_or("missing marker")?;
                     assert!(body.starts_with(prefix));
@@ -529,7 +558,9 @@ mod tests {
                 "/tmp/source.jsonl",
             )?;
             db.insert_evidence_span(&id, &evidence_input(&ws, &session, &row))?;
-            let stored = db.get_evidence_span(&id)?.ok_or("missing quarantined evidence")?;
+            let stored = db
+                .get_evidence_span(&id)?
+                .ok_or("missing quarantined evidence")?;
             assert_eq!(stored.pack_eligibility, "quarantined");
             assert_eq!(stored.search_eligibility, "quarantined");
             assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
@@ -563,7 +594,9 @@ mod tests {
         let row = parse(&raw)?;
         let decoded: serde_json::Value = serde_json::from_str(&row.excerpt)?;
         let retained = decoded["content"].as_str().ok_or("missing text")?;
-        let prefix = retained.strip_suffix(TRUNCATED_TAIL).ok_or("missing marker")?;
+        let prefix = retained
+            .strip_suffix(TRUNCATED_TAIL)
+            .ok_or("missing marker")?;
         assert!(body.starts_with(prefix));
         assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
         assert_eq!(screen_excerpt(&row.excerpt).content, row.excerpt);
@@ -582,7 +615,11 @@ mod tests {
         let row = parse(&raw)?;
         let _: serde_json::Value = serde_json::from_str(&row.excerpt)?;
         assert!(row.redacted);
-        assert!(row.redacted_reasons.iter().any(|reason| reason == "github_token"));
+        assert!(
+            row.redacted_reasons
+                .iter()
+                .any(|reason| reason == "github_token")
+        );
         assert!(!row.excerpt.contains(&token));
         assert!(row.excerpt.contains("[REDACTED:truncated_source]"));
         Ok(())
@@ -634,22 +671,31 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<UniqueJson>(text).is_err());
         }
-        assert!(serde_json::from_str::<UniqueJson>(
-            r#"{"metadata":[null,true,false,-1,2,0.5,"text",{"x":1}],"other":{"x":2}}"#
-        ).is_ok());
+        assert!(
+            serde_json::from_str::<UniqueJson>(
+                r#"{"metadata":[null,true,false,-1,2,0.5,"text",{"x":1}],"other":{"x":2}}"#
+            )
+            .is_ok()
+        );
         let body = "Build succeeded. ".repeat(5000);
         let raw = format!(
             "{{\"role\":\"system\",\"role\":\"assistant\",\"content\":{}}}",
             serde_json::to_string(&body).expect("encode body")
         );
         assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
-        let projected_class = crate::policy::classify_transcript_record(&screen_excerpt(&raw).content);
+        let projected_class =
+            crate::policy::classify_transcript_record(&screen_excerpt(&raw).content);
         assert!(!projected_class.is_indexable());
     }
 
     #[test]
     fn shared_budget_is_bounded_maximal_and_independent_of_block_order() {
-        for lengths in [vec![0, 0], vec![100, 1, 100], vec![1, 2, 3], vec![usize::MAX; 3]] {
+        for lengths in [
+            vec![0, 0],
+            vec![100, 1, 100],
+            vec![1, 2, 3],
+            vec![usize::MAX; 3],
+        ] {
             for budget in 0..256 {
                 let cap = shared_text_budget(&lengths, budget);
                 let used: usize = lengths.iter().map(|length| (*length).min(cap)).sum();
@@ -684,7 +730,9 @@ mod tests {
         });
         let row = parse(&original.to_string())?;
         let mut decoded: serde_json::Value = serde_json::from_str(&row.excerpt)?;
-        let blocks = decoded["message"]["content"].as_array().ok_or("missing blocks")?;
+        let blocks = decoded["message"]["content"]
+            .as_array()
+            .ok_or("missing blocks")?;
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[1]["text"], short);
         for (index, full) in [(0, &first), (2, &last)] {
@@ -704,14 +752,21 @@ mod tests {
     #[test]
     fn mixed_nontext_blocks_are_never_discarded_to_make_a_message_fit() -> TestResult {
         let body = "Build succeeded. ".repeat(5000);
-        for kind in ["tool_use", "tool_result", "image", "thinking", "future_block"] {
+        for kind in [
+            "tool_use",
+            "tool_result",
+            "image",
+            "thinking",
+            "future_block",
+        ] {
             let raw = json!({
                 "type": "assistant",
                 "message": {"role": "assistant", "content": [
                     {"type": "text", "text": body},
                     {"type": kind, "text": "not an ordinary message"}
                 ]}
-            }).to_string();
+            })
+            .to_string();
             assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
             let row = parse(&raw)?;
             assert!(!crate::policy::classify_transcript_record(&row.excerpt).is_indexable());
@@ -728,8 +783,8 @@ mod tests {
         assert!(raw.len() > MAX_EXCERPT_BYTES);
         assert!(bounded_record(&screen_external_text_for_ingestion(&raw)).is_none());
         assert!(!crate::policy::classify_transcript_record(&parse(&raw)?.excerpt).is_indexable());
-        let raw = json!({"type": "assistant", "content": "Build succeeded. ".repeat(80_000)})
-            .to_string();
+        let raw =
+            json!({"type": "assistant", "content": "Build succeeded. ".repeat(80_000)}).to_string();
         let row = parse(&raw)?;
         assert_eq!(row.redacted_reasons, ["external_ingestion_oversized"]);
         assert!(row.excerpt.len() < 128);
