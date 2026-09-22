@@ -567,6 +567,40 @@ fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// A stand-in `ee` that answers `diag build-admission` with a fixed verdict.
+///
+/// The pinned lane refuses a run that carries no build-admission verdict
+/// (`rch_verify_pinned_build_admission_verdict_required`), so a hermetic pinned
+/// test can no longer reach dispatch by passing `--skip-build-admission`. It has
+/// to supply a binary the preflight can actually interrogate.
+///
+/// `admitted` is a parameter rather than a constant because both answers are
+/// needed: the materialization test wants a lane that proceeds, and the guard
+/// tests want the denial and the non-verdict to stay distinguishable from each
+/// other. A stub that could only say yes would make every one of those arms
+/// agree by construction.
+fn write_admission_stub_ee(name: &str, admitted: bool) -> Result<PathBuf, String> {
+    let body = format!(
+        r#"#!/usr/bin/env bash
+printf '{{"success":true,"data":{{"admitted":{admitted},"checks":[{{"label":"workspace","path":"/tmp","bytesAvailable":9999999999,"minFreeBytes":1,"admitted":{admitted},"externalRequired":false,"external":true}}],"degraded":[]}}}}\n'
+"#
+    );
+    write_fake_rch(name, &body)
+}
+
+/// A stand-in `ee` that runs but never produces a verdict.
+///
+/// This is the `unavailable` state, and it exists as its own helper because it
+/// is NOT the same as a denial: `admitted` is null rather than false. That
+/// distinction is the whole point of the guard it drives — before it, a lane
+/// that could not obtain a verdict dispatched exactly like one that was allowed.
+fn write_silent_ee(name: &str) -> Result<PathBuf, String> {
+    write_fake_rch(
+        name,
+        "#!/usr/bin/env bash\nprintf 'build-admission unavailable\\n' >&2\nexit 3\n",
+    )
+}
+
 fn read_invocation_lines(path: &Path) -> Result<Vec<String>, String> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -2972,13 +3006,21 @@ printf '[RCH] remote worker-a (0.1s)\n'
     let cargo_home_arg = cargo_home
         .to_str()
         .ok_or_else(|| "pinned Cargo home path is not utf-8".to_owned())?;
+    let admission_stub = write_admission_stub_ee("fake-ee-pinned-admit.sh", true)?;
+    let admission_stub_arg = admission_stub
+        .to_str()
+        .ok_or_else(|| "pinned admission stub path is not utf-8".to_owned())?;
 
     let (status, stdout, stderr) = run_script_with_env_in_dir(
         &[
             "--pinned-franken-stack",
             "--treeish",
             "HEAD",
-            "--skip-build-admission",
+            // NOT --skip-build-admission: the pinned lane now refuses a skipped
+            // admission outright, so this test supplies a binary the preflight
+            // can interrogate instead of switching the preflight off.
+            "--build-admission-ee-bin",
+            admission_stub_arg,
             "--skip-known-blocker",
             "--rch-bin",
             fake_rch_arg,
@@ -2992,6 +3034,14 @@ printf '[RCH] remote worker-a (0.1s)\n'
         &[
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
             ("RCH_VERIFY_FORCE_TOML_FALLBACK", "1"),
+            // The shared helper sets RCH_VERIFY_PROOF_BROKER_ENABLED=0 because a
+            // real broker writes a ledger and takes reservations. The pinned
+            // lane refuses that bypass when it is SILENT, so this test states
+            // why it is taking it.
+            (
+                "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+                "hermetic contract test",
+            ),
             ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
@@ -3098,7 +3148,8 @@ printf '[RCH] remote worker-a (0.1s)\n'
             "--pinned-franken-stack",
             "--treeish",
             "HEAD",
-            "--skip-build-admission",
+            "--build-admission-ee-bin",
+            admission_stub_arg,
             "--skip-known-blocker",
             "--rch-bin",
             fake_rch_arg,
@@ -3111,6 +3162,10 @@ printf '[RCH] remote worker-a (0.1s)\n'
         ],
         &[
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            (
+                "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+                "hermetic contract test",
+            ),
             ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
@@ -8647,4 +8702,246 @@ fn rch_verify_every_blocker_has_live_bead_or_reason() -> TestResult {
 #[test]
 fn rch_verify_remediation_guidance_rejects_planted_gaps() -> TestResult {
     check_remediation_guidance(&["--self-test"])
+}
+
+/// The pinned lane must REFUSE a skipped build admission, not merely record it.
+///
+/// `bd-reality-core-convergence-1azkt.5` bullet 2 forbids five escapes on
+/// `--pinned-franken-stack`, one of them "skipped build admission". Before the
+/// guard this test covers, a pinned run carrying that escape returned
+/// `status: remote_pass`, `exit_code: 0`, `success: true` — a PASS, with
+/// `build_admission.status` reading "skipped" beside it. The escape was already
+/// recorded as `rch_verify_build_admission_skipped`; nothing refused on it.
+///
+/// The second arm is the one that keeps this honest. The guard is scoped to the
+/// pinned lane, so an identical command WITHOUT `--pinned-franken-stack` must
+/// not carry the code — otherwise a guard that refused every caller everywhere
+/// would pass the first arm just as well.
+#[test]
+fn pinned_lane_refuses_skipped_build_admission() -> TestResult {
+    let base = target_tmp_dir().join("pinned-skip-ba-base");
+    let base_arg = base
+        .to_str()
+        .ok_or_else(|| "committed-tree base path is not utf-8".to_owned())?;
+    let envs = [
+        ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
+        ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+    ];
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--no-write",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+        ],
+        &envs,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "pinned lane must refuse a skipped build admission\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned skip-admission refusal: {error}"))?;
+    if report["status"] != "refused"
+        || !degraded_contains(&report, "rch_verify_pinned_build_admission_skip_refused")?
+    {
+        return Err(format!(
+            "pinned skipped-admission refusal contract drifted: {report}"
+        ));
+    }
+
+    // OVER-BROADNESS CONTROL: same escape, off the pinned lane, must not be
+    // refused by THIS code.
+    let (_off_status, off_stdout, _off_stderr) = run_script_with_env(
+        &[
+            "--treeish",
+            "HEAD",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--no-write",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+        ],
+        &envs,
+    )?;
+    let off_report: Value = serde_json::from_str(&off_stdout)
+        .map_err(|error| format!("parse off-lane skip-admission report: {error}"))?;
+    if degraded_contains(
+        &off_report,
+        "rch_verify_pinned_build_admission_skip_refused",
+    )? {
+        return Err(format!(
+            "the pinned build-admission guard leaked off the pinned lane: {off_report}"
+        ));
+    }
+    Ok(())
+}
+
+/// The pinned lane must refuse an UNDECLARED proof-broker bypass.
+///
+/// This is the narrower half of `bd-jui80`, and the narrowing is deliberate: a
+/// DECLARED bypass still passes, because a real broker writes a ledger and takes
+/// reservations that a hermetic test must not. The guard can only exist because
+/// the two cases stopped being byte-identical — `rch_verify_proof_broker_bypassed`
+/// marks both, `rch_verify_proof_broker_bypassed_undeclared` marks only the
+/// silent one, and this is the first gate to refuse on the latter.
+///
+/// The declared arm is the control, and it is the assertion that would catch the
+/// likeliest regression here: a guard keyed on `PROOF_BROKER_ENABLED` alone
+/// rather than on the absence of a reason would refuse both arms and still pass
+/// the first.
+#[test]
+fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
+    let base = target_tmp_dir().join("pinned-broker-bypass-base");
+    let base_arg = base
+        .to_str()
+        .ok_or_else(|| "committed-tree base path is not utf-8".to_owned())?;
+    let args = [
+        "--pinned-franken-stack",
+        "--treeish",
+        "HEAD",
+        "--skip-known-blocker",
+        "--no-write",
+        "--",
+        "cargo",
+        "check",
+        "--locked",
+    ];
+
+    // run_script_with_env sets RCH_VERIFY_PROOF_BROKER_ENABLED=0 and declares no
+    // reason, which is exactly the undeclared branch.
+    let (status, stdout, stderr) = run_script_with_env(
+        &args,
+        &[
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+        ],
+    )?;
+    if status.success() {
+        return Err(format!(
+            "pinned lane must refuse an undeclared proof-broker bypass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned broker-bypass refusal: {error}"))?;
+    if report["status"] != "refused"
+        || !degraded_contains(&report, "rch_verify_pinned_proof_broker_bypass_refused")?
+    {
+        return Err(format!(
+            "pinned undeclared-bypass refusal contract drifted: {report}"
+        ));
+    }
+
+    // CONTROL: the SAME bypass, declared, must get past this guard. It may still
+    // be refused further down the lane -- that is asserted by the verdict test
+    // below -- so this checks only that THIS code is absent.
+    let (_declared_status, declared_stdout, _declared_stderr) = run_script_with_env(
+        &args,
+        &[
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+            (
+                "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+                "hermetic contract test",
+            ),
+        ],
+    )?;
+    let declared_report: Value = serde_json::from_str(&declared_stdout)
+        .map_err(|error| format!("parse declared bypass report: {error}"))?;
+    if degraded_contains(
+        &declared_report,
+        "rch_verify_pinned_proof_broker_bypass_refused",
+    )? {
+        return Err(format!(
+            "a DECLARED bypass was refused as undeclared: {declared_report}"
+        ));
+    }
+    Ok(())
+}
+
+/// A build admission that never reached a verdict must not read as permission.
+///
+/// Found by running the control for the guard above rather than by reading the
+/// clause: with the skip refused and the bypass declared, a pinned run still
+/// returned `remote_pass` while `build_admission.status` read "unavailable" —
+/// no `ee` binary had been found, so the preflight never produced a verdict and
+/// the lane dispatched anyway. Refusing only the DECLARED skip would have closed
+/// one door and left its silent twin open.
+///
+/// `admitted` is null for `unavailable`, false for `denied` and true for
+/// `passed`. Only `passed` may dispatch on this lane; `denied` was already
+/// refused, and this covers the third state.
+#[test]
+fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
+    let base = target_tmp_dir().join("pinned-ba-verdict-base");
+    let base_arg = base
+        .to_str()
+        .ok_or_else(|| "committed-tree base path is not utf-8".to_owned())?;
+    let silent = write_silent_ee("fake-ee-silent-admission.sh")?;
+    let silent_arg = silent
+        .to_str()
+        .ok_or_else(|| "silent ee stub path is not utf-8".to_owned())?;
+    let envs = [
+        ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
+        ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+        (
+            "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+            "hermetic contract test",
+        ),
+    ];
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--build-admission-ee-bin",
+            silent_arg,
+            "--skip-known-blocker",
+            "--no-write",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+        ],
+        &envs,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "pinned lane must refuse a build admission with no verdict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned admission-verdict refusal: {error}"))?;
+    if report["build_admission"]["status"] != "unavailable"
+        || !report["build_admission"]["admitted"].is_null()
+    {
+        return Err(format!(
+            "this test must drive the UNAVAILABLE state, not a denial: {report}"
+        ));
+    }
+    // The status word matters as much as the refusal. Unmapped, this code fell
+    // through to `rch_environment_failure`, which blames the remote for a
+    // decision the wrapper took locally before dispatch.
+    if report["status"] != "build_admission_refused"
+        || !degraded_contains(
+            &report,
+            "rch_verify_pinned_build_admission_verdict_required",
+        )?
+    {
+        return Err(format!(
+            "pinned admission-verdict refusal contract drifted: {report}"
+        ));
+    }
+    Ok(())
 }

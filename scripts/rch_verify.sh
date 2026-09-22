@@ -6531,7 +6531,15 @@ elif exit_code == 0:
     status = "pass_without_remote_marker"
 elif "rch_verify_committed_tree_unsupported" in degraded:
     status = "committed_tree_unsupported"
-elif "rch_verify_build_admission_denied" in degraded:
+elif (
+    "rch_verify_build_admission_denied" in degraded
+    # Grouped with the denial rather than given its own word: both mean build
+    # admission did not permit this run, and both stop it before remote Cargo.
+    # Unmapped, this code fell through to `rch_environment_failure`, which named
+    # the REMOTE as the cause of a refusal taken locally before dispatch -- the
+    # reader would have gone looking at workers for a verdict the wrapper made.
+    or "rch_verify_pinned_build_admission_verdict_required" in degraded
+):
     status = "build_admission_refused"
 elif (
     "rch_verify_dirty_tree_refused" in degraded
@@ -6987,6 +6995,60 @@ if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
             "rch_verify_franken_stack_locked_required"
         exit 1
     fi
+
+    # THE PINNED LANE MUST REFUSE ITS OWN ESCAPES, NOT MERELY RECORD THEM.
+    # bd-reality-core-convergence-1azkt.5 bullet 2; bd-jui80.
+    #
+    # Bullet 2 forbids five escapes on this lane. Three (local Cargo, allow-raw,
+    # mutable live-source) were already demonstrated refused. The remaining two
+    # were demonstrated ADMITTED, and the demonstration is the reason this guard
+    # exists rather than a reading of the clause: one pinned run taking BOTH
+    # escapes returned status remote_pass / exit_code 0 / success true, with
+    # build_admission.status "skipped" and proof_broker.status "bypassed".
+    #
+    # A PASS IS THE ONE VERDICT THESE ESCAPES MUST NOT BE ABLE TO PRODUCE. Both
+    # were already recorded as degraded codes, so this is not a visibility fix --
+    # the evidence was complete and nothing refused on it. Degraded codes are
+    # read by humans after the fact; a lane whose whole purpose is to be
+    # admissible evidence has to fail closed at preflight instead.
+    #
+    # PLACED AFTER the Cargo-kind and --locked checks on purpose, so a command
+    # that is wrong in shape still refuses on shape first and
+    # pinned_franken_stack_requires_cargo_locked_before_materialization keeps
+    # observing rch_verify_franken_stack_locked_required. Placed BEFORE
+    # compute_committed_tree_state_json and materialize_committed_tree, so a
+    # refused run touches no export base and costs no bundle.
+    if [ "$BUILD_ADMISSION_ENABLED" != "1" ]; then
+        RCH_INVOCATION=()
+        emit_json false null 0 "" \
+            "--pinned-franken-stack refuses skipped build admission; drop --skip-build-admission and RCH_VERIFY_BUILD_ADMISSION=0, or pass --build-admission-ee-bin to run the preflight against an explicit binary" \
+            "rch_verify_pinned_build_admission_skip_refused"
+        exit 2
+    fi
+
+    # THE UNDECLARED CASE ONLY, AND THAT LIMIT IS DELIBERATE.
+    #
+    # Refusing every proof-broker bypass here is the clause's plain reading, and
+    # it is NOT what this does. A declared bypass (--proof-broker-bypass <reason>
+    # or RCH_VERIFY_PROOF_BROKER_BYPASS_REASON) still passes, because a real
+    # broker writes a ledger and takes reservations, which a hermetic contract
+    # test must not do -- that caller is a requirement, not a bug.
+    #
+    # So this refuses the SILENT bypass and leaves a NAMED one open. A caller who
+    # supplies free text still gets through, which means escape 4 is narrowed,
+    # not eliminated, and it is recorded that way on the bead rather than graded
+    # as met. What makes the narrowing worth having is that the declared and
+    # undeclared cases are no longer byte-identical in the proof: the preceding
+    # work split them into rch_verify_proof_broker_bypassed (both) and
+    # rch_verify_proof_broker_bypassed_undeclared (silent only), and this guard
+    # is the first consumer of that distinction.
+    if [ "$PROOF_BROKER_ENABLED" = "0" ] && [ -z "$PROOF_BROKER_BYPASS_REASON" ]; then
+        RCH_INVOCATION=()
+        emit_json false null 0 "" \
+            "--pinned-franken-stack refuses an undeclared proof-broker bypass; unset RCH_VERIFY_PROOF_BROKER_ENABLED=0 or declare a reason with --proof-broker-bypass <reason>" \
+            "rch_verify_pinned_proof_broker_bypass_refused"
+        exit 2
+    fi
 fi
 
 if [ "$COMMITTED_TREE" -eq 1 ]; then
@@ -7148,6 +7210,34 @@ fi
 if [ "$BUILD_ADMISSION_STATUS" = "denied" ]; then
     emit_json true 1 0 "build-admission preflight denied RCH execution" "" \
         "rch_verify_build_admission_denied"
+    exit 1
+fi
+
+# A NON-VERDICT IS NOT AN ADMISSION, AND ON THE PINNED LANE IT MUST NOT PASS.
+# bd-reality-core-convergence-1azkt.5 bullet 2.
+#
+# FOUND BY THE CONTROL FOR THE PREFLIGHT GUARD ABOVE, NOT BY READING THE CLAUSE.
+# Running the pinned lane with build admission left ENABLED produced
+# status remote_pass / exit_code 0 with build_admission.status "unavailable" --
+# no ee binary was found, so the preflight never reached a verdict and the run
+# dispatched anyway. Refusing only --skip-build-admission would have closed the
+# DECLARED skip and left the SILENT one open, which is the same escape with a
+# better-looking proof.
+#
+# The vocabulary here is passed | denied | skipped | unavailable | not_run, and
+# only `passed` carries admitted=true. denied refuses above; skipped refuses at
+# preflight; unavailable and not_run are the two that reported nothing and were
+# read as permission. admitted is null for all three, so nothing downstream could
+# tell "admission allowed this" from "admission never spoke".
+#
+# Scoped to the pinned lane deliberately: off-lane runs keep degrading rather
+# than refusing, because unavailable is the ordinary state on a machine with no
+# built ee and making it fatal everywhere would be a policy change this bullet
+# does not ask for.
+if [ "$PINNED_FRANKEN_STACK" -eq 1 ] && [ "$BUILD_ADMISSION_STATUS" != "passed" ]; then
+    emit_json true 1 0 "" \
+        "--pinned-franken-stack requires a build-admission verdict; status was '${BUILD_ADMISSION_STATUS}' and only 'passed' may dispatch on this lane" \
+        "rch_verify_pinned_build_admission_verdict_required"
     exit 1
 fi
 
