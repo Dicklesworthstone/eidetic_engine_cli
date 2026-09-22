@@ -151,11 +151,26 @@ pub(super) fn set_duplicate(plan: &mut PromotionPlan, twin: Option<&str>) {
 }
 
 pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> PromotionReport {
+    // `already_promoted` is documented on PromotionReport as "True when an
+    // exact-content global twin ALREADY EXISTED" -- a statement about STATE, not
+    // about whether this call merged one. A preview that finds a twin has
+    // observed that state, so reporting false contradicted the field's own
+    // contract and made the report internally inconsistent: it returned
+    // `global_memory_id: Some(id)` (a twin was found) beside
+    // `already_promoted: false` (no twin existed). Two fields describing one
+    // fact disagreed, and the caller had already marked the PLAN a duplicate
+    // via set_duplicate() immediately before constructing this.
+    //
+    // Derived from `twin` rather than passed in, because the two call sites are
+    // exactly "refusal, no twin" (None) and "dry-run, twin looked up", so the
+    // Option already carries the answer. Preview stays read-only: this reports
+    // what was observed and writes nothing.
+    let already_promoted = twin.is_some();
     PromotionReport {
         plan,
         executed: false,
         global_memory_id: twin,
-        already_promoted: false,
+        already_promoted,
         index_job_id: None,
         index_status: "not_applicable".to_owned(),
         index_error: None,
