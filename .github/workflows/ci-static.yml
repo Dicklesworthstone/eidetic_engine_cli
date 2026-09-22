@@ -189,6 +189,41 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.forbidden_deps_self_test.outcome == 'success' }}
         run: ./scripts/check-forbidden-deps.sh
 
+      # bd-reality-core-convergence-1azkt.18 C4. deny.toml's [advisories]
+      # (yanked = "deny"), [bans] and [sources] (unknown-registry and
+      # unknown-git = "deny") were enforced only by ci.yml and release.yml,
+      # and both are disabled_manually, so nothing that executes checked
+      # them. bd-xz8jm's RUSTSEC-2026-0285 in rustls reached main that way.
+      #
+      # Two steps, as in ci.yml and release.yml: one red step should mean one
+      # thing, and a bans or sources regression must not hide behind an
+      # unrelated advisory. The schedule above re-checks an unchanged lock
+      # against new advisories.
+      #
+      # This audit has no --self-test. Its failure arm was measured instead,
+      # with cargo-deny 0.20.2 (the version this action commit bundles) and
+      # --all-features (the action's default): on the lock before 71f8b12fd,
+      # with everything else as at HEAD, `check advisories` exits 1 with only
+      # RUSTSEC-2026-0285, and `check bans sources` exits 0. At HEAD both exit 0.
+      #
+      # `licenses` stays OFF: 35 upstream franken crates declare no license
+      # field, and 10 more licenses need a policy ruling (see ci.yml).
+      #
+      # Pinned to the action's v2 COMMIT, not the annotated v2 tag object
+      # (b66acf5e...) that release.yml pins; the commits API does not resolve
+      # the tag object.
+      - name: RustSec advisory audit (cargo-deny)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          command: check advisories
+
+      - name: Ban and source audit (cargo-deny)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          command: check bans sources
+
       - name: Migration registry co-commit invariant
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/check-migration-registry.sh
