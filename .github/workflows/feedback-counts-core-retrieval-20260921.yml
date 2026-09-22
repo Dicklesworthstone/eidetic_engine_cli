@@ -22,11 +22,11 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
@@ -97,14 +97,14 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/core-retrieval-source.log"
           git archive --format=tar HEAD -o "$RUNNER_TEMP/ee-current-source.tar"
           rustc --version --verbose > "$RUNNER_TEMP/core-retrieval-toolchain.log"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: core-retrieval-source
           path: |
             ${{ runner.temp }}/ee-current-source.tar
             ${{ runner.temp }}/core-retrieval-source.log
           retention-days: 7
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -134,7 +134,7 @@ jobs:
             if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/core-retrieval-$name.log"; then failed=1; fi
           done
           exit "$failed"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
         with:
           name: core-retrieval-verification
