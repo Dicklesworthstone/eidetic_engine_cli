@@ -18,7 +18,9 @@ fn text(value: &str, changed: &mut bool) -> String {
 }
 
 fn provenance(id: &str, uri: Option<&str>, changed: &mut bool) -> Vec<RecallProvenanceRef> {
-    let Some(uri) = uri else { return Vec::new(); };
+    let Some(uri) = uri else {
+        return Vec::new();
+    };
     // Scheme delimiters can hide a leading absolute path from a prose scanner.
     // Inspect the opaque locator as well, and reuse pack's URI/path redactor.
     let locator = uri.split_once("://").map_or(uri, |(_, body)| body);
@@ -38,15 +40,15 @@ fn provenance(id: &str, uri: Option<&str>, changed: &mut bool) -> Vec<RecallProv
     }]
 }
 
-pub(super) fn apply(
-    row: &mut RecallCandidateRow,
-    source: &StoredMemory,
-    tags: &[String],
-) -> bool {
+pub(super) fn apply(row: &mut RecallCandidateRow, source: &StoredMemory, tags: &[String]) -> bool {
     let mut changed = false;
     row.content = text(&source.content, &mut changed);
     row.tags = tags.iter().map(|tag| text(tag, &mut changed)).collect();
-    row.provenance = provenance(&row.memory_id, source.provenance_uri.as_deref(), &mut changed);
+    row.provenance = provenance(
+        &row.memory_id,
+        source.provenance_uri.as_deref(),
+        &mut changed,
+    );
     changed
 }
 
@@ -58,7 +60,11 @@ mod tests {
 
     #[test]
     fn safe_origins_preserve_the_existing_recall_contract() {
-        for uri in ["manual://release-guide", "test://recall-golden", "https://example.org/docs#api"] {
+        for uri in [
+            "manual://release-guide",
+            "test://recall-golden",
+            "https://example.org/docs#api",
+        ] {
             let mut changed = false;
             let result = provenance(MEMORY, Some(uri), &mut changed);
             assert_eq!(result[0].uri, uri);
@@ -92,7 +98,10 @@ mod tests {
         assert!(locator_is_public("src/café.rs"));
         assert!(locator_is_public("Release::publish"));
         assert!(!locator_is_public("/home/private/project.rs"));
-        assert!(!locator_is_public(&format!("src/{}{}.rs", "AKIA", "ABCDEFGHIJKLMNOP")));
+        assert!(!locator_is_public(&format!(
+            "src/{}{}.rs",
+            "AKIA", "ABCDEFGHIJKLMNOP"
+        )));
     }
 
     #[test]
