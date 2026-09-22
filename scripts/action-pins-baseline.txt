@@ -19,7 +19,7 @@
 # way, so any mutable reference appearing there fails on sight.
 
 29	ci.yml
-8	typed-memory-recovery.yml
+0	typed-memory-recovery.yml
 7	diagnostic-snapshot-20260919.yml
 7	global-authority-20260919.yml
 7	learned-history-recovery-20260919.yml
