@@ -1,3 +1,7 @@
+# Every other host probe stays quiet, so only the hung cycle scan can move the
+# verdict (bd-f5j1x).
+source "$(dirname "${BASH_SOURCE[0]}")/quiet_probes_env.sh"
+
 __EE_CLOSEOUT_AUDIT_REAL_JQ="$(command -v jq)"
 
 br() {

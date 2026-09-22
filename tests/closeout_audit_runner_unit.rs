@@ -59,6 +59,23 @@ fn fixture_path(scenario: &str) -> PathBuf {
 /// return the parsed JSON output. Asserts exit code 0 (the audit
 /// itself is non-destructive — every classification is a successful
 /// exit; only argument errors / missing tools yield non-zero).
+/// Host knobs the audit script reads. They are cleared before each run so the
+/// caller's environment cannot steer a verdict; tests that need one set it.
+const HOST_PROBE_KNOBS: &[&str] = &[
+    "RCH_QUEUE_JSON",
+    "AGENT_MAIL_HOST",
+    "AGENT_MAIL_PORT",
+    "DEPENDENCY_CYCLE_TIMEOUT_SECONDS",
+    "RCH_PROBE_TIMEOUT_SECONDS",
+];
+
+/// BASH_ENV stand-ins that keep the audit's live host probes (`br`, `rch`,
+/// Agent Mail, `git status`) on their quiet branch. Without them a slow or busy
+/// host turned a nominal `ready` fixture into `blocked` (bd-f5j1x).
+fn quiet_probes_env() -> PathBuf {
+    fixture_path("quiet_probes_env.sh")
+}
+
 fn run_audit(scenario: &str, bead_id: &str) -> Result<Value, String> {
     run_audit_with_env(scenario, bead_id, &[])
 }
@@ -96,6 +113,11 @@ fn run_audit_with_env_strings(
         .arg("--json")
         .arg("--workspace-root")
         .arg(&fixture);
+    for key in HOST_PROBE_KNOBS {
+        command.env_remove(key);
+    }
+    // A caller's BASH_ENV replaces the stand-ins; an empty one disables them.
+    command.env("BASH_ENV", quiet_probes_env());
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -564,8 +586,8 @@ fn ready_fixture_reports_readiness_ready() -> TestResult {
         ));
     }
     // J1 log present in this fixture, so the j1_log_absent caveat
-    // must NOT appear. Other caveats from the live environment
-    // (rch / agent_mail) are tolerated.
+    // must NOT appear. Host probes are stood in by quiet_probes_env.sh,
+    // so no rch / agent_mail caveat can come from the machine either.
     let caveats = audit["caveats"].as_array().cloned().unwrap_or_default();
     for caveat in &caveats {
         if caveat.as_str().unwrap_or("").starts_with("j1_log_absent") {
@@ -589,15 +611,13 @@ fn ready_with_caveats_fixture_reports_readiness_ready_with_caveats() -> TestResu
     assert_envelope_shape(&audit)?;
 
     let readiness = audit["readiness"].as_str().unwrap_or("");
-    // Either `ready_with_caveats` (caveat present) or `ready` (none
-    // of the optional caveats fired in the current env). The
-    // fixture deliberately omits the J1 log so j1_log_absent should
-    // fire — but if the live agent_mail happens to be unreachable
-    // too, that's also a caveat. So we accept either reading as
-    // long as blockers is empty and we don't drop into `blocked`.
-    if readiness == "blocked" {
+    // The fixture deliberately omits the J1 log, so j1_log_absent fires.
+    // Host probes are stood in by quiet_probes_env.sh, so that is the only
+    // caveat source and the verdict is exact rather than "anything but
+    // blocked".
+    if readiness != "ready_with_caveats" {
         return Err(format!(
-            "ready_with_caveats fixture must NOT be classified `blocked`; got {readiness}. Full audit: {audit}",
+            "ready_with_caveats fixture should report readiness=`ready_with_caveats`; got {readiness:?}. Full audit: {audit}",
         ));
     }
     if audit["blockers"].as_array().is_some_and(|a| !a.is_empty()) {
@@ -669,6 +689,71 @@ fn blocked_fixture_reports_readiness_blocked_with_open_dependency() -> TestResul
         return Err(format!(
             "blocked fixture should list bd-fxt-blocked-dep-open with status=open; got {:?}",
             open_deps,
+        ));
+    }
+    Ok(())
+}
+
+/// bd-f5j1x: a readiness verdict must come from the fixture, never from the
+/// machine running the test. Hostile `br`, `rch` and `curl` executables go
+/// first on PATH -- a cycle scan that "times out", a failing RCH health check,
+/// an unreachable Agent Mail.
+///
+/// Without the stand-ins the `ready` fixture MUST turn `blocked` on the hostile
+/// cycle scan, with both hostile caveats present. That proves the hostile tools
+/// are really consulted, so the second half is not vacuous. With the stand-ins
+/// the same fixture on the same PATH must read exactly `ready`, with no blocker
+/// and no caveat.
+#[cfg(unix)]
+#[test]
+fn ready_fixture_verdict_does_not_depend_on_host_probes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hostile = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    for (tool, exit_code) in [("br", 124), ("rch", 1), ("curl", 7)] {
+        let path = hostile.path().join(tool);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {exit_code}\n"))
+            .map_err(|e| format!("write hostile {tool}: {e}"))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod hostile {tool}: {e}"))?;
+    }
+    let path = format!(
+        "{}:{}",
+        hostile.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let exposed = run_audit_with_env_strings(
+        "ready",
+        "bd-fxt-ready-1",
+        &[("PATH", path.clone()), ("BASH_ENV", String::new())],
+    )?;
+    let exposed_caveats = exposed["caveats"].to_string();
+    if exposed["readiness"].as_str() != Some("blocked")
+        || exposed["evidence"]["dependency_cycle_status"].as_str() != Some("timeout")
+        || !exposed_caveats.contains("rch_health_check_failed")
+        || !exposed_caveats.contains("agent_mail_unreachable")
+    {
+        return Err(format!(
+            "control failed: with no stand-ins the hostile host tools should block the \
+             ready fixture and raise both caveats, so this test cannot tell whether the \
+             host is consulted. Audit: {exposed}",
+        ));
+    }
+
+    let shielded = run_audit_with_env_strings("ready", "bd-fxt-ready-1", &[("PATH", path)])?;
+    assert_envelope_shape(&shielded)?;
+    let empty = |field: &str| shielded[field].as_array().is_some_and(Vec::is_empty);
+    if shielded["readiness"].as_str() != Some("ready") || !empty("blockers") || !empty("caveats") {
+        return Err(format!(
+            "with the stand-ins the hostile PATH must not move the verdict; expected \
+             ready with no blockers or caveats. Audit: {shielded}",
+        ));
+    }
+    if shielded["evidence"]["dependency_cycle_source"].as_str() != Some("jsonl") {
+        return Err(format!(
+            "the cycle scan should come from the fixture JSONL, got {:?}",
+            shielded["evidence"]["dependency_cycle_source"],
         ));
     }
     Ok(())
