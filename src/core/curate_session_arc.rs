@@ -4,8 +4,18 @@ use super::*;
 
 #[path = "curate_session_arc_clauses.rs"]
 mod clauses;
+#[path = "curate_session_arc_sequence.rs"]
+mod sequence;
 #[path = "curate_session_arc_text.rs"]
 mod text;
+
+pub(super) fn sequence_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+) -> Vec<ReviewSessionCandidate> {
+    sequence::candidates(workspace_id, session, spans)
+}
 
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an

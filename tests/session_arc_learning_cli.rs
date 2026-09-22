@@ -615,7 +615,7 @@ fn exercise_multiple_episodes(order: [usize; 4]) -> TestResult {
                 "ArcCli",
             ],
         )?;
-        assert_eq!(preview["application"]["status"], "ready", "{preview}");
+        assert_eq!(preview["application"]["status"], "would_apply", "{preview}");
         assert_eq!(preview["mutation"]["persisted"], false);
         assert_eq!(
             connection.list_audit_entries(Some(&fixture.workspace_id), None)?,
@@ -879,7 +879,7 @@ fn shared_window_source_hash_drift_blocks_previously_approved_later_episode() ->
         fixture.evidence_id
     ))?;
     connection.close()?;
-    fixture.assert_blocked_without_writes(2, "derived_source_evidence_not_admitted")
+    fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
 }
 
 #[test]
@@ -961,4 +961,214 @@ fn shared_window_forged_creation_does_not_turn_approval_into_application() -> Te
     );
     connection.close()?;
     fixture.assert_blocked_without_writes(2, "session_arc_pair_invalid")
+}
+
+#[test]
+fn public_cli_learns_all_structured_cross_window_episodes_and_applies_them_independently()
+-> TestResult {
+    let temporary = tempfile::Builder::new()
+        .prefix("ee-sequence-learning-")
+        .tempdir()?;
+    let workspace = temporary.path().canonicalize()?;
+    run(&workspace, &["init"])?;
+    let database = workspace.join(".ee/ee.db");
+    let db = DbConnection::open_file(&database)?;
+    let workspace_id = db
+        .get_workspace_by_path(workspace.to_str().ok_or("non-UTF8 workspace")?)?
+        .ok_or("workspace missing")?
+        .id;
+    let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x91c_0001)).to_string();
+    let messages = [
+        "cargo test failed because the cache identity was stale.",
+        "Fixed the cache identity and cargo test passed.",
+        "cargo test failed because the fixture path was absent.",
+        "Fixed the fixture path and cargo test passed.",
+    ];
+    let records: Vec<String> = messages.iter().enumerate().map(|(index, message)| {
+        json!({"type":"assistant", "message":{"role":"assistant", "content":message},
+            "metadata":{"topic":if index % 2 == 0 {"rustfmt"} else {"clippy"}, "content":"not-lesson-material"}}).to_string()
+    }).collect();
+    let transcript = workspace.join("structured-episodes.jsonl");
+    let transcript_text = format!("{}\n", records.join("\n"));
+    fs::write(&transcript, &transcript_text)?;
+    db.insert_session(
+        &session_id,
+        &CreateSessionInput {
+            workspace_id: workspace_id.clone(),
+            cass_session_id: "structured-episodes".into(),
+            source_path: Some(transcript.to_string_lossy().into_owned()),
+            agent_name: Some("fixture".into()),
+            model: None,
+            started_at: None,
+            ended_at: None,
+            message_count: 4,
+            token_count: None,
+            content_hash: format!(
+                "blake3:{}",
+                blake3::hash(transcript_text.as_bytes()).to_hex()
+            ),
+            metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.into()),
+        },
+    )?;
+    let mut evidence_ids = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let id =
+            EvidenceId::from_uuid(uuid::Uuid::from_u128(0x91c_1000 + index as u128)).to_string();
+        let line = u32::try_from(index + 1)?;
+        db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.clone(),
+                session_id: session_id.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("sequence-{index}"),
+                span_kind: "message".into(),
+                start_line: line,
+                end_line: line,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".into()),
+                excerpt: record.clone(),
+                content_hash: format!("blake3:{}", blake3::hash(record.as_bytes()).to_hex()),
+                metadata_json: Some(r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.into()),
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        evidence_ids.push(id);
+    }
+    db.close()?;
+    let proposed = run(
+        &workspace,
+        &[
+            "review",
+            "session",
+            &session_id,
+            "--propose",
+            "--limit",
+            "8",
+            "--min-confidence",
+            "0.8",
+        ],
+    )?;
+    let candidates: Vec<&Value> = proposed["candidates"]
+        .as_array()
+        .ok_or("candidates missing")?
+        .iter()
+        .filter(|candidate| candidate["sessionArc"].is_object())
+        .collect();
+    assert_eq!(
+        candidates.len(),
+        4,
+        "both episodes must be usable: {proposed}"
+    );
+    let mut memory_ids = Vec::new();
+    // Apply the second episode first. It must not approve the first one, and
+    // reconstructing from its two raw source records must reproduce its IDs.
+    for line in [3, 1] {
+        let pair: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| candidate["sessionArc"]["failureSpan"]["startLine"] == line)
+            .collect();
+        assert_eq!(pair.len(), 2, "missing episode at line {line}: {proposed}");
+        for kind in ["session_arc_rule", "session_arc_anti_pattern"] {
+            let candidate = pair
+                .iter()
+                .copied()
+                .find(|candidate| candidate["candidateKind"] == kind)
+                .ok_or("pair member missing")?;
+            let id = candidate["candidateId"]
+                .as_str()
+                .ok_or("candidate ID missing")?;
+            assert!(
+                !candidate["proposedContent"]
+                    .as_str()
+                    .ok_or("content missing")?
+                    .contains("not-lesson-material")
+            );
+            let validated = run(
+                &workspace,
+                &["curate", "validate", id, "--actor", "SequenceCli"],
+            )?;
+            assert_eq!(
+                validated["validation"]["decision"], "approved",
+                "{validated}"
+            );
+            let applied = run(
+                &workspace,
+                &["curate", "apply", id, "--actor", "SequenceCli"],
+            )?;
+            assert_eq!(applied["application"]["status"], "applied", "{applied}");
+            memory_ids.push(
+                applied["application"]["createdMemoryId"]
+                    .as_str()
+                    .ok_or("memory missing")?
+                    .to_owned(),
+            );
+            let replay = run(
+                &workspace,
+                &["curate", "apply", id, "--actor", "SequenceCli"],
+            )?;
+            assert_eq!(replay["application"]["status"], "already_applied");
+        }
+        let db = DbConnection::open_file(&database)?;
+        assert_eq!(
+            db.list_memories(&workspace_id, None, false)?.len(),
+            memory_ids.len()
+        );
+        if line == 3 {
+            for candidate in &candidates {
+                if candidate["sessionArc"]["failureSpan"]["startLine"] == 1 {
+                    let stored = db
+                        .get_curation_candidate(
+                            &workspace_id,
+                            candidate["candidateId"]
+                                .as_str()
+                                .ok_or("candidate missing")?,
+                        )?
+                        .ok_or("candidate lost")?;
+                    assert_ne!(
+                        stored.status, "applied",
+                        "later episode must not accept its predecessor"
+                    );
+                }
+            }
+        }
+        db.close()?;
+    }
+    let db = DbConnection::open_file(&database)?;
+    for (index, id) in evidence_ids.iter().enumerate() {
+        let source = db.get_evidence_span(id)?.ok_or("source lost")?;
+        assert_eq!(
+            source.excerpt, records[index],
+            "learning must not rewrite source JSON"
+        );
+        assert_eq!(
+            source.content_hash,
+            format!(
+                "blake3:{}",
+                blake3::hash(records[index].as_bytes()).to_hex()
+            )
+        );
+        let owner = if index < 2 {
+            &memory_ids[2]
+        } else {
+            &memory_ids[0]
+        };
+        assert_eq!(source.memory_id.as_ref(), Some(owner));
+    }
+    for pair in memory_ids.chunks_exact(2) {
+        let links = db.list_memory_links_for_memory(&pair[0], Some(MemoryLinkRelation::Related))?;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].src_memory_id, pair[0]);
+        assert_eq!(links[0].dst_memory_id, pair[1]);
+        assert_eq!(
+            db.list_audit_by_target("memory_link", &links[0].id, None)?
+                .len(),
+            1
+        );
+    }
+    db.close()?;
+    Ok(())
 }

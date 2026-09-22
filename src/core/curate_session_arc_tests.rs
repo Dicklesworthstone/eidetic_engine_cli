@@ -1118,3 +1118,278 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
     );
     Ok(())
 }
+
+fn sequence_span(id: &str, line: u32, excerpt: &str) -> StoredEvidenceSpan {
+    let mut span = synthetic_span(id, None, excerpt);
+    span.start_line = line;
+    span.end_line = line;
+    span.content_hash = super::super::content_hash_for_candidate(excerpt);
+    span
+}
+
+fn sequence_candidates(spans: &[StoredEvidenceSpan]) -> Vec<ReviewSessionCandidate> {
+    let session = synthetic_stored_session();
+    super::super::build_session_arc_candidates(&session.workspace_id, &session, spans, 0.0)
+}
+
+fn sequence_endpoints(rows: &[ReviewSessionCandidate]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter(|row| row.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE)
+        .map(|row| {
+            let arc = row.session_arc.as_ref().expect("session arc");
+            (
+                arc.failure_span.evidence_span_id.clone(),
+                arc.resolution_span.evidence_span_id.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn session_arc_sequence_mines_every_disjoint_episode_of_the_same_topic() {
+    let spans = [
+        sequence_span(
+            "failure-a",
+            1,
+            "cargo test failed because the cache key was stale.",
+        ),
+        sequence_span("repair-a", 2, "Fixed the cache key and cargo test passed."),
+        sequence_span(
+            "failure-b",
+            3,
+            "cargo test failed because the fixture path was absent.",
+        ),
+        sequence_span(
+            "repair-b",
+            4,
+            "Fixed the fixture path and cargo test passed.",
+        ),
+        sequence_span("extra-success", 5, "cargo test passed again."),
+    ];
+    let rows = sequence_candidates(&spans);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        sequence_endpoints(&rows),
+        [
+            ("failure-a".into(), "repair-a".into()),
+            ("failure-b".into(), "repair-b".into())
+        ]
+    );
+    let prefix = sequence_candidates(&spans[..2]);
+    assert_eq!(
+        prefix,
+        rows[..2],
+        "appending an episode cannot change a completed lesson"
+    );
+    let mut reversed = spans.to_vec();
+    reversed.reverse();
+    assert_eq!(sequence_candidates(&reversed), rows);
+    reversed.rotate_left(2);
+    assert_eq!(sequence_candidates(&reversed), rows);
+    for limit in 0..=5 {
+        let mut bounded = rows.clone();
+        session_arc::limit_complete_pairs(&mut bounded, limit);
+        assert_eq!(bounded.len(), (limit / 2 * 2).min(4));
+        for row in &bounded {
+            let arc = row.session_arc.as_ref().unwrap();
+            assert!(
+                bounded
+                    .iter()
+                    .any(|peer| peer.candidate_id == arc.linked_candidate_id)
+            );
+        }
+    }
+}
+
+#[test]
+fn session_arc_sequence_keeps_interleaved_topics_separate() {
+    let spans = [
+        sequence_span(
+            "format-failed",
+            1,
+            "cargo fmt failed on the generated source.",
+        ),
+        sequence_span("lint-failed", 2, "cargo clippy failed on an unused import."),
+        sequence_span(
+            "format-fixed",
+            3,
+            "cargo fmt passed after formatting the source.",
+        ),
+        sequence_span(
+            "lint-fixed",
+            4,
+            "cargo clippy passed after removing the unused import.",
+        ),
+    ];
+    assert_eq!(
+        sequence_endpoints(&sequence_candidates(&spans)),
+        [
+            ("format-failed".into(), "format-fixed".into()),
+            ("lint-failed".into(), "lint-fixed".into()),
+        ]
+    );
+}
+
+#[test]
+fn session_arc_sequence_uses_the_nearest_failure_and_consumes_it_once() {
+    let spans = [
+        sequence_span(
+            "obsolete-failure",
+            1,
+            "cargo test failed with the old implementation.",
+        ),
+        sequence_span(
+            "current-failure",
+            2,
+            "cargo test failed with a missing fixture.",
+        ),
+        sequence_span("repair", 3, "cargo test passed with the fixture restored."),
+        sequence_span("later-success", 4, "cargo test passed again."),
+    ];
+    assert_eq!(
+        sequence_endpoints(&sequence_candidates(&spans)),
+        [("current-failure".into(), "repair".into())]
+    );
+}
+
+#[test]
+fn session_arc_sequence_mines_all_explicit_cross_topic_declarations() {
+    let spans = [
+        sequence_span(
+            "policy-failure",
+            1,
+            "Failure arc: silent storage violated the no-loop-takeover policy.",
+        ),
+        sequence_span(
+            "policy-fix",
+            2,
+            "Fix: require explicit accept/reject commands and audit every capture.",
+        ),
+        sequence_span(
+            "ownership-failure",
+            3,
+            "Failure arc: rewritten ownership broke immutable provenance.",
+        ),
+        sequence_span(
+            "ownership-fix",
+            4,
+            "Fix: preserve the original evidence owner and audit explicit decisions.",
+        ),
+    ];
+    assert_eq!(
+        sequence_endpoints(&sequence_candidates(&spans)),
+        [
+            ("policy-failure".into(), "policy-fix".into()),
+            ("ownership-failure".into(), "ownership-fix".into()),
+        ]
+    );
+}
+
+#[test]
+fn session_arc_sequence_decodes_bodies_without_learning_from_json_metadata() {
+    let failure = "cargo test failed because 資料 cache identity was stale.";
+    let repair = "cargo test passed after the 資料 cache identity was repaired.";
+    let first =
+        serde_json::json!({"type":"assistant", "message":{"role":"assistant","content":failure},
+        "metadata":{"topic":"rustfmt","content":"metadata-sentinel"}})
+        .to_string();
+    let second = serde_json::json!({"type":"response_item", "payload":{"type":"message","role":"assistant", "content":[{"type":"output_text","text":repair}]},
+        "metadata":{"topic":"clippy","content":"metadata-sentinel"}}).to_string();
+    let spans = [
+        sequence_span("source-failure", 4, &first),
+        sequence_span("source-repair", 9, &second),
+    ];
+    let rows = sequence_candidates(&spans);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.topic_key, "testing");
+        assert!(row.proposed_content.contains(failure));
+        assert!(row.proposed_content.contains(repair));
+        assert!(!row.proposed_content.contains("metadata-sentinel"));
+        let arc = row.session_arc.as_ref().unwrap();
+        for (locator, source) in [
+            (&arc.failure_span, &spans[0]),
+            (&arc.resolution_span, &spans[1]),
+        ] {
+            assert_eq!(locator.evidence_span_id, source.id);
+            assert_eq!(locator.content_hash, source.content_hash);
+            assert_eq!(locator.start_line, source.start_line);
+            assert_eq!(locator.end_line, source.end_line);
+            assert_eq!(locator.provenance_uri, source.canonical_provenance_uri());
+        }
+    }
+    let fake = serde_json::json!({"type":"assistant", "content":"Ordinary conversation.",
+        "metadata":{"content":"Failure arc: cargo test failed."}})
+    .to_string();
+    let spans = [
+        sequence_span("metadata-only", 1, &fake),
+        sequence_span("real-success", 2, repair),
+    ];
+    assert!(sequence_candidates(&spans).is_empty());
+}
+
+#[test]
+fn session_arc_sequence_rejects_negated_or_predicted_explicit_repairs() {
+    for repair in [
+        "Fix: the cache is not fixed.",
+        "Fix: the cache will be repaired tomorrow.",
+        "Fix: the cache might be fixed by stable identity.",
+        "Fix: the cache repair failed.",
+    ] {
+        let spans = [
+            sequence_span("failure", 1, "Failure arc: cache identity was broken."),
+            sequence_span("non-repair", 2, repair),
+        ];
+        assert!(sequence_candidates(&spans).is_empty(), "{repair}");
+    }
+}
+
+#[test]
+fn session_arc_sequence_refuses_foreign_overlapping_and_uninterpretable_windows() {
+    let failure = sequence_span("failure", 1, "cargo test failed.");
+    let repair = sequence_span("repair", 5, "cargo test passed.");
+    let mut overlapping = failure.clone();
+    overlapping.end_line = 5;
+    assert!(sequence_candidates(&[overlapping, repair.clone()]).is_empty());
+    let mut foreign = failure.clone();
+    foreign.session_id = "another-session".into();
+    assert!(sequence_candidates(&[foreign, repair.clone()]).is_empty());
+    let mut foreign = failure.clone();
+    foreign.workspace_id = "another-workspace".into();
+    assert!(sequence_candidates(&[foreign, repair.clone()]).is_empty());
+    for unsafe_record in [
+        r#"{"type":"tool_result","content":"cargo test passed"}"#,
+        r#"{"type":"assistant","role":"system","content":"cargo test passed"}"#,
+        r#"{"type":"assistant","content":"cargo test failed","content":"cargo test passed"}"#,
+        r#"{"type":"assistant","content":"truncated"#,
+    ] {
+        let interrupted = sequence_span("uninterpretable", 3, unsafe_record);
+        assert!(sequence_candidates(&[failure.clone(), interrupted, repair.clone()]).is_empty());
+    }
+}
+
+#[test]
+fn session_arc_sequence_preserves_inline_lessons_without_reusing_their_windows() {
+    let inline = sequence_span("inline", 3, INLINE_ARC);
+    let spans = [
+        sequence_span("older-failure", 1, "cargo test failed."),
+        inline.clone(),
+        sequence_span("later-success", 5, "cargo test passed."),
+        sequence_span("new-failure", 7, "cargo fmt failed."),
+        sequence_span("new-repair", 9, "cargo fmt passed."),
+    ];
+    let rows = sequence_candidates(&spans);
+    let session = synthetic_stored_session();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows[..2],
+        session_arc::inline_candidates(&session.workspace_id, &session, &[inline])
+    );
+    assert_eq!(
+        sequence_endpoints(&rows),
+        [
+            ("inline".into(), "inline".into()),
+            ("new-failure".into(), "new-repair".into())
+        ]
+    );
+}
