@@ -19,12 +19,12 @@
     "fixed_clock": "2026-06-14T00:00:00Z",
     "deterministic_seed": "seed.ask_v1.hash_embedder",
     "stable_ids": [
-      "mem_ask_direct_toolchain",
-      "mem_ask_multi_release_primary",
-      "mem_ask_multi_release_support",
-      "mem_ask_conflict_affirm",
-      "mem_ask_conflict_negate",
-      "mem_ask_version_current"
+      "mem_askdirecttoolchain00000000",
+      "mem_askmultireleaseprimary0000",
+      "mem_askmultireleasesupport0000",
+      "mem_askconflictaffirm000000000",
+      "mem_askconflictnegate000000000",
+      "mem_askversioncurrent000000000"
     ],
     "workspace_fingerprints": ["workspace.ask_v1"]
   },
@@ -221,7 +221,7 @@
         "scenario_id": "ask_lexical_release_tag",
         "command_step": 6,
         "question": "Which command must run before every release tag?",
-        "expected_cited_memory_ids": ["mem_ask_release_tag_format"],
+        "expected_cited_memory_ids": ["mem_askreleasetagformat0000000"],
         "expected_answer_terms": ["cargo fmt --check"],
         "expect_abstention": false,
         "expect_conflict": false
@@ -241,7 +241,7 @@
         "scenario_id": "ask_direct_fact",
         "command_step": 1,
         "question": "What Rust toolchain does Project Zephyr use?",
-        "expected_cited_memory_ids": ["mem_ask_direct_toolchain"],
+        "expected_cited_memory_ids": ["mem_askdirecttoolchain00000000"],
         "expected_answer_terms": ["Rust nightly 1.96.0", "toolchain"],
         "expect_abstention": false,
         "expect_conflict": false
@@ -252,8 +252,8 @@
         "command_step": 2,
         "question": "Which release readiness gate must Project Zephyr pass before deploy?",
         "expected_cited_memory_ids": [
-          "mem_ask_multi_release_primary",
-          "mem_ask_multi_release_support"
+          "mem_askmultireleaseprimary0000",
+          "mem_askmultireleasesupport0000"
         ],
         "expected_answer_terms": ["smoke gate alpha", "release readiness"],
         "expect_abstention": false,
@@ -264,18 +264,18 @@
         "scenario_id": "ask_conflicting_evidence",
         "command_step": 3,
         "question": "Is remote cache delta enabled for Project Zephyr?",
-        "expected_cited_memory_ids": ["mem_ask_conflict_affirm", "mem_ask_conflict_negate"],
+        "expected_cited_memory_ids": ["mem_askconflictaffirm000000000", "mem_askconflictnegate000000000"],
         "expected_answer_terms": ["remote cache delta", "enabled"],
         "expect_abstention": false,
         "expect_conflict": true,
         "expected_sides": [
           {
             "label": "affirming",
-            "cited_memory_ids": ["mem_ask_conflict_affirm"]
+            "cited_memory_ids": ["mem_askconflictaffirm000000000"]
           },
           {
             "label": "negating",
-            "cited_memory_ids": ["mem_ask_conflict_negate"]
+            "cited_memory_ids": ["mem_askconflictnegate000000000"]
           }
         ]
       },
@@ -294,7 +294,7 @@
         "scenario_id": "ask_version_sensitive_current",
         "command_step": 5,
         "question": "What is the current retention window for Project Zephyr traces?",
-        "expected_cited_memory_ids": ["mem_ask_version_current"],
+        "expected_cited_memory_ids": ["mem_askversioncurrent000000000"],
         "expected_answer_terms": ["30 days", "2026-06-01"],
         "expect_abstention": false,
         "expect_conflict": false

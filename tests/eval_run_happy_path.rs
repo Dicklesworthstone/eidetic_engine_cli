@@ -139,29 +139,46 @@ fn expected_corpus_ids(fixture_id: &str) -> Result<BTreeSet<String>, String> {
     if let Some(range) = numeric_range {
         return Ok(range.map(|id| format!("mem_{id:026}")).collect());
     }
+    // bd-90yt4. These two fixtures used to label their corpora `memory-1` and
+    // `mem_ask_*`, which the memories table cannot store: src/db/mod.rs:3416
+    // declares CHECK (id GLOB 'mem_*' AND length(id) = 30), preserved through
+    // the V090 rebuild at :8480. They only ever "passed" because the evaluator
+    // searched a store-less workspace, so nothing reconciled them against the
+    // schema. Seeding a real store made the violation reachable and they now
+    // carry storable IDs.
+    //
+    // The oracle keeps BUILDING ids from its own rule rather than importing the
+    // fixture's, so it still fails when a fixture silently drops or renames a
+    // record. Padding right with '0' is what keeps the names readable at a
+    // glance while satisfying the exact-30 requirement.
     if fixture_id == "fx.async_migration.v1" {
-        return Ok((1..=3).map(|id| format!("memory-{id}")).collect());
+        return Ok((1..=3)
+            .map(|id| format!("mem_asyncmigration{id:012}"))
+            .collect());
     }
     if fixture_id == "ask_v1" {
         let mut ids: BTreeSet<_> = [
-            "release_tag_format",
-            "direct_toolchain",
-            "direct_database",
-            "multi_release_primary",
-            "multi_release_support",
-            "conflict_affirm",
-            "conflict_negate",
-            "version_current",
-            "version_old",
-            "boundary_rule",
-            "low_trust_noise",
-            "unrelated_billing",
-            "unrelated_ui",
+            "releasetagformat",
+            "directtoolchain",
+            "directdatabase",
+            "multireleaseprimary",
+            "multireleasesupport",
+            "conflictaffirm",
+            "conflictnegate",
+            "versioncurrent",
+            "versionold",
+            "boundaryrule",
+            "lowtrustnoise",
+            "unrelatedbilling",
+            "unrelatedui",
         ]
         .into_iter()
-        .map(|suffix| format!("mem_ask_{suffix}"))
+        .map(|suffix| {
+            let body = format!("ask{suffix}");
+            format!("mem_{body:0<26}")
+        })
         .collect();
-        ids.extend((1..=48).map(|id| format!("mem_ask_noise_{id:03}")));
+        ids.extend((1..=48).map(|id| format!("mem_asknoise{id:018}")));
         return Ok(ids);
     }
     Err(format!("unclassified retrieval fixture {fixture_id}"))

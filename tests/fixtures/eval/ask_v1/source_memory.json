@@ -5,17 +5,17 @@
   "fixed_clock": "2026-06-14T00:00:00Z",
   "memories": [
     {
-      "id": "mem_ask_release_tag_format",
+      "id": "mem_askreleasetagformat0000000",
       "level": "procedural",
       "kind": "rule",
       "trust_class": "human_explicit",
       "confidence": 0.85,
       "content": "Run cargo fmt --check before every release tag.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_release_tag_format",
+      "provenance_uri": "fixture://ask_v1/mem_askreleasetagformat0000000",
       "expected_query_match": ["Which command must run before every release tag?"]
     },
     {
-      "id": "mem_ask_direct_toolchain",
+      "id": "mem_askdirecttoolchain00000000",
       "level": "procedural",
       "kind": "fact",
       "trust_class": "human_explicit",
@@ -24,11 +24,11 @@
       "importance": 0.83,
       "tags": ["ask", "toolchain", "zephyr"],
       "content": "Project Zephyr uses Rust nightly 1.96.0 as its active toolchain for all release verification.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_direct_toolchain",
+      "provenance_uri": "fixture://ask_v1/mem_askdirecttoolchain00000000",
       "expected_query_match": ["What Rust toolchain does Project Zephyr use?"]
     },
     {
-      "id": "mem_ask_direct_database",
+      "id": "mem_askdirectdatabase000000000",
       "level": "semantic",
       "kind": "fact",
       "trust_class": "agent_validated",
@@ -37,11 +37,11 @@
       "importance": 0.64,
       "tags": ["ask", "database", "zephyr"],
       "content": "Project Zephyr stores durable trace metadata in FrankenSQLite through SQLModel, not in an HTTP service.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_direct_database",
+      "provenance_uri": "fixture://ask_v1/mem_askdirectdatabase000000000",
       "expected_query_match": ["Where does Project Zephyr store trace metadata?"]
     },
     {
-      "id": "mem_ask_multi_release_primary",
+      "id": "mem_askmultireleaseprimary0000",
       "level": "procedural",
       "kind": "rule",
       "trust_class": "human_explicit",
@@ -50,13 +50,13 @@
       "importance": 0.86,
       "tags": ["ask", "release", "gate"],
       "content": "Project Zephyr release readiness requires smoke gate alpha before deploy.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_multi_release_primary",
+      "provenance_uri": "fixture://ask_v1/mem_askmultireleaseprimary0000",
       "expected_query_match": [
         "Which release readiness gate must Project Zephyr pass before deploy?"
       ]
     },
     {
-      "id": "mem_ask_multi_release_support",
+      "id": "mem_askmultireleasesupport0000",
       "level": "episodic",
       "kind": "decision",
       "trust_class": "agent_validated",
@@ -65,13 +65,13 @@
       "importance": 0.77,
       "tags": ["ask", "release", "gate"],
       "content": "The 2026-06-01 release review repeated that smoke gate alpha is the mandatory Project Zephyr release readiness gate before deploy.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_multi_release_support",
+      "provenance_uri": "fixture://ask_v1/mem_askmultireleasesupport0000",
       "expected_query_match": [
         "Which release readiness gate must Project Zephyr pass before deploy?"
       ]
     },
     {
-      "id": "mem_ask_conflict_affirm",
+      "id": "mem_askconflictaffirm000000000",
       "level": "episodic",
       "kind": "observation",
       "trust_class": "agent_assertion",
@@ -80,11 +80,11 @@
       "importance": 0.74,
       "tags": ["ask", "remote-cache", "conflict"],
       "content": "Remote cache delta is enabled for Project Zephyr on the worker-g worker pool.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_conflict_affirm",
+      "provenance_uri": "fixture://ask_v1/mem_askconflictaffirm000000000",
       "expected_query_match": ["Is remote cache delta enabled for Project Zephyr?"]
     },
     {
-      "id": "mem_ask_conflict_negate",
+      "id": "mem_askconflictnegate000000000",
       "level": "episodic",
       "kind": "observation",
       "trust_class": "agent_assertion",
@@ -93,11 +93,11 @@
       "importance": 0.74,
       "tags": ["ask", "remote-cache", "conflict"],
       "content": "Remote cache delta is not enabled for Project Zephyr on the worker-g worker pool.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_conflict_negate",
+      "provenance_uri": "fixture://ask_v1/mem_askconflictnegate000000000",
       "expected_query_match": ["Is remote cache delta enabled for Project Zephyr?"]
     },
     {
-      "id": "mem_ask_version_current",
+      "id": "mem_askversioncurrent000000000",
       "level": "procedural",
       "kind": "rule",
       "trust_class": "human_explicit",
@@ -106,11 +106,11 @@
       "importance": 0.82,
       "tags": ["ask", "retention", "current"],
       "content": "As of 2026-06-01, the current Project Zephyr trace retention window is 30 days.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_version_current",
+      "provenance_uri": "fixture://ask_v1/mem_askversioncurrent000000000",
       "expected_query_match": ["What is the current retention window for Project Zephyr traces?"]
     },
     {
-      "id": "mem_ask_version_old",
+      "id": "mem_askversionold0000000000000",
       "level": "episodic",
       "kind": "decision",
       "trust_class": "legacy_import",
@@ -119,11 +119,11 @@
       "importance": 0.31,
       "tags": ["ask", "retention", "deprecated"],
       "content": "Before 2026-06-01, Project Zephyr trace retention used a deprecated 14 day window.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_version_old",
+      "provenance_uri": "fixture://ask_v1/mem_askversionold0000000000000",
       "expected_query_match": ["What was the old Project Zephyr trace retention window?"]
     },
     {
-      "id": "mem_ask_boundary_rule",
+      "id": "mem_askboundaryrule00000000000",
       "level": "procedural",
       "kind": "rule",
       "trust_class": "human_explicit",
@@ -132,11 +132,11 @@
       "importance": 0.7,
       "tags": ["ask", "boundary"],
       "content": "Ask answers for Project Zephyr must quote stored evidence spans and must not synthesize claims outside citations.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_boundary_rule",
+      "provenance_uri": "fixture://ask_v1/mem_askboundaryrule00000000000",
       "expected_query_match": ["How should Project Zephyr ask answers cite evidence?"]
     },
     {
-      "id": "mem_ask_low_trust_noise",
+      "id": "mem_asklowtrustnoise0000000000",
       "level": "episodic",
       "kind": "note",
       "trust_class": "legacy_import",
@@ -145,11 +145,11 @@
       "importance": 0.2,
       "tags": ["ask", "noise"],
       "content": "A stale note mentions a possible umbrella color for Project Zephyr demos but gives no operational fact.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_low_trust_noise",
+      "provenance_uri": "fixture://ask_v1/mem_asklowtrustnoise0000000000",
       "expected_query_match": []
     },
     {
-      "id": "mem_ask_unrelated_billing",
+      "id": "mem_askunrelatedbilling0000000",
       "level": "semantic",
       "kind": "fact",
       "trust_class": "cass_evidence",
@@ -158,11 +158,11 @@
       "importance": 0.2,
       "tags": ["ask", "distractor"],
       "content": "The billing sandbox fixture uses invoice identifiers that are unrelated to Project Zephyr approval flows.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_unrelated_billing",
+      "provenance_uri": "fixture://ask_v1/mem_askunrelatedbilling0000000",
       "expected_query_match": []
     },
     {
-      "id": "mem_ask_unrelated_ui",
+      "id": "mem_askunrelatedui000000000000",
       "level": "episodic",
       "kind": "note",
       "trust_class": "cass_evidence",
@@ -171,7 +171,7 @@
       "importance": 0.19,
       "tags": ["ask", "distractor"],
       "content": "A UI fixture checks sidebar contrast and does not describe Project Zephyr infrastructure policy.",
-      "provenance_uri": "fixture://ask_v1/mem_ask_unrelated_ui",
+      "provenance_uri": "fixture://ask_v1/mem_askunrelatedui000000000000",
       "expected_query_match": []
     }
   ],
@@ -180,8 +180,8 @@
       "name": "ask_noise",
       "expected_memory_count": 48,
       "id_range": {
-        "start": "mem_ask_noise_001",
-        "end": "mem_ask_noise_048"
+        "start": "mem_asknoise000000000000000001",
+        "end": "mem_asknoise000000000000000048"
       },
       "expected_query_match": [],
       "generator": {
