@@ -16,23 +16,42 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
             .strip_prefix("#[path = \"../")
             .and_then(|line| line.strip_suffix("\"]"))
             .ok_or_else(|| format!("unexpected suite declaration: {line}"))?;
-        // Shared helpers are compiled once by a suite. They do not replace a
-        // root test registration, and only direct support/*.rs paths qualify.
-        let module_file = file.strip_prefix("support/").unwrap_or(file);
-        let name = module_file
+        let stem = file
             .strip_suffix(".rs")
-            .filter(|name| {
-                name.chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            .filter(|stem| {
+                stem.split('/').all(|part| {
+                    !part.is_empty()
+                        && part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                })
             })
             .ok_or_else(|| format!("invalid suite module path: {file}"))?;
-        let declaration = format!("mod {name};");
-        if lines.next() != Some(declaration.as_str()) {
-            return Err(format!("{file} must be followed by {declaration}"));
+        // Every declaration must still be followed by a `mod <ident>;` line.
+        let declaration = lines
+            .next()
+            .ok_or_else(|| format!("{file} must be followed by a mod declaration"))?;
+        let declared = declaration
+            .strip_prefix("mod ")
+            .and_then(|name| name.strip_suffix(';'))
+            .filter(|name| {
+                !name.is_empty()
+                    && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            })
+            .ok_or_else(|| format!("{file} must be followed by a mod declaration"))?;
+        // A path with a directory component is a shared helper compiled once by
+        // a suite. It does not replace a root test registration, and the suite
+        // names it: `agent_mail_fixture/snapshot_v1.rs` is declared as
+        // `agent_mail_snapshot_v1` so two workspace-hygiene modules can share
+        // one copy without tripping clippy::duplicate_mod. Root files keep the
+        // strict stem match, because that is what keeps the coverage counts
+        // keyed to real file names -- relaxing it there would let a renamed
+        // module silently stop covering its file.
+        if stem.contains('/') {
+            continue;
         }
-        if module_file == file {
-            modules.push(file.to_owned());
+        if declared != stem {
+            return Err(format!("{file} must be followed by mod {stem};"));
         }
+        modules.push(file.to_owned());
     }
     Ok(modules)
 }

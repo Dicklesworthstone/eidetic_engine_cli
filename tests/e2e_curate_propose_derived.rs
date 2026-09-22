@@ -347,7 +347,7 @@ fn curate_propose_derived_inserts_pending_candidate_and_is_idempotent() -> TestR
     let (first_output, first_parsed) = propose_derived(
         &workspace_arg,
         &[("memory", &source)],
-        "Derived insight from non-dry-run pin test.",
+        "Non-dry-run propose-derived pins the candidate: see src/curate/mod.rs, keep p99 under 250ms on main, and treat E0308 as a hard stop.",
         &[],
     )?;
     ensure(
@@ -398,7 +398,7 @@ fn curate_propose_derived_inserts_pending_candidate_and_is_idempotent() -> TestR
     let (second_output, second_parsed) = propose_derived(
         &workspace_arg,
         &[("memory", &source)],
-        "Derived insight from non-dry-run pin test.",
+        "Non-dry-run propose-derived pins the candidate: see src/curate/mod.rs, keep p99 under 250ms on main, and treat E0308 as a hard stop.",
         &[],
     )?;
     ensure(

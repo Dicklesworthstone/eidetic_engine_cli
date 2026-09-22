@@ -377,12 +377,12 @@ mod tests {
     #[test]
     fn link_ids_match_database_constraint_shape() {
         assert!(
-            HOT_LINK_ID.starts_with("link_"),
+            super::HOT_LINK_ID.starts_with("link_"),
             "hot link id must use link_ prefix"
         );
-        assert_eq!(HOT_LINK_ID.len(), 31, "hot link id length");
+        assert_eq!(super::HOT_LINK_ID.len(), 31, "hot link id length");
 
-        let sample = seed_link_id(42);
+        let sample = super::seed_link_id(42);
         assert!(
             sample.starts_with("link_"),
             "seed link id must use link_ prefix"

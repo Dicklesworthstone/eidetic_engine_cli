@@ -16,8 +16,26 @@ fn parse_doc_env_vars() -> TestResult<Vec<DocEnvVar>> {
     let content = include_str!("../docs/env_vars.md");
     let mut entries = Vec::new();
 
+    // docs/env_vars.md documents build-time `option_env!`/`env!` names in a
+    // separate four-column table under "## Build-time variables". Those are not
+    // runtime registry entries -- `EnvVar::all()` contains none of them -- and
+    // they ARE `EE_`-prefixed, so the `EE_` filter below cannot exclude them
+    // the way it excludes the third-party table. The six-column shape belongs
+    // to the registry table only, so rows have to be attributed to a table
+    // before it is applied. Any heading resets the flag, so an unknown section
+    // fails loudly on the six-cell rule rather than being silently skipped.
+    let mut in_build_time_table = false;
+
     for (line_index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            let heading = heading.trim_start_matches('#').trim();
+            in_build_time_table = heading.eq_ignore_ascii_case("Build-time variables");
+            continue;
+        }
+        if in_build_time_table {
+            continue;
+        }
         if !trimmed.starts_with('|') {
             continue;
         }

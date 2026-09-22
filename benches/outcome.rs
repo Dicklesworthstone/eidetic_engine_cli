@@ -484,6 +484,7 @@ mod tests {
             event_id: None,
             actor: Some("unit-test".to_string()),
             agent_name: None,
+            prompt_injection_guard: true,
             dry_run: false,
             harmful_per_source_per_hour: super::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: super::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
