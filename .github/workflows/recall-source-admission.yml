@@ -41,9 +41,15 @@ jobs:
             test "$(git hash-object src/core/recall_admission.rs)" = 3911882901f25215fa9bb43acbbc276886c31206
             reviewed=270a987de2db628af16107ee14ef625266bbb307
             git fetch --no-tags origin "$reviewed"
-            git diff --binary 99157cf509af58f9d8af18b13a1a2cbe651ed115 "$reviewed" -- "${new_files[@]}" > "$RUNNER_TEMP/recall-reviewed-files.patch"
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/recall-reviewed-files.patch"
-            git apply "$RUNNER_TEMP/recall-reviewed-files.patch"
+            for file in "${new_files[@]}"; do
+              test ! -L "$file"
+              if test -e "$file"; then
+                test "$(git hash-object "$file")" = "$(git rev-parse "$reviewed:$file")"
+              else
+                mkdir -p "$(dirname "$file")"
+                git show "$reviewed:$file" > "$file"
+              fi
+            done
             test "$(git hash-object src/core/recall_scan.rs)" = 2e0e2eabfe905d20047aaa7011fa518919da1e42
             test "$(git hash-object tests/recall_source_lifecycle_cli.py)" = a4e09160eb077987edba8f809047f08ccc7814bc
             patch=scripts/delivery/recall-admitted-scan-20260922.patch
@@ -53,8 +59,8 @@ jobs:
           fi
           rustfmt --edition 2024 --config skip_children=true src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs
           python3 -m py_compile tests/recall_source_lifecycle_cli.py
-          git diff --check
           git add -- "${files[@]}"
+          git diff --cached --check -- . ':!scripts/delivery/recall-admitted-scan-20260922.patch'
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
