@@ -30,6 +30,12 @@ source "$E2E_DIR/lib/e2e_harness.sh"
 harness_init "backup_roundtrip"
 
 ee_json() { "$EE_BIN" "$@" 2>/dev/null || true; }
+# records_root <backup_dir> — the content root from the records.jsonl footer, or
+# empty when the backup has no records file or no authenticated footer.
+records_root() {
+    [ -n "${1:-}" ] && [ -f "$1/records.jsonl" ] || return 0
+    tail -n 1 "$1/records.jsonl" | jq -r '.authentication.recordsRoot // empty' 2>/dev/null || true
+}
 
 with_temp_workspace WS
 
@@ -85,6 +91,19 @@ else
     log_drop 1 "backup verify skipped: create did not return a backupPath"
 fi
 
+step "control: a second backup of unchanged content reproduces the records root"
+# Without this, a root that differs on every backup would make the round-trip
+# identity below red regardless of what restore did.
+cr_again="$(ee_json backup create --workspace "$WS" --json)"
+root_source="$(records_root "$backup_path")"
+root_again="$(records_root "$(printf '%s' "$cr_again" | jq -r '.data.backupPath // empty')")"
+if [ -n "$root_source" ] && [ -n "$root_again" ]; then
+    assert_eq "$root_again" "$root_source" \
+        "records root is stable across backups of unchanged content"
+else
+    log_drop 1 "records-root stability control unmeasured: no authentication.recordsRoot in the footer (first [$root_source], second [$root_again])"
+fi
+
 step "ee backup restore materializes an isolated copy (round-trip)"
 # --side-path must be a real, non-symlink directory OUTSIDE the source workspace.
 # Use a sibling of WS (outside it, same real volume). macOS temp roots live under
@@ -107,15 +126,26 @@ if printf '%s' "$rs" | jq -e '.success == true' >/dev/null 2>&1; then
     assert_jq "$rs" '(.data.counts.issues // null) | type == "number"' \
         "restore surfaces a numeric issues count (degraded, not silent)"
 
-    step "round-trip hash identity: re-backup of restored state reproduces hashes"
-    # The restored workspace, re-backed-up, must reproduce the same records hash.
+    step "round-trip content identity: re-backup of restored state reproduces the records root"
+    # recordsHash hashes the whole records.jsonl, whose header and footer carry
+    # this backup's own export_id and timestamps, so two backups of identical
+    # content never share it (bd-cjt23). Identity is asserted on the footer's
+    # authentication.recordsRoot, which covers only the emitted memory, tag and
+    # link lines. The controls below show that root is stable across backups of
+    # unchanged content and moves when that content changes.
     rs_db="$(printf '%s' "$rs" | jq -r '.data.restoredDatabasePath // .data.databasePath // empty')"
     rs_imported="$(printf '%s' "$rs" | jq -r '.data.counts.memoriesImported // 0')"
     if [ -n "$rs_db" ] && [ -n "$records_hash" ] && [ "$rs_imported" -gt 0 ] 2>/dev/null; then
         cr2="$(ee_json backup create --workspace "$WS" --database "$rs_db" --json)"
         if printf '%s' "$cr2" | jq -e '.success == true' >/dev/null 2>&1; then
-            assert_jq "$cr2" '(.data.recordsHash // "x") == "'"$records_hash"'"' \
-                "re-backup of restored state reproduces the records hash (round-trip identity)"
+            root1="$(records_root "$backup_path")"
+            root2="$(records_root "$(printf '%s' "$cr2" | jq -r '.data.backupPath // empty')")"
+            if [ -n "$root1" ] && [ -n "$root2" ]; then
+                assert_eq "$root2" "$root1" \
+                    "re-backup of restored state reproduces the records root (round-trip identity)"
+            else
+                log_drop 1 "round-trip identity unmeasured: records.jsonl footer carries no authentication.recordsRoot (source [$root1], re-backup [$root2]); recordsHash cannot substitute because it hashes per-backup ids and timestamps"
+            fi
         else
             log_drop 1 "round-trip re-backup over restored DB unavailable on this binary; restore success asserted above"
         fi
@@ -130,6 +160,21 @@ else
         *)
             log_drop 1 "backup restore unavailable on this binary ($rs_msg): when wired, assert an isolated round-trip restore with identical artifact hashes" ;;
     esac
+fi
+
+step "control: the records root moves when durable content changes"
+# Runs after the round trip so the extra memory cannot reach any backup above.
+# Without this, a constant root would satisfy the identity assertion trivially.
+m3="$(ee_json remember "backup.rs hashes records.jsonl including its header." \
+    --workspace "$WS" --level semantic --kind fact --tags backup --json)"
+assert_jq "$m3" '.success == true' "remember a third memory for the sensitivity control"
+cr_changed="$(ee_json backup create --workspace "$WS" --json)"
+root_changed="$(records_root "$(printf '%s' "$cr_changed" | jq -r '.data.backupPath // empty')")"
+if [ -n "$root_source" ] && [ -n "$root_changed" ]; then
+    assert_eq "$([ "$root_changed" != "$root_source" ] && echo differs || echo same)" "differs" \
+        "records root changes when a memory is added"
+else
+    log_drop 1 "records-root sensitivity control unmeasured: no authentication.recordsRoot in the footer (source [$root_source], changed [$root_changed])"
 fi
 
 step "NEW-ASSET coverage: every new durable/derived asset is in the manifest (23.2)"
