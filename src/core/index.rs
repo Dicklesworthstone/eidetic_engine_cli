@@ -15,7 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::remote_embed::{
-    EmbedBackendSelection, configured_embed_backend, resolve_configured_remote_embedder,
+    EmbedBackendSelection, RemoteEmbedConfigError, RemoteEmbedSettings, configured_embed_backend,
+    resolve_configured_remote_embedder,
 };
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
@@ -32,8 +33,8 @@ use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMAT
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
     EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
-    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE,
-    EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
+    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
+    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
@@ -1441,6 +1442,8 @@ impl EmbeddingPosture {
     #[must_use]
     pub fn semantic_pending(&self) -> bool {
         self.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
+            || (self.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED
+                && self.source == "remote_dimension_unprobed")
     }
 }
 
@@ -3991,9 +3994,33 @@ fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildE
 
     let base = index_base_name(index_dir)?;
     let stamp = monotonicish_stamp();
+    // A crash immediately after directory exchange leaves the former live
+    // generation at this staging name. Bind that name to the live inode now:
+    // the newly built staging inode cannot satisfy this identity until a real
+    // exchange has displaced the already published directory into it.
+    #[cfg(unix)]
+    let displaced_identity = {
+        use std::os::unix::fs::MetadataExt;
+        ensure_index_path_has_no_symlinks(index_dir, "identify displaced index generation")?;
+        ensure_index_publish_target_is_directory_or_missing(
+            index_dir,
+            "identify displaced index generation",
+        )?;
+        match std::fs::symlink_metadata(index_dir) {
+            Ok(metadata) => format!("-displaced-{:016x}-{:016x}", metadata.dev(), metadata.ino()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(IndexRebuildError::Index(format!(
+                    "Failed to identify displaced index generation: {error}"
+                )));
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let displaced_identity = "";
     for sequence in 0_u32..1000 {
         let candidate = parent.join(format!(
-            ".{base}{INDEX_STAGING_PREFIX}{stamp}-{sequence:03}"
+            ".{base}{INDEX_STAGING_PREFIX}{stamp}-{sequence:03}{displaced_identity}"
         ));
         let mut directory = std::fs::DirBuilder::new();
         // Index tiers may contain source text. Set privacy at creation rather
@@ -4504,6 +4531,21 @@ fn publish_index_by_exchange(
     sync_directory: &mut impl FnMut(&Path) -> Result<(), IndexRebuildError>,
     retain: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
 ) -> Result<Option<PathBuf>, IndexRebuildError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if let Some((_, device, inode)) = displaced_generation_identity(index_dir, staging_dir)? {
+        let live = std::fs::symlink_metadata(index_dir).map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "Failed to recheck displaced index identity: {error}"
+            ))
+        })?;
+        if !live.is_dir() || live.dev() != device || live.ino() != inode {
+            return Err(IndexRebuildError::Index(
+                "Live index identity changed while staging was built; no exchange was attempted"
+                    .to_owned(),
+            ));
+        }
+    }
     let retained = allocate_retained_index_dir(index_dir)?;
     // Persist the old directory while it is STILL live. A directory fsync in
     // the old retain-then-rename gap would prolong reader-visible absence.
@@ -5240,6 +5282,77 @@ fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32
     }
     let sequence = suffix.parse::<u32>().ok()?;
     (sequence > 0).then_some(sequence)
+}
+
+/// Recognize only a formerly live directory stranded by an interrupted
+/// exchange. A complete pre-exchange build has the wrong inode and remains
+/// uncommitted staging, regardless of its manifest or source generation.
+#[cfg(unix)]
+fn displaced_generation_sequence(
+    index_dir: &Path,
+    candidate: &Path,
+) -> Result<Option<u32>, IndexRebuildError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some((sequence, device, inode)) = displaced_generation_identity(index_dir, candidate)?
+    else {
+        return Ok(None);
+    };
+    ensure_index_path_has_no_symlinks(candidate, "inspect displaced index generation")?;
+    let metadata = std::fs::symlink_metadata(candidate).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to inspect displaced index generation: {error}"
+        ))
+    })?;
+    Ok(
+        (metadata.is_dir() && metadata.dev() == device && metadata.ino() == inode)
+            .then_some(sequence),
+    )
+}
+
+#[cfg(unix)]
+fn displaced_generation_identity(
+    index_dir: &Path,
+    candidate: &Path,
+) -> Result<Option<(u32, u64, u64)>, IndexRebuildError> {
+    if index_parent(candidate) != index_parent(index_dir) {
+        return Ok(None);
+    }
+    let Some(name) = candidate.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let prefix = format!(".{}{INDEX_STAGING_PREFIX}", index_base_name(index_dir)?);
+    let Some(suffix) = name.strip_prefix(&prefix) else {
+        return Ok(None);
+    };
+    let Some((allocation, identity)) = suffix.split_once("-displaced-") else {
+        return Ok(None);
+    };
+    let Some((stamp, sequence)) = allocation.split_once('-') else {
+        return Ok(None);
+    };
+    if stamp.is_empty()
+        || !stamp.bytes().all(|byte| byte.is_ascii_digit())
+        || stamp.parse::<u128>().is_err()
+        || sequence.len() != 3
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let Some((device, inode)) = identity.split_once('-') else {
+        return Ok(None);
+    };
+    if device.len() != 16 || inode.len() != 16 {
+        return Ok(None);
+    }
+    let (Ok(device), Ok(inode), Ok(sequence)) = (
+        u64::from_str_radix(device, 16),
+        u64::from_str_radix(inode, 16),
+        sequence.parse::<u32>(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((sequence, device, inode)))
 }
 
 fn find_latest_recoverable_retained_dir(
@@ -6178,14 +6291,42 @@ fn active_remote_embedder() -> &'static ActiveRemoteEmbedder {
     })
 }
 
-/// Descriptor for the active remote embedder, when one is serving.
-fn remote_embedder_descriptor() -> Option<EmbedderDescriptor> {
-    match active_remote_embedder() {
-        ActiveRemoteEmbedder::Ready(embedder) => {
-            Some(EmbedderDescriptor::from_embedder(embedder.as_ref()))
+/// Observe remote configuration without bringing up the execution backend.
+///
+/// Status is reached by read-only pack, why-not, doctor and capabilities. Its
+/// descriptor must not send the dimension probe or cache a failure that a
+/// later retrieval would inherit. A configured dimension is enough to describe
+/// the same identity execution would construct; an unknown dimension remains
+/// pending until a caller that actually embeds text resolves it.
+fn remote_embedder_descriptors() -> Option<(EmbedderDescriptor, Option<EmbedderDescriptor>)> {
+    remote_embedder_descriptors_with(&ACTIVE_REMOTE_EMBEDDER, || {
+        (configured_embed_backend() == EmbedBackendSelection::Remote)
+            .then(RemoteEmbedSettings::from_env)
+    })
+}
+
+fn remote_embedder_descriptors_with(
+    resolved: &OnceLock<ActiveRemoteEmbedder>,
+    configured: impl FnOnce() -> Option<Result<RemoteEmbedSettings, RemoteEmbedConfigError>>,
+) -> Option<(EmbedderDescriptor, Option<EmbedderDescriptor>)> {
+    match resolved.get() {
+        Some(ActiveRemoteEmbedder::Ready(embedder)) => {
+            return Some((EmbedderDescriptor::from_embedder(embedder.as_ref()), None));
         }
-        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Failed => None,
+        Some(ActiveRemoteEmbedder::Failed) => return Some(remote_unavailable_descriptors()),
+        Some(ActiveRemoteEmbedder::NotConfigured) => return None,
+        None => {}
     }
+    let settings = match configured()? {
+        Ok(settings) => settings,
+        Err(_) => return Some(remote_unavailable_descriptors()),
+    };
+    let Some(dimension) = settings.dimension else {
+        let (mut fast, quality) = stack_descriptors(&hash_fallback_embedder_stack());
+        fast.remote_dimension_unprobed = true;
+        return Some((fast, quality));
+    };
+    Some((EmbedderDescriptor::remote(&settings, dimension), None))
 }
 
 /// Hash-tier descriptors marked as "the remote backend you asked for is down".
@@ -7787,6 +7928,10 @@ struct EmbedderDescriptor {
     /// Distinct from an ordinary hash fallback: the operator asked for a remote
     /// backend and must be told it is not working.
     remote_unavailable: bool,
+    /// Inspection has no configured or previously resolved remote dimension.
+    /// The hash tier is usable, but the endpoint has not been tried and must
+    /// not be described as failed. Real retrieval may still resolve it.
+    remote_dimension_unprobed: bool,
     /// The LOCAL neural tier was attempted and failed, so this descriptor
     /// describes the hash tier that ran instead. Also distinct from an ordinary
     /// hash fallback: the model was reachable and the load is what broke, and
@@ -7806,6 +7951,7 @@ impl EmbedderDescriptor {
             ready: embedder.is_ready(),
             pending_download: embedder_reports_pending_model2vec_download(embedder),
             remote_unavailable: false,
+            remote_dimension_unprobed: false,
             local_load_failed: false,
         }
     }
@@ -7820,6 +7966,22 @@ impl EmbedderDescriptor {
             ready: true,
             pending_download: false,
             remote_unavailable: false,
+            remote_dimension_unprobed: false,
+            local_load_failed: false,
+        }
+    }
+
+    fn remote(settings: &RemoteEmbedSettings, dimension: usize) -> Self {
+        Self {
+            id: settings.embedder_id(),
+            model_name: settings.model.clone(),
+            dimension,
+            category: ModelCategory::ApiEmbedder,
+            semantic: true,
+            ready: true,
+            pending_download: false,
+            remote_unavailable: false,
+            remote_dimension_unprobed: false,
             local_load_failed: false,
         }
     }
@@ -7845,13 +8007,30 @@ fn workspace_embedder_descriptors(
     {
         return Ok(stack_descriptors(&stack));
     }
-    if let Some(descriptor) = remote_embedder_descriptor() {
-        return Ok((descriptor, None));
+    if let Some(descriptors) = remote_embedder_descriptors() {
+        return Ok(descriptors);
     }
-    if matches!(active_remote_embedder(), ActiveRemoteEmbedder::Failed) {
-        return Ok(remote_unavailable_descriptors());
-    }
-    if configured_embedder_model_root().is_none() {
+    let configured_settings =
+        configured_embedder_model_root().map(|model_root| EeEmbedderSettings {
+            model_root,
+            download_mode: default_embed_download_mode(),
+            local_source: EmbedModelSource::Configured,
+        });
+    workspace_local_embedder_descriptors(
+        db,
+        workspace_id,
+        &DEFAULT_SEARCH_EMBEDDER,
+        configured_settings.as_ref(),
+    )
+}
+
+fn workspace_local_embedder_descriptors(
+    db: &DbConnection,
+    workspace_id: &str,
+    resolved: &OnceLock<DefaultSearchEmbedder>,
+    configured_settings: Option<&EeEmbedderSettings>,
+) -> Result<(EmbedderDescriptor, Option<EmbedderDescriptor>), DbError> {
+    if configured_settings.is_none() {
         match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
         {
             RegisteredModel2VecResolution::Ready(descriptor) => return Ok((descriptor, None)),
@@ -7862,40 +8041,17 @@ fn workspace_embedder_descriptors(
             | RegisteredModel2VecResolution::BundledDefaultDeclared => {}
         }
     }
-    // bd-qf3l4. Below, this function shares execution's resolution so inspection
-    // cannot claim a neural backend that retrieval falls back from (bd-7hsgy).
-    // That sharing must READ the resolution, never force it. `get_or_init` here
-    // made `ee index status` and `ee doctor` load the embedding model: a
-    // registered workspace probed with a model root configured allocated ~2 GB
-    // RSS against ~48 MB without, for the same read-only command. The comment
-    // below justifies the cost as "what retrieval would have paid anyway", which
-    // holds for `ee search` and not for a probe that never retrieves -- and these
-    // are the commands an agent runs when something is already wrong.
-    //
-    // This file already states the rule twice, for `active_semantic_identity` and
-    // `active_embedder_identity_hint`: a diagnostic that initialised the global
-    // would fix the very identity it claims to report, turning an observation
-    // into a mutation. The same applies here.
-    //
-    // When the process HAS resolved, behaviour is unchanged and bd-7hsgy's
-    // guarantee holds exactly. When it has not, answer from the registry rather
-    // than forcing a load -- the same answer the unconfigured branch above
-    // already gives. The tradeoff is real and deliberate: an unresolved process
-    // may describe a registered model optimistically, where before it would have
-    // loaded the weights to be certain. A 2 GB allocation on `ee doctor` is the
-    // worse defect, and the execution path still resolves for real before any
-    // retrieval reports a posture.
-    let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() else {
-        return match resolve_registered_model2vec(db, workspace_id, |_| {
-            Ok(EmbedderDescriptor::potion())
-        })? {
-            RegisteredModel2VecResolution::Ready(descriptor) => Ok((descriptor, None)),
-            RegisteredModel2VecResolution::Rejected(_)
-            | RegisteredModel2VecResolution::NotRegistered
-            | RegisteredModel2VecResolution::BundledDefaultDeclared => {
-                Ok(stack_descriptors(&hash_fallback_embedder_stack()))
-            }
-        };
+    // bd-qf3l4: observation must never initialize the process model. Loading
+    // weights here made a small index/status probe allocate about 2 GB.
+    // Preserve execution's configured-root precedence even before that first
+    // load: registry availability cannot override missing configured assets.
+    let Some(selection) = resolved.get() else {
+        if configured_settings
+            .is_some_and(|settings| verified_default_model_dir(settings).is_some())
+        {
+            return Ok((EmbedderDescriptor::potion(), None));
+        }
+        return Ok(stack_descriptors(&hash_fallback_embedder_stack()));
     };
     // Inspection shares execution's one-time resolution rather than answering
     // from discovery alone. A verified model directory establishes that the
@@ -8166,6 +8322,8 @@ fn embedding_posture_from_records(
         "remote_endpoint"
     } else if fast_embedder.remote_unavailable {
         "remote_endpoint_unavailable"
+    } else if fast_embedder.remote_dimension_unprobed {
+        "remote_dimension_unprobed"
     } else if semantic && selected_registry_model.is_some() {
         "registry_observed"
     } else if semantic {
@@ -8187,6 +8345,8 @@ fn embedding_posture_from_records(
         EMBEDDING_POSTURE_MODE_NEURAL_REMOTE
     } else if fast_embedder.remote_unavailable {
         EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE
+    } else if fast_embedder.remote_dimension_unprobed {
+        EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED
     } else if semantic && selected_registry_model.is_some() {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
     } else if semantic {
@@ -12180,6 +12340,362 @@ mod tests {
     }
 
     #[test]
+    fn remote_descriptor_inspection_preserves_configured_identity_without_connecting() -> TestResult
+    {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let endpoint = format!(
+            "http://{}/v1",
+            listener.local_addr().map_err(|error| error.to_string())?
+        );
+        let resolved = OnceLock::new();
+        let mut fingerprints = BTreeSet::new();
+        for (model, dimension) in [
+            ("all-minilm", "384"),
+            ("bge-small", "384"),
+            ("all-minilm", "768"),
+        ] {
+            let settings =
+                RemoteEmbedSettings::new(Some(&endpoint), Some(model), None, Some(dimension))
+                    .map_err(|error| error.to_string())?;
+            let (fast, quality) =
+                remote_embedder_descriptors_with(&resolved, || Some(Ok(settings.clone())))
+                    .ok_or("configured remote descriptor missing")?;
+            let execution = crate::core::remote_embed::RemoteApiEmbedder::with_dimension(
+                settings.clone(),
+                settings.dimension.ok_or("configured dimension missing")?,
+            );
+            let inspected_fingerprint =
+                descriptor_content_hash(&fast, ModelProvider::External, None);
+            ensure(
+                inspected_fingerprint
+                    == active_embedder_fingerprint(&execution, ModelProvider::External)
+                        .content_hash,
+                "passive remote identity must equal the identity execution persists",
+            )?;
+            fingerprints.insert(inspected_fingerprint);
+            let coverage = EmbeddingVectorCoverage::new(2, 2);
+            let inspected = embedding_posture_from_records(&fast, quality.as_ref(), &[], coverage);
+            let executed = embedding_posture_from_records(
+                &EmbedderDescriptor::from_embedder(&execution),
+                None,
+                &[],
+                coverage,
+            );
+            ensure(
+                inspected == executed,
+                "configured remote posture must preserve the execution descriptor",
+            )?;
+            ensure(
+                inspected.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE
+                    && inspected.semantic
+                    && !inspected.deterministic,
+                "configured remote vectors must keep their semantic, remote identity",
+            )?;
+        }
+        ensure(
+            fingerprints.len() == 3,
+            "different model names and dimensions must remain different embedding spaces",
+        )?;
+        ensure(
+            resolved.get().is_none(),
+            "inspection must not initialize remote execution state",
+        )?;
+        ensure(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "descriptor inspection must not connect to the configured endpoint",
+        )
+    }
+
+    #[test]
+    fn remote_descriptor_inspection_leaves_unknown_dimension_pending_without_probing() -> TestResult
+    {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let endpoint = format!(
+            "http://{}/v1",
+            listener.local_addr().map_err(|error| error.to_string())?
+        );
+        let settings = RemoteEmbedSettings::new(Some(&endpoint), Some("all-minilm"), None, None)
+            .map_err(|error| error.to_string())?;
+        let resolved = OnceLock::new();
+        let (fast, quality) = remote_embedder_descriptors_with(&resolved, || Some(Ok(settings)))
+            .ok_or("unresolved remote descriptor missing")?;
+        let posture = embedding_posture_from_records(
+            &fast,
+            quality.as_ref(),
+            &[],
+            EmbeddingVectorCoverage::new(0, 2),
+        );
+        ensure(
+            posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED
+                && posture.source == "remote_dimension_unprobed",
+            "an untried endpoint must be distinguishable from a failed endpoint",
+        )?;
+        ensure(
+            !posture.semantic
+                && posture.fast_dimension == 256
+                && posture.fast_model_id == HashEmbedder::default_256().id(),
+            "unknown remote dimensions must describe the usable hash fallback, not invented semantic vectors",
+        )?;
+        ensure(
+            posture.semantic_pending(),
+            "actual similar retrieval must still be able to resolve an unprobed remote backend",
+        )?;
+        ensure(
+            resolved.get().is_none(),
+            "inspection must leave remote execution available for a later real attempt",
+        )?;
+        ensure(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "unknown dimensions must not trigger an HTTP probe during observation",
+        )
+    }
+
+    #[test]
+    fn remote_descriptor_inspection_status_does_not_initialize_execution() -> TestResult {
+        const CHILD_WORKSPACE: &str = "EE_TEST_REMOTE_DESCRIPTOR_WORKSPACE";
+        if let Some(workspace) = std::env::var_os(CHILD_WORKSPACE) {
+            let workspace = PathBuf::from(workspace);
+            let database = workspace.join("status.db");
+            ensure(
+                ACTIVE_REMOTE_EMBEDDER.get().is_none() && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
+                "isolated status process must begin with unresolved execution backends",
+            )?;
+            prepare_index_status_embedder_for_workspace(&workspace, &database)
+                .map_err(|error| error.to_string())?;
+            let report = get_index_status(&IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database),
+                index_dir: Some(workspace.join("index")),
+            })
+            .map_err(|error| error.to_string())?;
+            let posture = report
+                .embedding
+                .ok_or("registered workspace posture missing")?;
+            ensure(
+                posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED
+                    && posture.source == "remote_dimension_unprobed",
+                "real status must leave an unknown remote dimension unprobed",
+            )?;
+            return ensure(
+                ACTIVE_REMOTE_EMBEDDER.get().is_none() && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
+                "status preparation and inspection must not initialize remote or local execution",
+            );
+        }
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = root.path().join("status.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(root.path());
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.path().to_string_lossy().into_owned(),
+                    name: Some("passive remote status".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let endpoint = format!(
+            "http://{}/v1",
+            listener.local_addr().map_err(|error| error.to_string())?
+        );
+        let output = std::process::Command::new(
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
+        .args([
+            "--exact",
+            "core::index::tests::remote_descriptor_inspection_status_does_not_initialize_execution",
+            "--nocapture",
+        ])
+        .env(CHILD_WORKSPACE, root.path())
+        .env("EE_EMBED_BACKEND", "remote")
+        .env("EE_EMBED_REMOTE_URL", endpoint)
+        .env("EE_EMBED_REMOTE_MODEL", "passive-status-fixture")
+        .env_remove("EE_EMBED_REMOTE_DIMENSION")
+        .env_remove("EE_EMBED_REMOTE_API_KEY")
+        .output()
+        .map_err(|error| error.to_string())?;
+        ensure(
+            output.status.success(),
+            format!(
+                "isolated status failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        ensure(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "the real status pipeline must not contact the remote embedding endpoint",
+        )
+    }
+
+    #[test]
+    fn remote_descriptor_inspection_keeps_invalid_configuration_distinct_from_pending() -> TestResult
+    {
+        let resolved = OnceLock::new();
+        let (fast, quality) = remote_embedder_descriptors_with(&resolved, || {
+            Some(Err(RemoteEmbedConfigError::MissingUrl))
+        })
+        .ok_or("invalid remote configuration descriptor missing")?;
+        let posture = embedding_posture_from_records(
+            &fast,
+            quality.as_ref(),
+            &[],
+            EmbeddingVectorCoverage::new(0, 0),
+        );
+        ensure(
+            posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE
+                && !posture.semantic_pending(),
+            "invalid configuration cannot advertise a pending semantic attempt",
+        )?;
+        ensure(
+            resolved.get().is_none(),
+            "observing invalid configuration must not cache an execution failure",
+        )?;
+        ensure(
+            remote_embedder_descriptors_with(&resolved, || None).is_none(),
+            "an unconfigured remote backend must leave local inspection in control",
+        )
+    }
+
+    #[test]
+    fn remote_descriptor_inspection_reuses_resolved_success_and_failure() -> TestResult {
+        let settings = RemoteEmbedSettings::new(
+            Some("http://127.0.0.1:1/v1"),
+            Some("resolved-model"),
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let ready = OnceLock::new();
+        ready
+            .set(ActiveRemoteEmbedder::Ready(Arc::new(
+                crate::core::remote_embed::RemoteApiEmbedder::with_dimension(settings, 384),
+            )))
+            .map_err(|_| "remote fixture already resolved")?;
+        let reread_configuration = std::cell::Cell::new(false);
+        let (fast, quality) = remote_embedder_descriptors_with(&ready, || {
+            reread_configuration.set(true);
+            None
+        })
+        .ok_or("resolved remote descriptor missing")?;
+        ensure(
+            fast.id == "remote-api:resolved-model"
+                && fast.dimension == 384
+                && fast.semantic
+                && quality.is_none(),
+            "previously discovered dimensions and model identity must remain authoritative",
+        )?;
+        ensure(
+            !reread_configuration.get(),
+            "a resolved remote backend must not be rediscovered",
+        )?;
+
+        let failed = OnceLock::new();
+        failed
+            .set(ActiveRemoteEmbedder::Failed)
+            .map_err(|_| "remote fixture already failed")?;
+        let (fast, quality) = remote_embedder_descriptors_with(&failed, || {
+            reread_configuration.set(true);
+            None
+        })
+        .ok_or("failed remote descriptor missing")?;
+        let posture = embedding_posture_from_records(
+            &fast,
+            quality.as_ref(),
+            &[],
+            EmbeddingVectorCoverage::new(0, 0),
+        );
+        ensure(
+            posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE
+                && !posture.semantic_pending(),
+            "an observed execution failure must not revert to unprobed or semantic-ready",
+        )?;
+        ensure(
+            !reread_configuration.get(),
+            "failure inspection must not retry endpoint resolution",
+        )
+    }
+
+    #[test]
+    fn local_descriptor_inspection_respects_configured_root_without_initializing_models()
+    -> TestResult {
+        // No schema: any registry access would fail. An explicit configured
+        // root must take precedence before registry inspection, even if absent.
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let settings = EeEmbedderSettings {
+            model_root: unique_test_dir("descriptor-missing-configured-root"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Configured,
+        };
+        let resolved = OnceLock::new();
+        let (fast, quality) = workspace_local_embedder_descriptors(
+            &connection,
+            "workspace",
+            &resolved,
+            Some(&settings),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            !fast.semantic && !fast.local_load_failed && quality.is_none(),
+            "missing configured assets must yield hash availability without inventing a load failure",
+        )?;
+        ensure(
+            resolved.get().is_none() && !settings.model_root.exists(),
+            "local observation must neither load a model nor start an auto download",
+        )?;
+        ensure(
+            workspace_local_embedder_descriptors(&connection, "workspace", &resolved, None)
+                .is_err(),
+            "the fixture must detect accidental registry inspection",
+        )?;
+
+        let mut failed_selection = DefaultSearchEmbedder::ready(
+            hash_fallback_embedder_stack(),
+            EmbedModelResolution::deterministic_hash(),
+        );
+        failed_selection.verified_load_failed = true;
+        resolved
+            .set(failed_selection)
+            .map_err(|_| "local fixture already resolved")?;
+        let (fast, quality) = workspace_local_embedder_descriptors(
+            &connection,
+            "workspace",
+            &resolved,
+            Some(&settings),
+        )
+        .map_err(|error| error.to_string())?;
+        let posture = embedding_posture_from_records(
+            &fast,
+            quality.as_ref(),
+            &[],
+            EmbeddingVectorCoverage::new(0, 0),
+        );
+        ensure(
+            posture.source == "model_load_failed",
+            "resolved execution failure must remain authoritative during inspection",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     #[ignore = "requires the real potion-multilingual-128M fixture"]
     fn verified_potion_descriptor_matches_real_loaded_model() -> TestResult {
         let root = crate::config::env_registry::read_os(
@@ -13336,6 +13852,244 @@ mod tests {
             }
             assert!(lease.index_for_snapshot(&cx, &live, 6).is_err());
             assert_eq!(index_regular_file_snapshot(&parent)?, before);
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_generation_rejects_completed_exchange_staging_before_publication() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let live = parent.join("index");
+        build_current_test_index(
+            &live,
+            9,
+            vec![test_indexable_doc("mem_live", "live evidence")],
+        )?;
+        let staged = create_publish_staging_dir(&live).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &staged,
+            8,
+            vec![test_indexable_doc("mem_staged", "staged evidence")],
+        )?;
+        build_current_test_index(
+            &parent.join(".index.publish-uncommitted"),
+            8,
+            vec![test_indexable_doc(
+                "mem_uncommitted",
+                "uncommitted evidence",
+            )],
+        )?;
+        assert!(
+            displaced_generation_identity(&live, &staged)
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        assert!(
+            displaced_generation_identity(&parent.join("other"), &staged)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        assert!(
+            displaced_generation_sequence(&live, &staged)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let before = index_regular_file_snapshot(&parent)?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let lease = IndexGenerationLease::read(&cx, &live)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(
+                !lease
+                    .has_retained_generation_directory(&cx, &live)
+                    .map_err(|error| error.to_string())?
+            );
+            assert!(lease.index_for_snapshot(&cx, &live, 8).is_err());
+            assert_eq!(
+                lease
+                    .index_for_snapshot(&cx, &live, 9)
+                    .map_err(|error| error.to_string())?,
+                live
+            );
+            assert_eq!(index_regular_file_snapshot(&parent)?, before);
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn publication_exchange_refuses_a_changed_displacement_identity() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let live = parent.join("index");
+        write_marker(&live, "generation", "old")?;
+        let staged = create_publish_staging_dir(&live).map_err(|error| error.to_string())?;
+        write_marker(&staged, "generation", "staged")?;
+        std::fs::rename(&live, parent.join("displaced-by-another-writer"))
+            .map_err(|error| error.to_string())?;
+        write_marker(&live, "generation", "replacement")?;
+        let before = index_regular_file_snapshot(&parent)?;
+        let result = publish_staged_index(&live, &staged);
+        assert!(
+            result
+                .expect_err("changed live identity must be refused")
+                .to_string()
+                .contains("identity changed")
+        );
+        assert_eq!(index_regular_file_snapshot(&parent)?, before);
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn snapshot_generation_survives_killed_publisher_after_exchange() -> TestResult {
+        const CHILD_ROOT: &str = "EE_TEST_INDEX_EXCHANGE_CRASH_ROOT";
+        const CHILD_STAGING: &str = "EE_TEST_INDEX_EXCHANGE_CRASH_STAGING";
+        if let Some(parent) = std::env::var_os(CHILD_ROOT) {
+            let parent = PathBuf::from(parent);
+            let live = parent.join("index");
+            let staged = parent.join(
+                std::env::var_os(CHILD_STAGING)
+                    .ok_or_else(|| "child staging path missing".to_owned())?,
+            );
+            return crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                // The parent kills this process while this real OS lease and
+                // exchange rollback guard are held. No Rust Drop runs.
+                let _lease = IndexGenerationLease::publish(&cx, &live).await?;
+                publish_index_by_exchange(&live, &staged, &mut sync_index_directory, |from, _| {
+                    if validated_index_generation(&live).ok() != Some(9)
+                        || validated_index_generation(from).ok() != Some(8)
+                    {
+                        return Err(IndexRebuildError::Index(
+                            "child did not exchange real generations".to_owned(),
+                        ));
+                    }
+                    std::fs::write(parent.join("exchanged"), b"ready")
+                        .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+                    loop {
+                        std::thread::park_timeout(Duration::from_secs(1));
+                    }
+                })
+                .map(|_| ())
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string());
+        }
+
+        use std::os::unix::process::ExitStatusExt;
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let live = parent.join("index");
+        build_current_test_index(
+            &live,
+            8,
+            vec![test_indexable_doc("mem_old", "formerly published evidence")],
+        )?;
+        let staged = create_publish_staging_dir(&live).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &staged,
+            9,
+            vec![test_indexable_doc("mem_new", "newly published evidence")],
+        )?;
+        assert!(
+            displaced_generation_sequence(&live, &staged)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let mut child = std::process::Command::new(
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
+        .args([
+            "--exact",
+            "core::index::tests::snapshot_generation_survives_killed_publisher_after_exchange",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, &parent)
+        .env(
+            CHILD_STAGING,
+            staged
+                .file_name()
+                .ok_or_else(|| "staging name missing".to_owned())?,
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let ready = loop {
+            if parent.join("exchanged").is_file() {
+                break true;
+            }
+            if Instant::now() >= deadline || !matches!(child.try_wait(), Ok(None)) {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let killed = child.kill();
+        let output = child
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready,
+            format!(
+                "publisher never reached exchange: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        killed.map_err(|error| error.to_string())?;
+        assert_eq!(
+            output.status.signal(),
+            Some(9),
+            "publisher must die without rollback"
+        );
+        assert_eq!(validated_index_generation(&live)?, 9);
+        assert_eq!(validated_index_generation(&staged)?, 8);
+        assert!(
+            !parent.join("index.previous").exists(),
+            "normal retention must not have run"
+        );
+        let before = index_regular_file_snapshot(&parent)?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let lease = IndexGenerationLease::read(&cx, &live)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(
+                lease
+                    .has_retained_generation_directory(&cx, &live)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                lease
+                    .index_for_snapshot(&cx, &live, 8)
+                    .map_err(|error| error.to_string())?,
+                staged
+            );
+            assert_eq!(
+                lease
+                    .index_for_snapshot(&cx, &live, 9)
+                    .map_err(|error| error.to_string())?,
+                live
+            );
+            assert!(lease.index_for_snapshot(&cx, &live, 7).is_err());
+            assert_eq!(
+                index_regular_file_snapshot(&parent)?,
+                before,
+                "reader must not repair or rename files"
+            );
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())?

@@ -88,12 +88,13 @@ impl IndexGenerationLease {
         for entry in entries {
             index_checkpoint(cx)?;
             let entry = entry.map_err(|error| lease_error("inspect retained generation", error))?;
+            let path = entry.path();
             let Some(sequence) =
                 super::retained_generation_sequence(&entry.file_name().to_string_lossy(), &prefix)
+                    .or(super::displaced_generation_sequence(index_dir, &path)?)
             else {
                 continue;
             };
-            let path = entry.path();
             ensure_index_path_has_no_symlinks(&path, "select retained snapshot index")?;
             if !entry
                 .file_type()
@@ -166,6 +167,10 @@ impl IndexGenerationLease {
             index_checkpoint(cx)?;
             let entry = entry.map_err(|error| lease_error("inspect retained entry", error))?;
             if super::retained_generation_sequence(&entry.file_name().to_string_lossy(), &prefix)
+                .or(super::displaced_generation_sequence(
+                    index_dir,
+                    &entry.path(),
+                )?)
                 .is_none()
             {
                 continue;

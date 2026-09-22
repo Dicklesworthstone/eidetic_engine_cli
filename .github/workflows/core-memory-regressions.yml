@@ -113,6 +113,10 @@ jobs:
           index-workspace core::index::tests::process_index_jobs_respects_requested_workspace_over_newest_row
           index-repair core::index::tests::requested_index_repair_
           index-isolation core::index::tests::index_mutations_refuse_unregistered_workspace_in_shared_database
+          index-snapshot-recovery core::index::tests::snapshot_generation_
+          index-publication-exchange core::index::tests::publication_exchange_
+          index-passive-remote core::index::tests::remote_descriptor_inspection
+          index-passive-local core::index::tests::local_descriptor_inspection
           pack-native-evidence core::context::tests::direct_evidence_pack_applies_request_filters_and_combined_limit
           pack-pagination core::context::tests::apply_pagination_preserves_next_cursor_metadata_for_response
           pack-read-only-model core::index::ask_model::tests::
