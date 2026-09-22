@@ -15,7 +15,7 @@ permissions:
   contents: read
 concurrency:
   group: cass-refresh-regressions-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   checkpoint-recovery:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -96,7 +96,26 @@ jobs:
                    }
                }
            
-          @@ -1082,7 +1084,7 @@
+          @@ -1027,8 +1029,17 @@
+                   db.execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+                       .unwrap();
+                   let original = stable_search_index_job_id(&workspace, &id);
+          +        let invalid_json = "not-json PRIVATE_PAYLOAD_SENTINEL";
+          +        let before_invalid = db.get_session(&id).unwrap();
+          +        assert!(metadata_object(Some(invalid_json)).is_err());
+          +        // The live schema rejects invalid JSON itself. Exercise that guard
+          +        // rather than disabling it to manufacture an impossible stored row.
+          +        assert!(db.execute_raw(&format!(
+          +            "UPDATE sessions SET metadata_json = {} WHERE id = {}",
+          +            sql_text(invalid_json), sql_text(&id),
+          +        )).is_err());
+          +        assert_eq!(db.get_session(&id).unwrap(), before_invalid);
+                   for metadata in [
+          -            "not-json PRIVATE_PAYLOAD_SENTINEL".to_owned(),
+                       "[]".to_owned(),
+                       json!({CHECKPOINT_KEY: null}).to_string(),
+                       json!({CHECKPOINT_KEY: {"schema": CHECKPOINT_SCHEMA}}).to_string(),
+          @@ -1082,7 +1093,7 @@
                        Some("memory")
                    );
                    db.execute_raw(
@@ -105,7 +124,7 @@ jobs:
                    )
                    .unwrap();
                    let error = reconcile_session_publication(&db, &workspace, &id)
-          @@ -1111,4 +1113,39 @@
+          @@ -1111,4 +1122,39 @@
                        assert_eq!(row_counts(&db), before);
                    }
                }
@@ -147,7 +166,7 @@ jobs:
           +    }
           +}
           PATCH
-          echo "7b9fcd57b2aa373780ab3c9a678357ee137f6e8318fd870a84fcca8e9bf3e863  $RUNNER_TEMP/cass-publication-correction.patch" | sha256sum --check
+          echo "ad437fab003a0bf0d07bd5a6fc8f4c4f841932495d629b334e883b514a7372d1  $RUNNER_TEMP/cass-publication-correction.patch" | sha256sum --check
           git apply --check "$RUNNER_TEMP/cass-publication-correction.patch"
           git apply "$RUNNER_TEMP/cass-publication-correction.patch"
           rustfmt --edition 2024 --config skip_children=true src/cass/refresh.rs src/cass/backfill_public_tests.rs
