@@ -322,7 +322,10 @@ fn temporal_literal(token: &str) -> Option<(String, Token)> {
         if hour >= 24 || minute >= 60 || second >= 60 {
             return None;
         }
-        return Some((format!("{hour:02}:{minute:02}:{second:02}"), Token::LocalTime));
+        return Some((
+            format!("{hour:02}:{minute:02}:{second:02}"),
+            Token::LocalTime,
+        ));
     }
     None
 }
@@ -954,9 +957,18 @@ mod tests {
             ("production.date=2026-09-22", "staging.date=2026-09-23"),
             ("launch=2026-09-22", "Launch=2026-09-23"),
             ("The time is 09:30 UTC.", "The time is 10:30 EDT."),
-            ("The launch date is 2026-09-22.", "The launch date is unknown."),
-            ("Release 2026-09-22 is stable.", "Release 2026-09-23 is stable."),
-            ("The launch dates are 2026-09-22 and 2026-09-23.", "The launch dates are 2026-09-24 and 2026-09-25."),
+            (
+                "The launch date is 2026-09-22.",
+                "The launch date is unknown.",
+            ),
+            (
+                "Release 2026-09-22 is stable.",
+                "Release 2026-09-23 is stable.",
+            ),
+            (
+                "The launch dates are 2026-09-22 and 2026-09-23.",
+                "The launch dates are 2026-09-24 and 2026-09-25.",
+            ),
         ] {
             assert!(!disagreement(left, right), "{left} / {right}");
         }
@@ -965,17 +977,39 @@ mod tests {
     #[test]
     fn calendar_and_clock_literals_validate_boundaries_without_locale_guessing() {
         for valid in [
-            "0001-01-01", "9999-12-31", "2000-02-29", "2024-02-29",
-            "2026-04-30", "00:00", "23:59", "23:59:59",
+            "0001-01-01",
+            "9999-12-31",
+            "2000-02-29",
+            "2024-02-29",
+            "2026-04-30",
+            "00:00",
+            "23:59",
+            "23:59:59",
         ] {
             assert!(temporal_literal(valid).is_some(), "{valid}");
         }
         for invalid in [
-            "0000-01-01", "1900-02-29", "2100-02-29", "2026-02-29",
-            "2026-04-31", "2026-00-01", "2026-13-01", "2026-01-00",
-            "2026-9-22", "09/22/2026", "22-09-2026", "tomorrow", "1.2.3",
-            "24:00", "23:60", "23:59:60", "9:30", "09:30Z", "09:30:xx",
-            "２０２６-09-22", "2026-09-22T09:30:00Z",
+            "0000-01-01",
+            "1900-02-29",
+            "2100-02-29",
+            "2026-02-29",
+            "2026-04-31",
+            "2026-00-01",
+            "2026-13-01",
+            "2026-01-00",
+            "2026-9-22",
+            "09/22/2026",
+            "22-09-2026",
+            "tomorrow",
+            "1.2.3",
+            "24:00",
+            "23:60",
+            "23:59:60",
+            "9:30",
+            "09:30Z",
+            "09:30:xx",
+            "２０２６-09-22",
+            "2026-09-22T09:30:00Z",
         ] {
             assert!(temporal_literal(invalid).is_none(), "{invalid}");
         }
@@ -993,10 +1027,13 @@ mod tests {
             "The launch is VALUE if approved.",
             "The launch is approximately VALUE.",
         ] {
-            assert!(!disagreement(
-                &template.replace("VALUE", "2026-09-22"),
-                &template.replace("VALUE", "2026-09-23"),
-            ), "{template}");
+            assert!(
+                !disagreement(
+                    &template.replace("VALUE", "2026-09-22"),
+                    &template.replace("VALUE", "2026-09-23"),
+                ),
+                "{template}"
+            );
         }
         assert!(!conflicts(
             "The launch date is 2026-09-22.",
