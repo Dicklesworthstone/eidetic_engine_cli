@@ -7243,8 +7243,58 @@ fi
 # Separating "bypassed for a declared test reason" from "bypassed in production"
 # is a design decision recorded on bd-jui80 rather than taken here.
 if [ -z "$PROOF_BROKER_LEDGER" ] && [ "$PROOF_BROKER_ENABLED" = "0" ]; then
-    PROOF_BROKER_JSON='{"status":"bypassed","enabled":false,"verdict":null,"reason":"RCH_VERIFY_PROOF_BROKER_ENABLED=0","admissionSurface":null}'
+    # A DECLARED BYPASS AND AN UNDECLARED ONE MUST NOT BE BYTE-IDENTICAL (bd-jui80).
+    #
+    # This branch used to emit a fixed literal whose `reason` was always
+    # "RCH_VERIFY_PROOF_BROKER_ENABLED=0" -- the MECHANISM that took the bypass,
+    # never the caller's stated WHY. `--proof-broker-bypass <reason>` has existed
+    # at :273 and PROOF_BROKER_BYPASS_REASON is plumbed into
+    # proof_broker_mark_json, but THIS path never consulted it, so a hermetic
+    # contract test that declared its reason produced evidence identical to an
+    # undeclared production bypass. A field whose value never varies carries no
+    # information: the positive record existed but could not distinguish the two
+    # states it was added to separate.
+    #
+    # Built with python rather than interpolated into a JSON literal, because the
+    # reason is caller-supplied and a quote or backslash would otherwise emit
+    # malformed JSON onto the proof artifact.
+    PROOF_BROKER_JSON="$(
+        PROOF_BROKER_BYPASS_REASON_VALUE="$PROOF_BROKER_BYPASS_REASON" python3 - <<'PY'
+import json
+import os
+
+declared = os.environ.get("PROOF_BROKER_BYPASS_REASON_VALUE") or None
+print(
+    json.dumps(
+        {
+            "status": "bypassed",
+            "enabled": False,
+            "verdict": None,
+            "reason": "RCH_VERIFY_PROOF_BROKER_ENABLED=0",
+            "declared": declared is not None,
+            "bypassReason": declared,
+            "admissionSurface": None,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+    )"
     proof_broker_degraded+=("rch_verify_proof_broker_bypassed")
+    if [ -z "$PROOF_BROKER_BYPASS_REASON" ]; then
+        # THE CODE, not only the field, because gates refuse on codes. This is
+        # the precondition for ever refusing an UNDECLARED bypass on the pinned
+        # lane: until the undeclared case is distinguishable there is nothing to
+        # refuse on, which is why bd-jui80's other half could not be taken.
+        #
+        # Safe to add beside the existing code: :6486 classifies
+        # rch_verify_proof_broker_* codes as REFUSALS only when
+        # rch_verify_proof_broker_bypassed is ABSENT, and this is emitted only
+        # when it is present. The existing code is unchanged because two contract
+        # tests key on it (rch_verify_contract.rs:4262, :5351).
+        proof_broker_degraded+=("rch_verify_proof_broker_bypassed_undeclared")
+    fi
 fi
 
 if [ "$KNOWN_BLOCKER_ENABLED" = "1" ]; then
