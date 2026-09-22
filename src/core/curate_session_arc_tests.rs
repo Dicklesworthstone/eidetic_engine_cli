@@ -42,7 +42,12 @@ fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() 
     })
     .map_err(|error| error.message())?;
     assert_eq!(report.candidate_count, 4, "{:?}", report.candidates);
-    assert!(report.candidates.iter().all(|candidate| candidate.persisted));
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.persisted)
+    );
 
     let mut first_pair = Vec::new();
     let mut later_pair = Vec::new();
@@ -89,10 +94,7 @@ fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() 
     let planned_link = plan
         .planned_session_arc_link
         .expect("only the current reciprocal pair should link");
-    assert!(
-        planned_link.src_memory_id == later_first
-            || planned_link.dst_memory_id == later_first
-    );
+    assert!(planned_link.src_memory_id == later_first || planned_link.dst_memory_id == later_first);
     assert_ne!(planned_link.src_memory_id, owner);
     assert_ne!(planned_link.dst_memory_id, owner);
 
@@ -147,7 +149,6 @@ fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() 
     );
     Ok(())
 }
-
 
 #[test]
 fn session_arc_within_one_window_retains_exact_source_identity() {
