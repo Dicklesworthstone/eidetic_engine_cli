@@ -94,7 +94,7 @@ fn fixture() -> Fixture {
         }
         link(
             &db,
-            &format!("lnk_{number:026}"),
+            &format!("link_{number:026}"),
             &memories[0],
             &memories[1],
         );
@@ -432,7 +432,7 @@ fn cross_workspace_links_remain_uncovered_instead_of_leaking_or_disappearing() {
     let db = DbConnection::open_file(&fixture.database).unwrap();
     link(
         &db,
-        "lnk_00000000000000000000000099",
+        "link_00000000000000000000000099",
         &fixture.memories[0][0],
         &fixture.memories[1][0],
     );
