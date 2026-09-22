@@ -709,8 +709,7 @@ async fn post_json(
     // request_streaming's timeout ends after the headers. Keep one deadline
     // around the complete exchange so a stalled or trickling body cannot
     // outlive the configured request budget.
-    let result =
-        asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, exchange).await;
+    let result = asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, exchange).await;
     remote_checkpoint(cx)?;
     match result {
         Ok(result) => result,
@@ -1260,8 +1259,8 @@ mod tests {
                 {"index": 1, "embedding": [2.0]}
             ]),
         ] {
-            let payload = serde_json::to_vec(&serde_json::json!({"data": data}))
-                .expect("response JSON");
+            let payload =
+                serde_json::to_vec(&serde_json::json!({"data": data})).expect("response JSON");
             assert!(parse_embeddings_response(&payload, 2).is_err());
         }
     }
@@ -1285,8 +1284,8 @@ mod tests {
                 .into_iter()
                 .map(|index| serde_json::json!({"index": index, "embedding": expected[index]}))
                 .collect();
-            let payload = serde_json::to_vec(&serde_json::json!({"data": data}))
-                .expect("response JSON");
+            let payload =
+                serde_json::to_vec(&serde_json::json!({"data": data})).expect("response JSON");
             assert_eq!(
                 parse_embeddings_response(&payload, 3).expect("permutation"),
                 expected

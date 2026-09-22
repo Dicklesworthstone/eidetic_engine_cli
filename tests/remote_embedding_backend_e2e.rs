@@ -172,7 +172,9 @@ fn handle_connection(
             let response = format!(
                 "HTTP/1.1 {status} Error\r\ncontent-length: 1024\r\nconnection: close\r\n\r\n"
             );
-            stream.write_all(response.as_bytes()).expect("error headers");
+            stream
+                .write_all(response.as_bytes())
+                .expect("error headers");
             stream.flush().expect("flush error headers");
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -467,9 +469,14 @@ fn large_batches_restore_input_identity_across_reversed_http_chunks() {
     let embedder = RemoteApiEmbedder::with_dimension(settings, 1);
     let inputs: Vec<_> = (0..513_u16).map(|ordinal| ordinal.to_string()).collect();
     let texts: Vec<_> = inputs.iter().map(String::as_str).collect();
-    let expected: Vec<_> = (0..513_u16).map(|ordinal| vec![f32::from(ordinal)]).collect();
+    let expected: Vec<_> = (0..513_u16)
+        .map(|ordinal| vec![f32::from(ordinal)])
+        .collect();
 
-    assert_eq!(embed_many(&embedder, &texts).expect("three chunks"), expected);
+    assert_eq!(
+        embed_many(&embedder, &texts).expect("three chunks"),
+        expected
+    );
     let sizes: Vec<_> = server
         .observed_bodies()
         .iter()
@@ -554,8 +561,8 @@ fn error_status_is_reported_without_waiting_for_its_body() {
         let settings = server.settings("model", None, Some("4"));
         let embedder = RemoteApiEmbedder::with_dimension(settings, 4)
             .with_request_timeout(Duration::from_millis(300));
-        let error = embed_one(&embedder, "private-workspace-content")
-            .expect_err("non-success response");
+        let error =
+            embed_one(&embedder, "private-workspace-content").expect_err("non-success response");
         assert!(error.contains(&status.to_string()), "{error}");
         assert!(!error.contains("no complete response"), "{error}");
         assert_eq!(server.observed_bodies().len(), 1);
