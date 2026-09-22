@@ -1,0 +1,133 @@
+name: Session arc learning regressions
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/curate*.rs
+      - src/curate/**
+      - src/db/**
+      - src/policy/**
+      - tests/session_arc_learning_cli.rs
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/session-arc-regressions.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: session-arc-regressions-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: session-arc-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            session-arc-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Record exact committed source
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            git hash-object src/core/curate_session_arc.rs tests/session_arc_learning_cli.rs
+            rustc --version
+            cargo --version
+            sha256sum Cargo.lock
+          } | tee "$RUNNER_TEMP/session-arc-source.log"
+      - name: Inspect formatting without changing the checkout
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/session-arc-format"
+          for source in src/core/curate_session_arc.rs tests/session_arc_learning_cli.rs; do
+            rustfmt --edition 2024 --config skip_children=true --emit stdout \
+              < "$source" > "$RUNNER_TEMP/session-arc-format/$(basename "$source")"
+          done
+          rustfmt --edition 2024 --config skip_children=true --check \
+            src/core/curate_session_arc.rs tests/session_arc_learning_cli.rs \
+            2>&1 | tee "$RUNNER_TEMP/session-arc-format.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: session-arc-format
+          path: |
+            ${{ runner.temp }}/session-arc-format/
+            ${{ runner.temp }}/session-arc-source.log
+            ${{ runner.temp }}/session-arc-format.log
+          retention-days: 7
+      - name: Execute real-binary and public-core acceptance tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test session_arc_learning_cli -- --test-threads=2 \
+            2>&1 | tee "$RUNNER_TEMP/session-arc-public.log"
+          python3 - <<'PY'
+          import os, pathlib, re
+          log = pathlib.Path(os.environ['RUNNER_TEMP'], 'session-arc-public.log').read_text()
+          results = re.findall(r'test result: ok\. (\d+) passed; 0 failed; 0 ignored;', log)
+          if not results or int(results[-1]) < 11:
+              raise SystemExit('Expected at least eleven executed acceptance tests, none ignored')
+          PY
+      - name: Execute session-arc library regressions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib session_arc -- --test-threads=2 \
+            2>&1 | tee "$RUNNER_TEMP/session-arc-library.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' \
+            "$RUNNER_TEMP/session-arc-library.log"
+      - name: Check all Cargo targets
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/session-arc-check.log"
+      - name: Check strict Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-targets -- -D warnings \
+            2>&1 | tee "$RUNNER_TEMP/session-arc-clippy.log"
+      - name: Check repository formatting and unchanged source
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/session-arc-repository-format.log"
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: session-arc-verification
+          path: ${{ runner.temp }}/session-arc-*.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
