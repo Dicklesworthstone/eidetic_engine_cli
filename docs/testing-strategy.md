@@ -968,6 +968,43 @@ come apart whenever the population is smaller than the thing a reader assumes it
 covers. The count of consecutive green runs says nothing about **which
 population** was green.
 
+Local formatting checks are available through `scripts/check-format.sh`
+(`bd-gq26a`). The runner uses the dated toolchain from `rust-toolchain.toml`
+and CI Static's exact `cargo fmt --check` invocation, followed by the existing
+module-reachability and `check-include-fmt.sh` gates. It leaves configuration
+discovery to rustfmt: a source directory's `rustfmt.toml` or `.rustfmt.toml`
+can override an ancestor's configuration. It never forces a root config onto
+every file and never substitutes another nightly when the pin is unavailable.
+
+Hook installation remains deferred. Do not run the following command until the
+operator who re-enables hosted CI explicitly authorizes installation, with a
+working hosted gate available to verify it against. Approval to land the checker
+does not authorize installation. This shared tree's whole-tree check takes about
+22 seconds and can block one agent's push on another agent's unstaged work:
+
+```bash
+scripts/check-format.sh --install-pre-push
+```
+
+The installer prints the actual hook path. With the existing Agent Mail chain
+runner, it adds `hooks.d/pre-push/40-rustfmt.sh` beside `50-agent-mail.py` and
+preserves the dispatcher and other hooks. Without a pre-push hook it installs a
+standalone hook; it refuses to overwrite an unknown hook. Installation must be
+repeated for other clones and is not activated merely by pulling this script.
+
+This checks the whole working tree, including unstaged changes; it does not
+inspect staged blobs or attest the contents of pushed commits. It runs before
+push, without adding commit latency or holding `index.lock`. The original
+bead's staged-only pre-commit acceptance is a different requirement and remains
+unmet. Missing pinned tooling prints an inconclusive warning and fails open;
+such a warning is not a clean formatting verdict. The include-only gate retains
+its nonzero failure statuses. No hosted execution is implied by a local pass.
+
+`scripts/check-format.sh --self-test` exercises real formatter checks, including
+a nested config that disagrees with the root config, planted drift through the
+production Cargo invocation, and a restored clean fixture. Fixtures are retained
+in the printed temporary directory; the checker never rewrites project sources.
+
 Five gates were examined on 2026-09-21 and each turned out to under-cover in a
 different way. None was broken; each had a population narrower than its name
 suggests.

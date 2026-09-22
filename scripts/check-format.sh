@@ -11,36 +11,43 @@
 # working gate at zero for a day. After that single formatting commit the same
 # query returned 23 success. That delta is what this script protects.
 #
-# THIS SCRIPT NEVER WRITES. It runs `rustfmt --check` and reports; it does not
-# format, rewrite, or stage anything. AGENTS.md forbids scripts that modify code
-# files in this repo, and a formatter that edits under a hook is exactly that.
+# Checks never format, rewrite, or stage project sources. --self-test writes
+# temporary fixtures; only --install-pre-push writes a Git hook, on explicit
+# request. AGENTS.md forbids scripts that rewrite project code under a hook.
 #
 # NOT WIRED INTO verify.sh, DELIBERATELY. The verify budget admits zero new
 # stages: the non-benchmark p50s total exactly 600 against a <=600 ceiling and
 # UNMEASURED_STAGE_ALLOWANCE sits at its down-only ratchet of 27. Only widening
 # an existing stage is available and none is a plausible host.
 #
-# NOT INSTALLED AS A HOOK, DELIBERATELY. See the bead: .git/hooks is not
-# versioned so an install helps one checkout; a misbehaving pre-commit hook
-# blocks commits for every agent in this shared tree; and there is currently no
-# working gate to verify the installation against. Installation belongs to
-# whoever re-enables hosted CI, at that moment.
+# This is a whole-working-tree check, not a staged-blob check. A pre-push
+# installation is per clone; see docs/testing-strategy.md. It does not change
+# the index or hold index.lock. Unstaged formatting drift can block a push.
+#
+# --install-pre-push PRECONDITION: installation remains deferred until the
+# operator who re-enables hosted CI explicitly authorizes it, with a working
+# hosted gate available to verify it against. Approval to land this checker
+# does not authorize installation. Hooks are unversioned and help only the
+# checkout where installed. This tree is shared: the measured ~22-second,
+# whole-tree check can let one agent's unstaged work block another's push.
+# Moving the check from pre-commit to pre-push avoids index.lock contention;
+# it does not remove that shared-tree hazard. See the decision on bd-gq26a.
 #
 # USAGE
-#   scripts/check-format.sh              run the gate's own `cargo fmt --check`
+#   scripts/check-format.sh              run CI's primary and include-only checks
 #   scripts/check-format.sh --staged     accepted, NO-OP (see run_cargo_fmt_check)
-#   scripts/check-format.sh --self-test  prove both arms plus the fail-open arm
+#   scripts/check-format.sh --self-test  exercise real formatters and config lookup
+#   scripts/check-format.sh --install-pre-push  DEFERRED; precondition above
 #
 # EXIT CODES — the whole contract is here
 #   0  clean, OR inconclusive (fail-open). A warning is always printed when
 #      inconclusive, so a 0 is never silent about which kind it is.
-#   1  a real formatting diff was found, and the offending files are PRINTED.
+#   1  formatting drift, a reachability finding, or a failed include-only check.
 #
-# FAIL-OPEN IS THE POINT. Anything that is not a formatting diff — rustfmt
-# missing, a timeout, a parse error, not a git repo — exits 0 with a warning.
-# A local convenience check must never be the reason a commit cannot happen,
-# and this repo has already lost time to a pre-commit hook that hung while
-# holding index.lock.
+# Missing tooling warns and fails open, as required by the original bead.
+# This is not a CI pass. Existing reachability failure handling is preserved;
+# the include-only check retains CI's nonzero environmental failure statuses.
+# Installation refuses to replace an existing hook or an unknown dispatcher.
 
 # NOT `set -e`: fail-open means this script decides every exit itself, and -e
 # would hand that decision to the first command that returns non-zero.
@@ -48,19 +55,88 @@ set -uo pipefail
 
 EDITION="${CHECK_FORMAT_EDITION:-2024}"
 TIMEOUT_SECS="${CHECK_FORMAT_TIMEOUT_SECS:-60}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Read the pin from rust-toolchain.toml rather than hard-coding it, so this
-# script cannot drift from the toolchain the gate actually uses. Comments are
-# stripped first: the file's own preamble mentions `channel` in prose.
-PINNED_TOOLCHAIN="${CHECK_FORMAT_TOOLCHAIN:-}"
-if [ -z "$PINNED_TOOLCHAIN" ] && [ -f rust-toolchain.toml ]; then
-    PINNED_TOOLCHAIN="$(grep -vE '^[[:space:]]*#' rust-toolchain.toml \
-        | grep -E '^[[:space:]]*channel[[:space:]]*=' \
-        | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
-fi
+PINNED_TOOLCHAIN=""
 
 warn() { printf '[check-format] %s\n' "$*" >&2; }
 note() { printf '[check-format] %s\n' "$*"; }
+
+resolve_toolchain() {
+    # Parse the value, not a dated nightly mentioned in a comment. Do not let
+    # CHECK_FORMAT_TOOLCHAIN or an ambient RUSTUP_TOOLCHAIN replace CI's pin.
+    if ! PINNED_TOOLCHAIN="$(python3 - "$REPO_ROOT/rust-toolchain.toml" <<'PY'
+import re
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    channel = tomllib.load(source)["toolchain"]["channel"]
+if not isinstance(channel, str) or not re.fullmatch(r"nightly-\d{4}-\d{2}-\d{2}", channel):
+    raise ValueError("expected a dated nightly toolchain")
+print(channel)
+PY
+    )"; then
+        warn "cannot resolve the pinned toolchain — inconclusive, not blocking"
+        return 2
+    fi
+    if ! command -v rustup >/dev/null 2>&1 \
+        || ! rustup run "$PINNED_TOOLCHAIN" rustfmt --version >/dev/null 2>&1; then
+        warn "rustfmt unavailable under $PINNED_TOOLCHAIN — inconclusive, not blocking; no fallback toolchain used"
+        return 2
+    fi
+    # Cargo permits RUSTFMT to replace the formatter. Pin that too, including
+    # cargo calls made by the reachability/include-only population resolver.
+    RUSTFMT="$(rustup which --toolchain "$PINNED_TOOLCHAIN" rustfmt)" || return 2
+    export RUSTFMT
+    export RUSTUP_TOOLCHAIN="$PINNED_TOOLCHAIN"
+}
+
+install_pre_push() {
+    # Operator-only installation decision; see --install-pre-push precondition
+    # above. The flag's availability is not permission to install in this tree.
+    # Only this explicit opt-in writes, and only under Git's hooks directory.
+    # Preserve Agent Mail's dispatcher and every other drop-in. A clone without
+    # a dispatcher gets a standalone hook; an unknown hook needs manual review.
+    python3 - "$REPO_ROOT" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+hook = Path(subprocess.check_output(
+    ["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"],
+    cwd=root, text=True,
+).strip())
+body = '''#!/usr/bin/env bash
+# ee rustfmt pre-push gate (bd-gq26a); whole working tree, read-only.
+set -eu
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/check-format.sh"
+'''
+if hook.exists() and hook.read_text() != body:
+    if "# mcp-agent-mail chain-runner (pre-push)" not in hook.read_text():
+        raise SystemExit(f"Refusing to replace unknown pre-push hook: {hook}")
+    if not os.access(hook, os.X_OK):
+        raise SystemExit(f"Existing pre-push dispatcher is not executable: {hook}")
+    hook = hook.parent / "hooks.d" / "pre-push" / "40-rustfmt.sh"
+if hook.is_symlink():
+    raise SystemExit(f"Refusing to replace hook symlink: {hook}")
+if hook.exists():
+    if hook.read_text() != body or not os.access(hook, os.X_OK):
+        raise SystemExit(f"Existing hook differs or is not executable: {hook}")
+    print(f"[check-format] already installed in this clone: {hook}")
+else:
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation also protects against another installer winning a race.
+    with hook.open("x") as destination:
+        destination.write(body)
+    hook.chmod(0o755)
+    print(f"[check-format] installed in this clone only: {hook}")
+print("[check-format] other clones require their own explicit installation")
+PY
+}
 
 # Resolve a timeout binary. GNU coreutils `timeout` is `gtimeout` on macOS when
 # installed via brew; if neither exists we run without one and say so, because
@@ -116,17 +192,10 @@ run_cargo_fmt_check() {
     fi
 
     # The pinned toolchain, because rustfmt OUTPUT DIFFERS BETWEEN NIGHTLIES.
-    # `cargo +toolchain` fails where cargo is not the rustup shim (it is not on
-    # the dev Macs here), so go through `rustup run`. If the pin is unavailable
-    # we still check, and say which toolchain answered.
-    fmt_cmd=(cargo fmt --check)
-    if [ -n "$PINNED_TOOLCHAIN" ] \
-        && command -v rustup >/dev/null 2>&1 \
-        && rustup run "$PINNED_TOOLCHAIN" true >/dev/null 2>&1; then
-        fmt_cmd=(rustup run "$PINNED_TOOLCHAIN" cargo fmt --check)
-    else
-        warn "pinned toolchain ${PINNED_TOOLCHAIN:-<unresolved>} unavailable — using default cargo fmt; verdict may differ from CI"
-    fi
+    # `cargo +toolchain` fails where cargo is not the rustup shim. Availability
+    # was checked by resolve_toolchain; another nightly is never a substitute.
+    # No --config-path: leave per-file configuration discovery to rustfmt.
+    fmt_cmd=(rustup run "$PINNED_TOOLCHAIN" cargo fmt --check)
 
     timeout_bin="$(resolve_timeout)"
     if [ -n "$timeout_bin" ]; then
@@ -165,17 +234,17 @@ run_cargo_fmt_check() {
 # exactly the right instrument. It is no longer used against the repo.
 run_rustfmt_check() {
     local out rc timeout_bin
-    if ! command -v rustfmt >/dev/null 2>&1; then
+    if ! command -v rustup >/dev/null 2>&1; then
         warn "rustfmt not found on PATH — cannot check formatting, not blocking"
         return 2
     fi
     timeout_bin="$(resolve_timeout)"
     if [ -n "$timeout_bin" ]; then
-        out="$("$timeout_bin" "$TIMEOUT_SECS" rustfmt --edition "$EDITION" --check "$@" 2>&1)"
+        out="$("$timeout_bin" "$TIMEOUT_SECS" rustup run "$PINNED_TOOLCHAIN" rustfmt --edition "$EDITION" --check "$@" 2>&1)"
         rc=$?
     else
         warn "no timeout binary (timeout/gtimeout) — running without a hard cap"
-        out="$(rustfmt --edition "$EDITION" --check "$@" 2>&1)"
+        out="$(rustup run "$PINNED_TOOLCHAIN" rustfmt --edition "$EDITION" --check "$@" 2>&1)"
         rc=$?
     fi
 
@@ -201,7 +270,7 @@ run_rustfmt_check() {
 
 # --------------------------------------------------------------------------
 # --self-test: a format checker that cannot fail is the defect it removes.
-# Three arms, each with its own fixture, none of them in the repo tree.
+# Standalone and Cargo fixtures live outside the repo tree.
 # --------------------------------------------------------------------------
 self_test() {
     local tmp failures=0
@@ -250,11 +319,47 @@ self_test() {
         failures=$((failures + 1))
     fi
 
+    # Exercise the production cargo invocation, not just standalone rustfmt.
+    # The nested config deliberately disagrees with the root config. Passing
+    # --config-path at the root would reject this correctly tab-indented file.
+    mkdir -p "$tmp/crate/src"
+    printf '[package]\nname = "format-control"\nversion = "0.0.0"\nedition = "2024"\n' > "$tmp/crate/Cargo.toml"
+    printf 'edition = "2024"\nhard_tabs = false\n' > "$tmp/crate/rustfmt.toml"
+    printf 'edition = "2024"\nhard_tabs = true\n' > "$tmp/crate/src/rustfmt.toml"
+    printf 'fn main() {\n\tprintln!("control");\n}\n' > "$tmp/crate/src/main.rs"
+    local rc4 rc5 rc6
+    ( cd "$tmp/crate" && run_cargo_fmt_check ) > "$tmp/cargo-clean.log" 2>&1
+    rc4=$?
+    if [ "$rc4" -eq 0 ]; then
+        note "self-test arm4 OK: cargo honors the source directory's config"
+    else
+        warn "SELF-TEST FAIL arm4: nested-config clean source gave rc=$rc4, expected 0"
+        failures=$((failures + 1))
+    fi
+    printf 'fn main( ) {println!("control");}\n' > "$tmp/crate/src/main.rs"
+    ( cd "$tmp/crate" && run_cargo_fmt_check ) > "$tmp/cargo-drift.log" 2>&1
+    rc5=$?
+    if [ "$rc5" -eq 1 ] && grep -q 'main.rs' "$tmp/cargo-drift.log"; then
+        note "self-test arm5 OK: production cargo path catches planted drift"
+    else
+        warn "SELF-TEST FAIL arm5: planted drift gave rc=$rc5, expected 1 naming main.rs"
+        failures=$((failures + 1))
+    fi
+    printf 'fn main() {\n\tprintln!("control");\n}\n' > "$tmp/crate/src/main.rs"
+    ( cd "$tmp/crate" && run_cargo_fmt_check ) > "$tmp/cargo-restored.log" 2>&1
+    rc6=$?
+    if [ "$rc6" -eq 0 ]; then
+        note "self-test arm6 OK: restored cargo fixture passes again"
+    else
+        warn "SELF-TEST FAIL arm6: restored source gave rc=$rc6, expected 0"
+        failures=$((failures + 1))
+    fi
+
     if [ "$failures" -ne 0 ]; then
-        warn "SELF-TEST FAILED: ${failures} of 3 arms"
+        warn "SELF-TEST FAILED: ${failures} of 6 arms (logs retained in $tmp)"
         return 1
     fi
-    note "self-test: 3 of 3 arms passed"
+    note "self-test: 6 of 6 arms passed (fixtures retained in $tmp)"
     return 0
 }
 
@@ -267,7 +372,7 @@ self_test() {
 # it, because cargo walks targets and those files were reachable from none.
 # Same blind spot, and the formatter's version of it is the harmless one.
 run_reachability() {
-    local script="${0%/*}/lib/mod_reachability.py"
+    local script="$REPO_ROOT/scripts/lib/mod_reachability.py"
     if [ ! -f "$script" ]; then
         warn "mod_reachability.py not found — skipping reachability, not blocking"
         return 0
@@ -303,9 +408,21 @@ run_reachability() {
 }
 
 main() {
+    cd "$REPO_ROOT" || exit 1
+    if [ "${1:-}" = "--install-pre-push" ]; then
+        install_pre_push
+        exit $?
+    fi
+    local toolchain_available=1
+    resolve_toolchain || toolchain_available=0
     case "${1:-}" in
-        --self-test) self_test; exit $? ;;
+        --self-test)
+            [ "$toolchain_available" -eq 1 ] || exit 1
+            self_test; exit $?
+            ;;
         --reachability) run_reachability; exit $? ;;
+        ""|--staged) ;;
+        *) warn "usage: $0 [--staged|--self-test|--reachability|--install-pre-push]"; exit 1 ;;
     esac
 
     if ! command -v git >/dev/null 2>&1 || ! git rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -320,14 +437,18 @@ main() {
         note "--staged is a no-op: the gate is whole-crate, and matching its scope is the point"
     fi
 
-    run_cargo_fmt_check
-    local rc=$?
+    local rc=2
+    if [ "$toolchain_available" -eq 1 ]; then
+        run_cargo_fmt_check
+        rc=$?
+    fi
     local failed=0
     case "$rc" in
         0) note "formatting clean (cargo fmt --check, toolchain ${PINNED_TOOLCHAIN:-default})" ;;
         1)
             warn "FORMATTING DRIFT in the files listed above."
-            warn "Fix with: rustup run ${PINNED_TOOLCHAIN:-nightly} cargo fmt -- <file>   (this script never writes)"
+            warn "Repair the printed diff, then rerun: rustup run $PINNED_TOOLCHAIN cargo fmt --check"
+            warn "Per-file repair tool: rustup run $PINNED_TOOLCHAIN rustfmt --edition 2024 <file> (this script never writes)"
             failed=1
             ;;
         *) : ;;   # inconclusive; run_cargo_fmt_check already warned
@@ -337,6 +458,16 @@ main() {
     # how a check reports one defect and never five.
     if ! run_reachability; then
         failed=1
+    fi
+
+    # CI Static also runs this separate gate. Cargo's module walker does not
+    # cover include!-only files; reuse CI's population resolver and invocation.
+    if [ "$toolchain_available" -eq 1 ]; then
+        if ! "$REPO_ROOT/scripts/check-include-fmt.sh"; then
+            failed=1
+        fi
+    else
+        warn "include-only formatting unavailable — inconclusive, not blocking"
     fi
 
     exit "$failed"
