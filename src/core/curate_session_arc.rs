@@ -440,27 +440,28 @@ mod episode_tests {
     use super::*;
 
     const FIRST_FAILURE: &str = "Failure arc: M7.cache.lookup in src/cache.rs failed.";
-    const FIRST_REPAIR: &str = "Fix: M7.cache.lookup was repaired by selecting stable identity bytes.";
+    const FIRST_REPAIR: &str =
+        "Fix: M7.cache.lookup was repaired by selecting stable identity bytes.";
     const SECOND_FAILURE: &str = "Failure arc: M8.index.publish in src/index.rs failed.";
-    const SECOND_REPAIR: &str = "Fix: M8.index.publish was repaired by publishing the complete generation.";
+    const SECOND_REPAIR: &str =
+        "Fix: M8.index.publish was repaired by publishing the complete generation.";
 
     #[test]
     fn every_complete_episode_survives_in_source_order() {
-        let source = format!(
-            "{FIRST_FAILURE}\n{FIRST_REPAIR}\n{SECOND_FAILURE}\n{SECOND_REPAIR}"
-        );
+        let source = format!("{FIRST_FAILURE}\n{FIRST_REPAIR}\n{SECOND_FAILURE}\n{SECOND_REPAIR}");
         assert_eq!(
             inline_pairs(&source).collect::<Vec<_>>(),
-            [(FIRST_FAILURE, FIRST_REPAIR), (SECOND_FAILURE, SECOND_REPAIR)]
+            [
+                (FIRST_FAILURE, FIRST_REPAIR),
+                (SECOND_FAILURE, SECOND_REPAIR)
+            ]
         );
         assert_eq!(inline_pair(&source), Some((FIRST_FAILURE, FIRST_REPAIR)));
     }
 
     #[test]
     fn resolved_failures_cannot_be_reused_by_later_successes() {
-        let source = format!(
-            "{FIRST_FAILURE} {FIRST_REPAIR} {FIRST_REPAIR} {SECOND_REPAIR}"
-        );
+        let source = format!("{FIRST_FAILURE} {FIRST_REPAIR} {FIRST_REPAIR} {SECOND_REPAIR}");
         assert_eq!(
             inline_pairs(&source).collect::<Vec<_>>(),
             [(FIRST_FAILURE, FIRST_REPAIR)]
@@ -511,7 +512,10 @@ mod episode_tests {
         let first = format!("{FIRST_FAILURE} {FIRST_REPAIR}");
         let combined = format!("{first} {SECOND_FAILURE} {SECOND_REPAIR}");
         let expected = inline_pairs(&first).collect::<Vec<_>>();
-        assert_eq!(inline_pairs(&combined).take(1).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            inline_pairs(&combined).take(1).collect::<Vec<_>>(),
+            expected
+        );
         for (failure, repair) in inline_pairs(&combined) {
             assert!(combined.contains(failure));
             assert!(combined.contains(repair));
@@ -524,7 +528,11 @@ mod episode_tests {
         let source = format!("{FIRST_FAILURE} {FIRST_REPAIR} ").repeat(64);
         let pairs: Vec<_> = inline_pairs(&source).collect();
         assert_eq!(pairs.len(), 64);
-        assert!(pairs.iter().all(|pair| *pair == (FIRST_FAILURE, FIRST_REPAIR)));
+        assert!(
+            pairs
+                .iter()
+                .all(|pair| *pair == (FIRST_FAILURE, FIRST_REPAIR))
+        );
     }
 
     #[test]
