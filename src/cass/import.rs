@@ -1540,6 +1540,28 @@ mod ingestion;
 // CassViewSpanForImport, SessionImportPersistResult, stable_session_id.
 // backfill.rs also opens its own `mod tests`, so `super::super::` inside that
 // block is one level higher again and lands on `cass::import` as written.
+// bd-4aw2d. SUPERSEDED, NOT UNWIRED -- and that distinction decides the fix.
+// `refresh::refresh_session` at :715 is this module's successor: the same five
+// parameters in the same order, the same `with_import_session_transaction`
+// wrapper, and a return type that is a strict superset (`RefreshReport` carries
+// `added_lines` and `index_job_id` exactly as `BackfillResult` did, plus
+// `changed`). It occupies the call position `backfill_session` would have held.
+// Chronology agrees: 5374d5563 added backfill.rs at 2026-09-20 22:25 UTC and
+// 33a9e157c wired refresh four hours later at 2026-09-21 02:24 UTC.
+//
+// So DO NOT "wire it up" -- that would duplicate refresh.rs, and the earlier
+// note in backfill.rs saying otherwise is withdrawn. Retirement is the likely
+// end state, but a deletion needs explicit written authorisation nobody holds,
+// so this `allow` is the declared interim and the whole of the concession.
+//
+// `allow`, NOT `expect`, and the reason is measured rather than stylistic:
+// backfill.rs's own `#[cfg(test)] mod tests` exercises `backfill_session` and
+// `BackfillResult`, so in the lib TEST build these symbols ARE used and
+// `dead_code` never fires there. `#[expect(dead_code)]` -- which clippy's help
+// suggests -- would therefore go UNFULFILLED in that target and raise a fresh
+// `unfulfilled_lint_expectation`, trading six lib errors for a new test-target
+// one. Scoped to this module so anything else that dies still reds the gate.
+#[allow(dead_code)]
 #[path = "backfill.rs"]
 mod backfill;
 #[path = "refresh.rs"]

@@ -32,13 +32,25 @@
 //! green while this module exists unused. The commit introduced no defect; it
 //! moved a true statement from one gate to another.
 //!
-//! BOTH EXITS ARE SOMEONE ELSE'S TO TAKE: wire the importer to call this (that
-//! is bd-5uym0's actual repair), or remove the file (a deletion requiring
-//! explicit authorisation). `#[allow(dead_code)]` here is a third option and a
-//! gate relaxation, so it is a decision rather than a lane's to make quietly.
+//! WHY IT IS DEAD IS NOW SETTLED, AND THE EARLIER ANSWER HERE WAS WRONG. This
+//! module used to say the repair was to wire the importer to call it. That is
+//! WITHDRAWN. bd-5uym0 established by a passing run of the real public importer
+//! that `src/cass/import.rs:715` already calls `refresh::refresh_session`, and
+//! `refresh.rs` is this module's SUCCESSOR, not its sibling: same five
+//! parameters in the same order, same `with_import_session_transaction`, and
+//! `RefreshReport` is a strict superset of `BackfillResult`. 5374d5563 added
+//! this file at 2026-09-20 22:25 UTC; 33a9e157c wired refresh four hours later.
 //!
-//! Do not "fix" this by silencing it in passing, and do not spend time
-//! attributing it to your own diff.
+//! So this is not an unwired feature waiting to be connected -- wiring it would
+//! DUPLICATE refresh.rs. These six symbols are dead because something replaced
+//! them.
+//!
+//! The `#[allow(dead_code)]` now sits on the module declaration at
+//! src/cass/import.rs, with the reasoning, under bd-4aw2d. It is an interim.
+//! Retirement is the likely end state and needs explicit written authorisation
+//! that nobody currently holds, so nothing here has been deleted.
+//!
+//! Do not spend time attributing this to your own diff.
 
 use std::collections::{BTreeMap, BTreeSet};
 
