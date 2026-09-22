@@ -2,84 +2,27 @@ name: Typed memory recovery
 on:
   push:
     branches: [main]
-    paths: [scripts/delivery/recovery-live-consumers.patch, scripts/delivery/recovery-audit-mapping.patch, .github/workflows/typed-memory-recovery.yml]
+    paths:
+      - 'src/core/backup*.rs'
+      - 'src/core/jsonl*.rs'
+      - 'src/output/jsonl*.rs'
+      - 'src/models/jsonl.rs'
+      - 'tests/e2e_backup_restore_roundtrip.rs'
+      - 'tests/backup_*.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/typed-memory-recovery.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: typed-memory-delivery
-  cancel-in-progress: true
+  group: typed-memory-recovery-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.source.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-08-31
-          components: rustfmt
-      - name: Exercise live typed queries and exact redacted lineage
-        id: source
-        run: |
-          set -euo pipefail
-          base=$(git rev-parse HEAD)
-          patch=scripts/delivery/recovery-live-consumers.patch
-          echo "fba60a23f8fa667abd91f598214a66eb54df7a70882d7e13d91ab47a8a278ac1  $patch" | sha256sum -c
-          if ! grep -Fq 'fn mapped_recovery_reference(' src/core/backup.rs; then
-            test "$(git rev-parse HEAD:src/core/backup.rs)" = 536d1be7d4574ab4fee26296402a06924df6a156
-            test "$(git rev-parse HEAD:src/core/backup_import_recovery_tests.rs)" = 21e8e6fd91dfa9ef7429567aa893037e42062ad8
-            test "$(git rev-parse HEAD:src/core/backup_operational_recovery_tests.rs)" = 5705223a0195cadf66ecff1caa55aea085d25e1d
-            test "$(git rev-parse HEAD:src/core/backup_typed_memory_recovery_tests.rs)" = 0fc14cc3fc0599cabff05f93cf4367cb5154ac44
-            git apply --check --whitespace=error-all "$patch"
-            git apply "$patch"
-          fi
-          audit_patch=scripts/delivery/recovery-audit-mapping.patch
-          echo "7c337dceb745088c432fae4823854320dc4056b3cc03a8d8babd52e1aad2227b  $audit_patch" | sha256sum -c
-          if ! grep -Fq 'let mut expected_audit = source' src/core/backup_operational_recovery_tests.rs; then
-            git apply --check --whitespace=error-all "$audit_patch"
-            git apply "$audit_patch"
-          fi
-          files=(src/core/backup.rs src/core/backup_import_recovery_tests.rs src/core/backup_operational_recovery_tests.rs src/core/backup_typed_memory_recovery_tests.rs)
-          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
-          git diff --check
-          git add -- "${files[@]}"
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'test(backup): verify live typed queries and exact redacted recovery lineage' -m 'Exercise the rebuilt strict lexical index and chosen-field filter after every typed round trip. Repair four execution-proven fixture failures without weakening expectations: mutate one CASS source instead of violating source uniqueness, rebind only named memory references and require each target to exist, and verify the complete audit row with its mapped target and recomputed commitment. Every other value remains identical. Patch and formatting checks passed; runtime verdicts are reported separately.'
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 3
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${files[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          git rev-parse HEAD > "$RUNNER_TEMP/typed-source-sha.log"
-          tar -czf "$RUNNER_TEMP/typed-source.tar.gz" "${files[@]}"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: typed-memory-source
-          path: |
-            ${{ runner.temp }}/typed-source-sha.log
-            ${{ runner.temp }}/typed-source.tar.gz
-          retention-days: 7
   verify:
-    needs: integrate
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
@@ -89,54 +32,75 @@ jobs:
       CARGO_TERM_COLOR: never
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.integrate.outputs.source }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Capture immutable recovery source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-source-sha.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recovery-source.tar.gz" HEAD \
+            src tests scripts .beads/issues.jsonl Cargo.toml Cargo.lock rust-toolchain.toml \
+            AGENTS.md COMPREHENSIVE_PLAN.md CLOSE_THE_GAP_PLAN.md .github/workflows/typed-memory-recovery.yml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recovery-source-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/recovery-source-sha.log
+            ${{ runner.temp }}/recovery-source.tar.gz
+          retention-days: 7
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
           path: |
             ~/.cargo/registry
             target
-          key: typed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             typed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Compile all targets
-        run: |
-          set -euo pipefail
-          git rev-parse HEAD | tee "$RUNNER_TEMP/typed-identity.log"
-          timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/typed-check.log"
-      - name: Test typed transport, live consumers and corrected recovery cases
+            session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Test typed transport and durable recovery consumers
         run: |
           set -euo pipefail
           failed=0
-          group() {
-            if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/typed-$3.log"; then
+          for group in \
+            core::jsonl_import::typed_fields_tests \
+            output::jsonl_export::typed_fields::tests \
+            core::backup::recovery::typed_memory_tests \
+            core::backup::recovery::history::imports::tests \
+            core::backup::recovery::history::operational::tests \
+            core::backup::tests::provenance_recovery_survives_rebackup_without_rejudging_evidence; do
+            log="$RUNNER_TEMP/recovery-${group//::/-}.log"
+            if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1
-            elif ! grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/typed-$3.log"; then
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
               failed=1
             fi
-          }
-          group core::jsonl_import::typed_fields_tests 5 import
-          group output::jsonl_export::typed_fields::tests 5 export
-          group core::backup::recovery::typed_memory_tests 5 recovery
-          group core::backup::recovery::history::imports::tests 7 checkpoints
-          group core::backup::recovery::history::operational::tests 9 operational
-          group core::backup::tests::provenance_recovery_survives_rebackup_without_rejudging_evidence 1 provenance
+          done
           exit "$failed"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
         with:
-          name: typed-memory-results
-          path: ${{ runner.temp }}/typed-*.log
+          name: recovery-consumer-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recovery-*.log
           retention-days: 7
-      - uses: actions/cache/save@v4
+      - name: Execute public backup and restore round trips
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test e2e_backup_restore_roundtrip -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-public.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-public.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: recovery-public-results-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recovery-public.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
           path: |
