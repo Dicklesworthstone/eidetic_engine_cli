@@ -8900,7 +8900,32 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
         ),
     ];
 
-    let (status, stdout, stderr) = run_script_with_env(
+    // THIS TEST SEEDS ITS OWN REPOSITORY, AND THE REASON IS A MEASURED ONE.
+    //
+    // The two guards above refuse at PREFLIGHT, before any git runs, so they
+    // hold in any directory. This one is a POST-ADMISSION guard: the run must
+    // get through committed-tree materialization to reach it, which needs a git
+    // repository plus the two lockfiles the pinned lane validates.
+    //
+    // Run against the ambient checkout it therefore inherits that checkout's
+    // git-ness. Executed in a tree with no `.git` (the shape `rch exec
+    // --clean-overlay` ships, which strips it), the same command returns
+    // `committed_tree_unsupported` and NONE of the pinned codes -- a red that
+    // looks like this guard failing and is actually the lane having no git.
+    //
+    // Seeding a workspace removes the dependency rather than documenting it.
+    let workspace = seed_git_workspace("rch-pinned-ba-verdict")?;
+    for name in ["franken-stack.lock", "Cargo.toml", "Cargo.lock"] {
+        let source = repo_root().join(name);
+        let bytes = fs::read(&source)
+            .map_err(|error| format!("read {} for pinned fixture: {error}", source.display()))?;
+        fs::write(workspace.join(name), bytes)
+            .map_err(|error| format!("seed {name} into pinned fixture: {error}"))?;
+    }
+    git(&workspace, &["add", "-A"])?;
+    git(&workspace, &["commit", "-m", "seed pinned lockfiles"])?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
         &[
             "--pinned-franken-stack",
             "--treeish",
@@ -8915,6 +8940,7 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
             "--locked",
         ],
         &envs,
+        &workspace,
     )?;
     if status.success() {
         return Err(format!(
