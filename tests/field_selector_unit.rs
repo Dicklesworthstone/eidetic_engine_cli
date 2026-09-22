@@ -6,10 +6,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use ee::core::ask::{AskCitation, AskConfidenceComponents, AskReport, ask_data_json};
 use ee::output::{
     FieldProfile, FieldSelector, apply_field_selector_to_json, error_response_json,
     field_preset_names_for_command,
@@ -157,6 +158,82 @@ fn retrieval_presets_never_strip_embedding_backend_attribution() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn ask_presets_preserve_confidence_calibration_after_projection() -> TestResult {
+    let expected = json!({
+        "status": "heuristic_uncalibrated",
+        "calibrated": false,
+        "scoreKind": "ask_span_heuristic_v1",
+        "calibrationId": null,
+    });
+    let mut failures = Vec::new();
+    for abstained in [false, true] {
+        let report = AskReport {
+            native_sources: BTreeMap::new(),
+            question: "Run cargo fmt before release".into(),
+            abstained,
+            answer_text: (!abstained).then(|| "[1] Run cargo fmt before release.".into()),
+            confidence: if abstained { 0.0 } else { 0.8 },
+            confidence_components: AskConfidenceComponents {
+                top_span_score: if abstained { 0.0 } else { 0.8 },
+                corroboration: 1.0,
+                contradiction_penalty: 0.0,
+            },
+            citations: if abstained {
+                vec![]
+            } else {
+                vec![AskCitation {
+                    index: 1,
+                    memory_id: "mem_00000000000000000000000001".into(),
+                    byte_start: 0,
+                    byte_end: "Run cargo fmt before release.".len(),
+                    text: "Run cargo fmt before release.".into(),
+                    provenance_uri: None,
+                    trust_class: "human_explicit".into(),
+                    confidence: 0.9,
+                    team_provenance: None,
+                }]
+            },
+            sides: None,
+            nearest_evidence: None,
+            counterfactual_hint: None,
+            semantic_degraded: false,
+            conflict_detected: false,
+            conflict_link: None,
+            extractiveness_violated: false,
+            candidates_scanned: usize::from(!abstained),
+        };
+        let response = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": ask_data_json(&report),
+            "degraded": [],
+        })
+        .to_string();
+        for (preset, _) in PRESETS {
+            let selected =
+                apply_field_selector_to_json(&response, &FieldSelector::parse(preset))
+                    .map_err(|error| format!("ask {preset} abstained={abstained}: {error}"))?;
+            let selected: Value =
+                serde_json::from_str(&selected).map_err(|error| error.to_string())?;
+            // Check after projection, and distinguish an absent block/key from
+            // the required, present calibrationId=null value.
+            let calibration = selected["data"].get("confidenceCalibration");
+            if calibration != Some(&expected) {
+                failures.push(format!(
+                    "ask {preset} abstained={abstained}: confidenceCalibration after projection \
+                     expected={expected}, observed={calibration:?}"
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
 }
 
 #[test]

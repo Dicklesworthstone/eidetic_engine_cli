@@ -1899,6 +1899,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "abstained",
                 "answerText",
                 "confidence",
+                "confidenceCalibration",
                 "citations",
             ],
             FieldProfile::Summary => &[
@@ -1907,6 +1908,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "abstained",
                 "answerText",
                 "confidence",
+                "confidenceCalibration",
                 "confidenceComponents",
                 "citations",
                 "candidatesScanned",
@@ -1920,6 +1922,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "abstained",
                 "answerText",
                 "confidence",
+                "confidenceCalibration",
                 "confidenceComponents",
                 "citations",
                 "sides",
