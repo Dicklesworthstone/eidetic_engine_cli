@@ -382,6 +382,10 @@ name = "agent_profile_e2e"
 path = "tests/agent_profile_e2e.rs"
 
 [[test]]
+name = "bench_contracts"
+path = "tests/bench_contracts.rs"
+
+[[test]]
 name = "cache_hotset_contract"
 path = "tests/cache_hotset_contract.rs"
 
