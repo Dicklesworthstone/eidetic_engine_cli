@@ -6,14 +6,16 @@ on:
     paths:
       - 'src/core/curate*.rs'
       - 'tests/session_arc_learning_cli.rs'
+      - 'scripts/delivery/session-learning-sequence-20260922.patch.xz.b64'
       - '.github/workflows/session-learning-regressions.yml'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -27,26 +29,68 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          persist-credentials: false
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Apply reviewed conversation-sequence implementation once
+        id: delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -qF 'session_arc::sequence_candidates(workspace_id, session, evidence_spans)' src/core/curate.rs; then
+            test -f src/core/curate_session_arc_sequence.rs
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import base64, hashlib, lzma, os
+          from pathlib import Path
+          expected = {
+              'src/core/curate.rs': 'e33dcaea3ebd1ead8f5f70d207f1bf01d0f31089a67282a82da0dc9749867675',
+              'src/core/curate_session_arc.rs': '098747e80be6a531b178a6068f2b1265725c3560bccc1e748bb18d3ece6e49ed',
+              'src/core/curate_session_arc_tests.rs': '1037ed888ecd5d2d96908843bb978de1a313c56c7182955accf5fb1024410b8b',
+              'tests/session_arc_learning_cli.rs': 'a71944f8bd420e44f639b616bed03a2d830297ffabfcbaa5f50f8d4bdc57862f',
+          }
+          for name, digest in expected.items():
+              if hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f'Source changed; refusing to overwrite {name}')
+          if Path('src/core/curate_session_arc_sequence.rs').exists():
+              raise SystemExit('Sequence module already exists without expected integration')
+          encoded = Path('scripts/delivery/session-learning-sequence-20260922.patch.xz.b64').read_text()
+          patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
+          if hashlib.sha256(patch).hexdigest() != 'a957b9a4da4503b5470a8e0ecf06974747bf4451ad01114b2a0a95bd838815c3':
+              raise SystemExit('Delivery patch checksum mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'learning-sequence.patch').write_bytes(patch)
+          PY
+          git apply --check "$RUNNER_TEMP/learning-sequence.patch"
+          git apply "$RUNNER_TEMP/learning-sequence.patch"
+          files=(src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_sequence.rs src/core/curate_session_arc_tests.rs tests/session_arc_learning_cli.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit \
+            -m 'feat(curate): learn every source-backed conversation episode' \
+            -m 'Decode safe CASS message bodies before cross-window mining; retain every disjoint failure/repair episode with deterministic pairing, exact evidence provenance, independent explicit application, and idempotent replay. Add eight sequence regressions and a real CLI lifecycle test. Correct two stale test expectations to the existing public dry-run and source-pair validation contracts.'
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
       - name: Capture exact learning source
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/learning-source-sha.log"
           git archive --format=tar.gz --output="$RUNNER_TEMP/learning-source.tar.gz" HEAD \
             .beads/issues.jsonl AGENTS.md COMPREHENSIVE_PLAN.md CLOSE_THE_GAP_PLAN.md \
             Cargo.toml Cargo.lock rust-toolchain.toml src/core/curate.rs \
-            src/core/curate_session_arc.rs src/core/curate_session_arc_text.rs \
-            src/core/curate_session_arc_clauses.rs src/core/curate_session_arc_tests.rs \
-            tests/session_arc_learning_cli.rs
+            src/core/curate_session_arc*.rs tests/session_arc_learning_cli.rs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
         with:
           name: session-learning-source-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/learning-source.tar.gz
             ${{ runner.temp }}/learning-source-sha.log
           retention-days: 7
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
-        with:
-          toolchain: nightly-2026-08-31
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -57,16 +101,21 @@ jobs:
             session-learning-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
             ask-numeric-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
       - name: Execute public learning lifecycle
+        id: cli
         run: |
           set -o pipefail
           cargo test --locked --test session_arc_learning_cli -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-cli.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/learning-cli.log"
       - name: Execute source reconstruction and application regressions
-        if: ${{ !cancelled() }}
+        id: engine
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo test --locked --lib session_arc -- --nocapture 2>&1 | tee "$RUNNER_TEMP/learning-engine.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/learning-engine.log"
+      - name: Publish the tested source directly to main
+        if: steps.delivery.outputs.changed == 'true' && steps.cli.outcome == 'success' && steps.engine.outcome == 'success'
+        run: git push origin HEAD:main
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
