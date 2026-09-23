@@ -4,14 +4,15 @@ on:
     branches: [main]
     paths:
       - 'src/core/context_task_paths.rs'
-      - 'scripts/delivery/pack-scope-explanations.patch.xz.b64'
+      - 'src/cli/pack_stream_tests.rs'
+      - 'scripts/delivery/canonical-pack-stream.patch.xz.b64'
       - 'tests/pack_task_paths_cli.py'
       - '.github/workflows/pack-task-paths.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: pack-task-scope-explanations-${{ github.ref }}
+  group: canonical-task-pack-stream-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   integrate:
@@ -31,31 +32,31 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Preserve each selected rule's conditional applicability
+      - name: Expose canonical task-pack streaming
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          if ! grep -Fq 'and_then(task_paths::scope_explanation)' src/core/context.rs; then
+          if ! grep -Fq 'mod pack_stream_tests;' src/cli/mod.rs; then
             python3 - <<'PY'
           import base64, hashlib, lzma, os
           from pathlib import Path
-          encoded = Path('scripts/delivery/pack-scope-explanations.patch.xz.b64').read_text()
+          encoded = Path('scripts/delivery/canonical-pack-stream.patch.xz.b64').read_text()
           patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
-          if hashlib.sha256(patch).hexdigest() != 'b916c014779aab82d3396467941c789991e261d15aa7e70edb301448937d71ab':
-              raise SystemExit('Scope explanation patch checksum mismatch')
-          Path(os.environ['RUNNER_TEMP'], 'pack-scope.patch').write_bytes(patch)
+          if hashlib.sha256(patch).hexdigest() != 'eb12cfe25d1aab382371937062045a495154457ad10eccc898880e0d7e4381a4':
+              raise SystemExit('Canonical stream patch checksum mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'canonical-stream.patch').write_bytes(patch)
           PY
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/pack-scope.patch"
-            git apply "$RUNNER_TEMP/pack-scope.patch"
-            files=(src/core/context.rs src/core/context_task_paths.rs tests/pack_task_paths_cli.py)
-            rustfmt --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/canonical-stream.patch"
+            git apply "$RUNNER_TEMP/canonical-stream.patch"
+            files=(src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py)
+            rustfmt --edition 2024 --config skip_children=true src/cli/mod.rs src/cli/pack_stream_tests.rs
             python3 -m py_compile tests/pack_task_paths_cli.py
             git diff --check
             git add -- "${files[@]}"
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(pack): retain conditional rule applicability in mixed-target packs' -m 'Attach the admitted native directory/file pattern to each selected rule explanation without rewriting its source body. Account for the additional applicability text in candidate token estimates. Withhold private, control-bearing and oversized patterns before matching or public disclosure. Cover scope explanation, unchanged source bytes and mixed-target public selection.'
+            git commit -m 'feat(pack): expose canonical task-query streaming with live target admission' -m 'Forward pack --stream into the existing source-bound context streaming pipeline. Retain JSON/JSONL format validation and reject file, query-file, cursor, delta and performance combinations that would otherwise be ignored. Prevent path-dependent CLI JSON shortcuts. Add parser and cache regressions, and correct the public test to use the established context-show command without weakening replay assertions.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -67,7 +68,7 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs tests/pack_task_paths_cli.py
+          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -95,6 +96,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
         with:
           path: |
             ~/.cargo/registry
@@ -105,12 +107,12 @@ jobs:
             recall-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Exercise target scope, native authorization and streaming
+      - name: Exercise targets, native authorization and stream contracts
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
           failed=0
-          for group in core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
+          for group in cli::pack_stream_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
             log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
             if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1
@@ -125,11 +127,26 @@ jobs:
           name: task-pack-unit-results
           path: ${{ runner.temp }}/task-pack-*.log
           retention-days: 7
-      - name: Run the public scoped-pack lifecycle
+      - name: Build the public command
+        id: binary
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/task-pack-build.log"
+          sha256sum target/debug/ee | tee "$RUNNER_TEMP/task-pack-binary-sha256.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.binary.outcome == 'success' }}
+        with:
+          name: task-pack-tested-binary
+          path: |
+            target/debug/ee
+            ${{ runner.temp }}/task-pack-identity.log
+            ${{ runner.temp }}/task-pack-binary-sha256.log
+          retention-days: 7
+      - name: Run the public scoped-pack lifecycle
+        if: ${{ !cancelled() && steps.binary.outcome == 'success' }}
+        run: |
+          set -euo pipefail
           python3 tests/pack_task_paths_cli.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/task-pack-cli.log"
           grep -q '^PASS: literal task scopes' "$RUNNER_TEMP/task-pack-cli.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -154,3 +171,10 @@ jobs:
           name: task-pack-results
           path: ${{ runner.temp }}/task-pack-*.log
           retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
