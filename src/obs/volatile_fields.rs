@@ -364,6 +364,78 @@ pub fn normalize_pack_timing_markdown(text: &str) -> (String, usize) {
     )
 }
 
+/// What [`normalize_pack_envelope_timing`] found and removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PackEnvelopeTimingReport {
+    /// A wall-clock timing entry was in some `degraded` list before the scrub.
+    pub timing_entries_present: bool,
+    /// Timing entries dropped, the largest count from any one `degraded` list
+    /// (the list is serialized at both `.degraded` and `.data.degraded`).
+    pub timing_entries_dropped: usize,
+}
+
+/// The timing channel for a pack or context JSON ENVELOPE, with its guards.
+///
+/// bd-4w1up: every caller that compares pack envelopes needs the wall-clock
+/// degradation removed, and each used to hand-roll the same scrub plus its own
+/// subset of guards. This is the one place for it. It holds ONLY the timing
+/// step: the SLO measurements stay with each caller, because that step is not
+/// idempotent and [`strip_volatile_fields`] already applies it, and the
+/// name-based strip stays separate because golden comparisons keep volatile
+/// names. Unlike the strip, it never fails silently:
+///
+/// - a timing entry that is present but not dropped is an error, not a no-op;
+/// - a timing bullet left in ANY string afterwards is an error (a reworded
+///   message, or a bullet without its `degraded` entry).
+pub fn normalize_pack_envelope_timing(
+    value: &mut Value,
+) -> Result<PackEnvelopeTimingReport, String> {
+    let timing_entries_present = contains_timing_degradation(value);
+    let timing_entries_dropped = normalize_pack_timing_degradations(value);
+    if timing_entries_present && timing_entries_dropped == 0 {
+        return Err(format!(
+            "the envelope carries {} but the timing normalizer dropped nothing",
+            crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE
+        ));
+    }
+    let leftover = count_timing_bullets(value);
+    if leftover > 0 {
+        return Err(format!(
+            "{leftover} timing bullet(s) remain in the envelope's text after the timing normalizer"
+        ));
+    }
+    Ok(PackEnvelopeTimingReport {
+        timing_entries_present,
+        timing_entries_dropped,
+    })
+}
+
+fn contains_timing_degradation(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, child)| {
+            (key == "degraded"
+                && child
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(is_timing_degradation)))
+                || contains_timing_degradation(child)
+        }),
+        Value::Array(items) => items.iter().any(contains_timing_degradation),
+        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => false,
+    }
+}
+
+fn count_timing_bullets(value: &Value) -> usize {
+    match value {
+        Value::Object(object) => object.values().map(count_timing_bullets).sum(),
+        Value::Array(items) => items.iter().map(count_timing_bullets).sum(),
+        Value::String(text) => text
+            .split('\n')
+            .filter(|line| is_timing_degradation_bullet(line))
+            .count(),
+        Value::Number(_) | Value::Bool(_) | Value::Null => 0,
+    }
+}
+
 /// Stand-in for a per-workspace daemon socket path in comparable output.
 pub const WORKSPACE_DAEMON_SOCKET_PLACEHOLDER: &str = "<workspace-daemon-socket>";
 
@@ -570,10 +642,10 @@ fn log_volatile_strip(report: &VolatileStripReport) {
 #[cfg(test)]
 mod tests {
     use super::{
-        VOLATILE_FIELD_NAMES, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER, is_volatile_field_name,
-        normalize_pack_timing_degradations, normalize_pack_timing_markdown,
-        normalize_workspace_daemon_socket_paths, normalize_workspace_daemon_socket_paths_in_json,
-        strip_volatile_fields,
+        PackEnvelopeTimingReport, VOLATILE_FIELD_NAMES, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER,
+        is_volatile_field_name, normalize_pack_envelope_timing, normalize_pack_timing_degradations,
+        normalize_pack_timing_markdown, normalize_workspace_daemon_socket_paths,
+        normalize_workspace_daemon_socket_paths_in_json, strip_volatile_fields,
     };
 
     type TestResult = Result<(), String>;
@@ -765,6 +837,64 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    /// bd-4w1up: the envelope helper bites on the slow reading, no-ops on the
+    /// fast one, reports which it did, and leaves both identical.
+    #[test]
+    fn envelope_timing_reports_what_it_dropped_and_converges() -> TestResult {
+        let (fast, slow) = timing_pair();
+        let mut fast_out = fast.clone();
+        let mut slow_out = slow;
+        let fast_report = normalize_pack_envelope_timing(&mut fast_out)?;
+        let slow_report = normalize_pack_envelope_timing(&mut slow_out)?;
+        let expected_fast = PackEnvelopeTimingReport::default();
+        let expected_slow = PackEnvelopeTimingReport {
+            timing_entries_present: true,
+            timing_entries_dropped: 1,
+        };
+        if fast_report != expected_fast || slow_report != expected_slow {
+            return Err(format!(
+                "reports: fast {fast_report:?} (want {expected_fast:?}), \
+                 slow {slow_report:?} (want {expected_slow:?})"
+            ));
+        }
+        if fast_out != fast {
+            return Err(format!("fast envelope must be untouched:\n{fast_out:#}"));
+        }
+        if fast_out != slow_out {
+            return Err(format!(
+                "fast and slow envelopes normalized differently\n\
+                 fast:\n{fast_out:#}\n\nslow:\n{slow_out:#}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// bd-4w1up: a timing bullet whose `degraded` entry is missing (a reworded
+    /// code, or text rendered from a different list) must be an error, never a
+    /// silent pass with the milliseconds still in the text.
+    #[test]
+    fn envelope_timing_rejects_a_bullet_left_without_its_entry() -> TestResult {
+        let (_, slow) = timing_pair();
+        let mut orphaned = slow;
+        for pointer in ["/degraded", "/data/degraded"] {
+            if let Some(entries) = orphaned
+                .pointer_mut(pointer)
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                entries.retain(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str)
+                        != Some(crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+                });
+            }
+        }
+        match normalize_pack_envelope_timing(&mut orphaned) {
+            Err(message) if message.contains("timing bullet") => Ok(()),
+            other => Err(format!(
+                "an orphaned timing bullet must be rejected, got {other:?}"
+            )),
+        }
     }
 
     /// The same convergence for a pack rendered as markdown, which has no

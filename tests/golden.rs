@@ -4711,7 +4711,15 @@ mod tests {
         // Regenerating without this would freeze "pack assembly ALWAYS exceeds
         // its elapsed budget" into the contract -- a property the source
         // explicitly says is not reproducible.
-        ee::obs::normalize_pack_timing_degradations(&mut value);
+        //
+        // bd-4w1up: through the shared envelope helper, which also fails when an
+        // entry survives or a timing bullet is left in any string.
+        let timing = ee::obs::normalize_pack_envelope_timing(&mut value)?;
+        if timing.timing_entries_dropped != usize::from(timing.timing_entries_present) {
+            return Err(format!(
+                "pack golden output must carry at most one timing entry and drop exactly it: {timing:?}"
+            ));
+        }
 
         normalize_context_pack_json_strings(&mut value);
 

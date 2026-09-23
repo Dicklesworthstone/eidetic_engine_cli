@@ -328,40 +328,18 @@ fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec
     let mut value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("context stdout not JSON: {error}"))?;
     strip_volatile_fields(&mut value);
-    // bd-j3reo: strip_volatile_fields does not apply the registered timing
-    // channel (src/obs/volatile_fields.rs, bd-8ig10). The wall-clock
+    // bd-j3reo / bd-4w1up: strip_volatile_fields does not apply the registered
+    // timing channel (src/obs/volatile_fields.rs, bd-8ig10). The wall-clock
     // degradation is appended after pack.hash is computed and carries the
-    // measured milliseconds into degraded[] and the rendered pack.text, so
-    // drop it here through the SHARED normalizers, as bd-j1upc does for the
-    // metamorphic envelope. Both guards fail rather than pass silently.
-    let timing_present = ["/degraded", "/data/degraded"].iter().any(|pointer| {
-        value
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry.get("code").and_then(serde_json::Value::as_str)
-                        == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
-                })
-            })
-    });
-    let dropped = ee::obs::normalize_pack_timing_degradations(&mut value);
-    if timing_present && dropped == 0 {
+    // measured milliseconds into degraded[] and the rendered pack.text. The
+    // shared envelope helper drops it and fails, rather than passing silently,
+    // when an entry survives or a bullet is left behind. SLO measurements were
+    // already normalized by strip_volatile_fields above.
+    let timing = ee::obs::normalize_pack_envelope_timing(&mut value)?;
+    if timing.timing_entries_dropped != usize::from(timing.timing_entries_present) {
         return Err(format!(
-            "context envelope carries {} but the shared timing normalizer dropped nothing",
-            ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE
+            "context envelope must carry at most one timing entry and drop exactly it: {timing:?}"
         ));
-    }
-    if let Some(text) = value
-        .pointer("/data/pack/text")
-        .and_then(serde_json::Value::as_str)
-    {
-        let (_, leftover) = ee::obs::normalize_pack_timing_markdown(text);
-        if leftover > 0 {
-            return Err(format!(
-                "pack.text still carries {leftover} timing bullet(s) after the shared JSON normalizer"
-            ));
-        }
     }
     let value = canonicalize_json(value);
     serde_json::to_vec(&value).map_err(|error| error.to_string())

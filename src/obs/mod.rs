@@ -18,8 +18,9 @@ pub use test_log::{
     hash_bytes, log_event, log_level, log_path, note, test_id_or,
 };
 pub use volatile_fields::{
-    VOLATILE_FIELD_NAMES, VolatileStripReport, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER,
-    is_volatile_field_name, normalize_pack_slo_measurements, normalize_pack_timing_degradations,
+    PackEnvelopeTimingReport, VOLATILE_FIELD_NAMES, VolatileStripReport,
+    WORKSPACE_DAEMON_SOCKET_PLACEHOLDER, is_volatile_field_name, normalize_pack_envelope_timing,
+    normalize_pack_slo_measurements, normalize_pack_timing_degradations,
     normalize_pack_timing_markdown, normalize_workspace_daemon_socket_paths,
     normalize_workspace_daemon_socket_paths_in_json, strip_volatile_fields,
 };

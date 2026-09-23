@@ -352,49 +352,20 @@ fn normalize_pack_envelope(stdout: &str) -> Result<String, String> {
         return Err("pack envelope missing SLO measurements".to_owned());
     }
 
-    // bd-j1upc: the wall-clock degradation is registered volatile beside the
-    // SLO fields (src/obs/volatile_fields.rs, bd-8ig10). It is appended after
-    // pack.hash is computed, so it is outside the hash but inside degraded[]
-    // and the rendered pack.text, and it carries the measured milliseconds.
-    // Drop it through the SHARED normalizer the goldens use, never a copy.
-    let timing_present = carries_timing_degradation(&envelope);
-    let dropped = ee::obs::normalize_pack_timing_degradations(&mut envelope);
-    if timing_present && dropped == 0 {
+    // bd-j1upc / bd-4w1up: the wall-clock degradation is registered volatile
+    // beside the SLO fields (src/obs/volatile_fields.rs, bd-8ig10). It is
+    // appended after pack.hash is computed, so it is outside the hash but inside
+    // degraded[] and the rendered pack.text, and it carries the measured
+    // milliseconds. The shared envelope helper drops it and fails, rather than
+    // passing, when an entry survives or a bullet is left in any string.
+    let timing = ee::obs::normalize_pack_envelope_timing(&mut envelope)?;
+    if timing.timing_entries_dropped != usize::from(timing.timing_entries_present) {
         return Err(format!(
-            "pack envelope carries {} but the shared timing normalizer dropped nothing",
-            ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE
+            "pack envelope must carry at most one timing entry and drop exactly it: {timing:?}"
         ));
-    }
-    // Lockstep with the markdown half: once the JSON normalizer has run, no
-    // timing bullet may remain in pack.text. A leftover (a reworded message, or
-    // a bullet without its degraded entry) must go red, not pass.
-    if let Some(text) = envelope
-        .pointer("/data/pack/text")
-        .and_then(JsonValue::as_str)
-    {
-        let (_, leftover) = ee::obs::normalize_pack_timing_markdown(text);
-        if leftover > 0 {
-            return Err(format!(
-                "pack.text still carries {leftover} timing bullet(s) after the shared JSON normalizer"
-            ));
-        }
     }
     serde_json::to_string(&envelope)
         .map_err(|error| format!("serialize normalized pack envelope: {error}"))
-}
-
-fn carries_timing_degradation(envelope: &JsonValue) -> bool {
-    ["/degraded", "/data/degraded"].iter().any(|pointer| {
-        envelope
-            .pointer(pointer)
-            .and_then(JsonValue::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry.get("code").and_then(JsonValue::as_str)
-                        == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
-                })
-            })
-    })
 }
 
 /// The real determinism contract: the same workspace and query give the same
