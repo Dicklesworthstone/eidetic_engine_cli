@@ -47,10 +47,21 @@ def doctor_double():
         if scenario.get("excluded_noise"):
             for name in (".doctor/run.json", ".fixture_baseline/capture.json",
                          ".ee/doctor-fixtures/noise.json", ".assert.stdout",
-                         ".assert.stderr", "._sidecar"):
+                         ".assert.stderr", "._sidecar", ".ee/ee.db-shm"):
                 path = workspace / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"audit-only noise\n")
+        if scenario.get("wal_changed"):
+            # A source write that lands only in the WAL: undo does not
+            # restore it, so the round trip must fail.
+            (workspace / ".ee/ee.db-wal").write_bytes(b"source frame written by the fix\n")
+        if "write_lock" in scenario:
+            (workspace / ".ee/ee.write.lock").write_bytes(scenario["write_lock"].encode())
+        if scenario.get("write_lock_missing"):
+            # Move aside (never unlink) into the excluded run directory.
+            moved = workspace / ".doctor/moved-write.lock"
+            moved.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(workspace / ".ee/ee.write.lock", moved)
         data = {"schema": "ee.doctor.fix_summary.v1", "actionCount": 1}
         if not scenario.get("missing_run_id"):
             data["runId"] = "assertion-control"
@@ -78,6 +89,8 @@ class AssertionContract(unittest.TestCase):
         (self.workspace / ".ee/config.toml").write_bytes(CORRUPT)
         # Real bytes and awkward filenames must survive a correct undo too.
         (self.workspace / "binary file\nwith newline").write_bytes(bytes(range(256)))
+        # A real store carries a monotonic write-lock epoch (20 digits + LF).
+        (self.workspace / ".ee/ee.write.lock").write_bytes(b"00000000000000000005\n")
         self.scenario = {}
         self.report = {
             "schema": "ee.response.v2", "success": True, "degraded": [],
@@ -174,6 +187,42 @@ class AssertionContract(unittest.TestCase):
     def test_audit_and_capture_noise_is_excluded(self):
         self.scenario["excluded_noise"] = True
         self.assert_outcome(False)
+
+    def test_source_wal_change_is_rejected(self):
+        # ee.db-shm is excluded and ee.write.lock is classified; the WAL holds
+        # source frames and must stay byte-compared.
+        self.scenario["wal_changed"] = True
+        self.assert_outcome(True, "undo contents")
+
+    def test_write_lock_epoch_advance_is_accepted(self):
+        self.scenario["write_lock"] = "00000000000000000007\n"
+        self.assert_outcome(False)
+
+    def test_write_lock_epoch_regression_is_rejected(self):
+        self.scenario["write_lock"] = "00000000000000000003\n"
+        self.assert_outcome(True, "went backwards")
+
+    def test_unreadable_write_lock_is_rejected(self):
+        self.scenario["write_lock"] = "not-an-epoch\n"
+        self.assert_outcome(True, "missing or unreadable")
+
+    def test_short_write_lock_is_rejected(self):
+        # 20 digits with no trailing newline is not the stored format.
+        self.scenario["write_lock"] = "00000000000000000009"
+        self.assert_outcome(True, "missing or unreadable")
+
+    def test_missing_write_lock_is_rejected(self):
+        self.scenario["write_lock_missing"] = True
+        self.assert_outcome(True, "missing or unreadable")
+
+    def test_lock_created_when_absent_at_baseline_is_rejected(self):
+        # Move the seeded lock out of the workspace (never unlink), then take
+        # a fresh baseline that records it as absent.
+        os.replace(self.workspace / ".ee/ee.write.lock", self.root / "moved-baseline.lock")
+        prepared = self.run_script("corrupt.sh")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.scenario["write_lock"] = "00000000000000000001\n"
+        self.assert_outcome(True, "absent at the baseline")
 
     def test_nonzero_fix_exit_is_rejected(self):
         self.scenario["exits"] = {"--fix": 9}
