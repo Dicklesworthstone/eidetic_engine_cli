@@ -1,7 +1,9 @@
 # bd-rvrj2: shrink-only baseline of test/src functions that spawn the ee binary
 # without isolating its data dir (no HOME / XDG_DATA_HOME / env_clear /
-# isolated_ee_command in the enclosing fn). Enforced by
-# tests/ee_spawn_isolation_contract.rs. A row may only go down: migrate a
+# isolated_ee_command in the enclosing fn). Checked by
+# tests/ee_spawn_isolation_contract.rs in the integration_e_f target, which no
+# active gate runs yet (bd-feftl), so it fires only when that target is run by
+# hand. A row may only go down: migrate a
 # spawn to tests/support/isolated_ee.rs, then lower (or drop) its row.
 # Never raise a row or add a new one.
 # Format: <count><TAB><repo-relative path>. Total at filing: 279 in 214 files.

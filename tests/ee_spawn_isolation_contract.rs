@@ -13,6 +13,10 @@
 //! (tests/fixtures/ee_spawn_isolation_baseline.tsv): a file above its row
 //! fails, and a row above reality also fails so it must come down when a spawn
 //! is migrated. The census that produced the baseline is on bd-rvrj2.
+//!
+//! Neural is opt-in (bd-rvrj2 A2): the helper is the only test code that may
+//! read the model-fixture variable, so a test cannot quietly score against a
+//! model the runner happens to provide.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -20,6 +24,7 @@
 mod isolated_ee;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +37,9 @@ const ISOLATION_MARKERS: [&str; 4] = [
     "isolated_ee_command(",
 ];
 const BASELINE: &str = "tests/fixtures/ee_spawn_isolation_baseline.tsv";
+/// Built with concat! so this guard is not itself a reader of the opt-in.
+const MODEL_FIXTURE_TOKEN: &str = concat!("EE_EMBED_MODEL_", "FIXTURE_DIR");
+const HELPER: &str = "tests/support/isolated_ee.rs";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -291,12 +299,9 @@ fn classifier_controls_both_directions() {
     );
 }
 
-#[test]
-fn isolated_helper_points_every_data_dir_under_its_root() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = temp.path().join("isolated");
-    let command = isolated_ee::isolated_ee_command(&root).expect("isolated command");
-    let envs: BTreeMap<String, Option<String>> = command
+/// The environment a `Command` will apply: `Some(value)` set, `None` removed.
+fn envs_of(command: &std::process::Command) -> BTreeMap<String, Option<String>> {
+    command
         .get_envs()
         .map(|(key, value)| {
             (
@@ -304,7 +309,40 @@ fn isolated_helper_points_every_data_dir_under_its_root() {
                 value.map(|value| value.to_string_lossy().into_owned()),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Whether source text names the model opt-in as a string literal anywhere
+/// but an `env_remove(..)` line. Scrubbing the variable is not honouring it,
+/// and a bare mention in a comment is not a read.
+fn honours_model_fixture(text: &str) -> bool {
+    let quoted = format!("\"{MODEL_FIXTURE_TOKEN}\"");
+    text.lines()
+        .any(|line| line.contains(&quoted) && !line.contains("env_remove("))
+}
+
+/// Repo-relative `.rs` files under tests/ that honour the model opt-in.
+fn model_fixture_readers(root: &Path) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    rust_sources(&root.join("tests"), &mut files);
+    files
+        .into_iter()
+        .filter(|path| fs::read_to_string(path).is_ok_and(|text| honours_model_fixture(&text)))
+        .map(|path| {
+            path.strip_prefix(root)
+                .expect("source under repo root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect()
+}
+
+#[test]
+fn isolated_helper_points_every_data_dir_under_its_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("isolated");
+    let command = isolated_ee::isolated_ee_command(&root).expect("isolated command");
+    let envs = envs_of(&command);
     for key in [
         "HOME",
         "XDG_DATA_HOME",
@@ -323,13 +361,17 @@ fn isolated_helper_points_every_data_dir_under_its_root() {
         );
     }
     assert_eq!(envs.get("EE_EMBED_DOWNLOAD"), Some(&Some("off".to_owned())));
-    for key in [
-        "EE_WORKSPACE",
-        "EE_WORKSPACE_REGISTRY",
-        "EE_EMBED_MODEL_DIR",
-    ] {
+    for key in ["EE_WORKSPACE", "EE_WORKSPACE_REGISTRY"]
+        .into_iter()
+        .chain(isolated_ee::MODEL_SELECTION_ENV)
+    {
         assert_eq!(envs.get(key), Some(&None), "{key} must be removed");
     }
+    assert!(
+        isolated_ee::MODEL_SELECTION_ENV.contains(&"EE_EMBED_MODEL_DIR")
+            && isolated_ee::MODEL_SELECTION_ENV.contains(&MODEL_FIXTURE_TOKEN),
+        "an inherited model dir or fixture must never reach a non-opted-in spawn"
+    );
     // It really spawns the binary.
     let output = isolated_ee::isolated_ee_command(&root)
         .expect("isolated command")
@@ -369,5 +411,99 @@ fn ratchet_controls_both_directions() {
         parse_baseline("# comment\n\n2\ttests/a.rs\n1\ttests/b.rs\n"),
         baseline,
         "baseline rows parse as <count>\\t<path>"
+    );
+}
+
+#[test]
+fn model_fixture_is_honoured_only_by_the_helper() {
+    assert_eq!(isolated_ee::MODEL_FIXTURE_ENV, MODEL_FIXTURE_TOKEN);
+    // Positive control and empty-world guard in one: the helper must be found.
+    let expected: BTreeSet<String> = [HELPER.to_owned()].into_iter().collect();
+    assert_eq!(
+        model_fixture_readers(&repo_root()),
+        expected,
+        "only {HELPER} may read {MODEL_FIXTURE_TOKEN}; call isolated_ee::model_fixture_root \
+         or isolated_ee_command_with_model instead"
+    );
+}
+
+#[test]
+fn model_fixture_reader_controls_both_directions() {
+    let read = format!("let root = std::env::var_os(\"{MODEL_FIXTURE_TOKEN}\");\n");
+    assert!(
+        honours_model_fixture(&read),
+        "a direct read honours the opt-in"
+    );
+    let constant = format!("pub const ENV: &str = \"{MODEL_FIXTURE_TOKEN}\";\n");
+    assert!(
+        honours_model_fixture(&constant),
+        "naming it as a literal counts"
+    );
+    let scrub = format!("command.env_remove(\"{MODEL_FIXTURE_TOKEN}\");\n");
+    assert!(
+        !honours_model_fixture(&scrub),
+        "scrubbing it is not honouring it"
+    );
+    let comment = format!("// {MODEL_FIXTURE_TOKEN} is documented elsewhere\n");
+    assert!(
+        !honours_model_fixture(&comment),
+        "a bare mention is not a read"
+    );
+    assert!(
+        !honours_model_fixture("std::env::var_os(\"EE_EMBED_MODEL_DIR\")"),
+        "a different variable is not the opt-in"
+    );
+}
+
+#[test]
+fn model_opt_in_controls_both_directions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("isolated");
+
+    let unset = isolated_ee::isolated_ee_command_with_model_from(&root, None)
+        .expect_err("no opt-in, no model");
+    assert!(unset.contains(MODEL_FIXTURE_TOKEN), "{unset}");
+    let empty = isolated_ee::model_fixture_root_from(Some(OsStr::new("")))
+        .expect_err("an empty value is not an opt-in");
+    assert!(empty.contains(MODEL_FIXTURE_TOKEN), "{empty}");
+    let absent = temp.path().join("absent");
+    let not_dir = isolated_ee::model_fixture_root_from(Some(absent.as_os_str()))
+        .expect_err("a missing fixture dir");
+    assert!(not_dir.contains("is not a directory"), "{not_dir}");
+
+    let fixture = temp.path().join("fixture");
+    fs::create_dir_all(&fixture).expect("fixture dir");
+    let incomplete =
+        isolated_ee::isolated_ee_command_with_model_from(&root, Some(fixture.as_os_str()))
+            .expect_err("a fixture without the model files");
+    assert!(incomplete.contains("model.safetensors"), "{incomplete}");
+
+    for file in isolated_ee::MODEL_FIXTURE_FILES {
+        let path = fixture.join(file);
+        fs::create_dir_all(path.parent().expect("parent")).expect("model dir");
+        fs::write(&path, b"placeholder").expect("placeholder");
+    }
+    assert_eq!(
+        isolated_ee::model_fixture_root_from(Some(fixture.as_os_str())),
+        Ok(fixture.clone())
+    );
+    let command =
+        isolated_ee::isolated_ee_command_with_model_from(&root, Some(fixture.as_os_str()))
+            .expect("opted-in command");
+    let envs = envs_of(&command);
+    assert_eq!(
+        envs.get("EE_EMBED_MODEL_DIR"),
+        Some(&Some(fixture.to_string_lossy().into_owned()))
+    );
+    assert_eq!(envs.get("EE_EMBED_DOWNLOAD"), Some(&Some("off".to_owned())));
+    assert_eq!(
+        envs.get(MODEL_FIXTURE_TOKEN),
+        Some(&None),
+        "the child never sees the opt-in itself"
+    );
+    let home = envs.get("HOME").and_then(Clone::clone).expect("HOME set");
+    assert!(
+        Path::new(&home).starts_with(&root),
+        "opting in keeps HOME isolated: {home}"
     );
 }
