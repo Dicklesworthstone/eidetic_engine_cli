@@ -114,7 +114,7 @@ def main() -> None:
     records = replay['replay']['ledger']['request']['taskPaths']
     assert [record['text'] for record in records] == paths, replay
     assert all(not record['redacted'] and record['hash'].startswith('blake3:') for record in records)
-    shown = execute('context', 'show', pack_id)
+    shown = execute('context-show', pack_id)
     assert shown['pack']['taskPaths'] == records, shown
 
     stream = execute('pack', query, *flags, '--task-path', paths[0], '--stream', '--read-only', frames=True)

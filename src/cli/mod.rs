@@ -1,4 +1,7 @@
 mod context_delta_evidence;
+#[cfg(test)]
+#[path = "pack_stream_tests.rs"]
+mod pack_stream_tests;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -3578,6 +3581,10 @@ pub struct PackArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Emit ee.pack.stream.v1 NDJSON frames for a task query. Requires JSON or JSONL output.
+    #[arg(long, action = ArgAction::SetTrue, requires = "query", conflicts_with_all = ["output", "explain_performance", "explain_gaps", "cursor", "since"])]
+    pub stream: bool,
+
     /// Optional pack subcommand. Omit it to build from `--query-file`.
     #[command(subcommand)]
     pub command: Option<PackCommand>,
@@ -40989,6 +40996,7 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && !args.explain
         && !args.explain_gaps
         && !args.stream
+        && args.task_paths.is_empty()
         && args.since.is_none()
         && args.mesh_mode == MeshCommandMode::Off
         && args.changed_symbols.is_empty()
@@ -45900,7 +45908,7 @@ where
                 || lens_overlay
                     .and_then(|overlay| overlay.strict_source_mode)
                     .unwrap_or(false),
-            stream: false,
+            stream: args.stream,
             profile: args
                 .profile
                 .clone()
