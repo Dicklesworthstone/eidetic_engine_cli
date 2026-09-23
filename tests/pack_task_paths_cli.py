@@ -85,6 +85,10 @@ def main() -> None:
     paths = ['src/payments/invoice.rs', 'tests/expiry.rs']
     both = pack(paths)
     assert 'DirGuidance' in selected(both) and 'TestGuidance' in selected(both), both
+    for marker, scope in [('DirGuidance', 'directory "src/payments"'), ('TestGuidance', 'file_pattern "tests/*.rs"')]:
+        item = next(item for item in both['pack']['items'] if marker in item.get('content', ''))
+        assert 'Rule scope: ' + scope in item['why'], item
+        assert 'only to matching task targets' in item['why'], item
     reordered = pack(['tests/expiry.rs', './src/payments/invoice.rs', 'tests/expiry.rs'])
     assert reordered['request']['taskPaths'] == paths, reordered
     assert both['pack']['hash'] == reordered['pack']['hash'], (both, reordered)

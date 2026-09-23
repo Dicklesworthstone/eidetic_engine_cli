@@ -71,7 +71,7 @@ pub(super) fn matches_rule(rule: &RuleIndexProjection, targets: &[String]) -> bo
     match RuleScope::from_str(&rule.rule().scope) {
         Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project) => true,
         Ok(scope @ (RuleScope::Directory | RuleScope::FilePattern)) => {
-            let Some(pattern) = rule.normalized_scope_pattern() else {
+            let Some(pattern) = public_scope_pattern(rule) else {
                 return false;
             };
             targets.iter().any(|path| {
@@ -85,6 +85,32 @@ pub(super) fn matches_rule(rule: &RuleIndexProjection, targets: &[String]) -> bo
         }
         Err(_) => false,
     }
+}
+
+// Patterns may be recovered from old or externally authored stores. Do not
+// expose secret-bearing patterns as applicability text, or allow an unbounded
+// pattern to expand the matching work against an otherwise bounded target.
+fn public_scope_pattern(rule: &RuleIndexProjection) -> Option<&str> {
+    let pattern = rule.normalized_scope_pattern()?;
+    (pattern.len() <= MAX_TARGET_BYTES
+        && !pattern.chars().any(char::is_control)
+        && !crate::policy::redact_public_replay_text(pattern).redacted)
+        .then_some(pattern)
+}
+
+/// Keep directory/file advice visibly conditional in mixed-target packs.
+/// This is explanation metadata, never a replacement for the stored rule body.
+pub(super) fn scope_explanation(rule: &RuleIndexProjection) -> Option<String> {
+    let scope = RuleScope::from_str(&rule.rule().scope).ok()?;
+    if !matches!(scope, RuleScope::Directory | RuleScope::FilePattern) {
+        return None;
+    }
+    let pattern = public_scope_pattern(rule)?;
+    Some(format!(
+        "Rule scope: {} {}. Apply this guidance only to matching task targets.",
+        scope.as_str(),
+        serde_json::to_string(pattern).ok()?
+    ))
 }
 
 /// Empty targets deliberately contribute no new bytes: historical no-target
@@ -241,6 +267,33 @@ mod tests {
         assert!(!matches_rule(&rule, &[]));
         let global = projection(root.path(), "workspace", None);
         assert!(matches_rule(&global, &[]));
+    }
+
+    #[test]
+    fn applicability_metadata_preserves_scope_without_rewriting_source_body() {
+        let root = tempfile::tempdir().unwrap();
+        let rule = projection(root.path(), "directory", Some("src/payments"));
+        let body = rule.rule().content.clone();
+        let explanation = scope_explanation(&rule).unwrap();
+        assert!(explanation.contains("directory"));
+        assert!(explanation.contains("src/payments"));
+        assert!(explanation.contains("only to matching task targets"));
+        assert_eq!(rule.rule().content, body);
+        assert!(scope_explanation(&projection(root.path(), "workspace", None)).is_none());
+    }
+
+    #[test]
+    fn private_and_oversized_scope_patterns_never_gain_public_applicability() {
+        let root = tempfile::tempdir().unwrap();
+        for pattern in [
+            format!("src/{}{}/*", "AKIA", "ABCDEFGHIJKLMNOP"),
+            "*".repeat(MAX_TARGET_BYTES + 1),
+            "src/\n*".to_owned(),
+        ] {
+            let rule = projection(root.path(), "file_pattern", Some(&pattern));
+            assert!(scope_explanation(&rule).is_none());
+            assert!(!matches_rule(&rule, &["src/payments.rs".to_owned()]));
+        }
     }
 
     #[test]

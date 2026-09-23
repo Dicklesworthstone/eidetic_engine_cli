@@ -12297,13 +12297,22 @@ fn candidate_from_hit_preloaded(
         Some(rule) => rule.content.clone(),
         None => memory.content.clone(),
     };
-    let why = candidate_selection_why(
+    let applicability = artifact_id
+        .as_deref()
+        .and_then(|id| source.rules.get(id))
+        .and_then(task_paths::scope_explanation);
+    let applicability_tokens = applicability.as_deref().map_or(0, estimate_tokens_default);
+    let mut why = candidate_selection_why(
         source.query,
         hit.source.as_str(),
         relevance.into_inner(),
         utility.into_inner(),
         artifact_id.as_deref(),
     );
+    if let Some(applicability) = applicability {
+        why.push(' ');
+        why.push_str(&applicability);
+    }
     let mut candidate_provenances = vec![provenance];
     if let Some(rule) = promoted_rule {
         if let Ok(entry) = PackProvenance::new(
@@ -12318,7 +12327,7 @@ fn candidate_from_hit_preloaded(
         section: promoted_rule
             .map(|_| PackSection::ProceduralRules)
             .unwrap_or_else(|| section_for_memory(memory)),
-        estimated_tokens: estimate_tokens_default(&content),
+        estimated_tokens: estimate_tokens_default(&content).saturating_add(applicability_tokens),
         content,
         relevance,
         utility,
