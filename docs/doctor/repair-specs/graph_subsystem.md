@@ -31,7 +31,7 @@ Labels, fields and the coverage rule are defined in
 ## fm-graph_subsystem-snapshot-write-lock-held
 
 - **Label:** NOT-DETECTED (pinned gap; NOT coverage)
-- **Severity:** P0. Scored P1 as `pop-graph_lock-held`: a held lease blocks graph refresh only and leaves memory data untouched.
+- **Severity:** P1. Scored P1 as `pop-graph_lock-held`: a held lease blocks graph refresh only and leaves memory data untouched. The manifest said P0 until the bd-2oh15 c9891 ruling (the rubric governs).
 - **Detector:** None. Doctor never reads `ee_advisory_locks`.
 - **Real trigger:** SQL inserts a row into `ee_advisory_locks` with resource key `graph_snapshot:<workspace id>:memory_links`, holder `ee-graph-snapshot-1-fixture` (not PID-reclaimable) and an expiry in 2099. A byte copy of the pre-lock database is kept in `.fixture_baseline/ee.db.pre-lock`.
 - **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.

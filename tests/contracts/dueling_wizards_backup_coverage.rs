@@ -314,7 +314,10 @@ fn each_asset_declares_full_backup_restore_coverage() -> TestResult {
         }
 
         let storage_class = string_field(asset, "/storageClass", &context)?;
-        if !matches!(storage_class, "durable" | "derived" | "durable_and_derived") {
+        if !matches!(
+            storage_class,
+            "durable" | "derived" | "durable_and_derived" | PLANNED_NOT_STORED
+        ) {
             return Err(format!(
                 "{asset_kind}: unsupported storageClass {storage_class}"
             ));
@@ -509,6 +512,13 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
 const DECLARED_CONFORMANT: &str = "declared_conformant";
 const NOT_CONFORMANT_RUNTIME_PARTIAL: &str = "not_conformant_runtime_partial";
 const NOT_CONFORMANT_EVIDENCE_PENDING: &str = "not_conformant_evidence_pending";
+/// bd-1n0np.23.2 (orchestrator ruling 2) added the not-stored pair: a kind whose
+/// migration allocation is only planned has no stored asset, so there is
+/// nothing to back up and no evidence to be pending on. The two values are
+/// legal only together, and the row must point at the planned allocation and
+/// at the ruling that put it out of scope.
+const NOT_APPLICABLE_NOT_STORED: &str = "not_applicable_not_stored";
+const PLANNED_NOT_STORED: &str = "planned_not_stored";
 
 /// What a row's cited evidence is checked against: each named clause's source
 /// anchors, and the runtime backup source that must hold every cited test.
@@ -685,7 +695,10 @@ fn require_pending_bead(row: &Value, context: &str, status: &str) -> TestResult 
 /// runtime evidence covering some clauses but not all, with `tested` equal to
 /// the covered count and a bead owning the rest. `not_conformant_evidence_pending`
 /// is legal only while evidence is planned, cites no tests, and names a bead;
-/// its counters need only be internally consistent.
+/// its counters need only be internally consistent. `not_applicable_not_stored`
+/// is legal only with storageClass `planned_not_stored`, and the reverse: it
+/// cites nothing, counts nothing, is pending on nothing, and names the planned
+/// allocation and the ruling that put the kind out of scope.
 fn row_compliance_error(row: &Value, context: &str, gate: &EvidenceGate) -> TestResult {
     let must_clauses = u64_field(row, "/mustClauses", context)?;
     let tested = u64_field(row, "/tested", context)?;
@@ -709,7 +722,16 @@ fn row_compliance_error(row: &Value, context: &str, gate: &EvidenceGate) -> Test
     let runtime_evidence =
         string_field(row, "/roundTripEvidenceStatus", context)? == "runtime_evidence_declared";
     let covered = cited_coverage(row, context, gate)?.len() as u64;
-    match string_field(row, "/complianceStatus", context)? {
+    let compliance = string_field(row, "/complianceStatus", context)?;
+    let not_stored =
+        row.pointer("/storageClass").and_then(Value::as_str) == Some(PLANNED_NOT_STORED);
+    if not_stored != (compliance == NOT_APPLICABLE_NOT_STORED) {
+        return Err(format!(
+            "{context}: storageClass {PLANNED_NOT_STORED} and complianceStatus \
+             {NOT_APPLICABLE_NOT_STORED} are legal only together"
+        ));
+    }
+    match compliance {
         DECLARED_CONFORMANT => {
             if !runtime_evidence {
                 return Err(format!(
@@ -774,10 +796,41 @@ fn row_compliance_error(row: &Value, context: &str, gate: &EvidenceGate) -> Test
                 ));
             }
         }
+        NOT_APPLICABLE_NOT_STORED => {
+            if runtime_evidence || covered != 0 {
+                return Err(format!(
+                    "{context}: {NOT_APPLICABLE_NOT_STORED} cannot declare or cite runtime \
+                     evidence; there is no stored asset to exercise"
+                ));
+            }
+            if tested != 0 || passing != 0 || divergent != 0 {
+                return Err(format!(
+                    "{context}: {NOT_APPLICABLE_NOT_STORED} must count nothing tested"
+                ));
+            }
+            if row.pointer("/evidencePendingOn").is_some() {
+                return Err(format!(
+                    "{context}: {NOT_APPLICABLE_NOT_STORED} is pending on nothing; drop \
+                     evidencePendingOn"
+                ));
+            }
+            for pointer in ["/plannedAllocation", "/scopeRuling"] {
+                if row
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .is_none_or(|text| text.trim().is_empty())
+                {
+                    return Err(format!(
+                        "{context}: {NOT_APPLICABLE_NOT_STORED} must name {pointer}"
+                    ));
+                }
+            }
+        }
         other => {
             return Err(format!(
                 "{context}: complianceStatus must be one of {DECLARED_CONFORMANT}, \
-                 {NOT_CONFORMANT_RUNTIME_PARTIAL} or {NOT_CONFORMANT_EVIDENCE_PENDING}, got {other}"
+                 {NOT_CONFORMANT_RUNTIME_PARTIAL}, {NOT_CONFORMANT_EVIDENCE_PENDING} or \
+                 {NOT_APPLICABLE_NOT_STORED}, got {other}"
             ));
         }
     }
@@ -876,7 +929,7 @@ fn compliance_status_is_tied_to_counters_and_cited_evidence() -> TestResult {
         "arm C",
         "only legal while",
     )?;
-    // D: no fourth value.
+    // D: no value outside the vocabulary.
     expect_rejected(
         check(&unit_row("bogus", planned, &[], 0), "arm D"),
         "arm D",
@@ -972,6 +1025,31 @@ fn compliance_status_is_tied_to_counters_and_cited_evidence() -> TestResult {
     let mut p = unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, create_only, 1);
     p["coveredClauses"] = serde_json::json!(["backup_verify"]);
     expect_rejected(check(&p, "arm P"), "arm P", "coveredClauses must equal")?;
+
+    // The not-stored pair (bd-1n0np.23.2 ruling 2): a planned allocation with no
+    // stored asset.
+    let not_stored = || {
+        let mut row = unit_row(NOT_APPLICABLE_NOT_STORED, planned, &[], 0);
+        if let Some(fields) = row.as_object_mut() {
+            fields.remove("evidencePendingOn");
+        }
+        row["storageClass"] = serde_json::json!(PLANNED_NOT_STORED);
+        row["plannedAllocation"] = serde_json::json!("V128_EXAMPLE: planned allocation");
+        row["scopeRuling"] = serde_json::json!("bd-example ruling: nothing is stored");
+        row
+    };
+    // Q: the not-stored pair, pointing at its allocation and ruling, is legal.
+    check(&not_stored(), "arm Q")?;
+    // R: a planned-not-stored kind cannot claim conformance.
+    let mut r = unit_row(DECLARED_CONFORMANT, runtime, everything, full);
+    r["storageClass"] = serde_json::json!(PLANNED_NOT_STORED);
+    expect_rejected(check(&r, "arm R"), "arm R", "legal only together")?;
+    // S: the not-stored status must name the planned allocation it rests on.
+    let mut s = not_stored();
+    if let Some(fields) = s.as_object_mut() {
+        fields.remove("plannedAllocation");
+    }
+    expect_rejected(check(&s, "arm S"), "arm S", "must name /plannedAllocation")?;
     Ok(())
 }
 
@@ -1222,6 +1300,8 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
         "declared_conformant",
         "not_conformant_evidence_pending",
         "not_conformant_runtime_partial",
+        "not_applicable_not_stored",
+        "planned_not_stored",
         "evidencePendingOn",
         "mustClauseList",
         "mustClauseAnchors",

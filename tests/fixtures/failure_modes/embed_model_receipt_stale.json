@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "embed_model_receipt_stale",
+  "introduced_by": {
+    "bead": "bd-h1xbv",
+    "epic_letter": "model-receipt"
+  },
+  "surfaces": ["status", "doctor"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running `ee status --json` or `ee doctor --json` in an initialized workspace while the bundled potion model directory holds model.safetensors but its `.verified` receipt is missing or stale. A chmod or chown changes the file's ctime, which invalidates the receipt; from then on every process that loads the model re-hashes all 512 MB before using it. The probe is read-only and hash-free (it reads the receipt and stats the files). status reports it in degraded[]; doctor appends it to the embedding_posture advisory check, shown with its repair by `ee doctor --full --json` (the concise `ee doctor --json` counts it among the non-ok advisories).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee index rebuild --workspace .",
+      "chmod o-r \"$EE_EMBED_MODEL_DIR/potion-multilingual-128M/model.safetensors\""
+    ],
+    "invocation": "ee status --json"
+  },
+  "expected_emission": {
+    "code": "embed_model_receipt_stale",
+    "severity": "low",
+    "message_contains": [
+      "`.verified` receipt is missing or stale",
+      "re-hashes the 512 MB model before loading it"
+    ],
+    "repair_contains": "ee model fetch embedding-default",
+    "repair_string": "Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt."
+  }
+}

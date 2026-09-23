@@ -367,7 +367,7 @@
     },
     {
       "assetKind": "source_write_stats",
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "allocationCount": 1,
       "ownerBeadCount": 1,
@@ -383,8 +383,9 @@
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "not_conformant_evidence_pending",
-      "evidencePendingOn": "bd-1n0np.23.2"
+      "complianceStatus": "not_applicable_not_stored",
+      "plannedAllocation": "V128_SOURCE_WRITE_STATS: dueling_wizards_migration_registry.json allocation source_write_stats, status planned, not implemented",
+      "scopeRuling": "bd-1n0np.23.2 orchestrator ruling 2 (2026-09-23): no stored asset today; bd-1n0np.8.5 closed on computation only (compute_source_write_stats over caller-supplied observations), so there is nothing to back up. Building V128 or withdrawing the reservation is an operator decision."
     }
   ],
   "assets": [
@@ -600,7 +601,7 @@
       "assetKind": "source_write_stats",
       "migrationAllocationIds": ["source_write_stats"],
       "ownerBeads": ["bd-1n0np.8.5"],
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",

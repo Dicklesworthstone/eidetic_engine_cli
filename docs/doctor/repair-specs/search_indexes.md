@@ -31,7 +31,7 @@ Labels, fields and the coverage rule are defined in
 ## fm-search_indexes-index_corrupt
 
 - **Label:** REPAIR
-- **Severity:** P0. Scored P1 as `pop-index-corrupt`: the index is a derived artifact that a rebuild recovers from the intact store.
+- **Severity:** P1. Scored P1 as `pop-index-corrupt`: the index is a derived artifact that a rebuild recovers from the intact store. The manifest said P0 until the bd-2oh15 c9891 ruling (the rubric governs).
 - **Detector:** `search_index` reports EE-E301. Corrupt tier files are reported as stale.
 - **Real trigger:** The largest non-meta file under `.ee/index` is replaced with random bytes of the same length. Its relative path is recorded in `.fixture_baseline/corrupted-index-file`.
 - **Repair:** `fix_search_index_stale` dispatches the `run_index_rebuild` operation; `fixerResults` records finding `search_index_stale` with outcome `applied`.

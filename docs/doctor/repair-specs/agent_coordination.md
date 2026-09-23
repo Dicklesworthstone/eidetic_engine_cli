@@ -7,7 +7,7 @@ Labels, fields and the coverage rule are defined in
 ## fm-agent_coordination-rch-workers-all-blocked-by-pressure
 
 - **Label:** NOT-DETECTED (pinned gap; NOT coverage)
-- **Severity:** P0. Scored P1 as `pop-rch-pressure` in `docs/doctor/failure_mode_scores.jsonl`: blocked build workers stop remote verification only.
+- **Severity:** P1. Scored P1 as `pop-rch-pressure` in `docs/doctor/failure_mode_scores.jsonl`: blocked build workers stop remote verification only. The manifest said P0 until the bd-2oh15 c9891 ruling (the rubric governs).
 - **Detector:** None as a failure. `doctor --full` parses `rchWorkerPressure.status` as `healthy_but_pressure_blocked` with `usableWorkerCount` 0, but the `rch_worker_pressure` check keeps severity `ok`.
 - **Real trigger:** The state lives in an external tool. A stand-in `rch` placed first on `PATH` (a double for the external binary, not for ee internals) reports its only worker at critical disk pressure with 0 GB free.
 - **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.

@@ -17,11 +17,12 @@ Per `bd-2oh15`, the fixture lifecycle is:
    `.fixture_baseline/before.sha256`.
 2. `assert.sh` confirms the marker is present. When
    `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary is provided in
-   `EE_DOCTOR_FIXTURE_BINARY`, it additionally runs
-   `ee doctor --fix --only fm-policy_safety-trauma-guard-policy-denied-exit-7`, then a follow-up
-   `ee doctor` read-back, then `ee doctor undo --last`,
-   and finally compares the post-undo SHA-256 manifest
-   against the pre-fix baseline (round-trip byte-identical).
+   `EE_DOCTOR_FIXTURE_BINARY`, `doctor_fixture_assert` in `lib.sh`
+   additionally runs an unscoped `ee doctor --fix`, a follow-up `ee doctor`
+   report (the `--only` it passes filters nothing without `--fix`), then
+   `ee doctor --undo <runId>`, and finally compares the post-undo SHA-256
+   manifest against the pre-fix baseline (round-trip byte-identical). The
+   marker is not real damage, so this round trip exercises undo only.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -31,8 +32,12 @@ state on disk.
 
 ## Wiring status
 
-`ee doctor --fix --only fm-policy_safety-trauma-guard-policy-denied-exit-7` is WIRED. `bd-3boan` (CLI surface for
-the doctor runtime) is closed and `DoctorArgs` carries both `--fix` and
-`--only`, so `scripts/verify-undo.sh` sets `EE_DOCTOR_FIXTURE_RUN_EE=1` and
-the round-trip above runs under the `ee doctor Safety Harness` stage of
-`scripts/verify.sh`.
+Label: **UNCLASSIFIED** (repair spec and `manifest.json`). Marker-only: no
+real trigger has been built, so this fixture is not detector or repair coverage
+for `fm-policy_safety-trauma-guard-policy-denied-exit-7`.
+There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
+because `--fix` declares a conflict with `--only`.
+`scripts/verify-undo.sh` runs the round trip above with
+`EE_DOCTOR_FIXTURE_RUN_EE=1` when an `ee` binary is on `PATH`; its caller, the
+`ee doctor Safety Harness` stage of `scripts/verify.sh`, is not run by any CI
+workflow (bd-feftl).
