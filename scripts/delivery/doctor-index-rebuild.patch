@@ -1,0 +1,130 @@
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -55,6 +55,10 @@
+     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
+ };
+ use sqlmodel_core::Value as SqlValue;
++
++#[cfg(unix)]
++#[path = "index_doctor_repair.rs"]
++pub(crate) mod doctor_repair;
+ 
+ #[path = "index_storage.rs"]
+ mod storage;
+--- a/src/core/doctor_runtime.rs
++++ b/src/core/doctor_runtime.rs
+@@ -59,6 +59,10 @@
+ ))]
+ use fs4::FileExt as Fs4FileExt;
+ use serde::{Deserialize, Serialize};
++
++#[cfg(unix)]
++#[path = "doctor_index_repair.rs"]
++mod index_repair;
+ 
+ /// Public schema string for the doctor capabilities report. Bump only on a
+ /// breaking contract change; additive changes keep `v1`.
+@@ -394,10 +398,9 @@
+     /// blast-radius check would otherwise refuse.
+     EmitDiagnostic { code: String, severity: String },
+ 
+-    /// Run the search-index rebuild pipeline. Phase-1 (bd-tu4s8): records
+-    /// the planned rebuild as actions.jsonl evidence with manual operator
+-    /// steps until the subsystem actor handle lands; the doctor never
+-    /// directly performs the rebuild from this Op today.
++    /// Rebuild the derived index from a read-only source snapshot. Unix repair
++    /// and undo use the ordinary generation lease and journal every primitive
++    /// mutation. Dry runs record guidance only; unsupported platforms refuse.
+     RunIndexRebuild { steps: Vec<String> },
+ 
+     /// Refresh the graph snapshot subsystem. Phase-1 (bd-tu4s8): records
+@@ -446,6 +449,7 @@
+                 | Self::Chmod { .. }
+                 | Self::QuarantineByRename { .. }
+                 | Self::CreateDirAll { .. }
++                | Self::RunIndexRebuild { .. }
+         )
+     }
+ 
+@@ -456,7 +460,6 @@
+             self,
+             Self::Manual { .. }
+                 | Self::EmitDiagnostic { .. }
+-                | Self::RunIndexRebuild { .. }
+                 | Self::RunGraphRefresh { .. }
+                 | Self::RunWalCheckpoint { .. }
+                 | Self::RunMigration { .. }
+@@ -862,6 +865,17 @@
+         return Err(DoctorRuntimeError::BlastRadiusExceeded {
+             path: path.to_path_buf(),
+             allowed_roots: ctx.blast_radius_roots.clone(),
++        });
++    }
++
++    if matches!(&op, Op::RunIndexRebuild { .. }) && !ctx.dry_run {
++        #[cfg(unix)]
++        return index_repair::rebuild(ctx, path);
++        #[cfg(not(unix))]
++        return Err(DoctorRuntimeError::Io {
++            context: "rebuild index with audited doctor undo".to_owned(),
++            source: io::Error::new(io::ErrorKind::Unsupported,
++                "audited index repair requires Unix generation leases; use ee index rebuild explicitly"),
+         });
+     }
+ 
+@@ -1316,6 +1330,8 @@
+     }
+     let observed_action_count =
+         validate_undo_action_ledger(&run_dir, &state, &recorded_roots, &allowed_roots, &lines)?;
++    #[cfg(unix)]
++    let _index_lease = index_repair::undo_lease(&workspace, &lines)?;
+     // Read existing undo_log to skip already-undone actions.
+     //
+     // Only a SUCCESSFUL entry retires an action. Failure entries carry the
+--- a/src/core/doctor_fixers.rs
++++ b/src/core/doctor_fixers.rs
+@@ -1,16 +1,15 @@
+-//! 12 auto-fixable fixers wired through the `doctor_runtime::mutate()`
++//! Repair dispatchers wired through the `doctor_runtime::mutate()`
+ //! chokepoint (bd-tu4s8 Pass-2). Each fixer maps a specific repair-spec
+ //! finding code to the `Op` that the doctor should call `mutate()` with.
+ //!
+-//! Phase-1 scope: the fixers are pure dispatchers — they return the
++//! The fixers are pure dispatchers — they return the
+ //! `(path, Op)` pair the caller will hand to `mutate()`. They do NOT call
+ //! `mutate()` themselves so the test surface stays free of `RunContext`
+-//! setup. Subsystem-actor wiring for the `RunX` family of variants lands
+-//! in the bd-3boan CLI-wiring slice and follow-up actor beads; until those
+-//! land, `RunX` Ops record their planned-mutation evidence through the same
+-//! `actions.jsonl` channel as `Manual{steps}`.
++//! setup. Index rebuilds execute through a read-only source snapshot and the
++//! runtime's reversible file primitives. Other unwired subsystem operations
++//! record guidance, not an applied repair, through `actions.jsonl`.
+ //!
+-//! The 12 fixers cover the eight repair_specs/ subsystems
++//! The fixers cover the eight repair_specs/ subsystems
+ //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
+ //! schema_migrations, search_indexes, state_files, workspace_config) plus
+ //! WAL checkpoint and snapshot-backup as cross-cutting Ops. Each fixer
+@@ -55,8 +54,8 @@
+ }
+ 
+ /// FM-SI-01: search index manifest is stale relative to the underlying
+-/// memories table. Auto-fix dispatches an index rebuild plan; the actor
+-/// handle materialises the rebuild in a follow-up subsystem-wiring bead.
++/// memories table. The runtime stages a validated generation and journals
++/// every live-file change so the repair can be undone without source writes.
+ #[must_use]
+ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
+     FixerDispatch {
+@@ -350,8 +349,8 @@
+         };
+         assert_eq!(steps[0], "ee index rebuild --workspace .");
+         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
+-        assert!(dispatch.op.is_advisory());
+-        assert!(!dispatch.op.is_writing());
++        assert!(!dispatch.op.is_advisory());
++        assert!(dispatch.op.is_writing());
+         assert_eq!(dispatch.path, root().join(".ee/index"));
+     }
+ 
