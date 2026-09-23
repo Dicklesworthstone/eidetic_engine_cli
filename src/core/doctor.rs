@@ -2791,6 +2791,20 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::DATABASE_NOT_FOUND,
         );
     }
+    // bd-wswg0 / bd-xa6ud: a zero-byte file opens as a valid empty database and
+    // would read as pending migrations, but it is a store whose data is gone; a
+    // truncated file fails the open below only after touching its sidecars.
+    // Judge both from the header, before any open, so this never writes to them.
+    if let Some((code, reason)) = database_unreadable(workspace_path) {
+        let message = if code.id == error_codes::DATABASE_EMPTY.id {
+            empty_database_message(workspace_path, &database_path)
+        } else {
+            format!(
+                "Database readiness check failed: {reason}. Keep the file, recover from a backup (ee backup list --workspace .) or move it aside and re-initialize."
+            )
+        };
+        return CheckResult::error("database", message, code);
+    }
 
     match DbConnection::open_file(&database_path) {
         Ok(connection) => {
@@ -2857,6 +2871,110 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::DATABASE_CORRUPTED,
         ),
     }
+}
+
+/// What an empty store's workspace still holds that shows it once had data
+/// (bd-wswg0): a populated search index or backup directory. An empty list
+/// means ee cannot tell, not that the store never held data.
+fn prior_data_evidence(workspace_path: &Path) -> Vec<&'static str> {
+    let has_entries =
+        |path: PathBuf| std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some());
+    let mut evidence = Vec::new();
+    if has_entries(crate::config::workspace::resolve_store_index_dir(
+        workspace_path,
+        None,
+        None,
+    )) {
+        evidence.push("search index");
+    }
+    if has_entries(workspace_path.join(".ee").join("backups")) {
+        evidence.push("backups");
+    }
+    evidence
+}
+
+fn empty_database_message(workspace_path: &Path, database_path: &Path) -> String {
+    let evidence = prior_data_evidence(workspace_path);
+    let history = if evidence.is_empty() {
+        "ee cannot tell from a 0-byte file whether it ever held data".to_owned()
+    } else {
+        format!(
+            "this workspace previously held data (its {} still exist)",
+            evidence.join(" and ")
+        )
+    };
+    format!(
+        "Database file {} is empty (0 bytes): {history}. Do not run ee init or a migration over it; recover from a backup (ee backup list --workspace .) or move it aside and re-initialize.",
+        database_path.display()
+    )
+}
+
+/// Whether the workspace database is empty or visibly damaged, judged from its
+/// length and 100-byte SQLite header with plain reads (bd-xa6ud, bd-wswg0).
+/// Opening it, even read-only, writes its sidecars (`-wal`, `-shm`,
+/// `-fsqlite-ns-use`) and can initialise a 0-byte file, so every check that
+/// would open the store must consult this first and stay away when it answers.
+/// A missing database is not reported here; its own checks handle it. Damage
+/// the header cannot show is left to the normal open path.
+pub(crate) fn database_unreadable(workspace_path: &Path) -> Option<(ErrorCode, String)> {
+    use std::io::Read as _;
+
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    let metadata = std::fs::metadata(&database_path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let len = metadata.len();
+    if len == 0 {
+        return Some((
+            error_codes::DATABASE_EMPTY,
+            "the database is empty (0 bytes)".to_owned(),
+        ));
+    }
+    if len < 100 {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            format!("the database is {len} bytes, shorter than its 100-byte header"),
+        ));
+    }
+    let mut header = [0_u8; 100];
+    std::fs::File::open(&database_path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .ok()?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            "the database does not start with the SQLite file header".to_owned(),
+        ));
+    }
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536_u64,
+        size => u64::from(size),
+    };
+    let word = |at: usize| {
+        u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    let (change_counter, header_pages, valid_for) = (word(24), word(28), word(92));
+    if valid_for == change_counter && u64::from(header_pages) * page_size > len {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            format!(
+                "the database is truncated: its header records {header_pages} pages of {page_size} bytes, but the file holds {len} bytes"
+            ),
+        ));
+    }
+    None
+}
+
+/// The search index cannot be judged while the database is empty or unreadable.
+/// Report the database as the blocker instead of a missing index.
+fn search_index_blocked_by_database(workspace_path: &Path) -> Option<CheckResult> {
+    let (code, reason) = database_unreadable(workspace_path)?;
+    Some(CheckResult::warning(
+        "search_index",
+        format!("Search index not inspected: {reason}; see the database check."),
+        code,
+    ))
 }
 
 /// Presence-only scan of the foreign embedding-config env vars (never reads a
@@ -2979,6 +3097,15 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
         return embedding_posture_unavailable_check(&trap_present, "no workspace path");
     };
+    // bd-xa6ud / bd-wswg0: get_index_status opens the store read-write; this
+    // check runs before check_database, so on an empty or unreadable store it
+    // would write to it first. Report the posture as unavailable instead.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return embedding_posture_unavailable_check(
+            &trap_present,
+            &format!("{reason}; see the database check"),
+        );
+    }
     let options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
@@ -3174,6 +3301,14 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
     if !database_path.is_file() {
         return reranker_posture_check_result(None, Some("workspace database not found"));
     }
+    // bd-xa6ud / bd-wswg0: even a read-only open writes the store's sidecars and
+    // can initialise a 0-byte file; this runs before check_database.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return reranker_posture_check_result(
+            None,
+            Some(&format!("{reason}; see the database check")),
+        );
+    }
 
     let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
@@ -3230,7 +3365,12 @@ fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     let enabled =
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
     let workspace_root = workspace_path.map(Path::to_path_buf);
-    let workspace_id = workspace_path.map(crate::core::workspace::bound_workspace_id_from_path);
+    // bd-xa6ud / bd-wswg0: resolving the bound workspace id opens the store,
+    // and even a read-only open writes its namespace-use sidecar. Leave an
+    // empty or damaged store alone.
+    let workspace_id = workspace_path
+        .filter(|path| database_unreadable(path).is_none())
+        .map(crate::core::workspace::bound_workspace_id_from_path);
     let report = resolve_shard_fanout_status(ShardFanoutResolverInput {
         enabled,
         workspace_id,
@@ -3319,6 +3459,9 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::INDEX_NOT_FOUND,
         );
     };
+    if let Some(blocked) = search_index_blocked_by_database(workspace_path) {
+        return blocked;
+    }
     let options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
@@ -3369,6 +3512,14 @@ fn check_wal_pressure(workspace_path: Option<&Path>) -> CheckResult {
             "WAL pressure was not inspected without a workspace path.",
         );
     };
+    // bd-xa6ud / bd-wswg0: gathering WAL status opens the store; leave an
+    // empty or damaged one untouched. The database check reports the damage.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return CheckResult::ok(
+            "wal_pressure",
+            format!("WAL pressure not inspected: {reason}; see the database check."),
+        );
+    }
     let wal = crate::core::status::WalStatusReport::gather(Some(workspace_path));
     if !wal.exceeds_database_size() {
         return CheckResult::ok(

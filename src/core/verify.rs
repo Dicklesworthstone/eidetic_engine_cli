@@ -2630,6 +2630,16 @@ pub(crate) fn gather_verification_posture_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
+        // bd-xa6ud / bd-wswg0: this runs before every doctor check and opens
+        // read-write, which initialises a 0-byte file and writes sidecars on a
+        // truncated one. Judge an empty or damaged store from its header first.
+        if super::doctor::database_unreadable(workspace_path).is_some() {
+            return VerificationPostureReport::unavailable(
+                "unavailable",
+                "verification_ledger_unreadable",
+                "ee doctor --workspace . --json",
+            );
+        }
         match DbConnection::open_file(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;

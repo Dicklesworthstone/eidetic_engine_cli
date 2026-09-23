@@ -95,6 +95,41 @@ pub fn fix_search_index_missing(workspace_root: &Path) -> FixerDispatch {
     }
 }
 
+/// bd-wswg0 (EE-E206): the database file is empty (0 bytes), so the
+/// workspace's data is not present. Migrating or rebuilding over it would build
+/// a fresh store and hide the loss, so this records guidance only.
+#[must_use]
+pub fn fix_database_empty(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "database_empty",
+        "error",
+        workspace_root.join(".ee").join("ee.db"),
+        &[
+            "Do not run `ee init` or a migration over the empty file: that builds a fresh store and hides the loss.",
+            "List recoverable backups: `ee backup list --workspace .`.",
+            "Recover one with `ee backup restore` into a side path, inspect it, then move it into `.ee/`.",
+            "Or accept the loss: move `.ee/ee.db` aside and run `ee init --workspace .` to start an empty store.",
+        ],
+    )
+}
+
+/// bd-xa6ud (EE-E202): the database cannot be opened (e.g. truncated). Index
+/// repair and migration both read it and would fail, so this records guidance.
+#[must_use]
+pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "database_corrupted",
+        "error",
+        workspace_root.join(".ee").join("ee.db"),
+        &[
+            "Keep the damaged file: copy `.ee/ee.db` aside before any recovery attempt.",
+            "Do not run `ee index rebuild` or a migration against it; both read the damaged store.",
+            "List recoverable backups: `ee backup list --workspace .`, recover one into a side path with `ee backup restore`, inspect it, then move it into `.ee/`.",
+            "Or accept the loss: move `.ee/ee.db` aside and run `ee init --workspace .` to start an empty store.",
+        ],
+    )
+}
+
 /// The index directory the doctor's `search_index` detector inspects: no
 /// database or index override, so the workspace default (`.ee/index`).
 fn search_index_dir(workspace_root: &Path) -> PathBuf {

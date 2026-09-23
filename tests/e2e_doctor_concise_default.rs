@@ -436,3 +436,278 @@ fn doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution() -
         }),
     )
 }
+
+/// How the real store is damaged for the bd-xa6ud / bd-wswg0 worlds.
+#[derive(Clone, Copy)]
+enum DamagedStore {
+    /// `.ee/ee.db` is a zero-byte file.
+    Empty,
+    /// `.ee/ee.db` holds only the first 8192 bytes of the real database.
+    Truncated,
+}
+
+/// Build a real store (init, remember, index rebuild), then damage it. The
+/// original database and its sidecars are MOVED to `.fixture_baseline`, never
+/// deleted.
+fn damaged_store_workspace(damage: DamagedStore) -> Result<tempfile::TempDir, String> {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let arg = workspace
+        .path()
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+    for (label, args) in [
+        ("init", vec!["--workspace", arg, "init", "--json"]),
+        (
+            "remember",
+            vec![
+                "--workspace",
+                arg,
+                "remember",
+                "--json",
+                "Run the storage self-check before a release.",
+            ],
+        ),
+        (
+            "index rebuild",
+            vec!["--workspace", arg, "index", "rebuild", "--json"],
+        ),
+    ] {
+        let output = run_ee(label, &args)?;
+        ensure(
+            output.status.success(),
+            "real store setup step succeeds",
+            json!({ "step": label, "stderr": preview(&output.stderr) }),
+        )?;
+    }
+    // Provision the doctor runtime lock on the healthy store, before any
+    // damage, so its first creation is not counted as a change by --fix.
+    let provision = run_ee(
+        "provision doctor lock",
+        &["--workspace", arg, "doctor", "--fix", "--json"],
+    )?;
+    ensure(
+        workspace.path().join(".ee").join(".doctor.lock").is_file(),
+        "doctor --fix on the healthy store provisions .ee/.doctor.lock",
+        json!({
+            "exitCode": provision.status.code(),
+            "stderr": preview(&provision.stderr),
+        }),
+    )?;
+    let store = workspace.path().join(".ee");
+    let baseline = workspace.path().join(".fixture_baseline");
+    std::fs::create_dir_all(&baseline).map_err(|error| error.to_string())?;
+    for name in ["ee.db", "ee.db-wal", "ee.db-shm"] {
+        let path = store.join(name);
+        if path.exists() {
+            std::fs::rename(&path, baseline.join(name)).map_err(|error| error.to_string())?;
+        }
+    }
+    let damaged = match damage {
+        DamagedStore::Empty => Vec::new(),
+        DamagedStore::Truncated => {
+            let original =
+                std::fs::read(baseline.join("ee.db")).map_err(|error| error.to_string())?;
+            ensure(
+                original.len() > 8192,
+                "real database is larger than the truncation point",
+                json!({ "bytes": original.len() }),
+            )?;
+            original[..8192].to_vec()
+        }
+    };
+    std::fs::write(store.join("ee.db"), damaged).map_err(|error| error.to_string())?;
+    Ok(workspace)
+}
+
+/// Every regular file under `.ee`, as relative path -> (bytes, blake3). A new
+/// sidecar, a grown database or any rewritten store file changes it.
+fn store_fingerprint(workspace: &std::path::Path) -> Result<Value, String> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path.is_dir() {
+                walk(root, &path, files)?;
+            } else if path.is_file() {
+                let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .display()
+                    .to_string();
+                files.insert(
+                    relative,
+                    json!([bytes.len(), blake3::hash(&bytes).to_hex().to_string()]),
+                );
+            }
+        }
+        Ok(())
+    }
+    let store = workspace.join(".ee");
+    let mut files = serde_json::Map::new();
+    walk(&store, &store, &mut files)?;
+    Ok(Value::Object(files))
+}
+
+/// `.ee/ee.write.lock` holds a zero-padded decimal acquisition counter and a
+/// newline. Anything else is reported as unreadable rather than guessed at.
+fn write_lock_counter(workspace: &std::path::Path, label: &str) -> Result<u64, String> {
+    let text = std::fs::read_to_string(workspace.join(".ee").join("ee.write.lock"))
+        .map_err(|error| format!("{label}: ee.write.lock unreadable: {error}"))?;
+    let digits = text.trim_end_matches('\n');
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "{label}: ee.write.lock is not a decimal counter: {text:?}"
+        ));
+    }
+    digits
+        .parse::<u64>()
+        .map_err(|error| format!("{label}: ee.write.lock counter: {error}"))
+}
+
+fn check_by_name<'a>(doctor: &'a Value, name: &str) -> Option<&'a Value> {
+    doctor
+        .pointer("/data/checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.iter().find(|check| check["name"] == name))
+}
+
+fn assert_damaged_store_is_reported_and_left_untouched(
+    damage: DamagedStore,
+    database_code: &str,
+    fixer_code: &str,
+) -> TestResult {
+    let workspace = damaged_store_workspace(damage)?;
+    let arg = workspace
+        .path()
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+    let before = store_fingerprint(workspace.path())?;
+    let counter_before = write_lock_counter(workspace.path(), "baseline")?;
+
+    let doctor = run_ee(
+        "doctor full",
+        &["--workspace", arg, "doctor", "--full", "--json"],
+    )?;
+    let doctor_json = parse_json("doctor full", &doctor)?;
+    let database = check_by_name(&doctor_json, "database");
+    ensure(
+        database.and_then(|check| check["errorCode"].as_str()) == Some(database_code),
+        "database check names the damaged store, not pending migrations",
+        json!({ "expected": database_code, "database": database }),
+    )?;
+    ensure(
+        doctor_json.pointer("/data/posture") == Some(&json!("blocked")),
+        "a damaged store blocks the doctor posture",
+        json!({ "posture": doctor_json.pointer("/data/posture") }),
+    )?;
+    let search_index = check_by_name(&doctor_json, "search_index");
+    ensure(
+        search_index.and_then(|check| check["errorCode"].as_str()) != Some("EE-E300"),
+        "search index is not misreported as missing while the database is unreadable",
+        json!({ "search_index": search_index }),
+    )?;
+
+    let fix = run_ee(
+        "doctor fix",
+        &["--workspace", arg, "doctor", "--fix", "--json"],
+    )?;
+    let fix_text = String::from_utf8_lossy(&fix.stdout).into_owned();
+    ensure(
+        fix.status.code() == Some(0) && !fix_text.contains("doctor_runtime_io"),
+        "doctor --fix records guidance instead of crashing",
+        json!({
+            "exitCode": fix.status.code(),
+            "stdout": preview(&fix.stdout),
+            "stderr": preview(&fix.stderr),
+        }),
+    )?;
+    let fix_json = parse_json("doctor fix", &fix)?;
+    let results = fix_json
+        .pointer("/data/fixerResults")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    ensure(
+        results.iter().any(|result| {
+            result["findingCode"] == fixer_code && result["outcome"] == "guidance_recorded"
+        }),
+        "doctor --fix records database guidance",
+        json!({ "expected": fixer_code, "fixerResults": results }),
+    )?;
+    ensure(
+        !results.iter().any(|result| {
+            result["findingCode"].as_str().is_some_and(|code| {
+                code.starts_with("search_index") || code.starts_with("schema_migration")
+            })
+        }),
+        "no index or migration repair runs against an unreadable store",
+        json!({ "fixerResults": results }),
+    )?;
+
+    let recheck = run_ee(
+        "doctor full after fix",
+        &["--workspace", arg, "doctor", "--full", "--json"],
+    )?;
+    let recheck_json = parse_json("doctor full after fix", &recheck)?;
+    ensure(
+        recheck_json.pointer("/data/posture") == Some(&json!("blocked")),
+        "guidance does not repair the store, so posture stays blocked after --fix",
+        json!({ "posture": recheck_json.pointer("/data/posture") }),
+    )?;
+
+    // Byte identity for every .ee file, the provisioned .doctor.lock included,
+    // except ee.write.lock: a monotonic acquisition counter that an honest run
+    // advances, so it is checked by its semantics (exists; counter >= baseline).
+    let after = store_fingerprint(workspace.path())?;
+    let counter_after = write_lock_counter(workspace.path(), "after --fix")?;
+    log_event(
+        "runtime_locks",
+        "doctor runtime lock files before and after",
+        json!({
+            "doctorLock": [before.get(".doctor.lock"), after.get(".doctor.lock")],
+            "writeLockCounter": [counter_before, counter_after],
+        }),
+    );
+    ensure(
+        counter_after >= counter_before,
+        "ee.write.lock still exists and its acquisition counter did not go backwards",
+        json!({ "before": counter_before, "after": counter_after }),
+    )?;
+    let without_write_lock = |fingerprint: &Value| {
+        let mut files = fingerprint.as_object().cloned().unwrap_or_default();
+        files.remove("ee.write.lock");
+        Value::Object(files)
+    };
+    ensure(
+        without_write_lock(&after) == without_write_lock(&before),
+        "doctor and doctor --fix leave every other .ee file byte-identical",
+        json!({ "before": before, "after": after }),
+    )?;
+    Ok(())
+}
+
+// bd-wswg0 + bd-xa6ud: a zero-byte database is a data-loss finding (EE-E206),
+// never a pending migration, and --fix only records guidance.
+#[test]
+fn doctor_reports_an_empty_database_as_data_loss_and_fix_records_guidance() -> TestResult {
+    assert_damaged_store_is_reported_and_left_untouched(
+        DamagedStore::Empty,
+        "EE-E206",
+        "database_empty",
+    )
+}
+
+// bd-xa6ud: a truncated database (EE-E202) gets guidance from --fix, not an
+// index repair that crashes with doctor_runtime_io.
+#[test]
+fn doctor_fix_records_guidance_for_a_truncated_database() -> TestResult {
+    assert_damaged_store_is_reported_and_left_untouched(
+        DamagedStore::Truncated,
+        "EE-E202",
+        "database_corrupted",
+    )
+}
