@@ -1483,3 +1483,123 @@ fn pack_and_doctor_verdicts_are_reconciled_across_one_workspace() -> TestResult 
         ),
     )
 }
+
+fn status_memory_subsystem(status_json: &Value, context: &str) -> Result<Value, String> {
+    status_json
+        .pointer("/data/posture/subsystems")
+        .and_then(Value::as_array)
+        .and_then(|subsystems| {
+            subsystems
+                .iter()
+                .find(|subsystem| subsystem.get("id").and_then(Value::as_str) == Some("memory"))
+        })
+        .cloned()
+        .ok_or_else(|| format!("{context}: status has no memory subsystem"))
+}
+
+/// bd-jmlzs. A fresh store of rules a human stated with `ee remember` (trust
+/// class `human_explicit`, no `--source`) used to make `status` report memory
+/// `degraded_recoverable` (`memory_health_degraded`, repaired by nothing),
+/// while `doctor` said ok and `health` said healthy. The provenance component
+/// was 0, and the health score is the minimum of its components.
+///
+/// SCOPE: this pins agreement on MEMORY health. It does not assert
+/// `status.posture.overall == ok`. Without a semantic model, `status` also
+/// reports search `lexical_only` (and pack degraded because of it) while
+/// `doctor` says ok. That is a separate disagreement with a separate cause,
+/// and it is printed here, not asserted.
+///
+/// The second arm is the control that keeps the first honest: the same
+/// explicit rules with a tombstoned majority must still degrade memory health.
+#[test]
+fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResult {
+    let artifact_dir = unique_artifact_dir("fresh-explicit-posture")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+    let init = run_ee_json(&workspace, ["init"], "explicit init")?;
+    assert_success(&init, "explicit init")?;
+    let mut memory_ids = Vec::new();
+    for index in 0..8 {
+        memory_ids.push(remember(
+            &workspace,
+            &format!("explicitposture rule {index}: run the formatter before committing"),
+        )?);
+    }
+
+    let status = run_ee_json(&workspace, ["status"], "explicit status")?;
+    assert_success(&status, "explicit status")?;
+    let doctor = run_ee_json(&workspace, ["doctor"], "explicit doctor")?;
+    assert_success(&doctor, "explicit doctor")?;
+    let health = run_ee_json(&workspace, ["health"], "explicit health")?;
+    assert_success(&health, "explicit health")?;
+    eprintln!(
+        "fresh explicit store: status overall={:?}, non-ok subsystems={:?}",
+        status.json.pointer("/data/posture/overall"),
+        status
+            .json
+            .pointer("/data/posture/subsystems")
+            .and_then(Value::as_array)
+            .map(|subsystems| subsystems
+                .iter()
+                .filter(|subsystem| subsystem.get("status").and_then(Value::as_str) != Some("ok"))
+                .map(|subsystem| subsystem.get("id").cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>()),
+    );
+
+    let memory = status_memory_subsystem(&status.json, "explicit status")?;
+    ensure_equal(
+        &memory.get("status").and_then(Value::as_str),
+        &Some("ok"),
+        "status memory subsystem on a fresh explicit store",
+    )?;
+    ensure(
+        !status.stdout.contains("memory_health_degraded"),
+        "status must not report memory_health_degraded for a fresh explicit store",
+    )?;
+    ensure_equal(
+        &doctor
+            .json
+            .pointer("/data/healthy")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "doctor healthy on the same store",
+    )?;
+    ensure_equal(
+        &health.json.pointer("/data/verdict").and_then(Value::as_str),
+        &Some("healthy"),
+        "health verdict on the same store",
+    )?;
+
+    // Control: tombstone 6 of the 8. Live rows are still attested, but the
+    // active ratio and tombstone penalty must still degrade memory health.
+    for memory_id in &memory_ids[..6] {
+        let tombstone = run_ee_json(
+            &workspace,
+            [
+                "curate",
+                "tombstone",
+                memory_id.as_str(),
+                "--actor",
+                "bd-jmlzs-control",
+                "--reason",
+                "Planted: a tombstoned majority must still degrade memory health.",
+            ],
+            "explicit tombstone",
+        )?;
+        assert_success(&tombstone, "explicit tombstone")?;
+    }
+    let degraded = run_ee_json(&workspace, ["status"], "tombstoned status")?;
+    assert_success(&degraded, "tombstoned status")?;
+    let memory = status_memory_subsystem(&degraded.json, "tombstoned status")?;
+    ensure_equal(
+        &memory.get("status").and_then(Value::as_str),
+        &Some("degraded_recoverable"),
+        "status memory subsystem with a tombstoned majority",
+    )?;
+    ensure_equal(
+        &memory.get("reason").and_then(Value::as_str),
+        &Some("memory_health_degraded"),
+        "tombstoned majority reason",
+    )
+}

@@ -38,7 +38,7 @@ use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
-use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport};
+use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport, TrustClass};
 use crate::obs::flight_recorder::{FlightRecorderPosture, classify_flight_recorder_posture};
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 use crate::search::lexical_ram_tier::{
@@ -169,7 +169,8 @@ pub struct MemoryHealthReport {
     pub stale_count: u32,
     /// Average confidence score (0.0-1.0), None if no memories.
     pub average_confidence: Option<f32>,
-    /// Percentage of memories with provenance attached.
+    /// Share of active memories with an attested source: a provenance URI, or
+    /// a `human_explicit` trust class (the person who ran `ee remember`).
     pub provenance_coverage: Option<f32>,
     /// Conservative aggregate health score (0.0-1.0), None if unavailable.
     pub health_score: Option<f32>,
@@ -5484,6 +5485,23 @@ fn gather_memory_health_with_connection(
     )
 }
 
+/// A memory's source is attested when it carries a provenance URI, or when a
+/// human stated it directly (`ee remember`, trust class `human_explicit`): the
+/// person is the source. Without the second arm, a store made only of explicit
+/// human rules scored provenance 0, and because the health score is the minimum
+/// of its components, status reported it degraded while doctor and health
+/// reported it ok (bd-jmlzs).
+fn memory_has_attested_source(memory: &StoredMemory) -> bool {
+    memory
+        .provenance_uri
+        .as_deref()
+        .is_some_and(|uri| !uri.trim().is_empty())
+        || matches!(
+            memory.trust_class.parse::<TrustClass>(),
+            Ok(TrustClass::HumanExplicit)
+        )
+}
+
 #[cfg(test)]
 fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> MemoryHealthReport {
     memory_health_from_rows_with_accesses(memories, now, &BTreeMap::new())
@@ -5524,11 +5542,7 @@ fn memory_health_from_rows_with_accesses(
 
         active_count = active_count.saturating_add(1);
         confidence_sum += memory.confidence;
-        if memory
-            .provenance_uri
-            .as_deref()
-            .is_some_and(|uri| !uri.trim().is_empty())
-        {
+        if memory_has_attested_source(memory) {
             provenance_count = provenance_count.saturating_add(1);
         }
         let freshness = memory_row_freshness_score(memory, now, access_times.get(&memory.id));
@@ -8066,6 +8080,64 @@ mod tests {
         ensure(components.confidence_score, 0.6, "confidence score")?;
         ensure(components.provenance_score, 0.5, "provenance score")?;
         ensure(components.tombstone_penalty, 1.0 / 3.0, "tombstone penalty")
+    }
+
+    #[test]
+    fn explicit_human_memories_count_as_attested_but_tombstones_still_degrade() -> TestResult {
+        // bd-jmlzs: `ee remember` without --source stores trust_class
+        // human_explicit and no provenance URI. That is an attested source.
+        let now = parse_ts("2026-05-03T00:00:00Z")?;
+        let explicit = |id: &str, tombstoned_at: Option<&str>| {
+            let mut memory =
+                stored_memory_fixture(id, 0.8, None, "2026-05-02T00:00:00Z", tombstoned_at);
+            memory.trust_class = TrustClass::HumanExplicit.as_str().to_owned();
+            memory
+        };
+
+        let fresh: Vec<StoredMemory> = (0..8)
+            .map(|index| explicit(&format!("mem_explicit_{index}"), None))
+            .collect();
+        let report = memory_health_from_rows(&fresh, now);
+        ensure(report.provenance_coverage, Some(1.0), "explicit coverage")?;
+        ensure(
+            report.status,
+            MemoryHealthStatus::Healthy,
+            "fresh explicit store",
+        )?;
+
+        // Same rows, but agent assertions: no URI is still no attested source,
+        // so the arm above is keyed on the trust class, not on anything else.
+        let asserted: Vec<StoredMemory> = (0..8)
+            .map(|index| {
+                stored_memory_fixture(
+                    &format!("mem_asserted_{index}"),
+                    0.8,
+                    None,
+                    "2026-05-02T00:00:00Z",
+                    None,
+                )
+            })
+            .collect();
+        let report = memory_health_from_rows(&asserted, now);
+        ensure(report.provenance_coverage, Some(0.0), "asserted coverage")?;
+        ensure(
+            report.status,
+            MemoryHealthStatus::Degraded,
+            "unattested store",
+        )?;
+
+        // Explicit rows, tombstoned majority: must still degrade.
+        let mut tombstoned: Vec<StoredMemory> = (0..6)
+            .map(|index| explicit(&format!("mem_gone_{index}"), Some("2026-05-02T12:00:00Z")))
+            .collect();
+        tombstoned.extend((0..2).map(|index| explicit(&format!("mem_kept_{index}"), None)));
+        let report = memory_health_from_rows(&tombstoned, now);
+        ensure(report.provenance_coverage, Some(1.0), "live rows attested")?;
+        ensure(
+            report.status,
+            MemoryHealthStatus::Degraded,
+            "tombstoned majority",
+        )
     }
 
     #[test]
