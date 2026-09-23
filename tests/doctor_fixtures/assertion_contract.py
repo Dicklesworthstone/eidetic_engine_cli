@@ -417,6 +417,24 @@ class UntestedRatchetContract(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("pin is stale", result.stderr)
 
+    def test_new_out_of_scope_id_cannot_satisfy_the_pin(self):
+        # Relabelling an UNCLASSIFIED fixture OUT-OF-SCOPE would lower the
+        # UNCLASSIFIED count; the exact-id set must reject it.
+        result = self.ratchet(self.planted(("UNCLASSIFIED", "OUT-OF-SCOPE")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("OUT-OF-SCOPE set changed", result.stderr)
+
+    def test_dropping_a_pinned_out_of_scope_id_is_rejected(self):
+        result = self.ratchet(self.planted(("OUT-OF-SCOPE", "UNCLASSIFIED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("OUT-OF-SCOPE set changed", result.stderr)
+
+    def test_real_tree_prints_the_out_of_scope_line(self):
+        result = self.ratchet(HERE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OUT-OF-SCOPE (not doctor failure modes; never run, never a pass)",
+                      result.stderr)
+
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--probe"]:
