@@ -68,11 +68,10 @@ they read the damaged store (bd-xa6ud).
 Anything else still needs the manual skill content. The table is the
 dispatch in `fix_finding_for_check` (`src/core/doctor_fixers.rs`), which
 `--fix` and `--fix-plan` both read; `--fix-plan` reports it per step as
-`fixMode`. `ee doctor --capabilities --json` does not answer this
-question: it
-describes the runtime contract (schema versions, blast radius, the
-`mutate()` op vocabulary, exit codes, env vars), and its `op_kinds`
-include operations no dispatched fixer produces (bd-223vl M5).
+`fixMode`. `ee doctor --capabilities --json` lists the same table as
+`fix_dispatch` (`finding`, `op_kind`, `effect`: `repair` or `guidance`).
+Its `op_kinds` is different: that is every op the `mutate()` chokepoint
+accepts, most of which no dispatched fixer produces (bd-223vl M5).
 
 If `ee doctor --fix` leaves a failing check without a `fixerResults`
 entry, or records it with outcome `guidance_recorded`, that is the

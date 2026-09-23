@@ -376,6 +376,19 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "state_file_permission_drift",
 ];
 
+/// Every finding [`fix_finding_for_check`] can return: what `ee doctor --fix`
+/// actually dispatches, as opposed to every fixer this module defines.
+/// `ee doctor --capabilities` reports these (bd-223vl M5); a unit test proves
+/// the table never returns a finding outside this list.
+pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
+    "database_empty",
+    "database_corrupted",
+    "search_index_missing",
+    "search_index_stale",
+    "schema_migration_pending",
+    "cass_integration_drift",
+];
+
 /// How `ee doctor --fix` treats one failing doctor check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixMode {
@@ -509,6 +522,42 @@ mod tests {
         );
         assert_eq!(fix_finding_for_check(None, "database", false), None);
         assert!(fix_dispatch_for_finding(&root(), "graph_snapshot_stale").is_none());
+    }
+
+    /// Exhaustive over the error-code registry: the dispatch table can only
+    /// return listed findings, and every listed finding is reachable.
+    #[test]
+    fn fix_dispatched_findings_is_exactly_what_the_table_returns() {
+        let codes = std::iter::once(None).chain(
+            crate::models::error_codes::ALL_ERROR_CODES
+                .iter()
+                .map(|code| Some(code.id)),
+        );
+        let mut reached = std::collections::BTreeSet::new();
+        for code in codes {
+            for name in ["database", "search_index", "cass", "runtime"] {
+                for unreadable in [false, true] {
+                    if let Some(finding) = fix_finding_for_check(code, name, unreadable) {
+                        assert!(
+                            FIX_DISPATCHED_FINDINGS.contains(&finding),
+                            "{finding} ({code:?}, {name}) is dispatched but not listed"
+                        );
+                        reached.insert(finding);
+                    }
+                }
+            }
+        }
+        let listed = FIX_DISPATCHED_FINDINGS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(reached, listed, "every listed finding must be reachable");
+        for finding in FIX_DISPATCHED_FINDINGS {
+            assert!(
+                fix_dispatch_for_finding(&root(), finding).is_some(),
+                "{finding}"
+            );
+        }
     }
 
     #[test]

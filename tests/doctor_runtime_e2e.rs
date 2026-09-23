@@ -657,6 +657,42 @@ fn capabilities_report_serializes_with_stable_schema() {
     assert!(kinds.contains(&"write_file".to_string()));
     assert!(kinds.contains(&"quarantine_by_rename".to_string()));
     assert!(kinds.contains(&"manual".to_string()));
+
+    // bd-223vl M5: op_kinds is the mutate() vocabulary; fix_dispatch is what
+    // `ee doctor --fix` actually dispatches, and it is a subset of op_kinds.
+    let dispatch: Vec<(String, String, String)> = json
+        .get("fix_dispatch")
+        .and_then(|v| v.as_array())
+        .expect("fix_dispatch array")
+        .iter()
+        .map(|entry| {
+            let field = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            (field("finding"), field("op_kind"), field("effect"))
+        })
+        .collect();
+    for (finding, op_kind, _) in &dispatch {
+        assert!(
+            kinds.contains(op_kind),
+            "{finding} dispatches {op_kind}, which op_kinds does not list"
+        );
+    }
+    let effect_of = |finding: &str| {
+        dispatch
+            .iter()
+            .find(|(name, _, _)| name == finding)
+            .map(|(_, _, effect)| effect.as_str())
+    };
+    assert_eq!(effect_of("search_index_stale"), Some("repair"));
+    assert_eq!(effect_of("search_index_missing"), Some("repair"));
+    // Op::RunMigration records guidance and migrates nothing.
+    assert_eq!(effect_of("schema_migration_pending"), Some("guidance"));
+    assert_eq!(effect_of("graph_snapshot_stale"), None);
 }
 
 #[test]
