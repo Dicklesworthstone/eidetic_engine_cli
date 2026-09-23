@@ -3,7 +3,7 @@
   "success": true,
   "data": {
     "command": "why",
-    "version": "0.15.2",
+    "version": "<scrubbed:eeVersion>",
     "memoryId": "mem_00000000000000000000000001",
     "found": true,
     "content": "Run cargo fmt --check before release.",

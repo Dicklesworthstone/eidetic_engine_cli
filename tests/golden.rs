@@ -321,6 +321,7 @@ mod tests {
         scrub_environment_paths(&mut actual);
         normalize_workspace_daemon_sockets(&mut actual);
         normalize_doctor_platform_variants(&mut actual);
+        scrub_package_version_prose(&mut actual, env!("CARGO_PKG_VERSION"));
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
         ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
 
@@ -362,6 +363,141 @@ mod tests {
                 "/degraded",
             ],
             "doctor",
+        )
+    }
+
+    // bd-9si0r. Agent goldens used to pin the release version as a literal, so
+    // every Cargo.toml bump turned them red and each repair looked like a golden
+    // regeneration. The goldens now store the `<scrubbed:eeVersion>` sentinel,
+    // but only after the LIVE output is checked to carry the compiled package
+    // version: a stale or wrong version still fails. Each helper takes the
+    // version as a parameter so a test can simulate a release bump.
+
+    const EE_VERSION_SENTINEL: &str = "<scrubbed:eeVersion>";
+
+    /// `/data/version` must equal `package_version`; it is then replaced by the
+    /// sentinel. Absent `/data/version` is left alone.
+    fn scrub_live_package_version(
+        value: &mut serde_json::Value,
+        package_version: &str,
+    ) -> TestResult {
+        let Some(version) = value.pointer_mut("/data/version") else {
+            return Ok(());
+        };
+        ensure(
+            version.as_str() == Some(package_version),
+            format!(
+                "live /data/version {version} must equal the package version {package_version}"
+            ),
+        )?;
+        *version = serde_json::Value::String(EE_VERSION_SENTINEL.to_owned());
+        Ok(())
+    }
+
+    /// Byte-preserving form for compact goldens compared as raw stdout: the one
+    /// `"version":"<package_version>"` occurrence is replaced, nothing else.
+    fn scrub_live_package_version_text(
+        stdout: &str,
+        package_version: &str,
+    ) -> Result<String, String> {
+        let mut value: serde_json::Value = serde_json::from_str(stdout)
+            .map_err(|error| format!("parse live JSON for version scrub: {error}"))?;
+        if value.pointer("/data/version").is_none() {
+            return Ok(stdout.to_owned());
+        }
+        scrub_live_package_version(&mut value, package_version)?;
+        let needle = format!("\"version\":\"{package_version}\"");
+        ensure(
+            stdout.matches(&needle).count() == 1,
+            format!("expected exactly one {needle} in the live output"),
+        )?;
+        Ok(stdout.replacen(
+            &needle,
+            &format!("\"version\":\"{EE_VERSION_SENTINEL}\""),
+            1,
+        ))
+    }
+
+    /// Doctor's install-posture advisory quotes the running, source, and
+    /// installed versions in prose ("running version 0.15.2; ...").
+    fn scrub_package_version_prose(value: &mut serde_json::Value, package_version: &str) {
+        match value {
+            serde_json::Value::String(text) => {
+                let needle = format!("version {package_version}");
+                if text.contains(&needle) {
+                    *text = text.replace(&needle, &format!("version {EE_VERSION_SENTINEL}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    scrub_package_version_prose(item, package_version);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values_mut() {
+                    scrub_package_version_prose(item, package_version);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn simulated_version_bump_keeps_agent_goldens_green_but_content_change_reds() -> TestResult {
+        // A release bump changes the compiled version AND the live output
+        // together. Render each golden as a binary at a version it never saw
+        // would print, and the scrubbed result must equal the golden bytes.
+        let bumped = "99.1.0";
+        for name in ["agent_docs.json", "health_unavailable.json"] {
+            let golden = GoldenTest::new("agent", name).load_golden()?;
+            ensure(
+                golden.contains(&format!("\"version\":\"{EE_VERSION_SENTINEL}\""))
+                    && !golden.contains(env!("CARGO_PKG_VERSION")),
+                format!("agent/{name} golden must store the sentinel, not a release literal"),
+            )?;
+            let live_at_bump = golden.replacen(EE_VERSION_SENTINEL, bumped, 1);
+            ensure(
+                scrub_live_package_version_text(&live_at_bump, bumped)? == golden,
+                format!("agent/{name}: a pure version bump must stay green"),
+            )?;
+            // A binary reporting the wrong version is still red.
+            ensure(
+                scrub_live_package_version_text(&live_at_bump, "99.2.0").is_err(),
+                format!("agent/{name}: a stale live version must fail"),
+            )?;
+            // A real content change in the same file is still red.
+            let changed = live_at_bump.replacen(
+                "\"schema\":\"ee.response.v2\"",
+                "\"schema\":\"ee.response.v3\"",
+                1,
+            );
+            ensure(
+                changed != live_at_bump,
+                format!("agent/{name}: content-change control did not apply"),
+            )?;
+            ensure(
+                scrub_live_package_version_text(&changed, bumped)? != golden,
+                format!("agent/{name}: a content change must still red"),
+            )?;
+        }
+
+        let doctor = GoldenTest::new("agent", "doctor.json").load_golden()?;
+        let expected: serde_json::Value =
+            serde_json::from_str(&doctor).map_err(|error| error.to_string())?;
+        ensure(
+            !doctor.contains(env!("CARGO_PKG_VERSION")),
+            "agent/doctor.json golden must not carry a release literal",
+        )?;
+        let mut live: serde_json::Value = serde_json::from_str(&doctor.replace(
+            &format!("version {EE_VERSION_SENTINEL}"),
+            &format!("version {bumped}"),
+        ))
+        .map_err(|error| error.to_string())?;
+        ensure(live != expected, "doctor bump simulation did not apply")?;
+        scrub_package_version_prose(&mut live, bumped);
+        ensure(
+            live == expected,
+            "doctor prose: a pure version bump must stay green",
         )
     }
 
@@ -1722,7 +1858,8 @@ mod tests {
         } else if name == "doctor.json" {
             assert_doctor_json_golden("agent", "doctor.json", &stdout)
         } else {
-            assert_golden("agent", name, &stdout)
+            let scrubbed = scrub_live_package_version_text(&stdout, env!("CARGO_PKG_VERSION"))?;
+            assert_golden("agent", name, &scrubbed)
         }
     }
 
@@ -4723,6 +4860,13 @@ mod tests {
 
         let mut value: serde_json::Value =
             serde_json::from_str(json).map_err(|error| error.to_string())?;
+        // bd-9si0r. The version is scrubbed, but ledgerHash below is NOT: it is a
+        // content hash over the selection ledger core, which carries
+        // schema_version and generation = latest_schema_version()
+        // (src/db/mod.rs, the pack selection ledger builder). A migration
+        // therefore changes it for a real reason, and the migration must
+        // re-emit this golden.
+        scrub_live_package_version(&mut value, env!("CARGO_PKG_VERSION"))?;
         let audit_chain_hashes = value
             .pointer("/data/attestationBundle/evidenceManifest/chainHashes")
             .and_then(serde_json::Value::as_array)

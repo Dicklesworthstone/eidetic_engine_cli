@@ -200,6 +200,10 @@ fn package_version_golden_format(category: &str, name: &str) -> Option<ContractF
         // than a frozen literal -- a literal only ever matched one release.
         | ("doctor", "missing_db_degradation")
         | ("doctor", "pending_migration_degradation")
+        // bd-9si0r: three more surfaces pinned `/data/version` as a literal.
+        | ("agent", "health_unavailable.json")
+        | ("dependencies", "diag_dependencies")
+        | ("dependencies", "doctor_franken_health")
         | ("version", "version") => Some(ContractFormat::Json),
         ("check", "check_toon") | ("capabilities", "capabilities_toon") => {
             Some(ContractFormat::Toon)
@@ -392,7 +396,35 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
     scrub_environment_paths(&mut value);
     normalize_doctor_platform_variants(&mut value);
     replace_host_backed_subtrees(&mut value);
+    scrub_package_version_prose(&mut value, env!("CARGO_PKG_VERSION"));
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+}
+
+/// bd-9si0r. Doctor's install-posture advisory quotes the running, source, and
+/// installed versions in prose ("running version 0.15.2; ..."), so every
+/// release bump re-broke the doctor golden through a message string. Only the
+/// COMPILED version is replaced: a message quoting any other version survives
+/// normalization and still reds against the golden's sentinel.
+fn scrub_package_version_prose(value: &mut Value, package_version: &str) {
+    match value {
+        Value::String(text) => {
+            let needle = format!("version {package_version}");
+            if text.contains(&needle) {
+                *text = text.replace(&needle, "version <scrubbed:eeVersion>");
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_package_version_prose(item, package_version);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                scrub_package_version_prose(item, package_version);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Keep the Linux doctor contract exact while making the same golden portable
@@ -1852,6 +1884,60 @@ fn doctor_franken_health_json_matches_golden() -> TestResult {
     )?;
 
     assert_golden("dependencies", "doctor_franken_health", &stdout)
+}
+
+/// bd-9si0r discriminating test. A golden written at a PREVIOUS release must
+/// still compare equal to live output at the compiled version (a pure bump
+/// stays green), while a live output carrying the wrong version, or a real
+/// content change in the same file, still reds.
+#[test]
+fn simulated_version_bump_stays_green_while_content_change_reds() -> TestResult {
+    let previous = "0.1.0-previous";
+    for (category, name) in [
+        ("agent", "health_unavailable.json"),
+        ("dependencies", "diag_dependencies"),
+        ("dependencies", "doctor_franken_health"),
+    ] {
+        let context = format!("{category}/{name}");
+        let golden = fs::read_to_string(golden_path(category, name))
+            .map_err(|error| format!("{context}: read golden: {error}"))?;
+        let parsed: Value = serde_json::from_str(golden.trim())
+            .map_err(|error| format!("{context}: parse golden: {error}"))?;
+        let with_version = |version: &str| -> Result<String, String> {
+            let mut value = parsed.clone();
+            *value
+                .pointer_mut("/data/version")
+                .ok_or_else(|| format!("{context}: golden has no /data/version"))? = json!(version);
+            serde_json::to_string(&value).map_err(|error| error.to_string())
+        };
+        let golden_at_previous_release = with_version(previous)?;
+        let live_at_current_release = with_version(env!("CARGO_PKG_VERSION"))?;
+
+        assert_actual_package_version(category, name, &live_at_current_release)?;
+        ensure_equal(
+            &normalize_named_golden(category, name, &live_at_current_release),
+            &normalize_named_golden(category, name, &golden_at_previous_release),
+            &format!("{context}: a pure version bump must stay green"),
+        )?;
+        ensure(
+            assert_actual_package_version(category, name, &golden_at_previous_release).is_err(),
+            format!("{context}: live output carrying a stale version must fail"),
+        )?;
+
+        let mut changed: Value =
+            serde_json::from_str(&live_at_current_release).map_err(|error| error.to_string())?;
+        let success = changed["success"]
+            .as_bool()
+            .ok_or_else(|| format!("{context}: no boolean success field"))?;
+        changed["success"] = json!(!success);
+        let changed = serde_json::to_string(&changed).map_err(|error| error.to_string())?;
+        ensure(
+            normalize_named_golden(category, name, &changed)
+                != normalize_named_golden(category, name, &golden_at_previous_release),
+            format!("{context}: a content change must still red"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
