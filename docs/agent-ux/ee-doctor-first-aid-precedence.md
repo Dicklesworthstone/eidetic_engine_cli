@@ -12,16 +12,22 @@
 
 1. **`ee doctor --fix-plan --json`** — pure read; no mutation. Lists, in
    order, every failing check that carries a repair hint, with the hint's
-   command. `fixableIssues` currently counts checks that have a repair
-   hint, not checks `ee doctor --fix` can apply (bd-223vl M3), so a step
-   is not a promise that `--fix` will act on it.
+   command. Each step's `fixMode` says what `ee doctor --fix` does for it:
+   `auto_repair` (it repairs it), `auto_guidance` (it records guidance and
+   repairs nothing) or `manual` (it does not act); `fixFinding` names the
+   dispatched finding. `fixableIssues` counts only `auto_repair` steps.
 2. **`ee doctor --fix --json`** — applies the findings `--fix` can
    dispatch (listed below) through the single `mutate()` chokepoint with
    undo metadata; `ee doctor --undo <runId> --json` reverses a run.
    It always runs every dispatchable finding: `--fix --only <id>` is a
    usage error, because `--fix` declares a conflict with `--only`. A
    failing check with no dispatch is left untouched and gets no
-   `fixerResults` entry.
+   `fixerResults` entry. Required core checks that receive only guidance or
+   no dispatch remain in `unresolvedCoreChecks`, including checks without a
+   repair hint. Such a run is persisted as `completed_partial`, reports
+   `fixerDispatchPending: true`, and exits **6**. Optional advisory checks do
+   not trigger that exit. Successful mutation receipts remain `applied` and
+   can still be undone even when other required repairs remain pending.
 3. **`ee doctor --json` (read-only)** — the diagnostic report. Use it to
    inspect findings `--fix` does not dispatch, or that require human
    approval (e.g. anything that would touch the work tree's tracked
@@ -47,28 +53,37 @@ auto-resolve safely.
 
 ## How to know if `ee doctor --fix` already handles your situation
 
-`ee doctor --fix` dispatches four findings, keyed on the failing check's
-error code. The other nine of the 13 fixers in `src/core/doctor_fixers.rs`
-(`FIXER_FINDING_CODES`) are not dispatched by `--fix`:
+`ee doctor --fix` dispatches six findings, keyed on the failing check's
+error code, and only the two index findings repair anything. The other
+fixers in `src/core/doctor_fixers.rs` are not dispatched by `--fix`:
 
-| Finding (`findingCode`) | Failing check | Operation |
-| --- | --- | --- |
-| `search_index_missing` | `EE-E300` | `run_index_rebuild` |
-| `search_index_stale` | `EE-E301`, or any other failing `search_index` check | `run_index_rebuild` |
-| `schema_migration_pending` | `EE-E700` | `run_migration` |
-| `cass_integration_drift` | `EE-E507` | `manual`: records guidance, repairs nothing |
+| Finding (`findingCode`) | Failing check | Operation | Effect |
+| --- | --- | --- | --- |
+| `database_empty` | `database` `EE-E206` (0-byte store) | `manual` | guidance only (`guidance_recorded`): recover from backups |
+| `database_corrupted` | `database` `EE-E202` (store cannot be opened) | `manual` | guidance only (`guidance_recorded`): recover from backups |
+| `search_index_missing` | `EE-E300` | `run_index_rebuild` | repairs (`applied`) |
+| `search_index_stale` | `EE-E301`, or any other failing `search_index` check | `run_index_rebuild` | repairs (`applied`) |
+| `schema_migration_pending` | `EE-E700` | `run_migration` | guidance only (`guidance_recorded`): records `ee migrate run`, migrates nothing |
+| `cass_integration_drift` | `EE-E507` | `manual` | guidance only (`guidance_recorded`) |
 
-Anything else still needs the manual skill content. The table mirrors
-the dispatch in `doctor_fix_json` (`src/cli/mod.rs`); no report
-enumerates it. `ee doctor --capabilities --json` does not answer this
-question: it
-describes the runtime contract (schema versions, blast radius, the
-`mutate()` op vocabulary, exit codes, env vars), and its `op_kinds`
-include operations no dispatched fixer produces (bd-223vl M5).
+While the store is empty or cannot be opened (`EE-E206` or `EE-E202` on
+the `database` check), `--fix` skips the index and migration findings:
+they read the damaged store (bd-xa6ud).
+
+Anything else still needs the manual skill content. The table is the
+dispatch in `fix_finding_for_check` (`src/core/doctor_fixers.rs`), which
+`--fix` and `--fix-plan` both read; `--fix-plan` reports it per step as
+`fixMode`. `ee doctor --capabilities --json` lists the same table as
+`fix_dispatch` (`finding`, `op_kind`, `effect`: `repair` or `guidance`).
+Its `op_kinds` is different: that is every op the `mutate()` chokepoint
+accepts, most of which no dispatched fixer produces (bd-223vl M5).
 
 If `ee doctor --fix` leaves a failing check without a `fixerResults`
 entry, or records it with outcome `guidance_recorded`, that is the
-hand-off signal to the fallback skill.
+hand-off signal to the fallback skill. `success: true` means the command
+produced its report; it does not override exit 6 or the persisted partial
+status. Inspect `unresolvedCoreChecks` before treating the workspace as
+repaired, then rerun the read-only doctor after manual recovery.
 
 ## Why this precedence
 

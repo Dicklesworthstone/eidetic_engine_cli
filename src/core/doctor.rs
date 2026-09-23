@@ -402,18 +402,32 @@ impl DoctorReport {
         &self,
         agent_inventory: &AgentInventoryReport,
     ) -> FixPlan {
+        let store_unreadable = super::doctor_fixers::store_unreadable(
+            self.checks
+                .iter()
+                .map(|check| (check.name, check.error_code.map(|code| code.id))),
+        );
         let steps: Vec<FixStep> = self
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .enumerate()
-            .map(|(idx, check)| FixStep {
-                order: idx + 1,
-                subsystem: check.name,
-                severity: check.severity,
-                issue: check.message.clone(),
-                error_code: check.error_code,
-                command: check.repair.unwrap_or_default(),
+            .map(|(idx, check)| {
+                let (fix_mode, fix_finding) = super::doctor_fixers::fix_mode_for_check(
+                    check.error_code.map(|code| code.id),
+                    check.name,
+                    store_unreadable,
+                );
+                FixStep {
+                    order: idx + 1,
+                    subsystem: check.name,
+                    severity: check.severity,
+                    issue: check.message.clone(),
+                    error_code: check.error_code,
+                    command: check.repair.unwrap_or_default(),
+                    fix_mode,
+                    fix_finding,
+                }
             })
             .collect();
 
@@ -422,7 +436,12 @@ impl DoctorReport {
             .iter()
             .filter(|c| !c.severity.is_healthy())
             .count();
-        let fixable_issues = steps.len();
+        // Fixable means `ee doctor --fix` repairs it, not that the check has
+        // repair text: a step with only a hint is manual (bd-223vl M3).
+        let fixable_issues = steps
+            .iter()
+            .filter(|step| step.fix_mode == super::doctor_fixers::FixMode::AutoRepair)
+            .count();
 
         FixPlan {
             version: self.version,
@@ -1565,6 +1584,10 @@ pub struct FixStep {
     pub issue: String,
     pub error_code: Option<ErrorCode>,
     pub command: &'static str,
+    /// What `ee doctor --fix` does for this step.
+    pub fix_mode: super::doctor_fixers::FixMode,
+    /// The finding `ee doctor --fix` dispatches for this step, if any.
+    pub fix_finding: Option<&'static str>,
 }
 
 /// CASS import guidance status derived from agent detection.
@@ -3073,6 +3096,27 @@ fn embedding_posture_check_result(
     check.advisory()
 }
 
+/// bd-h1xbv: a present bundled model whose `.verified` receipt is missing or
+/// stale is re-hashed by every process that loads it. Say so on the embedding
+/// check, advisory only (results are unaffected), and point at the re-mint.
+fn with_model_receipt_stale_advisory(mut check: CheckResult, receipt_stale: bool) -> CheckResult {
+    if !receipt_stale {
+        return check;
+    }
+    check.message.push_str(&format!(
+        " Advisory code: {}. {}",
+        super::status::EMBED_MODEL_RECEIPT_STALE_CODE,
+        super::status::EMBED_MODEL_RECEIPT_STALE_MESSAGE
+    ));
+    if matches!(check.severity, CheckSeverity::Ok) {
+        check.severity = CheckSeverity::Warning;
+    }
+    if check.repair.is_none() {
+        check.repair = Some(super::status::EMBED_MODEL_RECEIPT_STALE_REPAIR);
+    }
+    check.advisory()
+}
+
 /// Advisory result for when the active retrieval mode cannot be determined
 /// (no workspace, or the index status read failed). Still `Ok`/advisory and
 /// still discloses the env trap; points to the canonical inspection surfaces.
@@ -3113,13 +3157,16 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     };
     match get_index_status(&options) {
         Ok(report) => match &report.embedding {
-            Some(posture) => embedding_posture_check_result(
-                posture.semantic,
-                posture.mode,
-                &posture.fast_model_id,
-                posture.fast_dimension,
-                posture.deterministic,
-                &trap_present,
+            Some(posture) => with_model_receipt_stale_advisory(
+                embedding_posture_check_result(
+                    posture.semantic,
+                    posture.mode,
+                    &posture.fast_model_id,
+                    posture.fast_dimension,
+                    posture.deterministic,
+                    &trap_present,
+                ),
+                !super::index::stale_receipt_potion_model_dirs().is_empty(),
             ),
             None => embedding_posture_unavailable_check(
                 &trap_present,
@@ -5449,15 +5496,111 @@ mod tests {
             .count();
         ensure(plan.total_issues, unhealthy_count, "total_issues matches")?;
 
-        let fixable_count = report
+        let step_count = report
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .count();
-        ensure(plan.fixable_issues, fixable_count, "fixable_issues matches")?;
-        ensure(plan.steps.len(), fixable_count, "steps count matches")?;
+        ensure(plan.steps.len(), step_count, "steps count matches")?;
+        let auto_repair_count = plan
+            .steps
+            .iter()
+            .filter(|step| step.fix_mode == crate::core::doctor_fixers::FixMode::AutoRepair)
+            .count();
+        ensure(
+            plan.fixable_issues,
+            auto_repair_count,
+            "fixable_issues matches",
+        )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn fix_plan_counts_only_what_fix_repairs_as_fixable() -> TestResult {
+        use crate::core::doctor_fixers::FixMode;
+
+        fn plan_for(checks: Vec<CheckResult>) -> FixPlan {
+            let mut report = DoctorReport::gather_with_workspace(None);
+            report.checks = checks;
+            report.to_fix_plan()
+        }
+        fn modes(plan: &FixPlan) -> Vec<(&'static str, FixMode, Option<&'static str>)> {
+            plan.steps
+                .iter()
+                .map(|step| (step.subsystem, step.fix_mode, step.fix_finding))
+                .collect()
+        }
+
+        // Readable store: a repair, a guidance-only dispatch, and a step with
+        // only a hint.
+        let plan = plan_for(vec![
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+            CheckResult::warning(
+                "cass",
+                "CASS capabilities limited.",
+                error_codes::CASS_DEGRADED,
+            ),
+            CheckResult::warning(
+                "shard_fanout",
+                "Shard fan-out configuration is unsafe.",
+                error_codes::CONFIG_INVALID_VALUE,
+            ),
+            CheckResult::ok("runtime", "ok"),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "search_index",
+                    FixMode::AutoRepair,
+                    Some("search_index_missing"),
+                ),
+                (
+                    "cass",
+                    FixMode::AutoGuidance,
+                    Some("cass_integration_drift"),
+                ),
+                ("shard_fanout", FixMode::Manual, None),
+            ],
+            "readable store: per-step fix modes",
+        )?;
+        ensure(plan.total_issues, 3, "readable store: total issues")?;
+        // Only the index repair is fixable. Before bd-223vl M3 this counted 3.
+        ensure(plan.fixable_issues, 1, "readable store: fixable issues")?;
+
+        // Unopenable store (bd-xa6ud): the database gets guidance and the
+        // index rebuild that would read it is not dispatched, so nothing here
+        // is fixable even though the index step has a repair hint.
+        let plan = plan_for(vec![
+            CheckResult::error(
+                "database",
+                "Database readiness check failed.",
+                error_codes::DATABASE_CORRUPTED,
+            ),
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "database",
+                    FixMode::AutoGuidance,
+                    Some("database_corrupted"),
+                ),
+                ("search_index", FixMode::Manual, None),
+            ],
+            "unreadable store: per-step fix modes",
+        )?;
+        ensure(plan.fixable_issues, 0, "unreadable store: fixable issues")
     }
 
     #[test]
@@ -6358,6 +6501,41 @@ mod tests {
         assert!(check.message.contains("potion-multilingual-128M"));
         assert!(check.message.contains("256d"));
         assert!(check.message.contains("ee model status"));
+    }
+
+    #[test]
+    fn stale_model_receipt_is_an_advisory_warning_with_the_fetch_repair() {
+        let ready = || {
+            embedding_posture_check_result(
+                true,
+                "neural_local",
+                "potion-multilingual-128M",
+                256,
+                true,
+                &[],
+            )
+        };
+        let untouched = with_model_receipt_stale_advisory(ready(), false);
+        assert_eq!(untouched.severity, CheckSeverity::Ok);
+        assert_eq!(untouched.message, ready().message);
+        assert_eq!(untouched.repair, None);
+
+        let check = with_model_receipt_stale_advisory(ready(), true);
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("ready"));
+        assert!(
+            check
+                .message
+                .contains("Advisory code: embed_model_receipt_stale.")
+        );
+        assert_eq!(
+            check.repair,
+            Some(
+                "Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt."
+            )
+        );
     }
 
     #[test]

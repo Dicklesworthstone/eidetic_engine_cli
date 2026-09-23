@@ -617,8 +617,8 @@ fn assert_damaged_store_is_reported_and_left_untouched(
     )?;
     let fix_text = String::from_utf8_lossy(&fix.stdout).into_owned();
     ensure(
-        fix.status.code() == Some(0) && !fix_text.contains("doctor_runtime_io"),
-        "doctor --fix records guidance instead of crashing",
+        fix.status.code() == Some(6) && !fix_text.contains("doctor_runtime_io"),
+        "doctor --fix reports unresolved core recovery instead of success or a runtime crash",
         json!({
             "exitCode": fix.status.code(),
             "stdout": preview(&fix.stdout),
@@ -626,6 +626,20 @@ fn assert_damaged_store_is_reported_and_left_untouched(
         }),
     )?;
     let fix_json = parse_json("doctor fix", &fix)?;
+    ensure(
+        fix_json.pointer("/data/status") == Some(&json!("completed_partial"))
+            && fix_json.pointer("/data/fixerDispatchPending") == Some(&json!(true))
+            && fix_json
+                .pointer("/data/unresolvedCoreChecks")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| {
+                    checks.iter().any(|check| {
+                        check["name"] == "database" && check["errorCode"] == database_code
+                    })
+                }),
+        "required database recovery remains visible in the fix summary",
+        json!({"data": fix_json.get("data")}),
+    )?;
     let results = fix_json
         .pointer("/data/fixerResults")
         .and_then(Value::as_array)

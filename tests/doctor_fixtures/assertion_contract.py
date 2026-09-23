@@ -30,7 +30,7 @@ def doctor_double():
     with Path(os.environ["DOCTOR_ASSERTION_CALLS"]).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"phase": phase, "args": args}) + "\n")
     exit_code = scenario.get("exits", {}).get(phase, 0)
-    if exit_code:
+    if exit_code and not (phase == "--fix" and "fix_data" in scenario and exit_code == 6):
         return exit_code
     if phase == "--fix" and "fix_data" in scenario:
         # Guidance-only mode: the double reports what the scenario says the
@@ -39,7 +39,7 @@ def doctor_double():
             (workspace / scenario["create_path"]).mkdir(parents=True)
         print(json.dumps({"schema": "ee.response.v2", "success": True,
                           "data": scenario["fix_data"], "degraded": []}))
-        return 0
+        return exit_code
     if phase == "--fix":
         (workspace / ".ee/config.toml").write_bytes(REPAIRED)
         if scenario.get("extra_file"):
@@ -256,8 +256,12 @@ class GuidanceOnlyContract(unittest.TestCase):
         self.workspace = self.root / "workspace"
         (self.workspace / ".ee").mkdir(parents=True)
         self.scenario = {
+            "exits": {"--fix": 6},
             "fix_data": {
                 "schema": "ee.doctor.fix_summary.v1", "runId": "guidance-control",
+                "status": "completed_partial", "fixerDispatchPending": True,
+                "unresolvedCoreCheckCount": 1,
+                "unresolvedCoreChecks": [{"name": "search_index", "errorCode": "EE-E300"}],
                 "guidanceOnlyFixerCount": 1,
                 "fixerResults": [{"findingCode": "search_index_missing",
                                   "operation": "run_index_rebuild",
@@ -311,6 +315,22 @@ class GuidanceOnlyContract(unittest.TestCase):
                  (self.root / "calls.jsonl").read_text().splitlines()]
         self.assertEqual(calls, ["--fix", "report"])
 
+    def test_zero_exit_cannot_hide_required_core_recovery(self):
+        self.scenario["exits"]["--fix"] = 0
+        self.assert_outcome(True, "must exit 6")
+
+    def test_completed_ok_cannot_hide_required_core_recovery(self):
+        self.scenario["fix_data"]["status"] = "completed_ok"
+        self.assert_outcome(True, "guidance_recorded")
+
+    def test_pending_flag_cannot_disagree_with_required_core_recovery(self):
+        self.scenario["fix_data"]["fixerDispatchPending"] = False
+        self.assert_outcome(True, "guidance_recorded")
+
+    def test_required_core_check_must_remain_in_the_summary(self):
+        self.scenario["fix_data"]["unresolvedCoreChecks"] = []
+        self.assert_outcome(True, "guidance_recorded")
+
     def test_applied_outcome_is_rejected(self):
         self.scenario["fix_data"]["fixerResults"][0]["outcome"] = "applied"
         self.assert_outcome(True, "guidance_recorded")
@@ -356,6 +376,84 @@ class GuidanceOnlyContract(unittest.TestCase):
     def test_marker_only_mode_is_refused(self):
         self.env["EE_DOCTOR_FIXTURE_RUN_EE"] = "0"
         self.assertEqual(self.assert_outcome(True, "marker-only").returncode, 2)
+
+
+class UntestedRatchetContract(unittest.TestCase):
+    """doctor_fixture_untested_ratchet (bd-2oh15): the one UNTESTED pin every
+    counting sub-harness enforces. The real tree must sit exactly at the pin;
+    a planted extra untested fixture, and a pin left above reality, must both
+    be rejected."""
+
+    def setUp(self):
+        evidence_root = os.environ.get("EE_DOCTOR_ASSERTION_TEST_ROOT")
+        if evidence_root:
+            Path(evidence_root).mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix=self._testMethodName + "-", dir=evidence_root))
+        self.manifest = json.loads((HERE / "manifest.json").read_text())
+
+    def ratchet(self, src):
+        command = ["bash", "-c", 'set -euo pipefail; source "$1"; doctor_fixture_untested_ratchet ratchet-control "$2"',
+                   "ratchet-control", str(HERE / "lib.sh"), str(src)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60,
+                                shell=False, check=False)
+        (self.root / "ratchet.receipt.json").write_text(json.dumps({
+            "exit": result.returncode, "stdout": result.stdout,
+            "stderr": result.stderr}, indent=2) + "\n")
+        print(f"{self._testMethodName}: ratchet exit={result.returncode}; evidence={self.root}",
+              flush=True)
+        return result
+
+    def planted(self, relabel):
+        """A fixture source whose manifest relabels ONE fixture, with an empty
+        directory per fixture (the ratchet counts directories by label)."""
+        src = self.root / "src"
+        src.mkdir()
+        manifest = json.loads(json.dumps(self.manifest))
+        old, new = relabel
+        victim = next(f for f in manifest["fixtures"] if f["label"] == old)
+        victim["label"] = new
+        (src / "manifest.json").write_text(json.dumps(manifest))
+        for fixture in manifest["fixtures"]:
+            (src / fixture["id"]).mkdir()
+        return src
+
+    def test_real_tree_sits_exactly_at_the_pin(self):
+        result = self.ratchet(HERE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNCLASSIFIED (not tested, pin", result.stderr)
+
+    def test_planted_extra_unclassified_is_rejected(self):
+        result = self.ratchet(self.planted(("REPAIR", "UNCLASSIFIED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ratchet exceeded", result.stderr)
+
+    def test_planted_extra_unresolved_is_rejected(self):
+        result = self.ratchet(self.planted(("NOT-DETECTED", "UNRESOLVED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ratchet exceeded", result.stderr)
+
+    def test_classified_fixture_with_unlowered_pin_is_rejected(self):
+        result = self.ratchet(self.planted(("UNCLASSIFIED", "REPAIR")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("pin is stale", result.stderr)
+
+    def test_new_out_of_scope_id_cannot_satisfy_the_pin(self):
+        # Relabelling an UNCLASSIFIED fixture OUT-OF-SCOPE would lower the
+        # UNCLASSIFIED count; the exact-id set must reject it.
+        result = self.ratchet(self.planted(("UNCLASSIFIED", "OUT-OF-SCOPE")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("OUT-OF-SCOPE set changed", result.stderr)
+
+    def test_dropping_a_pinned_out_of_scope_id_is_rejected(self):
+        result = self.ratchet(self.planted(("OUT-OF-SCOPE", "UNCLASSIFIED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("OUT-OF-SCOPE set changed", result.stderr)
+
+    def test_real_tree_prints_the_out_of_scope_line(self):
+        result = self.ratchet(HERE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OUT-OF-SCOPE (not doctor failure modes; never run, never a pass)",
+                      result.stderr)
 
 
 if __name__ == "__main__":

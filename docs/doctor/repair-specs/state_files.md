@@ -9,7 +9,7 @@ Labels, fields and the coverage rule are defined in
 - **Label:** UNRESOLVED
 - **Severity:** P0. Scored P0 as `pop-wal_shm-stale_sidecar` in `docs/doctor/failure_mode_scores.jsonl`.
 - **Detector:** None known. No doctor check reads `.ee/ee.db-wal` contents or `.ee/ee.db-shm`; `wal_pressure` (EE-E205) compares WAL size only.
-- **Real trigger:** Not yet built. Random sidecar bytes produce no failure: SQLite rejects a WAL whose salts do not match the database header. The trigger still to measure is a stale WAL with matching salts, replayed over a newer database file.
+- **Real trigger:** Not yet built. Random sidecar bytes produce no failure: fsqlite-wal rejects frames whose salts or checksum chain disagree with the WAL's OWN header (fsqlite-wal-0.4.0 `checksum.rs`). It does not compare the WAL with the database header, and ee reads only the WAL's size (`wal_status`, `wal_pressure`) and never the `-shm`. So the recipe to measure is an internally consistent WAL captured with an older `ee.db`, placed beside a newer `ee.db`: it would pass validation and replay. This is a code reading from the bd-2oh15 survey, not a measurement; the fsqlite-pager open path was not traced, so a database-binding check there is not ruled out.
 - **Repair:** None. No fixer is dispatched for sidecar state.
 - **Undo:** Not applicable until a trigger exists.
 - **Oracle:** None yet. The fixture is marker-only and does not run ee.
@@ -30,15 +30,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-empty-or-truncated-database
 
-- **Label:** PINNED-DEFECT bd-xa6ud (NOT coverage)
+- **Label:** GUIDANCE-ONLY (was PINNED-DEFECT bd-xa6ud until 9ed78b70d fixed it)
 - **Severity:** P0. Scored P0 as `pop-ee_db-empty_truncated`.
-- **Detector:** `database` reports EE-E202 with posture `blocked`; `search_index` also reports EE-E300.
+- **Detector:** `database` reports EE-E202 ("the database is truncated: its header records N pages ... but the file holds 8192 bytes") and `search_index` carries the same EE-E202; posture `blocked`. A zero-byte store reports EE-E206 instead (not exercised by this fixture).
 - **Real trigger:** The real `.ee/ee.db` is moved into `.fixture_baseline/` and replaced by its own first 8192 bytes. Doctor's lock is provisioned by a healthy no-op `--fix` before the damage.
-- **Repair:** Target (bd-xa6ud ruling): GUIDANCE-ONLY, a distinct finding (not EE-E700), posture `blocked` before and after `--fix`, `--fix` exits 0 with guidance, no repair write, no migration. Today `--fix` exits 3 with `doctor_runtime_io` ("build doctor index repair").
-- **Undo:** Not applicable: no repair write is allowed. The `.ee` content digest must be identical before and after `--fix`.
-- **Oracle:** The fixture pins today's defect: exit 3, the `doctor_runtime_io` error, and an identical content digest around `--fix`. When the bd-xa6ud fix lands, the assertion flips to the target oracle above.
+- **Repair:** None. `--fix` exits 0 with status `completed_ok` and records one guidance-only fixer: finding `database_corrupted`, operation `manual`, outcome `guidance_recorded`. No index or migration repair runs and no index rebuild is requested.
+- **Undo:** Not applicable: nothing is written. The `.ee` content digest is identical before and after `--fix`.
+- **Oracle:** `doctor_fixture_assert_guidance_only` for `database_corrupted` / `database` EE-E202, plus: EE-E202 on `database` and `search_index` with posture `blocked` before and after `--fix`, every fixer result manual guidance, and an identical content digest around `--fix`. Before 9ed78b70d the fixture pinned bd-xa6ud (exit 3 `doctor_runtime_io`); at 466ee56ee that pin failed as designed, at its detection check (bd-2oh15 c9944).
 - **Negative control:** `doctor_fixture_healthy_store` asserts the undamaged store is healthy, and the lock-provisioning `--fix` reports `actionCount` 0.
-- **Pinned sha:** 9188a0661, measured on the ab83e3f23 release binary.
+- **Pinned sha:** 466ee56ee, measured on its stamped release build (fix at 9ed78b70d).
 
 ## fm-state_files-merge-conflict-markers
 
