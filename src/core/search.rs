@@ -6145,14 +6145,20 @@ fn split_tags(tags: &str) -> Vec<String> {
 /// episodic memory is filed under `Evidence` because of what it is, not
 /// because it supports the query; query fitness is carried by the score and
 /// the relevance floor, not by the section heading.
+///
+/// The failure kinds are matched BEFORE the procedural level (bd-2vq2z.11).
+/// The reserved "What NOT to do" slice admits only `Failures`, and the natural
+/// way to store "never do X" is a procedural anti-pattern; with the level arm
+/// first, every such memory was filed under `ProceduralRules` and could never
+/// reach the slice built for it.
 #[must_use]
 pub(crate) fn pack_section_for_level_and_kind(level: &str, kind: &str) -> PackSection {
     match (level, kind) {
+        (_, "failure" | "anti-pattern" | "risk") => PackSection::Failures,
         ("procedural", _) | (_, "rule" | "convention" | "playbook-step") => {
             PackSection::ProceduralRules
         }
         (_, "decision") => PackSection::Decisions,
-        (_, "failure" | "anti-pattern" | "risk") => PackSection::Failures,
         ("episodic", _) => PackSection::Evidence,
         _ => PackSection::Artifacts,
     }
@@ -19972,6 +19978,10 @@ mod tests {
     fn pack_section_mapping_covers_the_whole_taxonomy_table() {
         for (level, kind, expected) in [
             ("procedural", "anything", PackSection::ProceduralRules),
+            ("procedural", "decision", PackSection::ProceduralRules),
+            ("procedural", "failure", PackSection::Failures),
+            ("procedural", "anti-pattern", PackSection::Failures),
+            ("procedural", "risk", PackSection::Failures),
             ("semantic", "rule", PackSection::ProceduralRules),
             ("semantic", "convention", PackSection::ProceduralRules),
             ("semantic", "playbook-step", PackSection::ProceduralRules),
