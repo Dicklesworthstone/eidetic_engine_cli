@@ -33,6 +33,17 @@ jq -e '.schema == "ee.response.v2" and .success == true and .data.memories_index
     > "$target/.fixture_baseline/doctor-healthy.json"
 doctor_fixture_assert_health_report "fm-search_indexes-index_missing" \
     "$target/.fixture_baseline/doctor-healthy.json"
+
+# Provision the real persistent coordination lock through a healthy no-op run,
+# before taking the corruption baseline. The repair must not unlink that inode
+# on undo; include it in the existing full-workspace byte/path digest instead
+# of weakening that digest to ignore coordination files.
+"$ee_bin" doctor --workspace "$target" --fix --json \
+    > "$target/.fixture_baseline/doctor-initialize-lock.json"
+jq -e '.schema == "ee.response.v2" and .success == true and .data.actionCount == 0' \
+    "$target/.fixture_baseline/doctor-initialize-lock.json" >/dev/null
+test -f "$target/.ee/.doctor.lock"
+
 test -f "$target/.ee/ee.db"
 test -f "$target/.ee/index/meta.json"
 mv "$target/.ee/index" "$target/.fixture_baseline/healthy-index"

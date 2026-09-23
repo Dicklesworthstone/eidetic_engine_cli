@@ -75,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::doctor_runtime::index_repair::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/index-repair.log"
-          grep -Eq 'test result: ok\. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/index-repair.log"
+          grep -Eq 'test result: ok\. 7 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/index-repair.log"
           cargo test --locked --lib core::doctor_fixers::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/dispatch.log"
           cargo test --locked --lib core::doctor_runtime::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/runtime.log"
@@ -100,7 +100,7 @@ jobs:
           cargo test --locked --lib cli::tests::doctor_fix_ -- --test-threads=1
           git add -- "${paths[@]}"
           if ! git diff --cached --quiet; then
-            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(doctor): rebuild damaged indexes with source-preserving audited undo' -m 'Build the canonical corpus through a read-only snapshot, validate every tier off-path, fence readers and publishers, and publish the admission marker last. Journal every real file mutation with existing hash-checked backups; undo holds the same generation lease. Preserve the current missing-index identity and advisory-guidance contracts. Actual build, source-byte, undo, safety and CLI regression tests passed before this normal main push.'
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(doctor): verify durable index repair publication and guarded undo' -m 'Format and verify the directly committed recovery implementation, including copy-capacity admission, persistence barriers, empty-source preservation, and refusal to undo a newer index. Focused index repair, doctor runtime and CLI regression suites passed before this normal main push.'
             git push origin HEAD:main
           fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/doctor-receipts/integrated-sha.txt"

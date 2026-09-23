@@ -11,7 +11,7 @@ use super::{
     build_index_generation, collect_workspace_index_source_snapshot,
     default_workspace_database_path, embedder_fingerprint_for_index_metadata,
     ensure_index_path_has_no_symlinks, hash_fallback_embedder_stack, index_checkpoint,
-    resolve_index_workspace_id, sync_index_generation, validate_built_generation,
+    resolve_index_workspace_id, sync_index_directory, sync_index_generation, validate_built_generation,
     workspace_embedder_stack, write_index_metadata,
 };
 
@@ -97,4 +97,41 @@ pub(crate) async fn publication_lease(
     index: &Path,
 ) -> Result<IndexGenerationLease, IndexRebuildError> {
     IndexGenerationLease::publish(cx, index).await
+}
+
+/// Publication is a non-cancellable commit tail, like ordinary index
+/// publication. Reuse its no-follow durability barriers rather than treating
+/// a buffered file flush as a disk persistence guarantee.
+pub(crate) fn flush_tree(path: &Path) -> Result<(), IndexRebuildError> {
+    sync_index_generation(path, || Ok(()))?;
+    if let Some(parent) = path.parent() {
+        sync_index_directory(parent)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn flush_directory(path: &Path) -> Result<(), IndexRebuildError> {
+    sync_index_directory(path)
+}
+
+/// Staging admission alone is insufficient for doctor: publication copies the
+/// staged generation and retains before-image backups instead of swapping two
+/// directory names. Project that extra allocation through the shared reserve
+/// policy before retiring the live admission marker. This is a preflight, not
+/// a reservation against unrelated filesystem writers.
+pub(crate) fn admit_repair_copy(
+    cx: &asupersync::Cx,
+    destination: &Path,
+    bytes: u64,
+    entries: u64,
+) -> Result<(), IndexRebuildError> {
+    super::storage::confirm_reserve(cx, destination, |ancestor| {
+        let capacity = super::storage::filesystem_capacity(ancestor)?;
+        Ok(super::storage::Capacity {
+            available_bytes: capacity.available_bytes.saturating_sub(bytes),
+            available_inodes: capacity
+                .available_inodes
+                .map(|value| value.saturating_sub(entries)),
+        })
+    })
 }
