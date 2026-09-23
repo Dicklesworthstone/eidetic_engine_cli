@@ -57,7 +57,7 @@ jobs:
           end = text.index('  verify:\n', start)
           text = text[:start] + text[end:]
           text = text.replace('    needs: integrate\n', '')
-          text = text.replace('          ref: ${{ needs.integrate.outputs.source }}\n', '')
+          text = '\n'.join(line for line in text.split('\n') if 'needs.integrate.outputs.source' not in line)
           if 'contents: write' in text or 'needs.integrate' in text:
               raise SystemExit('Verification must not retain source-write authority')
           prepared[path] = text
