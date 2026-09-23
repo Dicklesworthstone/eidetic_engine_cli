@@ -40,6 +40,9 @@ mod clustering;
 #[path = "ask_numeric.rs"]
 mod numeric;
 
+#[path = "ask_ordering.rs"]
+mod ordering;
+
 #[cfg(test)]
 #[path = "ask_numeric_tests.rs"]
 mod numeric_answer_tests;
@@ -840,10 +843,13 @@ fn same_conflict_topic(left: &[String], right: &[String]) -> bool {
     shared >= 2 && jaccard_similarity(left, right) >= 0.5
 }
 
-/// Use the same narrow scalar-setting rule in admission and composition.
-/// Neither different subjects nor two compatible negative restrictions qualify.
+/// Share conservative alternative detection between admission and composition.
+/// The historical helper name also covers categorical/temporal settings and
+/// reversed procedural order. Neither unrelated subjects nor compatible
+/// restrictions qualify. Command options are not English negation.
 fn numeric_conflict(left: &str, right: &str) -> bool {
-    numeric::conflicts(left, has_negation(left), right, has_negation(right))
+    ordering::conflicts(left, right)
+        || numeric::conflicts(left, has_negation(left), right, has_negation(right))
 }
 
 /// Opposite polarity about different numeric subjects is not proof of a
@@ -1231,14 +1237,19 @@ fn evaluate_ask_inner(
             .skip(1)
             .find(|span| numeric_conflict(&clusters[0].text, &span.text))
         {
-            // Two affirmative settings are alternatives, not an affirming and
-            // negating pair. Disclose the strongest supported alternative with
-            // its real source; never invent a stored relation or choose a winner.
+            // Affirmative alternatives need not contain negation. Disclose
+            // the strongest supported alternative with its real source; never
+            // invent a stored relation or choose one execution order as true.
+            let label = if ordering::conflicts(&clusters[0].text, &alternative.text) {
+                "ordering_alternative"
+            } else {
+                "numeric_alternative"
+            };
             (
                 vec![clusters[0].clone()],
                 vec![alternative.clone()],
                 "query_match",
-                "numeric_alternative",
+                label,
             )
         } else {
             // Only disclose the topic that actually conflicts with the best

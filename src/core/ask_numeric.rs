@@ -64,6 +64,11 @@ pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negat
 /// different environments, unknown values and qualified prose are not support
 /// for a known setting. Unparsed pairs retain the existing prose safeguards.
 pub(super) fn settings_compatible(left: &str, right: &str) -> bool {
+    // This guard is also used by span clustering after its Jaccard check.
+    // Reversed commands contain the same words but are not corroboration.
+    if !super::ordering::compatible(left, right) {
+        return false;
+    }
     match (setting_claim(left), setting_claim(right)) {
         (Some(left), Some(right)) => left.template == right.template && left.value == right.value,
         (None, None) => true,

@@ -98,7 +98,7 @@
     },
     "sides": {
       "type": ["array", "null"],
-      "description": "Present in conflict mode. Each side is a self-contained extractive answer with its own citations. Supported differing scalar assignments for the same affirmative statement use query_match and numeric_alternative; this inference does not fabricate a conflictLink.",
+      "description": "Present in conflict mode. Each side is a self-contained extractive answer with its own citations. Supported differing scalar assignments use query_match and numeric_alternative; reversed unqualified command ordering uses query_match and ordering_alternative. Neither inference fabricates a conflictLink.",
       "items": {
         "$ref": "#/$defs/side"
       }
@@ -307,9 +307,10 @@
             "negating",
             "query_match",
             "linked_opposition",
-            "numeric_alternative"
+            "numeric_alternative",
+            "ordering_alternative"
           ],
-          "description": "Which side of the conflict this represents. numeric_alternative is an inferred, supported alternative scalar setting for the query-matched statement, not a stored relation or a claim that one side is true."
+          "description": "Which side of the conflict this represents. numeric_alternative is a supported alternative scalar setting; ordering_alternative is the same two commands required in reverse order. Inferred alternatives are not stored relations and do not establish which side is true."
         },
         "answerText": {
           "type": "string",
