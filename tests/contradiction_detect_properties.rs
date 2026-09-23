@@ -95,6 +95,7 @@ fn pack_guard_options(
     task: &str,
 ) -> ContextPackOptions {
     ContextPackOptions {
+        task_paths: Vec::new(),
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(database_path.to_path_buf()),

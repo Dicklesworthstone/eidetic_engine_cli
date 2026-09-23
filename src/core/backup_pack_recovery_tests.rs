@@ -81,6 +81,7 @@ fn fixture(redaction: RedactionLevel) -> Result<Fixture, String> {
     db.insert_pack_record_with_timings_task_lens_and_evidence(
         &evidence_pack,
         &CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id,
             query: "release verification".to_owned(),
             profile: "balanced".to_owned(),

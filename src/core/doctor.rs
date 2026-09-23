@@ -5757,6 +5757,7 @@ mod tests {
             .inject_pack_reference_issue_fixture(
                 pack_id,
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: TEST_WORKSPACE_ID.to_string(),
                     query: "reference integrity test".to_string(),
                     profile: "compact".to_string(),

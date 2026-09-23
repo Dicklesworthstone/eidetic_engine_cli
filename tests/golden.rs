@@ -1921,6 +1921,7 @@ mod tests {
             .insert_pack_record_at(
                 pack_id,
                 &CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: "wsp_searchjson0000000000000001".to_owned(),
                     query: "format before release".to_owned(),
                     profile: "compact".to_owned(),

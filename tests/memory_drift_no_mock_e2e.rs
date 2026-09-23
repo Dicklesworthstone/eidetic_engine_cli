@@ -821,6 +821,7 @@ fn recent_pack_old_only_archived_source_drift_does_not_block_current_claim_windo
         .insert_pack_record_at(
             &pack_id,
             &CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id: stored.workspace_id,
                 query: "coordination snapshot path smoke".to_owned(),
                 profile: "balanced".to_owned(),

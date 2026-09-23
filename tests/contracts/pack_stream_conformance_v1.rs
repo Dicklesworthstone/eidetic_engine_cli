@@ -65,6 +65,7 @@ const COMPLETED_AT: &str = "2026-05-22T16:30:01Z";
 
 fn header_frame() -> PackStreamFrame {
     PackStreamFrame::Header(HeaderFrame::new(HeaderFrameInput {
+        task_paths: Vec::new(),
         pack_id: PACK_ID.to_string(),
         query: "prepare release".to_string(),
         workspace_id: WORKSPACE_ID.to_string(),

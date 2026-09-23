@@ -75,6 +75,10 @@ impl PackRevisionMeshMetadata {
             return None;
         }
         let query_hash = revision_hash_with_prefix(&["query", &response.data.request.query]);
+        let query_hash = crate::core::context::task_paths_query_hash(
+            &query_hash,
+            &response.data.request.task_paths,
+        );
         let pack_hash = response
             .data
             .pack
@@ -102,6 +106,13 @@ impl PackRevisionMeshMetadata {
         ]);
         let token = format!("packrev_{}", &token_digest[..32]);
         let quoted_query = shell_quote(&response.data.request.query);
+        let target_args = response
+            .data
+            .request
+            .task_paths
+            .iter()
+            .map(|target| format!(" --task-path {}", shell_quote(target)))
+            .collect::<String>();
         Some(Self {
             schema: PACK_REVISION_TOKEN_SCHEMA_V1,
             mode: mode.as_str(),
@@ -113,7 +124,9 @@ impl PackRevisionMeshMetadata {
             pack_hash: pack_hash.clone(),
             local_mesh_tip_state,
             selected_memory_ids,
-            rebuild_command: format!("ee {surface_command} {quoted_query} --mesh revisable --json"),
+            rebuild_command: format!(
+                "ee {surface_command} {quoted_query}{target_args} --mesh revisable --json"
+            ),
             diff_command: format!("ee pack diff {pack_hash} {token}"),
         })
     }
@@ -1620,6 +1633,8 @@ impl ContextRequestInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextRequest {
+    /// Normalized literal task targets, empty for historical/unscoped requests.
+    pub task_paths: Vec<String>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1658,6 +1673,7 @@ impl ContextRequest {
         };
 
         Ok(Self {
+            task_paths: Vec::new(),
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -4626,6 +4642,9 @@ pub fn render_context_markdown_with_analysis(
         pack.budget.max_tokens()
     ));
 
+    if !request.task_paths.is_empty() {
+        output.push_str(&format!("**Task targets:** {} literal workspace-relative path(s). Scoped guidance applies only to the supplied targets.\n\n", request.task_paths.len()));
+    }
     let advisory_banner = context_advisory_banner(pack, degraded);
     output.push_str("## Advisory Memory Banner\n\n");
     output.push_str(&format!(

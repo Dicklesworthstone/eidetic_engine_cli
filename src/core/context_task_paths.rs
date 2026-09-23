@@ -42,13 +42,17 @@ pub fn normalize(workspace: &Path, raw: &[String]) -> Result<Vec<String>, Contex
         }
         if value.starts_with(['/', '\\', '~'])
             || value.as_bytes().get(1) == Some(&b':')
-            || value.chars().any(|ch| ch.is_control() || matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+            || value
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
             || value.split(['/', '\\']).any(|part| part == "..")
         {
             return Err(invalid("non_literal_relative_target"));
         }
         let target = crate::search::normalize_rule_scope_pattern(
-            workspace, RuleScope::FilePattern, Some(value),
+            workspace,
+            RuleScope::FilePattern,
+            Some(value),
         )
         .map_err(|_| invalid("unsafe_target"))?
         .ok_or_else(|| invalid("missing_target"))?;
@@ -67,7 +71,9 @@ pub(super) fn matches_rule(rule: &RuleIndexProjection, targets: &[String]) -> bo
     match RuleScope::from_str(&rule.rule().scope) {
         Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project) => true,
         Ok(scope @ (RuleScope::Directory | RuleScope::FilePattern)) => {
-            let Some(pattern) = rule.normalized_scope_pattern() else { return false; };
+            let Some(pattern) = rule.normalized_scope_pattern() else {
+                return false;
+            };
             targets.iter().any(|path| {
                 std::iter::successors(Some(path.as_str()), |&parent| {
                     (scope == RuleScope::Directory)
@@ -84,7 +90,9 @@ pub(super) fn matches_rule(rule: &RuleIndexProjection, targets: &[String]) -> bo
 /// Empty targets deliberately contribute no new bytes: historical no-target
 /// requests retain their hashes. Nonempty input is normalized by the caller.
 pub(super) fn hash(hasher: &mut blake3::Hasher, targets: &[String]) {
-    if targets.is_empty() { return; }
+    if targets.is_empty() {
+        return;
+    }
     super::hash_labeled_bytes(hasher, "task_paths.schema", b"ee.pack.task_paths.v1");
     super::hash_labeled_u64(hasher, "task_paths.count", targets.len() as u64);
     for target in targets {
@@ -95,7 +103,9 @@ pub(super) fn hash(hasher: &mut blake3::Hasher, targets: &[String]) {
 /// Bind a query/cursor/stream identity to its normalized task targets while
 /// leaving the existing no-target wire identity unchanged.
 pub fn query_hash(base: &str, targets: &[String]) -> String {
-    if targets.is_empty() { return base.to_owned(); }
+    if targets.is_empty() {
+        return base.to_owned();
+    }
     let mut hasher = blake3::Hasher::new();
     super::hash_labeled_bytes(&mut hasher, "task_paths.query", base.as_bytes());
     hash(&mut hasher, targets);
@@ -113,40 +123,84 @@ mod tests {
     fn projection(root: &Path, scope: &str, pattern: Option<&str>) -> RuleIndexProjection {
         let db = DbConnection::open_memory().unwrap();
         db.migrate().unwrap();
-        db.insert_workspace(WORKSPACE, &CreateWorkspaceInput {
-            path: root.to_string_lossy().into_owned(), name: None,
-        }).unwrap();
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: root.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
         let id = "rule_00000000000000000000000421";
-        db.insert_procedural_rule(id, &CreateProceduralRuleInput {
-            workspace_id: WORKSPACE.to_owned(),
-            content: "Preserve the transactional outbox when updating invoice delivery.".to_owned(),
-            confidence: 0.8, utility: 0.8, importance: 0.5,
-            trust_class: "agent_assertion".to_owned(), scope: scope.to_owned(),
-            scope_pattern: pattern.map(str::to_owned), maturity: "validated".to_owned(),
-            protected: false, source_memory_ids: Vec::new(), tags: Vec::new(),
-        }).unwrap();
-        RuleIndexProjection::new(db.get_procedural_rule(id).unwrap().unwrap(), root, Vec::new(), Vec::new())
+        db.insert_procedural_rule(
+            id,
+            &CreateProceduralRuleInput {
+                workspace_id: WORKSPACE.to_owned(),
+                content: "Preserve the transactional outbox when updating invoice delivery."
+                    .to_owned(),
+                confidence: 0.8,
+                utility: 0.8,
+                importance: 0.5,
+                trust_class: "agent_assertion".to_owned(),
+                scope: scope.to_owned(),
+                scope_pattern: pattern.map(str::to_owned),
+                maturity: "validated".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .unwrap();
+        RuleIndexProjection::new(
+            db.get_procedural_rule(id).unwrap().unwrap(),
+            root,
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     #[test]
     fn literal_targets_are_sorted_deduplicated_and_allow_new_files() {
         let root = tempfile::tempdir().unwrap();
-        let paths = normalize(root.path(), &[
-            "./src/payments/new.rs".to_owned(), "src/lib.rs".to_owned(),
-            "src/payments/new.rs".to_owned(),
-        ]).unwrap();
+        let paths = normalize(
+            root.path(),
+            &[
+                "./src/payments/new.rs".to_owned(),
+                "src/lib.rs".to_owned(),
+                "src/payments/new.rs".to_owned(),
+            ],
+        )
+        .unwrap();
         assert_eq!(paths, ["src/lib.rs", "src/payments/new.rs"]);
-        assert!(!root.path().join("src").exists(), "validation must not create paths");
+        assert!(
+            !root.path().join("src").exists(),
+            "validation must not create paths"
+        );
     }
 
     #[test]
     fn ambiguous_private_and_escaping_targets_are_rejected_without_echo() {
         let root = tempfile::tempdir().unwrap();
-        for bad in ["", "../outside.rs", "src/../other.rs", "/private/code.rs", "C:\\private\\code.rs", "~/code.rs", "src/*.rs", "src/[ab].rs", "src/\nfile.rs"] {
-            assert!(normalize(root.path(), &[bad.to_owned()]).is_err(), "{bad:?}");
+        for bad in [
+            "",
+            "../outside.rs",
+            "src/../other.rs",
+            "/private/code.rs",
+            "C:\\private\\code.rs",
+            "~/code.rs",
+            "src/*.rs",
+            "src/[ab].rs",
+            "src/\nfile.rs",
+        ] {
+            assert!(
+                normalize(root.path(), &[bad.to_owned()]).is_err(),
+                "{bad:?}"
+            );
         }
         let secret = format!("src/{}{}.rs", "AKIA", "ABCDEFGHIJKLMNOP");
-        let error = normalize(root.path(), std::slice::from_ref(&secret)).unwrap_err().to_string();
+        let error = normalize(root.path(), std::slice::from_ref(&secret))
+            .unwrap_err()
+            .to_string();
         assert!(!error.contains("AKIA") && !error.contains(&secret));
         assert!(normalize(root.path(), &vec!["src/lib.rs".to_owned(); 65]).is_err());
     }
@@ -166,8 +220,14 @@ mod tests {
         let rule = projection(root.path(), "directory", Some("src/payments"));
         assert!(rule.is_pack_admissible());
         assert!(matches_rule(&rule, &["src/payments/invoice.rs".to_owned()]));
-        assert!(matches_rule(&rule, &["src/payments/nested/invoice.rs".to_owned()]));
-        assert!(!matches_rule(&rule, &["src/payments-other/invoice.rs".to_owned()]));
+        assert!(matches_rule(
+            &rule,
+            &["src/payments/nested/invoice.rs".to_owned()]
+        ));
+        assert!(!matches_rule(
+            &rule,
+            &["src/payments-other/invoice.rs".to_owned()]
+        ));
         assert!(!matches_rule(&rule, &[]));
     }
 
@@ -187,13 +247,22 @@ mod tests {
     fn target_hashes_are_distinct_and_do_not_change_historical_requests() {
         let root = tempfile::tempdir().unwrap();
         let a = normalize(root.path(), &["src/a.rs".into(), "src/b.rs".into()]).unwrap();
-        let b = normalize(root.path(), &["./src/b.rs".into(), "src/a.rs".into(), "src/a.rs".into()]).unwrap();
+        let b = normalize(
+            root.path(),
+            &["./src/b.rs".into(), "src/a.rs".into(), "src/a.rs".into()],
+        )
+        .unwrap();
         assert_eq!(query_hash("original", &[]), "original");
         assert_eq!(query_hash("original", &a), query_hash("original", &b));
-        assert_ne!(query_hash("original", &a), query_hash("original", &["src/a.rs".into()]));
+        assert_ne!(
+            query_hash("original", &a),
+            query_hash("original", &["src/a.rs".into()])
+        );
         assert_ne!(query_hash("other", &a), query_hash("original", &a));
-        let mut old = blake3::Hasher::new(); old.update(b"original");
-        let mut unchanged = old.clone(); hash(&mut unchanged, &[]);
+        let mut old = blake3::Hasher::new();
+        old.update(b"original");
+        let mut unchanged = old.clone();
+        hash(&mut unchanged, &[]);
         assert_eq!(old.finalize(), unchanged.finalize());
     }
 }

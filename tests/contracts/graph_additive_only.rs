@@ -629,6 +629,7 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
         .insert_pack_record(
             PACK_ID,
             &CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id,
                 query: QUERY.to_owned(),
                 profile: "compact".to_owned(),

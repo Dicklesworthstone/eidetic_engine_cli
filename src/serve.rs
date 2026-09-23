@@ -1859,6 +1859,7 @@ fn serve_context_payload_json(
     let task = require_single_query_value(request, "task", "/v1/context")?;
     let output_options = ContextPackOutputOptions::default();
     let options = ContextPackOptions {
+        task_paths: Vec::new(),
         workspace_path,
         database_path: None,
         index_dir: None,

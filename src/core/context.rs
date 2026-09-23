@@ -96,8 +96,7 @@ use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
     AgentContextProfileCounts, EmbedBackend, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId,
     MemoryScope, MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId,
-    ProvenanceUri, RedactionLevel, RuleId, RuleScope, TrustClass, UnitScore,
-    posture_for_trust_class,
+    ProvenanceUri, RedactionLevel, RuleId, TrustClass, UnitScore, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -734,6 +733,12 @@ impl CommandContext {
     }
 }
 
+#[path = "context_task_paths.rs"]
+mod task_paths;
+pub use task_paths::{
+    normalize as normalize_context_task_paths, query_hash as task_paths_query_hash,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextTaskLens {
     pub id: String,
@@ -743,6 +748,8 @@ pub struct ContextTaskLens {
 
 #[derive(Clone, Debug)]
 pub struct ContextPackOptions {
+    /// Literal workspace-relative task targets for directory/file-scoped rules.
+    pub task_paths: Vec<String>,
     pub workspace_path: PathBuf,
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
@@ -2331,6 +2338,7 @@ fn context_request_from_options_with_runtime_profile(
         })
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     }
+    request.task_paths = task_paths::normalize(&options.workspace_path, &options.task_paths)?;
     Ok(RuntimeProfileCappedRequest {
         request,
         effective_max_tokens,
@@ -2607,7 +2615,7 @@ pub fn explain_why_not(
     }
 
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let (candidates, _candidate_metrics) = candidates_from_search_with_metrics(
+    let (candidates, _candidate_metrics) = candidates_from_search_for_task_paths(
         read_connection,
         &options.workspace_path,
         &search_report,
@@ -2615,6 +2623,7 @@ pub fn explain_why_not(
         options.include_tombstoned,
         &mut degraded,
         Some(&search_preloaded_memories),
+        &task_paths::normalize(&options.workspace_path, &options.task_paths)?,
     );
 
     let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
@@ -3266,10 +3275,11 @@ async fn run_context_pack_with_performance_inner(
     }
     control.check()?;
 
+    request.task_paths = task_paths::normalize(&options.workspace_path, &options.task_paths)?;
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let (mut candidates, mut candidate_metrics) = candidates_from_search_with_metrics(
+    let (mut candidates, mut candidate_metrics) = candidates_from_search_for_task_paths(
         read_connection,
         &options.workspace_path,
         &search_report,
@@ -3277,6 +3287,7 @@ async fn run_context_pack_with_performance_inner(
         options.include_tombstoned,
         &mut degraded,
         Some(&search_preloaded_memories),
+        &request.task_paths,
     );
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
@@ -6595,6 +6606,7 @@ fn persist_pack_record_with_pack_id(
     subspans.degraded_serialization = degraded_serialization_start.elapsed();
 
     let input = CreatePackRecordInput {
+        task_paths: request.task_paths.clone(),
         workspace_id: workspace.id.clone(),
         query: request.query.clone(),
         profile: request.profile.as_str().to_string(),
@@ -6911,6 +6923,9 @@ fn context_pack_l2_bypass_reason(
     }
     if options.coordination_snapshot_path.is_some() {
         return Some("coordination_snapshot");
+    }
+    if !options.task_paths.is_empty() {
+        return Some("task_paths_require_live_admission");
     }
     if options.task_lens.is_some() {
         return Some("task_lens");
@@ -8187,6 +8202,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         "max_results",
         input.request.max_results.map(u64::from),
     );
+    task_paths::hash(&mut hasher, &input.request.task_paths);
     hash_labeled_u64(
         &mut hasher,
         "section_count",
@@ -8455,6 +8471,7 @@ fn compute_pack_hash_components(
         read_snapshot_generation,
     );
     hash_context_task_lens(&mut request_hasher, task_lens);
+    task_paths::hash(&mut request_hasher, &request.task_paths);
 
     let mut draft_hasher = Hasher::new();
     draft_hasher.update(&draft.used_tokens.to_le_bytes());
@@ -8487,6 +8504,7 @@ fn compute_pack_hash_components(
         read_snapshot_generation,
     );
     hash_context_task_lens(&mut composite_hasher, task_lens);
+    task_paths::hash(&mut composite_hasher, &request.task_paths);
     composite_hasher.update(&draft.used_tokens.to_le_bytes());
     if output_options.include_rendered_text {
         composite_hasher.update(rendered_text.as_bytes());
@@ -8826,6 +8844,7 @@ fn log_pack_hash_components(components: &PackHashComponents) {
 }
 
 #[allow(clippy::type_complexity)]
+#[cfg(test)]
 fn candidates_from_search_with_metrics(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -8834,6 +8853,29 @@ fn candidates_from_search_with_metrics(
     include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
+    candidates_from_search_for_task_paths(
+        connection,
+        workspace_path,
+        search_report,
+        filters,
+        include_tombstoned,
+        degraded,
+        preloaded_memories,
+        &[],
+    )
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn candidates_from_search_for_task_paths(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &crate::core::search::SearchReport,
+    filters: &crate::models::QueryFilters,
+    include_tombstoned: bool,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+    targets: &[String],
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let requested = crate::core::workspace::stable_workspace_id(workspace_path);
     let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
@@ -8890,7 +8932,7 @@ fn candidates_from_search_with_metrics(
                     // memories the same way artifact hits hydrate through
                     // their memory links (bd-3h6bz).
                     .or_else(|| {
-                        rule_linked_memory_id(connection, workspace_path, hit, degraded)
+                        rule_linked_memory_id(connection, targets, workspace_path, hit, degraded)
                             .map(|(memory_id, projection)| {
                                 let rule_id = projection.rule().id.clone();
                                 rules_map.insert(rule_id.clone(), projection);
@@ -12720,6 +12762,7 @@ fn artifact_linked_memory_id(
 /// silently dropped: the rule stays retrievable via `ee search`.
 fn rule_linked_memory_id(
     connection: &DbConnection,
+    targets: &[String],
     workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -12867,23 +12910,13 @@ fn rule_linked_memory_id(
         );
         return None;
     }
-    if matches!(
-        RuleScope::from_str(&projection.rule().scope),
-        Ok(RuleScope::Directory | RuleScope::FilePattern)
-    ) {
-        // Context packs currently carry no literal task-path target. Pattern
-        // validity alone never proves that a scoped rule applies to the task.
+    if !task_paths::matches_rule(&projection, targets) {
         push_degradation(
             degraded,
             "context_rule_hit_unhydrated",
             ContextResponseSeverity::Low,
-            format!(
-                "Rule {rule_id} requires a matching task path and was excluded from this pack."
-            ),
-            Some(
-                "ee ask \"What applies to this task?\" --path src/lib.rs --read-only --json"
-                    .to_owned(),
-            ),
+            format!("Rule {rule_id} requires a matching literal task path and was excluded from this pack."),
+            Some("Use ee pack \"<task>\" --task-path src/lib.rs --json with an applicable workspace-relative target.".to_owned()),
         );
         return None;
     }

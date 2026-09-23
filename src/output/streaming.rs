@@ -101,6 +101,8 @@ impl StreamError {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderFrame {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub task_paths: Vec<String>,
     pub schema: &'static str,
     pub kind: &'static str,
     pub pack_id: String,
@@ -125,6 +127,7 @@ impl HeaderFrame {
         Self {
             schema: PACK_STREAM_SCHEMA_V1,
             kind: "header",
+            task_paths: input.task_paths,
             pack_id: input.pack_id,
             query: input.query,
             workspace_id: input.workspace_id,
@@ -144,6 +147,7 @@ impl HeaderFrame {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeaderFrameInput {
+    pub task_paths: Vec<String>,
     pub pack_id: String,
     pub query: String,
     pub workspace_id: String,
@@ -584,6 +588,7 @@ pub fn context_response_stream_frames(
         .is_some_and(|stats| stats.strict_scope);
 
     let mut header = HeaderFrame::new(HeaderFrameInput {
+        task_paths: response.data.request.task_paths.clone(),
         pack_id: options.pack_id.clone(),
         query: response.data.request.query.clone(),
         workspace_id: options.workspace_id.clone(),
@@ -937,6 +942,7 @@ mod tests {
 
     fn header() -> PackStreamFrame {
         PackStreamFrame::Header(HeaderFrame::new(HeaderFrameInput {
+            task_paths: Vec::new(),
             pack_id: "pack_1".to_string(),
             query: "prepare release".to_string(),
             workspace_id: "workspace_1".to_string(),

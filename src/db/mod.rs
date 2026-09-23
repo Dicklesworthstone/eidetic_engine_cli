@@ -30590,6 +30590,8 @@ impl DbConnection {
 /// Input for creating a pack record.
 #[derive(Debug, Clone)]
 pub struct CreatePackRecordInput {
+    /// Canonical task targets, retained in the selection ledger with text redaction.
+    pub task_paths: Vec<String>,
     pub workspace_id: String,
     pub query: String,
     pub profile: String,
@@ -30927,6 +30929,7 @@ fn pack_recovery_error(message: impl Into<String>) -> DbError {
 impl StoredPackHistory {
     fn record_input(&self) -> CreatePackRecordInput {
         CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: self.record.workspace_id.clone(),
             query: self.record.query.clone(),
             profile: self.record.profile.clone(),
@@ -31458,6 +31461,8 @@ struct DecodedPackLedger {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    task_paths: Vec<PackLedgerTextRecord>,
     query: PackLedgerTextRecord,
     profile: String,
     max_tokens: u32,
@@ -33351,6 +33356,11 @@ fn build_uncompressed_pack_selection_ledger(
             lens_hash: task_lens.lens_hash.clone(),
         }),
         request: PackLedgerRequest {
+            task_paths: input
+                .task_paths
+                .iter()
+                .map(|path| pack_ledger_text_record(path))
+                .collect(),
             query: pack_ledger_text_record(&input.query),
             profile: input.profile.clone(),
             max_tokens: input.max_tokens,
@@ -33993,6 +34003,15 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
     }
     if !pack_ledger_text_record_is_canonical(&core.request.query) {
         mismatches.push("request.query");
+    }
+    if core.request.task_paths.len() > 64
+        || core
+            .request
+            .task_paths
+            .iter()
+            .any(|target| !pack_ledger_text_record_is_canonical(target))
+    {
+        mismatches.push("request.taskPaths");
     }
     if core
         .selected_items
@@ -41113,6 +41132,7 @@ mod tests {
         connection.insert_pack_record(
             pack_id,
             &super::CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id: "wsp_01234567890123456789012345".to_owned(),
                 query: "v093 trust rebuild".to_owned(),
                 profile: "compact".to_owned(),
@@ -41239,6 +41259,7 @@ mod tests {
 
         let first_id = "pack_000000000000000000000v0841";
         let first_input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_owned(),
             query: "v084 preserved pack".to_owned(),
             profile: "compact".to_owned(),
@@ -41474,6 +41495,7 @@ mod tests {
             connection.insert_pack_record(
                 &pack_id,
                 &super::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: first_input.workspace_id.clone(),
                     query: format!("V084 profile {profile}"),
                     profile: profile.to_owned(),
@@ -41492,6 +41514,7 @@ mod tests {
         connection.insert_pack_record(
             "pack_000000000000000000000v0843",
             &super::CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id: first_input.workspace_id,
                 query: "V084 contradiction omission".to_owned(),
                 profile: "grounding".to_owned(),
@@ -41540,6 +41563,7 @@ mod tests {
             connection.insert_pack_record_at(
                 pack_id,
                 &super::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.to_owned(),
                     query: "v084 file-backed migration".to_owned(),
                     profile: "compact".to_owned(),
@@ -57113,6 +57137,7 @@ UPDATE memories
         connection.insert_pack_record(
             id,
             &super::CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id: "wsp_01234567890123456789012345".to_owned(),
                 query: "cargo formatting".to_owned(),
                 profile: "balanced".to_owned(),
@@ -57168,6 +57193,7 @@ UPDATE memories
         setup_pack_test_memory(&connection)?;
 
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),
@@ -57254,6 +57280,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000imp01";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),
@@ -57350,6 +57377,7 @@ UPDATE memories
     fn impression_join_hashes_are_deterministic_and_query_sensitive() -> TestResult {
         let pack_id = "pack_000000000000000000000imp02";
         let base = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo verification".to_string(),
             profile: "balanced".to_string(),
@@ -57534,6 +57562,7 @@ UPDATE memories
         let pack_id = "pack_000000000000000000000ledg1";
         let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: format!("release prep api_key={raw_secret}"),
             profile: "compact".to_string(),
@@ -57654,6 +57683,7 @@ UPDATE memories
         let pack_id = "pack_000000000000000000000reas1";
         let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: format!("release prep api_key={raw_secret}"),
             profile: "compact".to_string(),
@@ -57799,6 +57829,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000pars1";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "format before release".to_string(),
             profile: "compact".to_string(),
@@ -58271,6 +58302,7 @@ UPDATE memories
             items.push(pack_item_input(pack_id, &memory_id, index + 1));
         }
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "metadata-only recent item scan".to_string(),
             profile: "compact".to_string(),
@@ -58337,6 +58369,7 @@ UPDATE memories
             })
             .collect::<Vec<_>>();
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "prepare release with many repeated formatting guardrails".to_string(),
             profile: "thorough".to_string(),
@@ -58498,6 +58531,7 @@ UPDATE memories
             })
             .collect::<Vec<_>>();
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "prepare release with corrupt compressed ledger".to_string(),
             profile: "thorough".to_string(),
@@ -58555,6 +58589,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000empt1";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "no matching memories".to_string(),
             profile: "compact".to_string(),
@@ -58615,6 +58650,7 @@ UPDATE memories
     fn pack_selection_ledger_is_deterministic_for_equivalent_inputs() -> TestResult {
         let pack_id = "pack_000000000000000000000ledg2";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo verification".to_string(),
             profile: "balanced".to_string(),
@@ -58684,6 +58720,7 @@ UPDATE memories
     {
         let pack_id = "pack_000000000000000000000afm01";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_owned(),
             query: "attempt family pack".to_owned(),
             profile: "balanced".to_owned(),
@@ -59082,6 +59119,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000hu8s1";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo verification".to_string(),
             profile: "balanced".to_string(),
@@ -59158,6 +59196,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000omrs1";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "omission reasons".to_string(),
             profile: "balanced".to_string(),
@@ -59205,6 +59244,7 @@ UPDATE memories
 
         let pack_id = "pack_000000000000000000000hu8s2";
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo rollback".to_string(),
             profile: "balanced".to_string(),
@@ -59248,6 +59288,7 @@ UPDATE memories
         setup_pack_test_memory(&connection)?;
 
         let input = super::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),

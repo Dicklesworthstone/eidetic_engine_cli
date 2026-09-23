@@ -3227,6 +3227,9 @@ pub struct ContextShowArgs {
 /// Arguments for `ee context`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct ContextArgs {
+    /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
+    #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
+    pub task_paths: Vec<String>,
     /// Query describing the task or topic to retrieve context for.
     #[arg(value_name = "QUERY")]
     pub query: String,
@@ -3572,6 +3575,9 @@ impl From<CompletionShell> for Shell {
     after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.omitted."
 )]
 pub struct PackArgs {
+    /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
+    #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
+    pub task_paths: Vec<String>,
     /// Optional pack subcommand. Omit it to build from `--query-file`.
     #[command(subcommand)]
     pub command: Option<PackCommand>,
@@ -3790,6 +3796,9 @@ pub enum PackCommand {
 /// Arguments for `ee pack build`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct PackBuildArgs {
+    /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
+    #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
+    pub task_paths: Vec<String>,
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
@@ -3970,6 +3979,7 @@ impl PackArgs {
         };
 
         Ok(PackBuildArgs {
+            task_paths: self.task_paths.clone(),
             query_file,
             use_daemon: self.use_daemon,
             daemon_socket: self.daemon_socket.clone(),
@@ -17156,6 +17166,7 @@ fn pack_quality_actuals_for_cases(
         let query = pack_quality_case_query(fixture_path, case)?;
         let (source_mode, strict_source_mode) = pack_quality_step_source_mode(&step.argv)?;
         let mut options = crate::core::context::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path),
             index_dir: Some(index_dir.clone()),
@@ -34548,6 +34559,7 @@ where
                 "would_insert"
             } else {
                 let input = crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.clone(),
                     query: args.query.clone(),
                     profile: args.profile.clone(),
@@ -41039,6 +41051,8 @@ fn context_stream_pack_id(
         pack_options.strict_scope
     );
     let digest = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let bound = crate::core::context::task_paths_query_hash(&digest, &request.task_paths);
+    let digest = bound.strip_prefix("blake3:").unwrap_or(&bound);
     format!("pack_stream_{}", &digest[..26])
 }
 
@@ -41049,6 +41063,7 @@ fn context_stream_header_frame(
 ) -> output::streaming::PackStreamFrame {
     output::streaming::PackStreamFrame::Header(output::streaming::HeaderFrame::new(
         output::streaming::HeaderFrameInput {
+            task_paths: request.task_paths.clone(),
             pack_id: options.pack_id.clone(),
             query: request.query.clone(),
             workspace_id: options.workspace_id.clone(),
@@ -41328,7 +41343,7 @@ where
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
 
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
         "data": {
@@ -41355,6 +41370,10 @@ where
         },
         "degraded": top_level_degraded,
     });
+
+    if let Some(targets) = public_ledger.pointer("/request/taskPaths") {
+        envelope["data"]["pack"]["taskPaths"] = targets.clone();
+    }
 
     match cli.renderer() {
         output::Renderer::Json
@@ -41604,6 +41623,7 @@ where
             ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Standard)
                 .with_resource_profile(PackResourceProfile::Standard);
         let pack_options = ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace_path.clone(),
             database_path: Some(addressed_database_path.clone()),
             index_dir: Some(addressed_index_dir.clone()),
@@ -42461,6 +42481,7 @@ where
         return write_domain_error(&domain_error, cli.context_renderer(), stdout, stderr);
     }
     let options = ContextPackOptions {
+        task_paths: args.task_paths.clone(),
         workspace_path: workspace_path.clone(),
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
@@ -45859,6 +45880,7 @@ where
             Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let context_args = ContextArgs {
+            task_paths: args.task_paths.clone(),
             use_daemon: args.use_daemon,
             daemon_socket: args.daemon_socket.clone(),
             query,
@@ -46061,7 +46083,22 @@ where
     let pagination = if request.pagination.is_empty() {
         None
     } else {
+        let task_paths = match crate::core::context::normalize_context_task_paths(
+            &workspace_root,
+            &args.task_paths,
+        ) {
+            Ok(paths) => paths,
+            Err(error) => {
+                return write_domain_error(
+                    &context_error_to_domain(&error),
+                    cli.renderer(),
+                    stdout,
+                    stderr,
+                );
+            }
+        };
         let query_hash = crate::models::compute_query_shape_hash(&request.query, &request.filters);
+        let query_hash = crate::core::context::task_paths_query_hash(&query_hash, &task_paths);
         let offset = match &request.pagination.cursor {
             Some(cursor_token) => match crate::models::PaginationCursor::decode(cursor_token) {
                 Ok(cursor) => {
@@ -46107,6 +46144,7 @@ where
     }
 
     let options = ContextPackOptions {
+        task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
@@ -46484,6 +46522,14 @@ fn public_pack_ledger_projection(ledger: &serde_json::Value) -> serde_json::Valu
     }
     if let Some(query) = public.pointer_mut("/request/query") {
         redact_public_ledger_text_record(query);
+    }
+    if let Some(targets) = public
+        .pointer_mut("/request/taskPaths")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for target in targets {
+            redact_public_ledger_text_record(target);
+        }
     }
     if let Some(items) = public
         .get_mut("selectedItems")
@@ -54549,6 +54595,7 @@ where
     };
 
     let options = ContextPackOptions {
+        task_paths: Vec::new(),
         workspace_path,
         database_path: Some(database_path),
         index_dir: None,
@@ -71414,6 +71461,7 @@ mod tests {
 
     fn stream_header_test_options(workspace_path: PathBuf) -> ContextPackOptions {
         ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path,
             database_path: None,
             index_dir: None,
@@ -85978,6 +86026,7 @@ mod tests {
             .insert_pack_record(
                 "pack_00000000000000000000000001",
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.clone(),
                     query: "collector alpha cache work".to_owned(),
                     profile: "compact".to_owned(),

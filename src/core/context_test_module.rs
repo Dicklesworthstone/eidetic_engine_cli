@@ -873,6 +873,7 @@ mod tests {
 
     fn context_options_with_coordination_snapshot(path: PathBuf) -> super::ContextPackOptions {
         super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-context-coordination-test"),
             database_path: None,
             index_dir: None,
@@ -6002,6 +6003,7 @@ pub fn unrelated_context() -> u64 {{
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-explain"),
             database_path: None,
             index_dir: None,
@@ -6171,6 +6173,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .map_err(|error| error.to_string())?;
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance"),
             database_path: None,
             index_dir: None,
@@ -6338,6 +6341,7 @@ pub fn unrelated_context() -> u64 {{
         let output_options =
             super::ContextPackOutputOptions::default().with_cache_json_response(true);
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(database_path.clone()),
             index_dir: None,
@@ -6718,6 +6722,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .map_err(|error| error.to_string())?;
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance-fallback"),
             database_path: None,
             index_dir: None,
@@ -6850,6 +6855,7 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
 
         let response = super::run_context_pack(&super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
@@ -6967,6 +6973,7 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
 
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: None,
             index_dir: Some(empty_index_dir),
@@ -7028,6 +7035,7 @@ pub fn unrelated_context() -> u64 {{
             crate::cache::pack_l2::PackL2CacheOptions::default(),
         );
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: tempdir.path().join("workspace"),
             database_path: None,
             index_dir: None,
@@ -7122,6 +7130,7 @@ pub fn unrelated_context() -> u64 {{
             crate::cache::pack_l2::PackL2CacheOptions::default(),
         );
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: tempdir.path().join("workspace"),
             database_path: None,
             index_dir: None,
@@ -7268,6 +7277,7 @@ pub fn unrelated_context() -> u64 {{
             let determinism = crate::runtime::determinism::Deterministic::from_seed(seed);
             let response = super::run_context_pack_seeded(
                 &super::ContextPackOptions {
+                    task_paths: Vec::new(),
                     workspace_path: workspace,
                     database_path: Some(db_path),
                     index_dir: Some(empty_index_dir),
@@ -7383,6 +7393,7 @@ pub fn unrelated_context() -> u64 {{
 
         let query = "format before release";
         let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path.clone()),
             index_dir: Some(empty_index_dir),
@@ -7548,6 +7559,7 @@ pub fn unrelated_context() -> u64 {{
         drop(connection);
 
         let base_options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(db_path.clone()),
             index_dir: Some(empty_index_dir),
@@ -8201,6 +8213,7 @@ pub fn unrelated_context() -> u64 {{
         drop(connection);
 
         let base_options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
@@ -8372,6 +8385,7 @@ pub fn unrelated_context() -> u64 {{
         drop(connection);
 
         let base_options = super::ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),

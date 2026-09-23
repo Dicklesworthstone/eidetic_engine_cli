@@ -5283,6 +5283,7 @@ impl DaemonContextParams {
             .map(|path| canonical_contained_path(&workspace_path, path, "indexDir"))
             .transpose()?;
         Ok(ContextPackOptions {
+            task_paths: Vec::new(),
             workspace_path,
             database_path,
             index_dir,

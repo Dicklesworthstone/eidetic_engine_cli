@@ -18320,6 +18320,7 @@ mod tests {
         let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
         let pack_id = crate::models::PackId::from_uuid(Uuid::from_u128(n)).to_string();
         let input = crate::db::CreatePackRecordInput {
+            task_paths: Vec::new(),
             workspace_id: workspace_id.clone(),
             query: "release api_key=pack-secret-canary".to_owned(),
             profile: "balanced".to_owned(),
@@ -19146,6 +19147,7 @@ mod tests {
             .insert_pack_record_with_timings_task_lens_and_evidence(
                 &pack_id,
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id,
                     query: "release verification".to_owned(),
                     profile: "balanced".to_owned(),
@@ -24796,6 +24798,7 @@ mod tests {
                     "restored predicate checks real file",
                 )?;
                 let pack_options = crate::core::context::ContextPackOptions {
+                    task_paths: Vec::new(),
                     workspace_path: side.clone(),
                     database_path: Some(restored_database.clone()),
                     index_dir: None,
@@ -25545,6 +25548,7 @@ mod tests {
             )?;
             let packed =
                 crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                    task_paths: Vec::new(),
                     workspace_path: side,
                     database_path: Some(PathBuf::from(&restored.restored_database_path)),
                     index_dir: None,
@@ -26723,6 +26727,7 @@ mod tests {
             if redaction != RedactionLevel::Full {
                 let response = crate::core::context::run_context_pack(
                     &crate::core::context::ContextPackOptions {
+                        task_paths: Vec::new(),
                         workspace_path: side_path,
                         database_path: Some(PathBuf::from(&restored.restored_database_path)),
                         index_dir: None,

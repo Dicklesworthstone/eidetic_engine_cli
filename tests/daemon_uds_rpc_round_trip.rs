@@ -550,6 +550,7 @@ fn context_pack_params(workspace: &Path, database: &Path, task: &str) -> serde_j
 
 fn context_pack_options(workspace: &Path, database: &Path, task: &str) -> ContextPackOptions {
     ContextPackOptions {
+        task_paths: Vec::new(),
         workspace_path: workspace.to_path_buf(),
         database_path: Some(database.to_path_buf()),
         index_dir: None,

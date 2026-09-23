@@ -495,6 +495,7 @@ fn fast_content_posture(
 
 fn orient_fast_pack_options(options: &OrientFastContentOptions<'_>) -> ContextPackOptions {
     ContextPackOptions {
+        task_paths: Vec::new(),
         workspace_path: options.workspace_path.to_path_buf(),
         database_path: options.database_path.map(Path::to_path_buf),
         index_dir: options.index_dir.map(Path::to_path_buf),

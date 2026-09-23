@@ -9911,6 +9911,7 @@ mod tests {
             .insert_pack_record(
                 pack_id,
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.to_owned(),
                     query: "schema validation".to_owned(),
                     profile: "compact".to_owned(),
@@ -13145,6 +13146,7 @@ mod tests {
             .insert_pack_record(
                 pack_id,
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.to_owned(),
                     query: "cache support bundle hotsets".to_owned(),
                     profile: "balanced".to_owned(),
@@ -13626,6 +13628,7 @@ mod tests {
             .insert_pack_record(
                 pack_id,
                 &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.to_owned(),
                     query: format!("support bundle replay {raw_secret}"),
                     profile: "compact".to_owned(),
