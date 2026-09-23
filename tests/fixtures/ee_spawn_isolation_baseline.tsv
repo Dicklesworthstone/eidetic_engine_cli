@@ -179,14 +179,12 @@
 1	tests/preflight_token_cli.rs
 1	tests/primer_cli_golden.rs
 1	tests/profile_config_golden_e2e.rs
-1	tests/property_query_and_pack.rs
 1	tests/read_pool_concurrency_e2e.rs
 1	tests/readme_cli_parity.rs
 1	tests/recall_cli_golden.rs
 2	tests/recorder_tail_follow.rs
 1	tests/renderer_command_capabilities.rs
 1	tests/resource_admission_report_conformance.rs
-1	tests/retrieval_index_regression_oracle.rs
 1	tests/retrieval_pipeline_monotonic.rs
 1	tests/rule_mark_update_e2e.rs
 1	tests/rule_provenance_integration.rs

@@ -110,17 +110,20 @@ fn redaction_level_for(raw: usize) -> RedactionLevel {
     RedactionLevel::all()[raw % RedactionLevel::all().len()]
 }
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
+/// bd-rvrj2 / bd-j3reo: each workspace gets its own ee data dir, so a verdict
+/// never depends on the model or global store the host holds. Every workspace
+/// in this file is a TempDir, so the data dir goes INSIDE it and is removed
+/// with it; a sibling path would outlive the TempDir and leak. The helper
+/// module is declared once, in tests/suites/integration_property.rs.
+fn ee_command(workspace: &Path) -> Result<Command, String> {
+    super::isolated_ee::isolated_ee_command(&workspace.join(".isolated-ee-data"))
 }
 
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    ee_command(workspace)?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -325,6 +328,41 @@ fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec
     let mut value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("context stdout not JSON: {error}"))?;
     strip_volatile_fields(&mut value);
+    // bd-j3reo: strip_volatile_fields does not apply the registered timing
+    // channel (src/obs/volatile_fields.rs, bd-8ig10). The wall-clock
+    // degradation is appended after pack.hash is computed and carries the
+    // measured milliseconds into degraded[] and the rendered pack.text, so
+    // drop it here through the SHARED normalizers, as bd-j1upc does for the
+    // metamorphic envelope. Both guards fail rather than pass silently.
+    let timing_present = ["/degraded", "/data/degraded"].iter().any(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str)
+                        == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+                })
+            })
+    });
+    let dropped = ee::obs::normalize_pack_timing_degradations(&mut value);
+    if timing_present && dropped == 0 {
+        return Err(format!(
+            "context envelope carries {} but the shared timing normalizer dropped nothing",
+            ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE
+        ));
+    }
+    if let Some(text) = value
+        .pointer("/data/pack/text")
+        .and_then(serde_json::Value::as_str)
+    {
+        let (_, leftover) = ee::obs::normalize_pack_timing_markdown(text);
+        if leftover > 0 {
+            return Err(format!(
+                "pack.text still carries {leftover} timing bullet(s) after the shared JSON normalizer"
+            ));
+        }
+    }
     let value = canonicalize_json(value);
     serde_json::to_vec(&value).map_err(|error| error.to_string())
 }
