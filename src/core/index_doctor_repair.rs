@@ -11,8 +11,8 @@ use super::{
     build_index_generation, collect_workspace_index_source_snapshot,
     default_workspace_database_path, embedder_fingerprint_for_index_metadata,
     ensure_index_path_has_no_symlinks, hash_fallback_embedder_stack, index_checkpoint,
-    resolve_index_workspace_id, sync_index_directory, sync_index_generation, validate_built_generation,
-    workspace_embedder_stack, write_index_metadata,
+    resolve_index_workspace_id, sync_index_directory, sync_index_generation,
+    validate_built_generation, workspace_embedder_stack, write_index_metadata,
 };
 
 pub(crate) struct PreparedRepair {
