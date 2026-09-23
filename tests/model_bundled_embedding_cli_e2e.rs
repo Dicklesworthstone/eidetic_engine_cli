@@ -1,5 +1,8 @@
 //! Real-binary e2e pin for bundled embedding model registration.
 
+#[path = "support/isolated_ee.rs"]
+mod isolated_ee;
+
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
@@ -827,9 +830,7 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
 #[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
 fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -> TestResult {
-    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_root = isolated_ee::model_fixture_root()?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
     let manifest = ModelManifest::potion_128m();
     let workspace = E2eWorkspace::create("registered-model2vec-offline")?;
@@ -1266,9 +1267,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
 #[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
 fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neural() -> TestResult {
-    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_root = isolated_ee::model_fixture_root()?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
     let manifest = ModelManifest::potion_128m();
 
@@ -2701,9 +2700,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
 #[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
 fn neural_unrelated_query_is_not_admitted_at_full_relevance() -> TestResult {
-    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_root = isolated_ee::model_fixture_root()?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
     let manifest = ModelManifest::potion_128m();
 
