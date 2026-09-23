@@ -61,3 +61,71 @@ that ruling:
   was no build admission, local-Cargo tripwire or known-blocker bookkeeping.
 - **Not a statement about the released 0.14.2 binary.** That historical
   evidence stays historical; these files describe commit `f1cbd6327a4b`.
+
+## Durable-mutation attribution and the rows check
+
+The oracle's first durable-mutation check compared workspace file bytes. At
+`42c8408` it went red on `ee.db`, its WAL files and `ee.write.lock` while
+every probe agreed. The `read_only_window_attribution` test found the cause
+arm by arm on one workspace:
+
+| Arm | What ran |
+| --- | --- |
+| N1, N2 | Nothing (null controls) |
+| S | `ee index status --json` |
+| PS | 8 concurrent `ee search` probes |
+| PP | 8 concurrent `ee pack --read-only` probes |
+| W | One `ee remember` (positive control for the row digest) |
+
+The finding: search appends to `audit_log`, and it is *declared* to
+(`append_only_write("search", vec!["audit_log"], ...)` in
+`src/core/effect.rs`). `index status` and `pack --read-only` changed no rows.
+So the byte check was treating a declared write as a mutation.
+
+Under GraniteKite's 20:40Z ruling (bead comment 10042), the check now judges
+rows:
+
+- The allowlist comes from `EffectManifest` via the real CLI parse, never a
+  hand-list.
+- Declared tables are append-only by rowid.
+- Undeclared tables must stay row-equal.
+- `ee.write.lock` follows the bd-xa6ud precedent.
+- The database files' byte churn is classified, with any `ee.db` byte change
+  recorded as UNEXPLAINED.
+
+Every run below used `rch exec --clean-overlay --base <sha>` with the oracle
+file and `src/db/mod.rs` as overlays. The overlays make these runs
+**unattested**: they verify the instrument, not a product verdict.
+
+| File | Run | What it holds |
+| --- | --- | --- |
+| `577dae27da9a343fbd4b4a6d3da864426c2d9887f4ee8956d0e7f2558da8178b.ee-test-event.jsonl` | Attribution run 1. Base `70c459bca8028e5871482931be7e24389ff1d6c9`, worker hz4, 2026-09-23T19:37-20:07Z. | Byte and WAL results per arm. The row digest FAILED in every arm: a read-only open of a copied WAL database is refused ("recovery in progress"). No row classification. |
+| `c5dbda5eff2c36a3da292b5288d9364ae85979f72d0e7f4c4808b0397cb98f57.ee-test-event.jsonl` | Attribution run 2. Base `4510aeee3f1a2a97a88626af70338afe13da77e5`, hz4, 20:08-20:35Z. | The attribution the ruling rests on. PS changed only `audit_log` (8 -> 56 rows = 8 probes × 6 audit rows). S and PP changed no rows. W changed `audit_log`, `memories`, `search_index_jobs` and `workspace_generations`. |
+| `999b1a27f48546f7769410bcbed5b789e1b22f670b774322e024a2866829bdf9.ee-test-event.jsonl` | Live oracle, default config, rows check in place. Base `8952b4bfa923bf8d594a9acb80e91578c8113e06`, worker vmi1227854, 21:14-21:31Z. Receipt overlay fingerprint `8ec1db2aed691628242700e8eebb404ca680f7155243a268d97c8369a2342cc5`. | `RACE_ABSENT`. The derived allowlist is `[audit_log, context_packs, pack_items]`. Only `audit_log` changed, with no append-only finding. The lock epoch went 357 -> 436. `ee.db` bytes changed and are recorded as `db-bytes-UNEXPLAINED`. |
+| `a36718c8cca175bfc948e7274f3d4acdf7819d7a9f33f33cfcd69beb8a8db944.ee-test-event.jsonl` | Attribution, same job as `999b1a27`. | The per-arm row judgment is empty in N1, S, PS, PP and N2. W is not judged. |
+
+**Retention disclosure for `577dae27` and `c5dbda5e`.** These two bodies were
+echoed on stderr. rch relays the remote stdout into its stderr without ordering
+the two streams, so libtest's own stdout lines landed inside the echoed block:
+
+- `577dae27`: 2 lines.
+- `c5dbda5e`: 4 lines.
+
+The extractor refused both. The retained files are the echoed block with
+exactly those whole, non-JSON lines removed. Each file's `b3sum` equals the
+digest the worker announced and the name of its proof file, and every line
+parses as JSON.
+
+The echo now goes to stdout. `999b1a27` and `a36718c8` came through the
+extractor unmodified.
+
+**What these files are NOT:**
+
+- They are not attested verdicts. The attested run of the landed oracle comes
+  after these files.
+- They do not explain the `ee.db` byte change. It stays UNEXPLAINED (ruling
+  condition 6); the row judgment only covers its consequence.
+- `context_packs` in the derived allowlist is not a table that exists. The
+  `pack build` declaration at `src/core/effect.rs:2533` names it, but the
+  schema's pack table is `pack_records`. That declaration drift is reported on
+  the bead and is not fixed here.
