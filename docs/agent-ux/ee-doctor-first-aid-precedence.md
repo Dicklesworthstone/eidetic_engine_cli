@@ -10,18 +10,22 @@
 
 ## Canonical first-aid order
 
-1. **`ee doctor --fix-plan --json`** — dry-run; reports the auto-fixable
-   findings the doctor would apply along with their blast radius and
-   the deterministic `mutate()` log. Pure read; no mutation.
-2. **`ee doctor --fix --json`** — applies the auto-fixable findings
-   through the single `mutate()` chokepoint with reversible/undo
-   metadata. Honors `EE_DOCTOR_FIX_DRY_RUN=1` for dry-run override and
-   `EE_DOCTOR_FIX_STRICT=1` to fail closed on findings the fixer
-   cannot handle.
-3. **`ee doctor --json` (read-only)** — full diagnostic report. Use to
-   inspect findings that the auto-fixer flagged as not-yet-implemented
-   or that require human approval (e.g. anything that would touch the
-   work tree's tracked files, anything mutating shared infrastructure).
+1. **`ee doctor --fix-plan --json`** — pure read; no mutation. Lists, in
+   order, every failing check that carries a repair hint, with the hint's
+   command. `fixableIssues` currently counts checks that have a repair
+   hint, not checks `ee doctor --fix` can apply (bd-223vl M3), so a step
+   is not a promise that `--fix` will act on it.
+2. **`ee doctor --fix --json`** — applies the findings `--fix` can
+   dispatch (listed below) through the single `mutate()` chokepoint with
+   undo metadata; `ee doctor --undo <runId> --json` reverses a run.
+   It always runs every dispatchable finding: `--fix --only <id>` is a
+   usage error, because `--fix` declares a conflict with `--only`. A
+   failing check with no dispatch is left untouched and gets no
+   `fixerResults` entry.
+3. **`ee doctor --json` (read-only)** — the diagnostic report. Use it to
+   inspect findings `--fix` does not dispatch, or that require human
+   approval (e.g. anything that would touch the work tree's tracked
+   files, anything mutating shared infrastructure).
 4. **Manual skill playbooks** — fall through to these only after
    steps 1–3 fail to converge.
 
@@ -43,15 +47,28 @@ auto-resolve safely.
 
 ## How to know if `ee doctor --fix` already handles your situation
 
-Run `ee doctor --capabilities --json`. The capability descriptor lists
-each fixer kind the binary supports, the situations it auto-resolves,
-and its `mutate()` reversibility class. The 12 P0/P1 fixers landed by
-bd-tu4s8 are listed there; anything not on the list still needs the
-manual skill content.
+`ee doctor --fix` dispatches four findings, keyed on the failing check's
+error code. The other nine of the 13 fixers in `src/core/doctor_fixers.rs`
+(`FIXER_FINDING_CODES`) are not dispatched by `--fix`:
 
-If `ee doctor --fix-plan` reports `degradedCodes: ["doctor_no_auto_fix_available"]`
-for your situation, that is the explicit hand-off signal to the
-fallback skill.
+| Finding (`findingCode`) | Failing check | Operation |
+| --- | --- | --- |
+| `search_index_missing` | `EE-E300` | `run_index_rebuild` |
+| `search_index_stale` | `EE-E301`, or any other failing `search_index` check | `run_index_rebuild` |
+| `schema_migration_pending` | `EE-E700` | `run_migration` |
+| `cass_integration_drift` | `EE-E507` | `manual`: records guidance, repairs nothing |
+
+Anything else still needs the manual skill content. The table mirrors
+the dispatch in `doctor_fix_json` (`src/cli/mod.rs`); no report
+enumerates it. `ee doctor --capabilities --json` does not answer this
+question: it
+describes the runtime contract (schema versions, blast radius, the
+`mutate()` op vocabulary, exit codes, env vars), and its `op_kinds`
+include operations no dispatched fixer produces (bd-223vl M5).
+
+If `ee doctor --fix` leaves a failing check without a `fixerResults`
+entry, or records it with outcome `guidance_recorded`, that is the
+hand-off signal to the fallback skill.
 
 ## Why this precedence
 
@@ -60,7 +77,7 @@ fallback skill.
   Manual skill execution depends on the operator following the steps
   in the right order; the auto-fixer enforces ordering and
   reversibility by construction.
-- **Verifiable evidence** — the `ee.doctor.fix.v1` response carries a
+- **Verifiable evidence** — the `ee.doctor.fix_summary.v1` response carries a
   structured record of what was done, what was backed up, and what
   remains. Pasting that into a bead is a clearer audit trail than
   pasting the output of an interactive skill run.
