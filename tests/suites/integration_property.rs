@@ -13,6 +13,10 @@
 
 #[path = "../support/graph_generator.rs"]
 mod graph_generator;
+// Declared once here: every module below reaches it as `super::isolated_ee`.
+// A second `#[path]` declaration of the same file is clippy::duplicate_mod.
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
 
 #[path = "../property_context_query_metamorphic.rs"]
 mod property_context_query_metamorphic;
