@@ -126,8 +126,15 @@ pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
 pub const SEARCH_LEXICAL_ONLY_CODE: &str = "search_lexical_only";
 /// Posture reason emitted alongside [`SEARCH_LEXICAL_ONLY_CODE`].
 pub const SEARCH_LEXICAL_ONLY_REASON: &str = "lexical_only";
-/// Repair command for [`SEARCH_LEXICAL_ONLY_CODE`].
+/// Repair command for [`SEARCH_LEXICAL_ONLY_CODE`] when a semantic embedder is
+/// active but nothing is embedded yet: a rebuild embeds the corpus.
 pub const SEARCH_LEXICAL_ONLY_REPAIR: &str = "ee index rebuild --workspace .";
+/// Repair for [`SEARCH_LEXICAL_ONLY_CODE`] under the deterministic-hash
+/// fallback. A rebuild alone re-embeds with the same hash embedder and changes
+/// nothing (bd-rzfov); the model has to be fetched first. Matches doctor's
+/// `embedding_posture` repair.
+pub const SEARCH_LEXICAL_ONLY_HASH_FALLBACK_REPAIR: &str =
+    "Run `ee model fetch`, then `ee index rebuild --workspace .`.";
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1254,8 +1261,14 @@ fn probe_storage_capability_with_connection(
 pub enum SearchSemanticPosture {
     /// A semantic embedder is active and semantic evidence can be retrieved.
     Available,
-    /// The index is healthy, but retrieval is lexical-only.
+    /// The index is healthy and a semantic embedder is active, but nothing is
+    /// embedded, so retrieval is lexical-only until a rebuild embeds the corpus.
     LexicalOnly,
+    /// The active embedder is the deterministic-hash fallback (no semantic
+    /// model). ADR 0081 D1: an honest hash fallback is usable and must not
+    /// degrade the top-line; it stays visible in `degraded[]` with the repair
+    /// that actually changes it (fetch the model, then rebuild).
+    HashFallback,
     /// Embedding posture was not probed for this call, so semantic
     /// availability is unknown. Unknown is never reported as lexical-only:
     /// an unprobed workspace has no evidence of under-recall, and inventing
@@ -1269,7 +1282,9 @@ pub enum SearchSemanticPosture {
 /// agent can act on:
 ///
 /// - `semantic == false` is the deterministic-hash fallback. No amount of
-///   corpus growth produces semantic evidence, so this is lexical-only.
+///   corpus growth or rebuilding produces semantic evidence, so this is
+///   [`HashFallback`], kept distinct because its repair and its top-line weight
+///   differ (ADR 0081 D1, bd-rzfov).
 /// - A semantic embedder with a non-empty corpus and *zero* embedded vectors
 ///   also retrieves lexical-only, because there is nothing for the vector arm
 ///   to match against.
@@ -1280,6 +1295,7 @@ pub enum SearchSemanticPosture {
 ///   double-counted here.
 ///
 /// [`Available`]: SearchSemanticPosture::Available
+/// [`HashFallback`]: SearchSemanticPosture::HashFallback
 fn search_semantic_posture_from_index_status(
     index_status: Option<&Result<IndexStatusReport, ()>>,
 ) -> SearchSemanticPosture {
@@ -1290,7 +1306,7 @@ fn search_semantic_posture_from_index_status(
                 .as_ref()
                 .map_or(SearchSemanticPosture::NotProbed, |embedding| {
                     if !embedding.semantic {
-                        SearchSemanticPosture::LexicalOnly
+                        SearchSemanticPosture::HashFallback
                     } else if embedding.vector_coverage.total > 0
                         && embedding.vector_coverage.embedded == 0
                     {
@@ -4012,9 +4028,12 @@ const fn search_posture_status(
         // (bd-status-search-lexical-honesty-ejdpo).
         CapabilityStatus::Ready => match semantic {
             SearchSemanticPosture::LexicalOnly => SubsystemPostureStatus::DegradedRecoverable,
-            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => {
-                SubsystemPostureStatus::Ok
-            }
+            // ADR 0081 D1: an honest hash fallback is usable and must not
+            // degrade the core row (and through it `pack` and `overall`). It
+            // is reported in `degraded[]` instead (bd-rzfov).
+            SearchSemanticPosture::HashFallback
+            | SearchSemanticPosture::Available
+            | SearchSemanticPosture::NotProbed => SubsystemPostureStatus::Ok,
         },
         CapabilityStatus::Pending => SubsystemPostureStatus::Initializing,
         CapabilityStatus::Degraded
@@ -4038,7 +4057,9 @@ const fn search_posture_reason(
     match status {
         CapabilityStatus::Ready => match semantic {
             SearchSemanticPosture::LexicalOnly => Some(SEARCH_LEXICAL_ONLY_REASON),
-            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => None,
+            SearchSemanticPosture::HashFallback
+            | SearchSemanticPosture::Available
+            | SearchSemanticPosture::NotProbed => None,
         },
         CapabilityStatus::Pending
             if matches!(
@@ -4064,7 +4085,9 @@ const fn search_posture_fallback(
     match status {
         CapabilityStatus::Ready => match semantic {
             SearchSemanticPosture::LexicalOnly => Some(SEARCH_LEXICAL_ONLY_REPAIR),
-            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => None,
+            SearchSemanticPosture::HashFallback
+            | SearchSemanticPosture::Available
+            | SearchSemanticPosture::NotProbed => None,
         },
         CapabilityStatus::Pending
             if matches!(
@@ -4512,8 +4535,8 @@ fn push_search_capability_degradation(
         // A healthy index still under-recalls when the semantic arm cannot
         // run. This is the only place `ee status` can say so
         // (bd-status-search-lexical-honesty-ejdpo).
-        CapabilityStatus::Ready => {
-            if matches!(semantic, SearchSemanticPosture::LexicalOnly) {
+        CapabilityStatus::Ready => match semantic {
+            SearchSemanticPosture::LexicalOnly => {
                 degradations.push(DegradationReport {
                     code: SEARCH_LEXICAL_ONLY_CODE,
                     severity: "medium",
@@ -4521,7 +4544,18 @@ fn push_search_capability_degradation(
                     repair: "Run `ee index rebuild --workspace .`.",
                 });
             }
-        }
+            // Visible but not top-line (ADR 0081 D1/D4). The repair must be
+            // one that changes the verdict: a rebuild alone does not (bd-rzfov).
+            SearchSemanticPosture::HashFallback => {
+                degradations.push(DegradationReport {
+                    code: SEARCH_LEXICAL_ONLY_CODE,
+                    severity: "medium",
+                    message: "Search index is healthy but semantic retrieval is unavailable: the embedder is the deterministic-hash fallback, so every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content. Memory still works; this does not degrade the overall posture.",
+                    repair: SEARCH_LEXICAL_ONLY_HASH_FALLBACK_REPAIR,
+                });
+            }
+            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => {}
+        },
         CapabilityStatus::Pending if workspace_path.is_none() => {
             degradations.push(DegradationReport {
                 code: "search_not_inspected",
@@ -8330,13 +8364,73 @@ mod tests {
     }
 
     #[test]
-    fn hash_fallback_embedder_reports_lexical_only_semantic_posture() -> TestResult {
+    fn hash_fallback_embedder_reports_hash_fallback_semantic_posture() -> TestResult {
         let report = index_report_with_embedding(Some(embedding_posture(false, 0, 3)));
 
         ensure(
             search_semantic_posture_from_index_status(Some(&Ok(report))),
-            SearchSemanticPosture::LexicalOnly,
+            SearchSemanticPosture::HashFallback,
             "deterministic-hash embedder cannot serve semantic evidence",
+        )
+    }
+
+    #[test]
+    fn hash_fallback_keeps_search_ok_but_reports_a_repair_that_fetches_the_model() -> TestResult {
+        // ADR 0081 D1: an honest hash fallback must not degrade the core row
+        // (so neither pack nor overall), but it stays visible (D4) with the
+        // repair that actually changes it (bd-rzfov).
+        ensure(
+            search_posture_status(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::HashFallback,
+            ),
+            SubsystemPostureStatus::Ok,
+            "hash fallback search row",
+        )?;
+        ensure(
+            search_posture_reason(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::HashFallback,
+            ),
+            None,
+            "hash fallback row reason",
+        )?;
+        let mut degradations = Vec::new();
+        push_search_capability_degradation(
+            &mut degradations,
+            CapabilityStatus::Ready,
+            Some(Path::new(".")),
+            SearchSemanticPosture::HashFallback,
+        );
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec![SEARCH_LEXICAL_ONLY_CODE],
+            "hash fallback stays visible in degraded[]",
+        )?;
+        let repair = degradations
+            .first()
+            .map(|degradation| degradation.repair)
+            .unwrap_or_default();
+        ensure(
+            repair.contains("ee model fetch") && repair.contains("ee index rebuild"),
+            true,
+            "hash fallback repair fetches the model before rebuilding",
+        )?;
+        // The zero-vectors case keeps bd-status-search-lexical-honesty-ejdpo's
+        // verdict: a rebuild does embed the corpus there.
+        ensure(
+            search_posture_status(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::LexicalOnly,
+            ),
+            SubsystemPostureStatus::DegradedRecoverable,
+            "semantic embedder with nothing embedded stays degraded",
         )
     }
 

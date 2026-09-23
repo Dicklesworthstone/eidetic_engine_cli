@@ -14597,7 +14597,7 @@ ee search 'any query' --workspace . --json
 
 **Introduced by:** bd-status-search-lexical-honesty-ejdpo (epic J)
 
-**Trigger.** The workspace search index is healthy (IndexHealth::Ready), but the active embedder reports semantic=false — the deterministic-hash fallback — or a semantic embedder is active over a non-empty corpus with zero embedded vectors. Either way every retrieval is served by the lexical arm alone, which under-recalls paraphrases and synonyms of indexed content. Before this code existed, `ee status` reported `search: ok` in exactly this state.
+**Trigger.** The workspace search index is healthy (IndexHealth::Ready), but the active embedder reports semantic=false — the deterministic-hash fallback — or a semantic embedder is active over a non-empty corpus with zero embedded vectors. Either way every retrieval is served by the lexical arm alone, which under-recalls paraphrases and synonyms of indexed content. Before this code existed, `ee status` reported `search: ok` in exactly this state. The two causes differ in weight and repair (bd-rzfov): with zero embedded vectors the search row is degraded_recoverable and `ee index rebuild` embeds the corpus; under the hash fallback the search row stays ok (ADR 0081 D1: an honest hash fallback must not degrade the top-line), the code is still reported here, and the repair is to fetch the model before rebuilding, because a rebuild alone re-embeds with the same hash embedder.
 
 **Setup.**
 
@@ -14615,7 +14615,7 @@ EE_EMBED_DOWNLOAD=off ee status --workspace . --json
 
 **Expected emission.** Message contains: `semantic retrieval is unavailable ... lexical fallback`
 
-**Repair hint.** Run `ee index rebuild --workspace .`.
+**Repair hint.** Run `ee model fetch`, then `ee index rebuild --workspace .`.
 
 **Fixture.** [`tests/fixtures/failure_modes/search_lexical_only.json`](../tests/fixtures/failure_modes/search_lexical_only.json)
 
