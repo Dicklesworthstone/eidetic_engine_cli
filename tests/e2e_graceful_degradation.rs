@@ -1587,7 +1587,28 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
             ],
             "explicit tombstone",
         )?;
-        assert_success(&tombstone, "explicit tombstone")?;
+        // `curate tombstone` answers with its bare report, not the
+        // ee.response.v2 envelope (tests/e2e_curate_tombstone.rs pins this),
+        // so check the report itself.
+        ensure_equal(&tombstone.exit_code, &Some(EXIT_SUCCESS), "tombstone exit")?;
+        ensure_equal(
+            &tombstone.json.pointer("/schema").and_then(Value::as_str),
+            &Some("ee.curate.tombstone.v1"),
+            "tombstone schema",
+        )?;
+        ensure_equal(
+            &tombstone.json.pointer("/memoryId").and_then(Value::as_str),
+            &Some(memory_id.as_str()),
+            "tombstone memory id",
+        )?;
+        ensure_equal(
+            &tombstone
+                .json
+                .pointer("/persisted")
+                .and_then(Value::as_bool),
+            &Some(true),
+            "tombstone persisted",
+        )?;
     }
     let degraded = run_ee_json(&workspace, ["status"], "tombstoned status")?;
     assert_success(&degraded, "tombstoned status")?;
