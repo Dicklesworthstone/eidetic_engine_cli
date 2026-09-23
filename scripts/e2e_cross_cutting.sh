@@ -504,12 +504,14 @@ assert_jq_file "$BACKUP_MANIFEST" \
 assert_jq_file "$BACKUP_MANIFEST" \
     '.coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and all(.assets[]; .hashPolicy == "blake3_required" and .missingAssetFailure == "degraded_not_silent_loss" and .coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and ((.roundTripEvidence // "") | length > 0))' \
     "backup assets declare full fail-visible coverage surfaces"
-# complianceStatus has two legal values (bd-nwyir). Conformance needs declared
-# runtime round-trip evidence. A row may admit it is not conformant only while
-# its round-trip evidence is still planned, and it must name the bead the
-# evidence is pending on.
+# complianceStatus has three legal values (bd-nwyir, bd-vxrcu). mustClauses is
+# the length of the named mustClauseList. Conformance needs runtime evidence
+# covering every clause. Partial runtime coverage and planned-only evidence must
+# each name the bead owning what is missing. The Rust contract also checks
+# that each cited test exists and reaches the clauses credited to it.
+# shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
-    'all(.assetCoverageMatrix[]; (.complianceStatus == "declared_conformant" and .roundTripEvidenceStatus == "runtime_evidence_declared" and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only" and ((.evidencePendingOn // "") | startswith("bd-"))))' \
+    '.mustClauseList as $m | all(.assetCoverageMatrix[]; .mustClauses == ($m | length) and all((.coveredClauses // [])[]; IN($m[])) and ((.complianceStatus == "declared_conformant" and .roundTripEvidenceStatus == "runtime_evidence_declared" and ((.coveredClauses // []) | length) == .mustClauses and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_runtime_partial" and .roundTripEvidenceStatus == "runtime_evidence_declared" and ((.coveredClauses // []) | length) > 0 and ((.coveredClauses // []) | length) < .mustClauses and .tested == ((.coveredClauses // []) | length) and .divergent == 0 and ((.evidencePendingOn // "") | startswith("bd-"))) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only" and .evidenceTests == null and ((.evidencePendingOn // "") | startswith("bd-")))))' \
     "backup coverage matrix claims are consistent with their evidence"
 # shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
