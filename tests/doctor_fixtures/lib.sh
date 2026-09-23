@@ -232,3 +232,165 @@ doctor_fixture_assert() {
 
     printf 'assert fixture ready: %s %s %s\n' "$fm_id" "$severity" "$subsystem" >&2
 }
+
+# ---------------------------------------------------------------------------
+# Real-corruption building blocks (bd-2oh15 P0 tranche). MOVES ONLY: an original
+# is moved into .fixture_baseline before a damaged version is written as a NEW
+# file. Nothing is deleted, and nothing is overwritten in place.
+# ---------------------------------------------------------------------------
+
+# Refuse a symlink or non-empty target rather than touching somebody's state.
+doctor_fixture_prepare_target() {
+    local target="${1:?target required}"
+    if [ -L "$target" ]; then
+        printf 'fixture refuses a symlink target: %s\n' "$target" >&2
+        return 2
+    fi
+    mkdir -p "$target"
+    if [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        printf 'fixture requires an empty target: %s\n' "$target" >&2
+        return 2
+    fi
+    mkdir -p "$target/.fixture_baseline"
+}
+
+# A real store with one source memory and a populated index, asserted healthy
+# before any damage. A failure mode is only meaningful against a real baseline.
+doctor_fixture_healthy_store() {
+    local fm_id="${1:?fm id required}"
+    local target="${2:?target required}"
+    local ee_bin="${3:?ee binary required}"
+    local base="$target/.fixture_baseline"
+    "$ee_bin" --workspace "$target" init --skip-boilerplate --json > "$base/init.json"
+    "$ee_bin" remember "Preserve this source memory while $fm_id is exercised." \
+        --workspace "$target" --level procedural --kind rule --json > "$base/remember.json"
+    "$ee_bin" index rebuild --workspace "$target" --json > "$base/index-healthy.json"
+    jq -e '.schema == "ee.response.v2" and .success == true and .data.memories_indexed >= 1' \
+        "$base/index-healthy.json" >/dev/null
+    "$ee_bin" doctor --workspace "$target" --json > "$base/doctor-healthy.json"
+    doctor_fixture_assert_health_report "$fm_id" "$base/doctor-healthy.json"
+}
+
+# Write <dst> as a NEW file: <src> with one 4096-byte page replaced by random
+# bytes. <src> is read, never modified.
+doctor_fixture_damaged_copy() {
+    local src="${1:?source required}"
+    local dst="${2:?destination required}"
+    local page="${3:?page index required}"
+    local off=$(( page * 4096 ))
+    {
+        head -c "$off" "$src"
+        head -c 4096 /dev/urandom
+        tail -c +"$(( off + 4096 + 1 ))" "$src"
+    } > "$dst"
+}
+
+doctor_fixture_sha256() {
+    shasum -a 256 -- "${1:?path required}" | cut -d' ' -f1
+}
+
+# NOT-DETECTED contract (orchestrator decision, bd-2oh15): a PINNED GAP.
+# doctor reports the damaged workspace healthy, --fix takes no action, and the
+# damaged artifact is byte-identical afterwards. The fixture's own assert.sh
+# must separately prove the damage is real with an independent witness. The day
+# doctor starts detecting this FM, this assertion FAILS on purpose: upgrade the
+# spec label and the fixture together (spec rule V6). Pinned gaps never count
+# toward coverage; the harness reports them as a separate GAPS count.
+# <artifact_rel> may be '-' when the damage is not a single file.
+doctor_fixture_assert_pinned_gap() {
+    local fm_id="${1:?fm id required}"
+    local artifact_rel="${2:?artifact path or - required}"
+    shift 2
+    local target
+    target="$(doctor_fixture_target)"
+    local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
+    local base="$target/.fixture_baseline"
+    local before=""
+    if [ "$artifact_rel" != "-" ]; then
+        before="$(doctor_fixture_sha256 "$target/$artifact_rel")"
+    fi
+    "$ee_bin" doctor --workspace "$target" "$@" --json > "$base/gap-doctor.json"
+    if ! jq -es '
+        length == 1 and (.[0] |
+            .schema == "ee.response.v2" and .success == true and
+            .data.healthy == true and .data.posture == "ok" and
+            (.data.actionable | type == "array" and length == 0))
+    ' "$base/gap-doctor.json" >/dev/null; then
+        printf 'fixture assert: %s is a PINNED GAP but doctor now reports something; upgrade the spec and fixture (V6); see %s\n' \
+            "$fm_id" "$base/gap-doctor.json" >&2
+        return 1
+    fi
+    "$ee_bin" doctor --workspace "$target" --fix --json > "$base/gap-fix.json"
+    if ! jq -es '
+        length == 1 and (.[0] |
+            .schema == "ee.response.v2" and .success == true and
+            .data.actionCount == 0 and (.data.fixerResults | length) == 0)
+    ' "$base/gap-fix.json" >/dev/null; then
+        printf 'fixture assert: %s is a PINNED GAP but --fix acted; upgrade the spec and fixture (V6); see %s\n' \
+            "$fm_id" "$base/gap-fix.json" >&2
+        return 1
+    fi
+    if [ -n "$before" ] && [ "$(doctor_fixture_sha256 "$target/$artifact_rel")" != "$before" ]; then
+        printf 'fixture assert: %s damaged artifact %s changed during doctor/--fix\n' \
+            "$fm_id" "$artifact_rel" >&2
+        return 1
+    fi
+    printf 'pinned gap confirmed: %s (doctor healthy, --fix 0 actions, damage intact) -- NOT coverage\n' \
+        "$fm_id" >&2
+}
+
+# REPORT-ONLY contract: doctor detects the FM (check + error code), but the
+# dispatch table has no entry for it, so --fix takes no action and records no
+# fixer result. The damage is untouched and still reported afterwards.
+# <view> is 'concise' (actionable[]) or 'full' (every check, --full).
+doctor_fixture_assert_report_only() {
+    local fm_id="${1:?fm id required}"
+    local check_name="${2:?check name required}"
+    local error_code="${3:?error code required}"
+    local view="${4:?concise or full required}"
+    local artifact_rel="${5:?artifact path or - required}"
+    local target
+    target="$(doctor_fixture_target)"
+    local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
+    local base="$target/.fixture_baseline"
+    local before="" doctor_args=(--json) filter
+    if [ "$view" = "full" ]; then
+        doctor_args=(--full --json)
+        filter='any(.. | objects | select(has("name") and has("errorCode")); .name == $check and .errorCode == $code)'
+    else
+        filter='any(.data.actionable[]?; .name == $check and .errorCode == $code)'
+    fi
+    if [ "$artifact_rel" != "-" ]; then
+        before="$(doctor_fixture_sha256 "$target/$artifact_rel")"
+    fi
+    local phase
+    for phase in before after; do
+        "$ee_bin" doctor --workspace "$target" "${doctor_args[@]}" > "$base/report-$phase.json"
+        if ! jq -es --arg check "$check_name" --arg code "$error_code" \
+            "length == 1 and (.[0] | .schema == \"ee.response.v2\" and .success == true and ($filter))" \
+            "$base/report-$phase.json" >/dev/null; then
+            printf 'fixture assert: %s: doctor (%s) did not report %s %s %s --fix; see %s\n' \
+                "$fm_id" "$view" "$check_name" "$error_code" "$phase" "$base/report-$phase.json" >&2
+            return 1
+        fi
+        if [ "$phase" = before ]; then
+            "$ee_bin" doctor --workspace "$target" --fix --json > "$base/report-fix.json"
+            if ! jq -es '
+                length == 1 and (.[0] |
+                    .schema == "ee.response.v2" and .success == true and
+                    .data.actionCount == 0 and (.data.fixerResults | length) == 0)
+            ' "$base/report-fix.json" >/dev/null; then
+                printf 'fixture assert: %s is REPORT-ONLY but --fix acted; upgrade the spec and fixture (V6); see %s\n' \
+                    "$fm_id" "$base/report-fix.json" >&2
+                return 1
+            fi
+        fi
+    done
+    if [ -n "$before" ] && [ "$(doctor_fixture_sha256 "$target/$artifact_rel")" != "$before" ]; then
+        printf 'fixture assert: %s artifact %s changed during a report-only --fix\n' \
+            "$fm_id" "$artifact_rel" >&2
+        return 1
+    fi
+    printf 'report-only fixture confirmed: %s (%s %s reported, --fix 0 actions, still reported)\n' \
+        "$fm_id" "$check_name" "$error_code" >&2
+}
