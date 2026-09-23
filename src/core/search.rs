@@ -5734,12 +5734,16 @@ fn query_assist_visible_candidates(
         read_connection,
         None,
     );
+    // `true`, as on every primary result path: in the default passthrough
+    // scopes this is also where the admitted memory's body is attached. With
+    // `false` the hits came back untouched, so every didYouMean suggestion
+    // rendered without `content` (bd-2vq2z.12).
     let (mut visible, _) = apply_memory_scope_visibility_with_metadata_mode_collecting(
         options,
         live_visible,
         &mut admission_degraded,
         read_connection,
-        false,
+        true,
         None,
         None,
     );
@@ -24192,6 +24196,78 @@ mod tests {
             query_assist_visible_candidates(&options, &hits, &mut degraded, Some(&connection))
                 .is_empty(),
             "strict scope must fail closed when any live query-assist candidate is out of scope"
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    // bd-2vq2z.12. didYouMean exists to turn a dead end into a next step, so a
+    // suggestion must say what it suggests. Index hits carry no body; ordinary
+    // results get it from the admitted memory during scope visibility, but the
+    // query-assist path skipped that enrichment in the default (passthrough)
+    // workspace scope, so every suggestion rendered without `content`. The hit
+    // here is shaped like an index hit -- no body in its metadata -- and the
+    // scope is the default one, which is exactly the case that failed.
+    #[test]
+    fn query_assist_did_you_mean_carries_admitted_memory_content() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-query-assist-content")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_42234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("query-assist-content".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = "mem_42000000000000000000000001";
+        let body =
+            "Release installers must pass live smoke validation before publishing artifacts.";
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: body.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.7,
+                    importance: 0.8,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        options.memory_scope = MemoryScope::Workspace;
+        let mut hit = synthetic_hit(memory_id, 0.016);
+        hit.metadata = Some(serde_json::json!({"validity_status": "current"}));
+
+        let mut degraded = Vec::new();
+        let visible =
+            query_assist_visible_candidates(&options, &[hit], &mut degraded, Some(&connection));
+        assert_eq!(visible.len(), 1, "the admitted memory stays a candidate");
+        let suggestion =
+            query_assist_did_you_mean_json(&visible[0], true, SearchContentPreview::Truncated);
+        let content = suggestion["content"]
+            .as_str()
+            .ok_or_else(|| format!("didYouMean must carry content: {suggestion}"))?;
+        assert!(
+            content.contains("installers") && content.contains("smoke"),
+            "didYouMean content must come from the admitted memory: {content}"
         );
         connection.close().map_err(|error| error.to_string())
     }
