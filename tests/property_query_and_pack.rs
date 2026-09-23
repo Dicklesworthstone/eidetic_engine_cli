@@ -110,22 +110,17 @@ fn redaction_level_for(raw: usize) -> RedactionLevel {
     RedactionLevel::all()[raw % RedactionLevel::all().len()]
 }
 
-#[path = "support/isolated_ee.rs"]
-mod isolated_ee;
-
-/// bd-rvrj2: each workspace gets its own ee data dir beside it, so a verdict
-/// never depends on the model or global store the host holds.
-fn ee_command(workspace: &Path) -> Result<Command, String> {
-    let mut root = workspace.as_os_str().to_os_string();
-    root.push(".ee-data");
-    isolated_ee::isolated_ee_command(Path::new(&root))
+fn ee_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ee")
 }
 
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
-    ee_command(workspace)?
+    Command::new(ee_binary())
         .arg("--workspace")
         .arg(workspace)
         .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
