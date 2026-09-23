@@ -476,7 +476,12 @@ fn damaged_store_workspace(damage: DamagedStore) -> Result<tempfile::TempDir, St
         ensure(
             output.status.success(),
             "real store setup step succeeds",
-            json!({ "step": label, "stderr": preview(&output.stderr) }),
+            json!({
+                "step": label,
+                "exitCode": output.status.code(),
+                "stdout": preview(&output.stdout),
+                "stderr": preview(&output.stderr),
+            }),
         )?;
     }
     // Provision the doctor runtime lock on the healthy store, before any
@@ -1016,7 +1021,12 @@ fn doctor_fix_on_a_store_that_lost_its_database_points_at_backups() -> TestResul
         ensure(
             output.status.success(),
             "real store setup step succeeds",
-            json!({ "step": label, "stderr": preview(&output.stderr) }),
+            json!({
+                "step": label,
+                "exitCode": output.status.code(),
+                "stdout": preview(&output.stdout),
+                "stderr": preview(&output.stderr),
+            }),
         )?;
     }
     let store = workspace.join(".ee");
