@@ -358,6 +358,66 @@ class GuidanceOnlyContract(unittest.TestCase):
         self.assertEqual(self.assert_outcome(True, "marker-only").returncode, 2)
 
 
+class UntestedRatchetContract(unittest.TestCase):
+    """doctor_fixture_untested_ratchet (bd-2oh15): the one UNTESTED pin every
+    counting sub-harness enforces. The real tree must sit exactly at the pin;
+    a planted extra untested fixture, and a pin left above reality, must both
+    be rejected."""
+
+    def setUp(self):
+        evidence_root = os.environ.get("EE_DOCTOR_ASSERTION_TEST_ROOT")
+        if evidence_root:
+            Path(evidence_root).mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix=self._testMethodName + "-", dir=evidence_root))
+        self.manifest = json.loads((HERE / "manifest.json").read_text())
+
+    def ratchet(self, src):
+        command = ["bash", "-c", 'set -euo pipefail; source "$1"; doctor_fixture_untested_ratchet ratchet-control "$2"',
+                   "ratchet-control", str(HERE / "lib.sh"), str(src)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60,
+                                shell=False, check=False)
+        (self.root / "ratchet.receipt.json").write_text(json.dumps({
+            "exit": result.returncode, "stdout": result.stdout,
+            "stderr": result.stderr}, indent=2) + "\n")
+        print(f"{self._testMethodName}: ratchet exit={result.returncode}; evidence={self.root}",
+              flush=True)
+        return result
+
+    def planted(self, relabel):
+        """A fixture source whose manifest relabels ONE fixture, with an empty
+        directory per fixture (the ratchet counts directories by label)."""
+        src = self.root / "src"
+        src.mkdir()
+        manifest = json.loads(json.dumps(self.manifest))
+        old, new = relabel
+        victim = next(f for f in manifest["fixtures"] if f["label"] == old)
+        victim["label"] = new
+        (src / "manifest.json").write_text(json.dumps(manifest))
+        for fixture in manifest["fixtures"]:
+            (src / fixture["id"]).mkdir()
+        return src
+
+    def test_real_tree_sits_exactly_at_the_pin(self):
+        result = self.ratchet(HERE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNCLASSIFIED (not tested, pin", result.stderr)
+
+    def test_planted_extra_unclassified_is_rejected(self):
+        result = self.ratchet(self.planted(("REPAIR", "UNCLASSIFIED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ratchet exceeded", result.stderr)
+
+    def test_planted_extra_unresolved_is_rejected(self):
+        result = self.ratchet(self.planted(("NOT-DETECTED", "UNRESOLVED")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ratchet exceeded", result.stderr)
+
+    def test_classified_fixture_with_unlowered_pin_is_rejected(self):
+        result = self.ratchet(self.planted(("UNCLASSIFIED", "REPAIR")))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("pin is stale", result.stderr)
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--probe"]:
         sys.exit(doctor_double())

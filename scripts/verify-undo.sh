@@ -13,8 +13,10 @@
 #              gap; if a gap stops reproducing the label is wrong, and that
 #              fails the run too.
 #   UNTESTED   UNCLASSIFIED, UNRESOLVED (marker-only). Not run. They never
-#              count as passes and never fail the run, but their number may
-#              only go down: the pins below fail the run if it grows.
+#              count as passes and never fail the run, but their number is
+#              held to the shared pin in tests/doctor_fixtures/lib.sh
+#              (doctor_fixture_untested_ratchet), which every counting
+#              sub-harness enforces.
 #
 # Driven by scripts/run-safety-harness.sh (bd-21joy stage 8.5 of
 # scripts/verify.sh). Exits 0 when every COVERAGE fixture passes, every GAP
@@ -29,11 +31,6 @@ FIXTURE_ROOT="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures}"
 FIXTURES_SRC="${EE_DOCTOR_FIXTURES_SRC:-$REPO_ROOT/tests/doctor_fixtures}"
 MANIFEST="$FIXTURES_SRC/manifest.json"
 EE_BIN="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
-
-# Ratchet pins (ruling c9954): lower these when a fixture is classified; never
-# raise them. A new fixture must arrive classified.
-MAX_UNCLASSIFIED=14
-MAX_UNRESOLVED=1
 
 if ! command -v "$EE_BIN" >/dev/null 2>&1; then
     # A harness that ran nothing is not a pass (bd-2oh15 ruling, option a).
@@ -56,8 +53,7 @@ COVERAGE_PASS=0
 COVERAGE_FAIL=0
 GAP_REPRODUCED=0
 GAP_LOST=0
-UNCLASSIFIED=0
-UNRESOLVED=0
+UNTESTED=0
 SKIP=0
 UNKNOWN=0
 FAILED_FMS=""
@@ -68,11 +64,7 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     bucket="$(doctor_fixture_bucket "$fm_id" "$MANIFEST")"
     case "$bucket" in
         untested)
-            if [ "$(doctor_fixture_label "$fm_id" "$MANIFEST")" = "UNRESOLVED" ]; then
-                UNRESOLVED=$((UNRESOLVED + 1))
-            else
-                UNCLASSIFIED=$((UNCLASSIFIED + 1))
-            fi
+            UNTESTED=$((UNTESTED + 1))
             continue
             ;;
         coverage | gap) ;;
@@ -119,17 +111,14 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
 done
 shopt -u nullglob
 
-echo "verify-undo: COVERAGE passed=$COVERAGE_PASS failed=$COVERAGE_FAIL; GAP reproduced=$GAP_REPRODUCED lost=$GAP_LOST; $UNCLASSIFIED UNCLASSIFIED (not tested, pin $MAX_UNCLASSIFIED); $UNRESOLVED UNRESOLVED (not tested, pin $MAX_UNRESOLVED); skipped=$SKIP unknown=$UNKNOWN fixture_root=$FIXTURE_ROOT" >&2
+echo "verify-undo: COVERAGE passed=$COVERAGE_PASS failed=$COVERAGE_FAIL; GAP reproduced=$GAP_REPRODUCED lost=$GAP_LOST; $UNTESTED UNTESTED (not run); skipped=$SKIP unknown=$UNKNOWN fixture_root=$FIXTURE_ROOT" >&2
 
 status=0
 if [ $((COVERAGE_PASS + COVERAGE_FAIL + GAP_REPRODUCED + GAP_LOST)) -eq 0 ]; then
     echo "verify-undo: no COVERAGE or GAP fixture ran; a run that tests nothing is not a pass" >&2
     status=1
 fi
-if [ "$UNCLASSIFIED" -gt "$MAX_UNCLASSIFIED" ] || [ "$UNRESOLVED" -gt "$MAX_UNRESOLVED" ]; then
-    echo "verify-undo: UNTESTED ratchet exceeded (UNCLASSIFIED $UNCLASSIFIED > $MAX_UNCLASSIFIED or UNRESOLVED $UNRESOLVED > $MAX_UNRESOLVED); classify the new fixture" >&2
-    status=1
-fi
+doctor_fixture_untested_ratchet verify-undo "$FIXTURES_SRC" || status=1
 if [ -n "$FAILED_FMS" ]; then
     echo "verify-undo: failed FMs:$FAILED_FMS" >&2
     status=1

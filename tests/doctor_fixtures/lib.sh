@@ -420,3 +420,44 @@ doctor_fixture_label() {
     local manifest="${2:?manifest path required}"
     jq -r --arg id "$fm_id" '[.fixtures[] | select(.id == $id) | .label] | first // ""' "$manifest"
 }
+
+# THE shared UNTESTED ratchet pin (bd-2oh15 rulings c9954 and the follow-up):
+# one pin for every sub-harness that counts fixtures. It is exact in both
+# directions: more untested fixtures than the pin fails (a new fixture must
+# arrive classified), and fewer also fails until the pin is lowered in the same
+# commit that classified the fixture, so the pin can only move down.
+DOCTOR_FIXTURE_PIN_UNCLASSIFIED=14
+DOCTOR_FIXTURE_PIN_UNRESOLVED=1
+
+# Counts the UNCLASSIFIED and UNRESOLVED fixture directories under
+# <fixtures_src>, prints the counts for <harness>, and fails unless both equal
+# their pins.
+doctor_fixture_untested_ratchet() {
+    local harness="${1:?harness name required}"
+    local src="${2:?fixtures source required}"
+    local manifest="$src/manifest.json"
+    local unclassified=0 unresolved=0 fm_dir label
+    for fm_dir in "$src"/fm-*; do
+        [ -d "$fm_dir" ] || continue
+        label="$(doctor_fixture_label "$(basename "$fm_dir")" "$manifest")"
+        case "$label" in
+            UNCLASSIFIED) unclassified=$((unclassified + 1)) ;;
+            UNRESOLVED) unresolved=$((unresolved + 1)) ;;
+        esac
+    done
+    printf '%s: %s UNCLASSIFIED (not tested, pin %s); %s UNRESOLVED (not tested, pin %s)\n' \
+        "$harness" "$unclassified" "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" \
+        "$unresolved" "$DOCTOR_FIXTURE_PIN_UNRESOLVED" >&2
+    if [ "$unclassified" -gt "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" ] ||
+        [ "$unresolved" -gt "$DOCTOR_FIXTURE_PIN_UNRESOLVED" ]; then
+        printf '%s: UNTESTED ratchet exceeded; classify the new fixture instead of raising the pin\n' \
+            "$harness" >&2
+        return 1
+    fi
+    if [ "$unclassified" -lt "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" ] ||
+        [ "$unresolved" -lt "$DOCTOR_FIXTURE_PIN_UNRESOLVED" ]; then
+        printf '%s: UNTESTED ratchet pin is stale; lower DOCTOR_FIXTURE_PIN_* in tests/doctor_fixtures/lib.sh to %s/%s\n' \
+            "$harness" "$unclassified" "$unresolved" >&2
+        return 1
+    fi
+}

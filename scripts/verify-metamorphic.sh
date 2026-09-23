@@ -10,6 +10,11 @@
 # Run `ee doctor --workspace <fixture> --json` twice with no mutations
 # between, diff the report.checks[] arrays. Any difference is a bug
 # (non-deterministic detector).
+#
+# Fixtures are bucketed by manifest label like verify-undo.sh (bd-2oh15
+# rulings): COVERAGE and GAP fixtures run; UNTESTED (UNCLASSIFIED,
+# UNRESOLVED) marker-only fixtures are not run and never count as passes,
+# held to the shared pin (doctor_fixture_untested_ratchet).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EE_BIN="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
 FIXTURE_ROOT="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures-metamorphic}"
 FIXTURES_SRC="${EE_DOCTOR_FIXTURES_SRC:-$REPO_ROOT/tests/doctor_fixtures}"
+MANIFEST="$FIXTURES_SRC/manifest.json"
 
 if ! command -v "$EE_BIN" >/dev/null 2>&1; then
     # A harness that ran nothing is not a pass (bd-2oh15 ruling, option a).
@@ -27,11 +33,18 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "verify-metamorphic: jq required" >&2
     exit 64
 fi
+if [ ! -f "$MANIFEST" ]; then
+    echo "verify-metamorphic: fixture manifest $MANIFEST missing" >&2
+    exit 64
+fi
+# shellcheck source=tests/doctor_fixtures/lib.sh
+. "$FIXTURES_SRC/lib.sh"
 
 mkdir -p "$FIXTURE_ROOT"
 PASS=0
 FAIL=0
 SKIP=0
+UNTESTED=0
 FAILED_FMS=""
 SKIPPED_FMS=""
 
@@ -49,6 +62,20 @@ hash_file() {
 shopt -s nullglob
 for fm_dir in "$FIXTURES_SRC"/fm-*; do
     fm_id="$(basename "$fm_dir")"
+    bucket="$(doctor_fixture_bucket "$fm_id" "$MANIFEST")"
+    case "$bucket" in
+        untested)
+            UNTESTED=$((UNTESTED + 1))
+            continue
+            ;;
+        coverage | gap) ;;
+        *)
+            FAIL=$((FAIL + 1))
+            FAILED_FMS="$FAILED_FMS $fm_id(label:${bucket#unknown:})"
+            echo "verify-metamorphic[$fm_id]: no usable manifest label ('${bucket#unknown:}')" >&2
+            continue
+            ;;
+    esac
     target="$FIXTURE_ROOT/$fm_id"
     mkdir -p "$target"
     # Round-6 self-review: don't silently swallow corrupt.sh failures —
@@ -95,13 +122,20 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
 done
 shopt -u nullglob
 
-echo "verify-metamorphic: passed=$PASS failed=$FAIL skipped=$SKIP" >&2
+echo "verify-metamorphic: passed=$PASS failed=$FAIL skipped=$SKIP; $UNTESTED UNTESTED (not run)" >&2
+# Every verdict below is reported; none hides another behind an early exit.
+status=0
+if [ $((PASS + FAIL + SKIP)) -eq 0 ]; then
+    echo "verify-metamorphic: no COVERAGE or GAP fixture ran; a run that tests nothing is not a pass" >&2
+    status=1
+fi
+doctor_fixture_untested_ratchet verify-metamorphic "$FIXTURES_SRC" || status=1
 if [ "$FAIL" -gt 0 ]; then
     echo "verify-metamorphic: failed:$FAILED_FMS" >&2
-    exit 1
+    status=1
 fi
 if [ "$SKIP" -gt 0 ]; then
     echo "verify-metamorphic: skipped:$SKIPPED_FMS (corrupt.sh broken — refusing to declare success)" >&2
-    exit 1
+    status=1
 fi
-exit 0
+exit "$status"

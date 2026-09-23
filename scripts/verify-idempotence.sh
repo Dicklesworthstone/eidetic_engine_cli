@@ -139,16 +139,19 @@ done
 shopt -u nullglob
 
 echo "verify-idempotence: passed=$PASS failed=$FAIL skipped=$SKIP; $UNTESTED UNTESTED (not run)" >&2
+# Every verdict below is reported; none hides another behind an early exit.
+status=0
 if [ $((PASS + FAIL + SKIP)) -eq 0 ]; then
     echo "verify-idempotence: no COVERAGE or GAP fixture ran; a run that tests nothing is not a pass" >&2
-    exit 1
+    status=1
 fi
+doctor_fixture_untested_ratchet verify-idempotence "$FIXTURES_SRC" || status=1
 if [ "$FAIL" -gt 0 ]; then
     echo "verify-idempotence: failed:$FAILED_FMS" >&2
-    exit 1
+    status=1
 fi
 if [ "$SKIP" -gt 0 ]; then
     echo "verify-idempotence: skipped:$SKIPPED_FMS (corrupt.sh broken — refusing to declare success)" >&2
-    exit 1
+    status=1
 fi
-exit 0
+exit "$status"
