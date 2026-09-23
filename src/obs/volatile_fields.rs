@@ -418,6 +418,31 @@ pub fn normalize_workspace_daemon_socket_paths(text: &str) -> (String, usize) {
     (out, replaced)
 }
 
+/// [`normalize_workspace_daemon_socket_paths`] applied to every string in a
+/// JSON value, returning how many paths were replaced. The one walker for every
+/// harness that compares doctor JSON (bd-47x3l): a second harness without it
+/// byte-compared the host's socket path and red on every other worker.
+pub fn normalize_workspace_daemon_socket_paths_in_json(value: &mut Value) -> usize {
+    match value {
+        Value::String(text) => {
+            let (normalized, replaced) = normalize_workspace_daemon_socket_paths(text);
+            if replaced > 0 {
+                *text = normalized;
+            }
+            replaced
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .map(normalize_workspace_daemon_socket_paths_in_json)
+            .sum(),
+        Value::Object(object) => object
+            .values_mut()
+            .map(normalize_workspace_daemon_socket_paths_in_json)
+            .sum(),
+        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+    }
+}
+
 /// One predicate for "this line is the timing bullet", shared by the counter
 /// above and the stripper below so the number subtracted from the prose is
 /// always the number of bullets actually removed.
@@ -547,7 +572,8 @@ mod tests {
     use super::{
         VOLATILE_FIELD_NAMES, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER, is_volatile_field_name,
         normalize_pack_timing_degradations, normalize_pack_timing_markdown,
-        normalize_workspace_daemon_socket_paths, strip_volatile_fields,
+        normalize_workspace_daemon_socket_paths, normalize_workspace_daemon_socket_paths_in_json,
+        strip_volatile_fields,
     };
 
     type TestResult = Result<(), String>;
@@ -820,6 +846,37 @@ mod tests {
         }
         if worker_out != message(WORKSPACE_DAEMON_SOCKET_PLACEHOLDER) {
             return Err(format!("unexpected normalized message: {worker_out}"));
+        }
+        Ok(())
+    }
+
+    /// bd-47x3l. The JSON walker every doctor-comparing harness shares: the
+    /// same doctor-shaped document from two hosts must normalize to one value,
+    /// counting one path each, while a non-host socket string stays put.
+    #[test]
+    fn workspace_daemon_socket_json_reads_the_same_on_two_hosts() -> TestResult {
+        let doctor = |path: &str| {
+            serde_json::json!({"data": {"checks": [
+                {"name": "daemon_socket_reachable",
+                 "message": format!("Optional daemon socket is not present at {path}; ok.")},
+                {"name": "default_socket",
+                 "message": "at <workspace>/.runtime/ee/daemon.sock"}
+            ]}})
+        };
+        let mut worker = doctor("/tmp/ee-1000/d-3f005d529dc893aa9eb9a073.sock");
+        let mut other = doctor("/tmp/ee-1001/d-dd8d8dfe03d558040e031a6f.sock");
+        if worker == other {
+            return Err("fixtures are identical; the test proves nothing".into());
+        }
+        let worker_hits = normalize_workspace_daemon_socket_paths_in_json(&mut worker);
+        let other_hits = normalize_workspace_daemon_socket_paths_in_json(&mut other);
+        if worker_hits != 1 || other_hits != 1 {
+            return Err(format!(
+                "each document must replace exactly one path, got {worker_hits} and {other_hits}"
+            ));
+        }
+        if worker != other || worker != doctor(WORKSPACE_DAEMON_SOCKET_PLACEHOLDER) {
+            return Err(format!("host-dependent or wrong output: {worker}"));
         }
         Ok(())
     }

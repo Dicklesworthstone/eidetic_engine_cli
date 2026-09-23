@@ -397,6 +397,9 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
     normalize_doctor_platform_variants(&mut value);
     replace_host_backed_subtrees(&mut value);
     scrub_package_version_prose(&mut value, env!("CARGO_PKG_VERSION"));
+    // bd-47x3l: the same shared rule tests/golden.rs uses. Without it this
+    // harness byte-compared the host's `/tmp/ee-<euid>/d-<hash>.sock` path.
+    ee::obs::normalize_workspace_daemon_socket_paths_in_json(&mut value);
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
 }
 
