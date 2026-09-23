@@ -32,7 +32,7 @@ for tool in jq shasum; do
     fi
 done
 
-doctor_fixture_corrupt "$FM" "P0" "cass_integration"
+doctor_fixture_corrupt "$FM" "P1" "cass_integration"
 PATH="$path_without_cass" "$ee_bin" doctor --workspace "$target" --full --json > "$base/doctor-corrupt.json"
 if ! jq -e 'any(.. | objects | select(has("name") and has("errorCode")); .name == "cass" and .errorCode == "EE-E506")' \
     "$base/doctor-corrupt.json" >/dev/null; then

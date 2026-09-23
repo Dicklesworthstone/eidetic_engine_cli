@@ -10,18 +10,28 @@
 
 ## Canonical first-aid order
 
-1. **`ee doctor --fix-plan --json`** — dry-run; reports the auto-fixable
-   findings the doctor would apply along with their blast radius and
-   the deterministic `mutate()` log. Pure read; no mutation.
-2. **`ee doctor --fix --json`** — applies the auto-fixable findings
-   through the single `mutate()` chokepoint with reversible/undo
-   metadata. Honors `EE_DOCTOR_FIX_DRY_RUN=1` for dry-run override and
-   `EE_DOCTOR_FIX_STRICT=1` to fail closed on findings the fixer
-   cannot handle.
-3. **`ee doctor --json` (read-only)** — full diagnostic report. Use to
-   inspect findings that the auto-fixer flagged as not-yet-implemented
-   or that require human approval (e.g. anything that would touch the
-   work tree's tracked files, anything mutating shared infrastructure).
+1. **`ee doctor --fix-plan --json`** — pure read; no mutation. Lists, in
+   order, every failing check that carries a repair hint, with the hint's
+   command. Each step's `fixMode` says what `ee doctor --fix` does for it:
+   `auto_repair` (it repairs it), `auto_guidance` (it records guidance and
+   repairs nothing) or `manual` (it does not act); `fixFinding` names the
+   dispatched finding. `fixableIssues` counts only `auto_repair` steps.
+2. **`ee doctor --fix --json`** — applies the findings `--fix` can
+   dispatch (listed below) through the single `mutate()` chokepoint with
+   undo metadata; `ee doctor --undo <runId> --json` reverses a run.
+   It always runs every dispatchable finding: `--fix --only <id>` is a
+   usage error, because `--fix` declares a conflict with `--only`. A
+   failing check with no dispatch is left untouched and gets no
+   `fixerResults` entry. Required core checks that receive only guidance or
+   no dispatch remain in `unresolvedCoreChecks`, including checks without a
+   repair hint. Such a run is persisted as `completed_partial`, reports
+   `fixerDispatchPending: true`, and exits **6**. Optional advisory checks do
+   not trigger that exit. Successful mutation receipts remain `applied` and
+   can still be undone even when other required repairs remain pending.
+3. **`ee doctor --json` (read-only)** — the diagnostic report. Use it to
+   inspect findings `--fix` does not dispatch, or that require human
+   approval (e.g. anything that would touch the work tree's tracked
+   files, anything mutating shared infrastructure).
 4. **Manual skill playbooks** — fall through to these only after
    steps 1–3 fail to converge.
 
@@ -43,15 +53,37 @@ auto-resolve safely.
 
 ## How to know if `ee doctor --fix` already handles your situation
 
-Run `ee doctor --capabilities --json`. The capability descriptor lists
-each fixer kind the binary supports, the situations it auto-resolves,
-and its `mutate()` reversibility class. The 12 P0/P1 fixers landed by
-bd-tu4s8 are listed there; anything not on the list still needs the
-manual skill content.
+`ee doctor --fix` dispatches six findings, keyed on the failing check's
+error code, and only the two index findings repair anything. The other
+fixers in `src/core/doctor_fixers.rs` are not dispatched by `--fix`:
 
-If `ee doctor --fix-plan` reports `degradedCodes: ["doctor_no_auto_fix_available"]`
-for your situation, that is the explicit hand-off signal to the
-fallback skill.
+| Finding (`findingCode`) | Failing check | Operation | Effect |
+| --- | --- | --- | --- |
+| `database_empty` | `database` `EE-E206` (0-byte store) | `manual` | guidance only (`guidance_recorded`): recover from backups |
+| `database_corrupted` | `database` `EE-E202` (store cannot be opened) | `manual` | guidance only (`guidance_recorded`): recover from backups |
+| `search_index_missing` | `EE-E300` | `run_index_rebuild` | repairs (`applied`) |
+| `search_index_stale` | `EE-E301`, or any other failing `search_index` check | `run_index_rebuild` | repairs (`applied`) |
+| `schema_migration_pending` | `EE-E700` | `run_migration` | guidance only (`guidance_recorded`): records `ee migrate run`, migrates nothing |
+| `cass_integration_drift` | `EE-E507` | `manual` | guidance only (`guidance_recorded`) |
+
+While the store is empty or cannot be opened (`EE-E206` or `EE-E202` on
+the `database` check), `--fix` skips the index and migration findings:
+they read the damaged store (bd-xa6ud).
+
+Anything else still needs the manual skill content. The table is the
+dispatch in `fix_finding_for_check` (`src/core/doctor_fixers.rs`), which
+`--fix` and `--fix-plan` both read; `--fix-plan` reports it per step as
+`fixMode`. `ee doctor --capabilities --json` lists the same table as
+`fix_dispatch` (`finding`, `op_kind`, `effect`: `repair` or `guidance`).
+Its `op_kinds` is different: that is every op the `mutate()` chokepoint
+accepts, most of which no dispatched fixer produces (bd-223vl M5).
+
+If `ee doctor --fix` leaves a failing check without a `fixerResults`
+entry, or records it with outcome `guidance_recorded`, that is the
+hand-off signal to the fallback skill. `success: true` means the command
+produced its report; it does not override exit 6 or the persisted partial
+status. Inspect `unresolvedCoreChecks` before treating the workspace as
+repaired, then rerun the read-only doctor after manual recovery.
 
 ## Why this precedence
 
@@ -60,7 +92,7 @@ fallback skill.
   Manual skill execution depends on the operator following the steps
   in the right order; the auto-fixer enforces ordering and
   reversibility by construction.
-- **Verifiable evidence** — the `ee.doctor.fix.v1` response carries a
+- **Verifiable evidence** — the `ee.doctor.fix_summary.v1` response carries a
   structured record of what was done, what was backed up, and what
   remains. Pasting that into a bead is a clearer audit trail than
   pasting the output of an interactive skill run.

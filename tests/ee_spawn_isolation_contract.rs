@@ -20,9 +20,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[path = "support/isolated_ee.rs"]
-mod isolated_ee;
-
+use crate::isolated_ee;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;

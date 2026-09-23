@@ -4430,6 +4430,34 @@ fn score_json(score: f32) -> String {
     json_number(f64::from(score), 6)
 }
 
+/// A MEASURED float (not a score) as the shortest round-trip JSON number: the
+/// spelling serde gives the same field on other surfaces. Non-finite is null.
+///
+/// bd-lecnm: status rendered `avgBatchSize` through [`score_json`], so it read
+/// `0.000000` there while `ee diag contention` (serde) and the status golden
+/// read `0.0`. Six-decimal quantization is the contract for scores (bd-8jvg.5,
+/// rank stability across arches); an average batch size is not a score.
+fn measured_f64_json(value: f64) -> String {
+    serde_json::Number::from_f64(value)
+        .map_or_else(|| "null".to_owned(), |number| number.to_string())
+}
+
+#[cfg(test)]
+mod measured_f64_json_tests {
+    use super::{measured_f64_json, score_json};
+
+    #[test]
+    fn measured_floats_use_the_shortest_round_trip_spelling() {
+        assert_eq!(measured_f64_json(0.0), "0.0");
+        assert_eq!(measured_f64_json(2.5), "2.5");
+        assert_eq!(measured_f64_json(1.0 / 3.0), "0.3333333333333333");
+        assert_eq!(measured_f64_json(f64::NAN), "null");
+        assert_eq!(measured_f64_json(f64::INFINITY), "null");
+        // The control: the score formatter spells the same zero differently.
+        assert_eq!(score_json(0.0), "0.000000");
+    }
+}
+
 fn string_array_json<I, S>(values: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -4911,7 +4939,7 @@ fn render_write_group_commit_status_json(
         write.field_str("redactionStatus", report.redaction_status);
         write.field_raw("batches", &report.batches.to_string());
         write.field_raw("writesCoalesced", &report.writes_coalesced.to_string());
-        write.field_raw("avgBatchSize", &score_json(report.avg_batch_size as f32));
+        write.field_raw("avgBatchSize", &measured_f64_json(report.avg_batch_size));
         write.field_raw("fsyncCount", &report.fsync_count.to_string());
         write.field_raw("fsyncSaved", &report.fsync_saved.to_string());
         write.field_raw(
@@ -6848,6 +6876,10 @@ pub fn render_fix_plan_json(plan: &FixPlan) -> String {
                 obj.field_str("errorCode", code.id);
             }
             obj.field_str("command", step.command);
+            obj.field_str("fixMode", step.fix_mode.as_str());
+            if let Some(finding) = step.fix_finding {
+                obj.field_str("fixFinding", finding);
+            }
         });
         d.field_object("cassImportGuidance", |guidance| {
             guidance.field_str("status", plan.cass_import_guidance.status.as_str());
@@ -6895,24 +6927,32 @@ pub fn render_fix_plan_human(plan: &FixPlan) -> String {
         output.push_str("No issues to fix. All subsystems are healthy.\n");
     } else {
         output.push_str(&format!(
-            "Found {} issue(s), {} fixable:\n\n",
+            "Found {} issue(s), {} repaired by `ee doctor --fix`:\n\n",
             plan.total_issues, plan.fixable_issues
         ));
 
         for step in &plan.steps {
+            let auto = match (step.fix_mode, step.fix_finding) {
+                (crate::core::doctor_fixers::FixMode::AutoRepair, Some(finding)) => {
+                    format!("--fix repairs this ({finding})")
+                }
+                (crate::core::doctor_fixers::FixMode::AutoGuidance, Some(finding)) => {
+                    format!("--fix records guidance only ({finding}); nothing is repaired")
+                }
+                _ => "manual: --fix does not act on this".to_owned(),
+            };
             output.push_str(&format!(
-                "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n\n",
+                "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n   Auto:  {}\n\n",
                 step.order,
                 step.subsystem,
                 step.severity.as_str().to_uppercase(),
                 step.issue,
-                step.command
+                step.command,
+                auto
             ));
         }
 
-        if plan.fixable_issues > 0 {
-            output.push_str("Run commands in order to resolve issues.\n");
-        }
+        output.push_str("Run commands in order to resolve issues.\n");
     }
 
     output.push_str("\nCASS import guidance:\n");

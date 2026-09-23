@@ -37,15 +37,13 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
-#[path = "support/isolated_ee.rs"]
-mod isolated_ee;
-
 /// bd-rvrj2: each workspace gets its own ee data dir beside it, so a verdict
-/// never depends on the model or global store the host holds.
+/// never depends on the model or global store the host holds. The helper
+/// module is declared once, in tests/suites/integration_property.rs.
 fn ee_command(workspace: &Path) -> Result<Command, String> {
     let mut root = workspace.as_os_str().to_os_string();
     root.push(".ee-data");
-    isolated_ee::isolated_ee_command(Path::new(&root))
+    super::isolated_ee::isolated_ee_command(Path::new(&root))
 }
 
 fn target_root() -> PathBuf {
