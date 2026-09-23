@@ -21,7 +21,7 @@
       "id": "fm-state_files-empty-or-truncated-database",
       "severity": "P0",
       "subsystem": "state_files",
-      "label": "PINNED-DEFECT",
+      "label": "GUIDANCE-ONLY",
       "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {

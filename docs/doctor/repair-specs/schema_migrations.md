@@ -18,15 +18,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-schema_migrations-migration-drift-checksum-mismatch
 
-- **Label:** GUIDANCE-ONLY (report-only)
+- **Label:** GUIDANCE-ONLY
 - **Severity:** P0. Scored P0 as `pop-migrations-checksum_drift`.
 - **Detector:** `database` reports EE-E202 with an EE-E040 `migration_drift` message, and the posture is `blocked`.
 - **Real trigger:** SQL sets the stored checksum of the lowest applied migration in `ee_schema_migrations` to `blake3:` followed by 64 zeros. A byte copy of the pre-drift database is kept in `.fixture_baseline/ee.db.pre-drift`.
-- **Repair:** None. EE-E202 has no dispatch in `doctor_fix_json`, so `--fix` reports 0 actions.
+- **Repair:** None. Since 9ed78b70d, `--fix` records one guidance-only fixer for the EE-E202 store (finding `database_corrupted`, operation `manual`, outcome `guidance_recorded`); before it, `--fix` reported 0 actions. The guidance names corruption although the cause is migration drift.
 - **Undo:** Not applicable: nothing is written. The tampered checksum is still present after `--fix`.
-- **Oracle:** `doctor_fixture_assert_report_only` for `database` EE-E202 in concise mode: detected before and after `--fix`, 0 actions. The report message contains `migration_drift`.
+- **Oracle:** `doctor_fixture_assert_guidance_only` for `database_corrupted` / `database` EE-E202, plus: posture `blocked` before and after, every fixer result manual guidance, the `migration_drift` message still reported, an identical content digest around `--fix`, and the tampered checksum still stored.
 - **Negative control:** `doctor_fixture_healthy_store` asserts the undamaged store is healthy before the update.
-- **Pinned sha:** 9188a0661, measured on the ab83e3f23 release binary.
+- **Pinned sha:** a2c2f950f, measured on its stamped release build (the report-only oracle held until 9ed78b70d).
 
 ## fm-schema_migrations-shard-fanout-catalog-hash-mismatch
 

@@ -423,9 +423,13 @@ fn doctor_fixtures_labels_match_what_the_scripts_do() {
                     "{id}: REPAIR must assert an applied outcome"
                 );
             }
+            // Report-only fixtures record no fixer at all; guidance-only ones
+            // record manual guidance and must still leave the damage reported.
             "GUIDANCE-ONLY" => assert!(
-                assert.contains("doctor_fixture_assert_report_only "),
-                "{id}: GUIDANCE-ONLY must use doctor_fixture_assert_report_only"
+                assert.contains("doctor_fixture_assert_report_only ")
+                    || assert.contains("doctor_fixture_assert_guidance_only "),
+                "{id}: GUIDANCE-ONLY must use doctor_fixture_assert_report_only or \
+                 doctor_fixture_assert_guidance_only"
             ),
             "NOT-DETECTED" => assert!(
                 assert.contains("doctor_fixture_assert_pinned_gap "),

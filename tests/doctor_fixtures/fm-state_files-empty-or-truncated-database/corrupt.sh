@@ -4,9 +4,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/doctor_fixtures/lib.sh
 . "$SCRIPT_DIR/../lib.sh"
 
-# DETECTED, --fix CRASHES (pinned defect bd-xa6ud; bd-2oh15 c9850): the real
+# GUIDANCE-ONLY (bd-xa6ud fixed at 9ed78b70d; bd-2oh15 c9944): the real
 # database is MOVED into the baseline and replaced by its own first 8192 bytes.
-# doctor reports database EE-E202 (posture blocked) plus search_index EE-E300.
+# doctor reports database and search_index EE-E202 (posture blocked).
 FM="fm-state_files-empty-or-truncated-database"
 target="$(doctor_fixture_target)"
 ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"

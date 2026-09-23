@@ -13,43 +13,37 @@ ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
 base="$target/.fixture_baseline"
 test -f "$(doctor_fixture_marker_dir "$target")/$FM.json"
 
-# PINNED DEFECT bd-xa6ud. Detection is asserted as it is today, and so is the
-# crash: --fix dispatches the EE-E300 index repair against a database it cannot
-# open and fails with doctor_runtime_io. When bd-xa6ud is fixed this assertion
-# FAILS on purpose; upgrade the spec label and this fixture together (V6).
-# NOT coverage.
-#
-# TARGET ORACLE once bd-xa6ud lands (orchestrator ruling on bd-xa6ud):
-# GUIDANCE-ONLY -- a distinct finding (not EE-E700); posture blocked before AND
-# after --fix; --fix exits 0 with guidance, no repair write and no migration;
-# workspace bytes identical before and after; no crash. The workspace-bytes rule
-# is already enforced below, around the pinned --fix.
-before="$(doctor_fixture_sha256 "$target/.ee/ee.db")"
-doctor_fixture_content_digest "$target" > "$base/pinned-before-fix.sha256"
-"$ee_bin" doctor --workspace "$target" --json > "$base/pinned-doctor.json"
+# GUIDANCE-ONLY (bd-xa6ud / bd-wswg0, fixed at 9ed78b70d; oracle measured on a
+# stamped 466ee56ee build, bd-2oh15 c9944). A truncated store is reported and
+# never touched: database and search_index both report EE-E202 and posture is
+# blocked before and after --fix; --fix exits 0 and records only manual
+# guidance (database_corrupted); every workspace byte is unchanged.
+"$ee_bin" doctor --workspace "$target" --json > "$base/guidance-before.json"
 jq -es '
     length == 1 and (.[0] |
         .schema == "ee.response.v2" and .success == true and .data.posture == "blocked" and
         any(.data.actionable[]; .name == "database" and .errorCode == "EE-E202") and
-        any(.data.actionable[]; .name == "search_index" and .errorCode == "EE-E300"))
-' "$base/pinned-doctor.json" >/dev/null
-set +e
-"$ee_bin" doctor --workspace "$target" --fix --json > "$base/pinned-fix.json" 2> "$base/pinned-fix.stderr"
-rc=$?
-set -e
-if [ "$rc" -ne 3 ] || ! jq -es '
+        any(.data.actionable[]; .name == "search_index" and .errorCode == "EE-E202"))
+' "$base/guidance-before.json" >/dev/null
+# A repair would request an index rebuild; guidance must not.
+test ! -e "$target/.ee/index-rebuild-request.json"
+doctor_fixture_content_digest "$target" > "$base/guidance-before-fix.sha256"
+doctor_fixture_assert_guidance_only "$FM" "database_corrupted" "database" "EE-E202" \
+    ".ee/index-rebuild-request.json"
+jq -es '
     length == 1 and (.[0] |
-        .schema == "ee.error.v2" and .error.code == "doctor_runtime_io" and
-        (.error.message | contains("build doctor index repair")))
-' "$base/pinned-fix.json" >/dev/null; then
-    printf 'fixture assert: %s pinned defect bd-xa6ud changed (--fix exit %s); upgrade the spec and fixture (V6); see %s\n' \
-        "$FM" "$rc" "$base/pinned-fix.json" >&2
+        .data.status == "completed_ok" and
+        .data.guidanceOnlyFixerCount == (.data.fixerResults | length) and
+        all(.data.fixerResults[]; .operation == "manual" and .outcome == "guidance_recorded"))
+' "$base/doctor-fix.json" >/dev/null
+jq -es '
+    length == 1 and (.[0] |
+        .data.posture == "blocked" and
+        any(.data.actionable[]; .name == "search_index" and .errorCode == "EE-E202"))
+' "$base/doctor-after.json" >/dev/null
+doctor_fixture_content_digest "$target" > "$base/guidance-after-fix.sha256"
+if ! cmp -s "$base/guidance-before-fix.sha256" "$base/guidance-after-fix.sha256"; then
+    printf 'fixture assert: %s guidance-only --fix changed workspace bytes\n' "$FM" >&2
     exit 1
 fi
-test "$(doctor_fixture_sha256 "$target/.ee/ee.db")" = "$before"
-doctor_fixture_content_digest "$target" > "$base/pinned-after-fix.sha256"
-if ! cmp -s "$base/pinned-before-fix.sha256" "$base/pinned-after-fix.sha256"; then
-    printf 'fixture assert: %s --fix changed workspace bytes while crashing\n' "$FM" >&2
-    exit 1
-fi
-printf 'pinned defect confirmed: %s (EE-E202 blocked; --fix exit 3 doctor_runtime_io, bd-xa6ud) -- NOT coverage\n' "$FM" >&2
+printf 'guidance-only confirmed: %s (EE-E202 blocked before and after; --fix exit 0, manual guidance only; bytes unchanged)\n' "$FM" >&2
