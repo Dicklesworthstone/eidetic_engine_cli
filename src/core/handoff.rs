@@ -6259,6 +6259,173 @@ memories_revised = 3
     }
 
     #[test]
+    fn handoff_capsule_and_resume_reuse_the_shared_pack_attestation_bundle_hash() -> TestResult {
+        // bd-1n0np.22.3: handoff embeds the same pack replay summary builder as
+        // the support bundle. The capsule and its resume rendering must carry the
+        // same public bundle hash as a direct attestation of the same pack.
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(workspace.join(".ee").join("ee.db"))
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+        let workspace_id = "wsp_01234567890123456789012348";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("handoff-pack-attestation".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+        let memory_id = "mem_00000000000000000000hpat01";
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Replay the handoff pack before relying on it.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://handoff/pack-attestation".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["pack".to_owned(), "handoff".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("failed to insert memory: {error}"))?;
+        let pack_id = "pack_00000000000000000000hpat01";
+        let pack_items = vec![crate::db::CreatePackItemInput {
+            pack_id: pack_id.to_owned(),
+            memory_id: memory_id.to_owned(),
+            rank: 1,
+            section: "procedural_rules".to_owned(),
+            estimated_tokens: 11,
+            relevance: 0.9,
+            utility: 0.8,
+            combined_score: None,
+            attempt_family_multiplicity: None,
+            why: "selected for handoff attestation parity".to_owned(),
+            diversity_key: Some("procedural:rule:handoff".to_owned()),
+            provenance_json: serde_json::json!({
+                "schema": "ee.test.provenance.v1",
+                "source": "handoff pack attestation parity"
+            })
+            .to_string(),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: Some("test".to_owned()),
+        }];
+        connection
+            .insert_pack_record(
+                pack_id,
+                &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
+                    workspace_id: workspace_id.to_owned(),
+                    query: "handoff pack attestation parity".to_owned(),
+                    profile: "compact".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 11,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"handoff-pack-attestation").to_hex()
+                    ),
+                    degraded_json: None,
+                    created_by: Some("ee context".to_owned()),
+                },
+                &pack_items,
+                &[],
+            )
+            .map_err(|error| format!("failed to insert pack record: {error}"))?;
+        let direct = crate::core::attest::build_pack_attestation(&connection, pack_id)
+            .map_err(|error| format!("direct pack attestation failed: {error}"))?
+            .ok_or_else(|| "direct pack attestation must exist".to_owned())?;
+        let public = crate::core::attest::public_attestation_bundle(&direct);
+        let expected_hash = public.bundle_hash();
+        ensure(
+            expected_hash.starts_with("blake3:"),
+            "direct pack attestation hash is blake3",
+        )?;
+
+        let output = workspace.join("handoff.json");
+        let create = create_handoff(&CreateOptions {
+            workspace: workspace.clone(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+            task_frame_id: None,
+            bind_to_machine: false,
+            machine_salt_path: None,
+            redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+        })
+        .map_err(|error| error.message())?;
+        let created = create
+            .pack_replay_summary
+            .as_ref()
+            .ok_or_else(|| "handoff create must embed a pack replay summary".to_owned())?;
+        ensure_equal(
+            &created
+                .pointer("/packs/0/attestationBundle/bundleHash")
+                .and_then(serde_json::Value::as_str),
+            &Some(expected_hash.as_str()),
+            "handoff create pack attestation bundle hash",
+        )?;
+        ensure_equal(
+            &created
+                .pointer("/packs/0/attestationBundle/subject/id")
+                .and_then(serde_json::Value::as_str),
+            &Some(public.subject.id.as_str()),
+            "handoff create pack attestation public subject id",
+        )?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: workspace.clone(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: true,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &resume
+                .pack_replay_summary
+                .as_ref()
+                .and_then(|summary| summary.pointer("/packs/0/attestationBundle/bundleHash"))
+                .and_then(serde_json::Value::as_str),
+            &Some(expected_hash.as_str()),
+            "handoff resume pack attestation bundle hash",
+        )?;
+        ensure(
+            resume
+                .status_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains(&expected_hash)),
+            "handoff resume status summary must render the shared bundle hash",
+        )
+    }
+
+    #[test]
     fn handoff_preview_create_and_resume_include_redacted_task_frame() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let created = crate::core::task_frame::create_task_frame(
