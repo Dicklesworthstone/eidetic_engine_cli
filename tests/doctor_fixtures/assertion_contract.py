@@ -456,6 +456,112 @@ class UntestedRatchetContract(unittest.TestCase):
                       result.stderr)
 
 
+CRASH_HARNESS = HERE.parent.parent / "scripts" / "verify-crash-recovery.sh"
+GUIDANCE_ONLY_FIX = {
+    "schema": "ee.response.v2", "success": True, "degraded": [],
+    "data": {"schema": "ee.doctor.fix_summary.v1", "status": "completed_partial",
+             "unresolvedCoreChecks": [
+                 {"name": "database", "severity": "error", "errorCode": "EE-E200",
+                  "fixMode": "auto_guidance", "fixFinding": "database_missing"},
+                 {"name": "search_index", "severity": "error", "errorCode": "EE-E300",
+                  "fixMode": "manual", "fixFinding": None}],
+             "fixerResults": [{"findingCode": "database_missing", "operation": "manual",
+                               "outcome": "guidance_recorded"}]}}
+
+
+class CrashRecoveryContract(unittest.TestCase):
+    """scripts/verify-crash-recovery.sh (bd-2oh15 ruling c10026): a retry that
+    exits 6 passes ONLY in the admissible guidance-only state -- no error
+    envelope, every unresolved core check guidance-class, every fixer receipt
+    guidance_recorded, and store bytes unchanged. A doctor double stands in for
+    ee, so these controls verify the harness, not doctor."""
+
+    def setUp(self):
+        evidence_root = os.environ.get("EE_DOCTOR_ASSERTION_TEST_ROOT")
+        if evidence_root:
+            Path(evidence_root).mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix=self._testMethodName + "-", dir=evidence_root))
+        self.double = self.root / "ee-double"
+        self.double.write_text(
+            "#!/usr/bin/env bash\n"
+            'ws=""; prev=""; for a in "$@"; do [ "$prev" = "--workspace" ] && ws="$a"; prev="$a"; done\n'
+            'n=$(( $(cat "$DOUBLE_COUNT" 2>/dev/null || echo 0) + 1 )); printf \'%s\' "$n" > "$DOUBLE_COUNT"\n'
+            'if [ "$n" -ge 2 ] && [ -n "${DOUBLE_WRITE:-}" ]; then printf x > "$ws/.ee/$DOUBLE_WRITE"; fi\n'
+            'cat "$DOUBLE_BODY"\n'
+            'exit "$DOUBLE_EXIT"\n')
+        self.double.chmod(0o700)
+
+    def run_harness(self, body, exit_code, write=None):
+        (self.root / "body.json").write_text(body if isinstance(body, str) else json.dumps(body))
+        env = dict(os.environ, EE_DOCTOR_FIXTURE_BINARY=str(self.double),
+                   DOUBLE_BODY=str(self.root / "body.json"), DOUBLE_EXIT=str(exit_code),
+                   DOUBLE_COUNT=str(self.root / "calls"), TMPDIR=str(self.root))
+        if write:
+            env["DOUBLE_WRITE"] = write
+        result = subprocess.run(["bash", str(CRASH_HARNESS)], env=env, capture_output=True,
+                                text=True, timeout=60, shell=False, check=False)
+        (self.root / "harness.receipt.json").write_text(json.dumps({
+            "exit": result.returncode, "stdout": result.stdout,
+            "stderr": result.stderr}, indent=2) + "\n")
+        print(f"{self._testMethodName}: harness exit={result.returncode}; evidence={self.root}",
+              flush=True)
+        return result
+
+    def fix_with(self, **changes):
+        body = json.loads(json.dumps(GUIDANCE_ONLY_FIX))
+        body["data"].update(changes)
+        return body
+
+    def test_guidance_only_exit_6_passes(self):
+        result = self.run_harness(GUIDANCE_ONLY_FIX, 6)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS (retry exit=6, guidance-only", result.stderr)
+
+    def test_non_guidance_unresolved_entry_fails(self):
+        checks = json.loads(json.dumps(GUIDANCE_ONLY_FIX["data"]["unresolvedCoreChecks"]))
+        checks[1]["fixMode"] = "auto_repair"
+        result = self.run_harness(self.fix_with(unresolvedCoreChecks=checks), 6)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("outside the admissible guidance-only state", result.stderr)
+
+    def test_error_envelope_with_exit_6_fails(self):
+        body = {"schema": "ee.error.v2",
+                "error": {"code": "doctor_runtime_io", "message": "build doctor index repair"}}
+        result = self.run_harness(body, 6)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("outside the admissible guidance-only state", result.stderr)
+
+    def test_non_guidance_fixer_receipt_fails(self):
+        receipts = [{"findingCode": "search_index_missing", "operation": "run_index_rebuild",
+                     "outcome": "applied"}]
+        result = self.run_harness(self.fix_with(fixerResults=receipts), 6)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("outside the admissible guidance-only state", result.stderr)
+
+    def test_empty_unresolved_set_with_exit_6_fails(self):
+        result = self.run_harness(self.fix_with(unresolvedCoreChecks=[]), 6)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("outside the admissible guidance-only state", result.stderr)
+
+    def test_store_byte_change_with_exit_6_fails(self):
+        result = self.run_harness(GUIDANCE_ONLY_FIX, 6, write="ee.db")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("changed store bytes", result.stderr)
+
+    def test_completed_retry_still_passes(self):
+        body = {"schema": "ee.response.v2", "success": True,
+                "data": {"schema": "ee.doctor.fix_summary.v1", "status": "completed_ok"}}
+        result = self.run_harness(body, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS (retry exit=0)", result.stderr)
+
+    def test_runtime_io_crash_still_fails(self):
+        body = {"schema": "ee.error.v2", "error": {"code": "doctor_runtime_io"}}
+        result = self.run_harness(body, 3)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("unexpected exit=3", result.stderr)
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--probe"]:
         sys.exit(doctor_double())
