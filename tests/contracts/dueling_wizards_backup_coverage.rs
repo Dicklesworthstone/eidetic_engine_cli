@@ -481,12 +481,12 @@ const NOT_CONFORMANT_EVIDENCE_PENDING: &str = "not_conformant_evidence_pending";
 /// Check one matrix row's compliance claim against its own counters and its
 /// round-trip evidence status.
 ///
-/// `declared_conformant` keeps every full-conformance check. The pending value
-/// is legal only while round-trip evidence is planned, and its counters need
-/// only be internally consistent: a row that has not been round-tripped must
-/// not be forced to report full coverage. Rows declared conformant on
-/// planned-only evidence stay governed by the grandfathered ratchet in
-/// `conformance_is_never_declared_on_planned_only_evidence`.
+/// `declared_conformant` keeps every full-conformance check and also requires
+/// declared runtime round-trip evidence: full counters over planned-only
+/// evidence are the claim bd-nwyir corrected. The pending value is legal only
+/// while round-trip evidence is planned, must name the bead the evidence is
+/// pending on, and its counters need only be internally consistent: a row that
+/// has not been round-tripped must not be forced to report full coverage.
 fn row_compliance_error(row: &Value, context: &str) -> TestResult {
     let must_clauses = u64_field(row, "/mustClauses", context)?;
     let tested = u64_field(row, "/tested", context)?;
@@ -508,6 +508,14 @@ fn row_compliance_error(row: &Value, context: &str) -> TestResult {
 
     match string_field(row, "/complianceStatus", context)? {
         DECLARED_CONFORMANT => {
+            if string_field(row, "/roundTripEvidenceStatus", context)?
+                != "runtime_evidence_declared"
+            {
+                return Err(format!(
+                    "{context}: {DECLARED_CONFORMANT} requires roundTripEvidenceStatus \
+                     runtime_evidence_declared; conformance cannot rest on planned-only evidence"
+                ));
+            }
             if tested != must_clauses || passing != tested || divergent != 0 {
                 return Err(format!(
                     "{context}: tested, passing, and divergent must describe full conformance"
@@ -524,6 +532,16 @@ fn row_compliance_error(row: &Value, context: &str) -> TestResult {
                 return Err(format!(
                     "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} is only legal while \
                      roundTripEvidenceStatus is planned_contract_only"
+                ));
+            }
+            let pending_on = row
+                .pointer("/evidencePendingOn")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !pending_on.starts_with("bd-") {
+                return Err(format!(
+                    "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} must name the bead its \
+                     evidence is pending on in evidencePendingOn, got {pending_on:?}"
                 ));
             }
             if tested > must_clauses || passing > tested || divergent > tested {
@@ -553,6 +571,7 @@ fn compliance_status_can_record_non_conformance_but_only_on_planned_evidence() -
             "passing": passing,
             "divergent": divergent,
             "scoreMilli": passing * 1000 / REQUIRED_ASSET_MUST_CLAUSES,
+            "evidencePendingOn": "bd-example",
         })
     };
     let full = REQUIRED_ASSET_MUST_CLAUSES;
@@ -620,6 +639,37 @@ fn compliance_status_can_record_non_conformance_but_only_on_planned_evidence() -
     if !e.as_ref().is_err_and(|e| e.contains("full conformance")) {
         return Err(format!(
             "arm E must keep the full-conformance check, got {e:?}"
+        ));
+    }
+    // F: the bd-nwyir defect itself -- full counters declared conformant while
+    // the evidence field says nothing was round-tripped.
+    let f = row_compliance_error(
+        &row(DECLARED_CONFORMANT, "planned_contract_only", full, full, 0),
+        "arm F",
+    );
+    if !f
+        .as_ref()
+        .is_err_and(|e| e.contains("cannot rest on planned-only evidence"))
+    {
+        return Err(format!(
+            "arm F must be rejected for its planned-only evidence, got {f:?}"
+        ));
+    }
+    // G: a pending row must say what it is pending on.
+    let mut unowned = row(
+        NOT_CONFORMANT_EVIDENCE_PENDING,
+        "planned_contract_only",
+        0,
+        0,
+        0,
+    );
+    if let Some(fields) = unowned.as_object_mut() {
+        fields.remove("evidencePendingOn");
+    }
+    let g = row_compliance_error(&unowned, "arm G");
+    if !g.as_ref().is_err_and(|e| e.contains("evidencePendingOn")) {
+        return Err(format!(
+            "arm G must be rejected for naming no pending bead, got {g:?}"
         ));
     }
     Ok(())
@@ -871,6 +921,7 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
         "privacy_contract_enforced",
         "declared_conformant",
         "not_conformant_evidence_pending",
+        "evidencePendingOn",
         "failureScenarios",
         "missing_derived_asset",
         "corrupt_derived_asset_hash",
@@ -895,36 +946,23 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
 
 /// GRANDFATHERED UNRESOLVED CLAIMS -- **not** approved exceptions. bd-nwyir.
 ///
-/// Each entry is an asset kind whose `complianceStatus` says
+/// Each entry would be an asset kind whose `complianceStatus` says
 /// `declared_conformant` while its `roundTripEvidenceStatus` says
 /// `planned_contract_only`. That pairing is the defect: a surface reporting an
 /// asset as proven while recording, in the field beside it, that nothing was
 /// ever round-tripped.
 ///
-/// NOTHING HERE HAS BEEN DECIDED OR APPROVED. These eleven are OPEN QUESTIONS
-/// awaiting a recorded decision on bd-nwyir: for each row, either the CLAIM is
-/// corrected (it is not conformant) or the EVIDENCE is produced (a real round
-/// trip). This list exists only so a TWELFTH cannot be added quietly while
-/// those decisions are pending. A row's presence here is not permission for it
-/// to stay, and this gate does not resolve any of them.
+/// EMPTY, AND IT STAYS EMPTY. This list once held all eleven rows as open
+/// questions. The recorded bd-nwyir decision corrected every one of those
+/// claims to `not_conformant_evidence_pending`, each naming the bead its
+/// evidence is pending on. Nothing may be added back: a row earns
+/// `declared_conformant` by producing runtime round-trip evidence, never by
+/// appearing here.
 ///
-/// The evidence status is recorded beside each kind on purpose. A bare count
-/// cannot tell a reader whether a row was fixed or merely swapped for a
-/// different offender, and swapping is exactly what a count-only baseline
-/// permits silently.
-const GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS: &[(&str, &str)] = &[
-    ("attestation_bundles", "planned_contract_only"),
-    ("derived_outcome_evidence", "planned_contract_only"),
-    ("error_fingerprints", "planned_contract_only"),
-    ("memory_anchors", "planned_contract_only"),
-    ("memory_sentinel_results", "planned_contract_only"),
-    ("memory_sentinel_specs", "planned_contract_only"),
-    ("pack_candidate_impressions", "planned_contract_only"),
-    ("query_miss_ledger", "planned_contract_only"),
-    ("source_write_stats", "planned_contract_only"),
-    ("typed_memory_fields", "planned_contract_only"),
-    ("workspace_generations", "planned_contract_only"),
-];
+/// Entries would carry the evidence status beside each kind, because a bare
+/// count cannot tell a reader whether a row was fixed or merely swapped for a
+/// different offender.
+const GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS: &[(&str, &str)] = &[];
 
 /// A surface may not be declared conformant while its own round-trip evidence
 /// field says nothing was round-tripped. bd-nwyir.
@@ -933,12 +971,12 @@ const GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS: &[(&str, &str)] = &[
 /// the asset's `roundTripEvidence`. It never checks `complianceStatus` against
 /// either, so those two cannot disagree and the pair is structurally incapable
 /// of detecting the state it exists to detect. Measured 2026-09-19: 11 of 11
-/// rows declared conformant, 11 of 11 on planned-only evidence.
+/// rows declared conformant, 11 of 11 on planned-only evidence. Corrected
+/// under bd-nwyir: 0 of 11.
 ///
-/// RATCHETS DOWN ONLY. Today's eleven is a ceiling, never a target: a twelfth
-/// offender fails, and so does a grandfathered row that gets resolved while
-/// the list still names it. A baseline that only blocks growth becomes a floor
-/// nobody ever descends.
+/// RATCHETS DOWN ONLY, and it is now at zero: any offender fails, and so would
+/// a grandfathered row that got resolved while the list still named it. A
+/// baseline that only blocks growth becomes a floor nobody ever descends.
 #[test]
 fn conformance_is_never_declared_on_planned_only_evidence() -> TestResult {
     // Overridable so the ratchet can be proven against a real copy of the

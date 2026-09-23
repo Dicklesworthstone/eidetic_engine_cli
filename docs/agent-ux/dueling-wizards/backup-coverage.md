@@ -95,27 +95,37 @@ coverage surfaces, and privacy-forbidden fields.
 
 `coverageStatus=full_surface_set_declared` means the asset declares all six
 backup surfaces from the checklist. `roundTripEvidenceStatus` is currently
-`planned_contract_only` for every row because runtime dueling-wizards schema
-work has not landed yet. `privacyStatus=privacy_contract_enforced` applies to
+`planned_contract_only` for every row, because no asset's `roundTripEvidence`
+names a runtime proof yet. `privacyStatus=privacy_contract_enforced` applies to
 `memory_anchors`; assets without a privacy contract use `not_applicable`.
 
 `complianceStatus` takes one of two values, and the gate ties each to the
 row's evidence:
 
-- `declared_conformant` requires `mustClauses=10`, `tested=10`, `passing=10`,
-  `divergent=0` and `scoreMilli` at or above 950.
+- `declared_conformant` requires
+  `roundTripEvidenceStatus=runtime_evidence_declared`, `mustClauses=10`,
+  `tested=10`, `passing=10`, `divergent=0` and `scoreMilli` at or above 950.
+  Conformance can never rest on planned-only evidence.
 - `not_conformant_evidence_pending` is legal only while
-  `roundTripEvidenceStatus=planned_contract_only`. Its counters must be
+  `roundTripEvidenceStatus=planned_contract_only`, and the row must name the
+  bead its evidence is pending on in `evidencePendingOn`. Its counters must be
   internally consistent (`tested` at most `mustClauses`, `passing` at most
   `tested`, `scoreMilli` computed from `passing`) but are not forced to full
   coverage, so a row that has not been round-tripped can say so.
 
-Every row currently carries `mustClauses=10`, `tested=10`, `passing=10`,
-`divergent=0`, `scoreMilli=1000`, and `complianceStatus=declared_conformant`,
-all on planned-only evidence. Those eleven claims are unresolved and are held
-in a ratchet list pending a recorded decision on bd-nwyir; they are not
-approved. Until the field could hold a second value, no row could make that
-gap visible.
+Every row is currently `not_conformant_evidence_pending` with
+`tested=0`, `passing=0`, `divergent=0` and `scoreMilli=0`: none has declared
+runtime round-trip evidence, so none counts a clause as tested. Until
+bd-nwyir, all eleven claimed `declared_conformant` with full counters on that
+same planned-only evidence, and the field had no second value that could say
+otherwise.
+
+- `pack_candidate_impressions`, `derived_outcome_evidence` and
+  `error_fingerprints` are pending on `bd-vxrcu`. Their producers exist, and
+  `src/core/backup.rs` holds inline backup/restore tests that touch them. What
+  is missing is the accounting: nobody has mapped the ten must-clauses to those
+  tests' assertions or cited the tests here.
+- The other eight kinds are pending on `bd-1n0np.23.2`.
 
 ## Failure Scenarios
 

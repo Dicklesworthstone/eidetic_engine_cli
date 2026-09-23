@@ -504,10 +504,12 @@ assert_jq_file "$BACKUP_MANIFEST" \
 assert_jq_file "$BACKUP_MANIFEST" \
     '.coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and all(.assets[]; .hashPolicy == "blake3_required" and .missingAssetFailure == "degraded_not_silent_loss" and .coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and ((.roundTripEvidence // "") | length > 0))' \
     "backup assets declare full fail-visible coverage surfaces"
-# complianceStatus has two legal values (bd-nwyir). A row may admit it is not
-# conformant, but only while its round-trip evidence is still planned.
+# complianceStatus has two legal values (bd-nwyir). Conformance needs declared
+# runtime round-trip evidence. A row may admit it is not conformant only while
+# its round-trip evidence is still planned, and it must name the bead the
+# evidence is pending on.
 assert_jq_file "$BACKUP_MANIFEST" \
-    'all(.assetCoverageMatrix[]; (.complianceStatus == "declared_conformant" and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only"))' \
+    'all(.assetCoverageMatrix[]; (.complianceStatus == "declared_conformant" and .roundTripEvidenceStatus == "runtime_evidence_declared" and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only" and ((.evidencePendingOn // "") | startswith("bd-"))))' \
     "backup coverage matrix claims are consistent with their evidence"
 # shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
