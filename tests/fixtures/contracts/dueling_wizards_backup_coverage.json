@@ -14,6 +14,28 @@
     "manifest_rehash",
     "roundtrip_e2e"
   ],
+  "mustClauseList": [
+    "backup_create",
+    "backup_inspect",
+    "backup_verify",
+    "backup_restore",
+    "manifest_rehash",
+    "roundtrip_e2e",
+    "hash_blake3",
+    "missing_asset_degraded",
+    "side_path_restore"
+  ],
+  "mustClauseAnchors": {
+    "backup_create": [["create_backup("]],
+    "backup_inspect": [["inspect_backup("]],
+    "backup_verify": [["verify_backup("]],
+    "backup_restore": [["restore_backup_to_side_path"]],
+    "manifest_rehash": [["manifest_hash_mismatch"]],
+    "roundtrip_e2e": [["create_backup(", "restore_backup_to_side_path"]],
+    "hash_blake3": [["verify_backup(", "blake3"]],
+    "missing_asset_degraded": [["derived_asset_missing"], ["\"missing_chunk\""]],
+    "side_path_restore": [["restore_backup_to_side_path"]]
+  },
   "policy": {
     "allMigrationBackupAssetKindsCovered": true,
     "hashPolicy": "blake3_required",
@@ -85,17 +107,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 6,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "privacy_contract_enforced",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "pack_candidate_impressions",
@@ -105,17 +128,36 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 6,
+      "passing": 6,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 666,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidenceStatus": "planned_contract_only",
+      "roundTripEvidenceStatus": "runtime_evidence_declared",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_runtime_partial",
+      "evidencePendingOn": "bd-vxrcu",
+      "coveredClauses": [
+        "backup_create",
+        "backup_verify",
+        "backup_restore",
+        "roundtrip_e2e",
+        "missing_asset_degraded",
+        "side_path_restore"
+      ],
+      "evidenceTests": [
+        {
+          "test": "default_backup_restores_pack_history_and_replay",
+          "clauses": ["backup_create", "backup_verify", "backup_restore", "roundtrip_e2e", "side_path_restore"]
+        },
+        {
+          "test": "pack_history_rejects_tampering_and_rolls_back",
+          "clauses": ["missing_asset_degraded"]
+        }
+      ]
     },
     {
       "assetKind": "derived_outcome_evidence",
@@ -125,17 +167,39 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 5,
+      "passing": 5,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 555,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidenceStatus": "planned_contract_only",
+      "roundTripEvidenceStatus": "runtime_evidence_declared",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_runtime_partial",
+      "evidencePendingOn": "bd-vxrcu",
+      "coveredClauses": [
+        "backup_create",
+        "backup_restore",
+        "roundtrip_e2e",
+        "missing_asset_degraded",
+        "side_path_restore"
+      ],
+      "evidenceTests": [
+        {
+          "test": "default_backup_restores_learning_signals_and_live_review",
+          "clauses": ["backup_create", "backup_restore", "roundtrip_e2e", "side_path_restore"]
+        },
+        {
+          "test": "learning_signals_reject_tampering_and_roll_back",
+          "clauses": ["missing_asset_degraded"]
+        },
+        {
+          "test": "default_backup_restores_recorded_history_and_live_consumers",
+          "clauses": ["backup_create", "backup_restore", "roundtrip_e2e", "side_path_restore"]
+        }
+      ]
     },
     {
       "assetKind": "error_fingerprints",
@@ -145,17 +209,35 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 5,
+      "passing": 5,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 555,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidenceStatus": "planned_contract_only",
+      "roundTripEvidenceStatus": "runtime_evidence_declared",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_runtime_partial",
+      "evidencePendingOn": "bd-vxrcu",
+      "coveredClauses": [
+        "backup_create",
+        "backup_restore",
+        "roundtrip_e2e",
+        "missing_asset_degraded",
+        "side_path_restore"
+      ],
+      "evidenceTests": [
+        {
+          "test": "default_backup_restores_error_recall_and_live_diagnosis",
+          "clauses": ["backup_create", "backup_restore", "roundtrip_e2e", "side_path_restore"]
+        },
+        {
+          "test": "error_recall_rejects_tampering_and_rolls_back",
+          "clauses": ["missing_asset_degraded"]
+        }
+      ]
     },
     {
       "assetKind": "memory_sentinel_specs",
@@ -165,17 +247,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "memory_sentinel_results",
@@ -185,17 +268,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "typed_memory_fields",
@@ -205,17 +289,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "attestation_bundles",
@@ -225,17 +310,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "query_miss_ledger",
@@ -245,17 +331,18 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "workspace_generations",
@@ -265,37 +352,40 @@
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_conformant_evidence_pending",
+      "evidencePendingOn": "bd-1n0np.23.2"
     },
     {
       "assetKind": "source_write_stats",
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "allocationCount": 1,
       "ownerBeadCount": 1,
       "coverageSurfaceCount": 6,
       "privacyForbiddenFieldCount": 0,
-      "mustClauses": 10,
-      "tested": 10,
-      "passing": 10,
+      "mustClauses": 9,
+      "tested": 0,
+      "passing": 0,
       "divergent": 0,
-      "scoreMilli": 1000,
+      "scoreMilli": 0,
       "coverageStatus": "full_surface_set_declared",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "declared_conformant"
+      "complianceStatus": "not_applicable_not_stored",
+      "plannedAllocation": "V128_SOURCE_WRITE_STATS: dueling_wizards_migration_registry.json allocation source_write_stats, status planned, not implemented",
+      "scopeRuling": "bd-1n0np.23.2 orchestrator ruling 2 (2026-09-23): no stored asset today; bd-1n0np.8.5 closed on computation only (compute_source_write_stats over caller-supplied observations), so there is nothing to back up. Building V128 or withdrawing the reservation is an operator decision."
     }
   ],
   "assets": [
@@ -353,7 +443,7 @@
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidence": "planned",
+      "roundTripEvidence": "src/core/backup.rs inline tests, partial; see assetCoverageMatrix evidenceTests",
       "coverageSurfaces": [
         "backup_create",
         "backup_inspect",
@@ -371,7 +461,7 @@
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidence": "planned",
+      "roundTripEvidence": "src/core/backup.rs inline tests, partial; see assetCoverageMatrix evidenceTests",
       "coverageSurfaces": [
         "backup_create",
         "backup_inspect",
@@ -389,7 +479,7 @@
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
-      "roundTripEvidence": "planned",
+      "roundTripEvidence": "src/core/backup.rs inline tests, partial; see assetCoverageMatrix evidenceTests",
       "coverageSurfaces": [
         "backup_create",
         "backup_inspect",
@@ -511,7 +601,7 @@
       "assetKind": "source_write_stats",
       "migrationAllocationIds": ["source_write_stats"],
       "ownerBeads": ["bd-1n0np.8.5"],
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",

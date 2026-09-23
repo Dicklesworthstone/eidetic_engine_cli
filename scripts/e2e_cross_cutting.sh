@@ -504,9 +504,18 @@ assert_jq_file "$BACKUP_MANIFEST" \
 assert_jq_file "$BACKUP_MANIFEST" \
     '.coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and all(.assets[]; .hashPolicy == "blake3_required" and .missingAssetFailure == "degraded_not_silent_loss" and .coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and ((.roundTripEvidence // "") | length > 0))' \
     "backup assets declare full fail-visible coverage surfaces"
+# complianceStatus has four legal values (bd-nwyir, bd-vxrcu, bd-1n0np.23.2).
+# mustClauses is the length of the named mustClauseList. Conformance needs
+# runtime evidence covering every clause. Partial runtime coverage and
+# planned-only evidence must each name the bead owning what is missing.
+# not_applicable_not_stored is legal only with storageClass planned_not_stored
+# (and the reverse): it cites and counts nothing, is pending on nothing, and
+# names its planned allocation and the scope ruling. The Rust contract also
+# checks that each cited test exists and reaches the clauses credited to it.
+# shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
-    'all(.assetCoverageMatrix[]; .complianceStatus == "declared_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
-    "backup coverage matrix is conformant"
+    '.mustClauseList as $m | all(.assetCoverageMatrix[]; .mustClauses == ($m | length) and all((.coveredClauses // [])[]; IN($m[])) and ((.storageClass == "planned_not_stored") == (.complianceStatus == "not_applicable_not_stored")) and ((.complianceStatus == "declared_conformant" and .roundTripEvidenceStatus == "runtime_evidence_declared" and ((.coveredClauses // []) | length) == .mustClauses and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_runtime_partial" and .roundTripEvidenceStatus == "runtime_evidence_declared" and ((.coveredClauses // []) | length) > 0 and ((.coveredClauses // []) | length) < .mustClauses and .tested == ((.coveredClauses // []) | length) and .divergent == 0 and ((.evidencePendingOn // "") | startswith("bd-"))) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only" and .evidenceTests == null and ((.evidencePendingOn // "") | startswith("bd-"))) or (.complianceStatus == "not_applicable_not_stored" and .roundTripEvidenceStatus == "planned_contract_only" and .evidenceTests == null and ((.coveredClauses // []) | length) == 0 and .tested == 0 and .passing == 0 and .divergent == 0 and .evidencePendingOn == null and ((.plannedAllocation // "") | length > 0) and ((.scopeRuling // "") | length > 0))))' \
+    "backup coverage matrix claims are consistent with their evidence"
 # shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
     '(.assets[] | select(.assetKind == "memory_anchors") | .privacyContract) as $p | $p.rawAnchorValuesAllowed == false and $p.valueMaterialPolicy == "hash_or_redacted_only" and $p.manifestRedactionClass == "hash" and $p.restoreValidation == "hashes_roundtrip_without_raw_values" and (($p.forbiddenFields | sort) == ["anchor_value","raw_anchor_value","raw_command","raw_path","raw_schema","raw_symbol"]) and ($p.serializedFields | index("anchor_value") == null) and ($p.serializedFields | index("raw_anchor_value") == null) and ($p.serializedFields | index("raw_path") == null)' \

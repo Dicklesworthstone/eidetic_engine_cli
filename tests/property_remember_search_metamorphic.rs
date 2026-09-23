@@ -51,8 +51,13 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
+/// bd-rvrj2: each workspace gets its own ee data dir beside it, so a verdict
+/// never depends on the model or global store the host holds. The helper
+/// module is declared once, in tests/suites/integration_property.rs.
+fn ee_command(workspace: &Path) -> Result<Command, String> {
+    let mut root = workspace.as_os_str().to_os_string();
+    root.push(".ee-data");
+    super::isolated_ee::isolated_ee_command(Path::new(&root))
 }
 
 fn target_root() -> PathBuf {
@@ -76,12 +81,10 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    ee_command(workspace)?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -90,12 +93,10 @@ fn run_ee_search(workspace: &Path, query_args: &[&str]) -> Result<Output, String
     let mut args: Vec<&str> = vec!["--json"];
     args.push("search");
     args.extend_from_slice(query_args);
-    Command::new(ee_binary())
+    ee_command(workspace)?
         .arg("--workspace")
         .arg(workspace)
         .args(&args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee search {}: {error}", query_args.join(" ")))
 }
