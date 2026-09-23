@@ -126,6 +126,12 @@ pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
 pub const SEARCH_LEXICAL_ONLY_CODE: &str = "search_lexical_only";
 /// Posture reason emitted alongside [`SEARCH_LEXICAL_ONLY_CODE`].
 pub const SEARCH_LEXICAL_ONLY_REASON: &str = "lexical_only";
+/// The bundled embedding model is present but its `.verified` receipt is
+/// missing or stale, so every process re-hashes it before loading (bd-h1xbv).
+pub const EMBED_MODEL_RECEIPT_STALE_CODE: &str = "embed_model_receipt_stale";
+pub const EMBED_MODEL_RECEIPT_STALE_MESSAGE: &str = "The bundled embedding model's `.verified` receipt is missing or stale (a chmod or chown changes file metadata), so every process re-hashes the 512 MB model before loading it. Results are unaffected; only startup cost grows.";
+pub const EMBED_MODEL_RECEIPT_STALE_REPAIR: &str =
+    "Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt.";
 /// Repair command for [`SEARCH_LEXICAL_ONLY_CODE`] when a semantic embedder is
 /// active but nothing is embedded yet: a rebuild embeds the corpus.
 pub const SEARCH_LEXICAL_ONLY_REPAIR: &str = "ee index rebuild --workspace .";
@@ -2644,6 +2650,14 @@ impl StatusReport {
                 options.workspace_path.as_deref(),
                 search_semantic,
             );
+            // Only for a workspace with a usable index: the probe is cheap but
+            // reads the machine-wide model cache, which goldens do not isolate.
+            if matches!(capabilities.search, CapabilityStatus::Ready) {
+                push_embed_model_receipt_stale_degradation(
+                    &mut degradations,
+                    !super::index::stale_receipt_potion_model_dirs().is_empty(),
+                );
+            }
         }
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
         // Derived from the already-computed report rather than re-probing, so
@@ -4531,6 +4545,20 @@ fn push_runtime_capability_degradation(
                 repair: "Run `ee doctor --json`.",
             });
         }
+    }
+}
+
+fn push_embed_model_receipt_stale_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    receipt_stale: bool,
+) {
+    if receipt_stale {
+        degradations.push(DegradationReport {
+            code: EMBED_MODEL_RECEIPT_STALE_CODE,
+            severity: "low",
+            message: EMBED_MODEL_RECEIPT_STALE_MESSAGE,
+            repair: EMBED_MODEL_RECEIPT_STALE_REPAIR,
+        });
     }
 }
 
@@ -8580,6 +8608,33 @@ mod tests {
             pack_posture_status(SubsystemPostureStatus::Ok, search_status),
             SubsystemPostureStatus::DegradedRecoverable,
             "pack posture follows lexical-only search",
+        )
+    }
+
+    #[test]
+    fn stale_model_receipt_emits_an_advisory_with_the_fetch_repair() -> TestResult {
+        let mut fresh = Vec::new();
+        push_embed_model_receipt_stale_degradation(&mut fresh, false);
+        ensure(fresh.is_empty(), true, "a valid receipt emits nothing")?;
+
+        let mut stale = Vec::new();
+        push_embed_model_receipt_stale_degradation(&mut stale, true);
+        ensure(
+            stale
+                .iter()
+                .map(|degradation| (degradation.code, degradation.severity))
+                .collect::<Vec<_>>(),
+            vec![(EMBED_MODEL_RECEIPT_STALE_CODE, "low")],
+            "stale receipt code and severity",
+        )?;
+        ensure(
+            stale.first().is_some_and(|degradation| {
+                degradation
+                    .repair
+                    .contains("ee model fetch embedding-default")
+            }),
+            true,
+            "stale receipt repair re-mints through fetch",
         )
     }
 

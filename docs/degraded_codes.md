@@ -5383,6 +5383,38 @@ ee diag search 'cargo fmt' --workspace . --all-arms --inject-duplicate-hit --jso
 
 ---
 
+## `embed_model_receipt_stale`
+
+**Severity:** low
+
+**Surfaces:** status, doctor
+
+**Introduced by:** bd-h1xbv (epic model-receipt)
+
+**Trigger.** Running `ee status --json` or `ee doctor --json` in an initialized workspace while the bundled potion model directory holds model.safetensors but its `.verified` receipt is missing or stale. A chmod or chown changes the file's ctime, which invalidates the receipt; from then on every process that loads the model re-hashes all 512 MB before using it. The probe is read-only and hash-free (it reads the receipt and stats the files). status reports it in degraded[]; doctor appends it to the embedding_posture advisory check, shown with its repair by `ee doctor --full --json` (the concise `ee doctor --json` counts it among the non-ok advisories).
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee index rebuild --workspace .
+chmod o-r "$EE_EMBED_MODEL_DIR/potion-multilingual-128M/model.safetensors"
+```
+
+**Invocation.**
+
+```bash
+ee status --json
+```
+
+**Expected emission.** Message contains: `` `.verified` receipt is missing or stale ... re-hashes the 512 MB model before loading it ``
+
+**Repair hint.** Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt.
+
+**Fixture.** [`tests/fixtures/failure_modes/embed_model_receipt_stale.json`](../tests/fixtures/failure_modes/embed_model_receipt_stale.json)
+
+---
+
 ## `embed_model_unavailable`
 
 **Severity:** warning

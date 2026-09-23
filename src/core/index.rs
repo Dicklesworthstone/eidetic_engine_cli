@@ -49,7 +49,7 @@ use crate::search::{LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelArtifactManifestV1, ModelDownloader,
-    ModelLifecycle, ModelManifest,
+    ModelLifecycle, ModelManifest, is_verification_cached,
 };
 use frankensearch::{
     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
@@ -6646,6 +6646,42 @@ pub(crate) fn default_embedder_model_root() -> PathBuf {
     resolve_default_embedder_model_root(&model_cache_root)
 }
 
+/// Potion model directories this process may load or verify whose `.verified`
+/// receipt is missing or stale (bd-h1xbv). Every process that loads such a
+/// model re-hashes all of it first, and nothing on the read path says so; the
+/// repair is `ee model fetch embedding-default`, which re-mints (bd-vlkfk).
+///
+/// Read-only and hash-free: `is_verification_cached` reads the small receipt
+/// and stats the files. It deliberately does not resolve the root through
+/// [`default_embedder_model_root`], whose registry-root choice runs a full
+/// verification when the receipt is stale. Nothing is written (e20a87bc1).
+pub(crate) fn stale_receipt_potion_model_dirs() -> Vec<PathBuf> {
+    let roots = match configured_embedder_model_root() {
+        Some(root) => vec![root],
+        None => {
+            let model_cache_root = process_ee_data_dir()
+                .unwrap_or_else(stable_ee_data_dir_fallback)
+                .join(EE_MODEL_CACHE_SUBDIR);
+            vec![
+                model_cache_root.join(EE_MODEL2VEC_REGISTRY_SUBDIR),
+                model_cache_root,
+            ]
+        }
+    };
+    stale_receipt_potion_model_dirs_in(&roots)
+}
+
+fn stale_receipt_potion_model_dirs_in(model_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let manifest = ModelManifest::potion_128m();
+    model_roots
+        .iter()
+        .map(|root| potion_model_destination_dir(root))
+        .filter(|dir| {
+            dir.join("model.safetensors").is_file() && !is_verification_cached(&manifest, dir)
+        })
+        .collect()
+}
+
 fn resolve_default_embedder_model_root(model_cache_root: &Path) -> PathBuf {
     resolve_default_embedder_model_root_with(model_cache_root, verified_potion_model_dir)
 }
@@ -12271,6 +12307,43 @@ mod tests {
             potion_model_destination_dir(&direct_model_dir) == direct_model_dir,
             "pre-populated model directories should be honored directly",
         )
+    }
+
+    /// bd-h1xbv: the stale-receipt probe flags a present model without a valid
+    /// receipt, ignores a root with no model, and never needs the real bytes.
+    #[test]
+    fn stale_receipt_probe_flags_present_models_without_a_valid_receipt() -> TestResult {
+        let root = unique_test_dir("stale-receipt-probe");
+        let empty = root.join("empty");
+        let unreceipted = root.join("unreceipted");
+        let garbage = root.join("garbage-receipt");
+        std::fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
+        write_marker(
+            &potion_model_destination_dir(&unreceipted),
+            "model.safetensors",
+            "not a model",
+        )?;
+        let garbage_dir = potion_model_destination_dir(&garbage);
+        write_marker(&garbage_dir, "model.safetensors", "not a model")?;
+        write_marker(&garbage_dir, ".verified", "{ not a receipt")?;
+
+        let stale = stale_receipt_potion_model_dirs_in(&[
+            empty.clone(),
+            unreceipted.clone(),
+            garbage.clone(),
+        ]);
+        let _ = std::fs::remove_dir_all(&root);
+        if stale
+            != vec![
+                potion_model_destination_dir(&unreceipted),
+                potion_model_destination_dir(&garbage),
+            ]
+        {
+            return Err(format!(
+                "probe must flag exactly the two present-but-unreceipted dirs, got {stale:?}"
+            ));
+        }
+        Ok(())
     }
 
     /// GH#34: the shared verification gate must apply the loader's rule, not a

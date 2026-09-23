@@ -3096,6 +3096,27 @@ fn embedding_posture_check_result(
     check.advisory()
 }
 
+/// bd-h1xbv: a present bundled model whose `.verified` receipt is missing or
+/// stale is re-hashed by every process that loads it. Say so on the embedding
+/// check, advisory only (results are unaffected), and point at the re-mint.
+fn with_model_receipt_stale_advisory(mut check: CheckResult, receipt_stale: bool) -> CheckResult {
+    if !receipt_stale {
+        return check;
+    }
+    check.message.push_str(&format!(
+        " Advisory code: {}. {}",
+        super::status::EMBED_MODEL_RECEIPT_STALE_CODE,
+        super::status::EMBED_MODEL_RECEIPT_STALE_MESSAGE
+    ));
+    if matches!(check.severity, CheckSeverity::Ok) {
+        check.severity = CheckSeverity::Warning;
+    }
+    if check.repair.is_none() {
+        check.repair = Some(super::status::EMBED_MODEL_RECEIPT_STALE_REPAIR);
+    }
+    check.advisory()
+}
+
 /// Advisory result for when the active retrieval mode cannot be determined
 /// (no workspace, or the index status read failed). Still `Ok`/advisory and
 /// still discloses the env trap; points to the canonical inspection surfaces.
@@ -3136,13 +3157,16 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     };
     match get_index_status(&options) {
         Ok(report) => match &report.embedding {
-            Some(posture) => embedding_posture_check_result(
-                posture.semantic,
-                posture.mode,
-                &posture.fast_model_id,
-                posture.fast_dimension,
-                posture.deterministic,
-                &trap_present,
+            Some(posture) => with_model_receipt_stale_advisory(
+                embedding_posture_check_result(
+                    posture.semantic,
+                    posture.mode,
+                    &posture.fast_model_id,
+                    posture.fast_dimension,
+                    posture.deterministic,
+                    &trap_present,
+                ),
+                !super::index::stale_receipt_potion_model_dirs().is_empty(),
             ),
             None => embedding_posture_unavailable_check(
                 &trap_present,
@@ -6477,6 +6501,41 @@ mod tests {
         assert!(check.message.contains("potion-multilingual-128M"));
         assert!(check.message.contains("256d"));
         assert!(check.message.contains("ee model status"));
+    }
+
+    #[test]
+    fn stale_model_receipt_is_an_advisory_warning_with_the_fetch_repair() {
+        let ready = || {
+            embedding_posture_check_result(
+                true,
+                "neural_local",
+                "potion-multilingual-128M",
+                256,
+                true,
+                &[],
+            )
+        };
+        let untouched = with_model_receipt_stale_advisory(ready(), false);
+        assert_eq!(untouched.severity, CheckSeverity::Ok);
+        assert_eq!(untouched.message, ready().message);
+        assert_eq!(untouched.repair, None);
+
+        let check = with_model_receipt_stale_advisory(ready(), true);
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("ready"));
+        assert!(
+            check
+                .message
+                .contains("Advisory code: embed_model_receipt_stale.")
+        );
+        assert_eq!(
+            check.repair,
+            Some(
+                "Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt."
+            )
+        );
     }
 
     #[test]
