@@ -351,8 +351,69 @@ fn normalize_pack_envelope(stdout: &str) -> Result<String, String> {
     if !ee::obs::normalize_pack_slo_measurements(&mut envelope)? {
         return Err("pack envelope missing SLO measurements".to_owned());
     }
+
+    // bd-j1upc: the wall-clock degradation is registered volatile beside the
+    // SLO fields (src/obs/volatile_fields.rs, bd-8ig10). It is appended after
+    // pack.hash is computed, so it is outside the hash but inside degraded[]
+    // and the rendered pack.text, and it carries the measured milliseconds.
+    // Drop it through the SHARED normalizer the goldens use, never a copy.
+    let timing_present = carries_timing_degradation(&envelope);
+    let dropped = ee::obs::normalize_pack_timing_degradations(&mut envelope);
+    if timing_present && dropped == 0 {
+        return Err(format!(
+            "pack envelope carries {} but the shared timing normalizer dropped nothing",
+            ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE
+        ));
+    }
+    // Lockstep with the markdown half: once the JSON normalizer has run, no
+    // timing bullet may remain in pack.text. A leftover (a reworded message, or
+    // a bullet without its degraded entry) must go red, not pass.
+    if let Some(text) = envelope
+        .pointer("/data/pack/text")
+        .and_then(JsonValue::as_str)
+    {
+        let (_, leftover) = ee::obs::normalize_pack_timing_markdown(text);
+        if leftover > 0 {
+            return Err(format!(
+                "pack.text still carries {leftover} timing bullet(s) after the shared JSON normalizer"
+            ));
+        }
+    }
     serde_json::to_string(&envelope)
         .map_err(|error| format!("serialize normalized pack envelope: {error}"))
+}
+
+fn carries_timing_degradation(envelope: &JsonValue) -> bool {
+    ["/degraded", "/data/degraded"].iter().any(|pointer| {
+        envelope
+            .pointer(pointer)
+            .and_then(JsonValue::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(JsonValue::as_str)
+                        == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+                })
+            })
+    })
+}
+
+/// The real determinism contract: the same workspace and query give the same
+/// pack.hash. The byte comparisons below are stricter, but this is the one the
+/// product guarantees, so it is asserted on its own and named in the failure.
+fn require_same_pack_hash(label: &str, runs: &[&str]) -> TestResult {
+    let mut hashes = Vec::with_capacity(runs.len());
+    for run in runs {
+        let value: JsonValue = serde_json::from_str(run)
+            .map_err(|error| format!("{label}: normalized envelope not JSON: {error}"))?;
+        hashes
+            .push(pack_hash(&value).ok_or_else(|| format!("{label}: envelope has no pack.hash"))?);
+    }
+    if hashes.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err(format!(
+            "{label}: pack.hash differs across runs: {hashes:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[test]
@@ -419,6 +480,44 @@ fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
                 "normalization concealed semantic drift at {pointer}"
             ));
         }
+    }
+
+    // bd-j1upc: the registered timing degradation, in degraded[] and as its
+    // rendered pack.text bullet, normalizes away at any measured duration.
+    let timing_entry = |ms: u64| {
+        serde_json::json!({
+            "code": ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+            "severity": "low",
+            "message": format!(
+                "Pack assembly took {ms}ms, at or over the standard resource-profile elapsed warning threshold of 500ms. The pack contents are unaffected."
+            ),
+        })
+    };
+    let mut with_text = original.clone();
+    with_text["data"]["degraded"] = serde_json::json!([]);
+    with_text["data"]["pack"]["text"] = serde_json::json!("# Context Pack\n## Items\n");
+    let text_baseline = normalize_pack_envelope(&with_text.to_string())?;
+    for ms in [612_u64, 1544] {
+        let mut timed = with_text.clone();
+        timed["degraded"] = serde_json::json!([timing_entry(ms)]);
+        timed["data"]["degraded"] = serde_json::json!([timing_entry(ms)]);
+        timed["data"]["pack"]["text"] = serde_json::json!(format!(
+            "# Context Pack\n- **[low]** Pack assembly took {ms}ms, at or over the standard resource-profile elapsed warning threshold of 500ms. The pack contents are unaffected.\n  - *Repair:* `Re-run when the host is idle`\n## Items\n"
+        ));
+        if normalize_pack_envelope(&timed.to_string())? != text_baseline {
+            return Err(format!(
+                "the registered timing degradation ({ms}ms) must normalize away from degraded[] and pack.text"
+            ));
+        }
+    }
+    // A timing bullet with no timing entry in degraded[] is not the registered
+    // shape, so the lockstep check must reject it rather than pass it.
+    let mut stray_bullet = with_text.clone();
+    stray_bullet["data"]["pack"]["text"] = serde_json::json!(
+        "# Context Pack\n- **[low]** Pack assembly took 612ms, at or over the standard resource-profile elapsed warning threshold of 500ms.\n## Items\n"
+    );
+    if normalize_pack_envelope(&stray_bullet.to_string()).is_ok() {
+        return Err("a timing bullet without its degraded entry must be rejected".to_owned());
     }
     Ok(())
 }
@@ -661,9 +760,10 @@ fn pack_item_contents(value: &JsonValue) -> Vec<String> {
 //
 // Two back-to-back `ee context` invocations against the same workspace
 // with the same query and `--max-tokens N` must produce byte-identical
-// JSON envelopes after normalizing only the registered SLO assembly time.
-// The existing determinism_unit.rs:196 test asserts
-// pack.hash equality; this stricter form catches drift in any other
+// JSON envelopes after normalizing only the registered volatile timing: the
+// SLO assembly time and the wall-clock degradation derived from it (both in
+// src/obs/volatile_fields.rs). pack.hash equality is asserted first, since it
+// is the product's contract; this stricter form catches drift in any other
 // envelope field (degraded[], packDna, provenance footer, tokenSavings,
 // …) that the hash-only check silently tolerates.
 
@@ -675,6 +775,7 @@ fn pack_envelope_byte_identical_under_repeated_max_tokens_invocation() -> TestRe
     let run1 = run_ee_context_stdout(&workspace, "prepare release", "1000")?;
     let run2 = run_ee_context_stdout(&workspace, "prepare release", "1000")?;
 
+    require_same_pack_hash("MR3", &[&run1, &run2])?;
     if run1 != run2 {
         return Err(format!(
             "MR3 broken — repeated `--max-tokens 1000` invocations diverged:\n  run1.len={}, run2.len={}\n  first-diff offset: {}",
@@ -712,6 +813,7 @@ fn pack_envelope_byte_identical_across_three_cold_process_invocations() -> TestR
     let run2 = run_ee_context_stdout(&workspace, "prepare release", "1000")?;
     let run3 = run_ee_context_stdout(&workspace, "prepare release", "1000")?;
 
+    require_same_pack_hash("MR4", &[&run1, &run2, &run3])?;
     if run1 != run2 {
         return Err(format!(
             "MR4 broken — run1 != run2: lens={}/{}",
@@ -758,6 +860,7 @@ fn pack_envelope_byte_identical_under_graph_ppr_alpha_zero() -> TestResult {
     let run1 = run_ee_context_stdout(&absolute, "prepare release", "1000")?;
     let run2 = run_ee_context_stdout(&absolute, "prepare release", "1000")?;
 
+    require_same_pack_hash("MR5", &[&run1, &run2])?;
     if run1 != run2 {
         return Err(format!(
             "MR5 broken — graph.ppr.alpha=0 envelope drifted between invocations:\n  run1.len={}, run2.len={}",
