@@ -179,11 +179,6 @@
 1	tests/preflight_token_cli.rs
 1	tests/primer_cli_golden.rs
 1	tests/profile_config_golden_e2e.rs
-1	tests/property_context_query_metamorphic.rs
-1	tests/property_pack_metamorphic.rs
-1	tests/property_pack_profile_variation_metamorphic.rs
-1	tests/property_query_and_pack.rs
-1	tests/property_remember_search_metamorphic.rs
 1	tests/read_pool_concurrency_e2e.rs
 1	tests/readme_cli_parity.rs
 1	tests/recall_cli_golden.rs
