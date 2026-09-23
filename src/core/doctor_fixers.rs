@@ -364,13 +364,11 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
 /// missing index was being repaired as stale; bd-xa6ud / bd-wswg0 added the
 /// guidance-only `database_empty` and `database_corrupted`. A contract test
 /// derives the codes from every fixer above and from the `ee doctor --fix`
-/// dispatch ([`fix_dispatch_for_finding`] and `doctor_fix_json`), so this list
-/// cannot drift from either (bd-ynfuu).
+/// dispatch ([`fix_dispatch_for_finding`], [`FIX_DISPATCHED_FINDINGS`] and
+/// `doctor_fix_json`), so this list cannot drift from either (bd-ynfuu).
 pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_stale",
     "search_index_missing",
-    "database_empty",
-    "database_corrupted",
     "graph_snapshot_stale",
     "wal_checkpoint_pending",
     "schema_migration_pending",
@@ -1157,6 +1155,15 @@ pub fn fix_test_only() -> FixerDispatch { finding_code: "test_only" }
         assert_eq!(
             derived, registered,
             "FIXER_FINDING_CODES must equal the codes the fix_* functions emit"
+        );
+        let dispatched_unregistered: Vec<&str> = FIX_DISPATCHED_FINDINGS
+            .iter()
+            .copied()
+            .filter(|finding| !registered.contains(finding))
+            .collect();
+        assert!(
+            dispatched_unregistered.is_empty(),
+            "findings --fix dispatches that are not in FIXER_FINDING_CODES: {dispatched_unregistered:?}"
         );
 
         // The --fix dispatch table (bd-223vl M3): every fixer it calls emits a
