@@ -23305,53 +23305,31 @@ impl DoctorFixRunEvidence {
 /// return `ee.error.v2` plus a non-zero process exit.
 fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
     use crate::core::doctor::DoctorReport;
-    use crate::core::doctor_fixers::*;
+    use crate::core::doctor_fixers::{
+        fix_dispatch_for_finding, fix_finding_for_check, store_unreadable,
+    };
 
     let report = DoctorReport::gather_for_workspace(workspace);
-    // bd-xa6ud / bd-wswg0: an empty or unreadable store cannot feed an index
-    // rebuild or a migration; running them crashes or builds over lost data.
-    // Record guidance for the database and skip the repairs that read it.
-    let store_unreadable = report.checks.iter().any(|check| {
-        check.name == "database"
-            && matches!(
-                check.error_code.map(|error_code| error_code.id),
-                Some("EE-E206" | "EE-E202")
-            )
-    });
+    // bd-xa6ud / bd-wswg0: an empty or unreadable store gets guidance for the
+    // database, and the repairs that read it are skipped. The rule lives in
+    // the one dispatch table `--fix-plan` also reads (bd-223vl M3).
+    let unreadable = store_unreadable(
+        report
+            .checks
+            .iter()
+            .map(|check| (check.name, check.error_code.map(|error_code| error_code.id))),
+    );
     let mut dispatches = Vec::new();
     for check in report.checks {
         if check.severity.is_healthy() {
             continue;
         }
-        let code = check.error_code.map(|error_code| error_code.id);
-        if check.name == "database" {
-            match code {
-                Some("EE-E206") => {
-                    dispatches.push(fix_database_empty(workspace));
-                    continue;
-                }
-                Some("EE-E202") => {
-                    dispatches.push(fix_database_corrupted(workspace));
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        if store_unreadable
-            && (check.name == "search_index"
-                || matches!(code, Some("EE-E300" | "EE-E301" | "EE-E700")))
-        {
-            continue;
-        }
-
-        let dispatch = match code {
-            Some("EE-E300") => Some(fix_search_index_missing(workspace)),
-            Some("EE-E301") => Some(fix_search_index_stale(workspace)),
-            Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
-            Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
-            _ if check.name == "search_index" => Some(fix_search_index_stale(workspace)),
-            _ => None,
-        };
+        let dispatch = fix_finding_for_check(
+            check.error_code.map(|error_code| error_code.id),
+            check.name,
+            unreadable,
+        )
+        .and_then(|finding| fix_dispatch_for_finding(workspace, finding));
         if let Some(dispatch) = dispatch {
             dispatches.push(dispatch);
         }

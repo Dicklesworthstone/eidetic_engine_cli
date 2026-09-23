@@ -118,14 +118,16 @@ pub const CONFIG_PARSE_ERROR: ErrorCode = ErrorCode {
     id: "EE-E101",
     category: ErrorCategory::Configuration,
     description: "Failed to parse configuration file",
-    default_repair: Some("ee doctor --fix-plan --json"),
+    default_repair: Some(
+        "Fix the TOML syntax in the config file the error names, then re-run the command",
+    ),
 };
 
 pub const CONFIG_INVALID_VALUE: ErrorCode = ErrorCode {
     id: "EE-E102",
     category: ErrorCategory::Configuration,
     description: "Invalid configuration value",
-    default_repair: Some("ee doctor --fix-plan --json"),
+    default_repair: Some("ee config show --json"),
 };
 
 pub const WORKSPACE_IDENTITY_MISMATCH: ErrorCode = ErrorCode {
@@ -154,7 +156,9 @@ pub const DATABASE_CORRUPTED: ErrorCode = ErrorCode {
     id: "EE-E202",
     category: ErrorCategory::Storage,
     description: "Database file is corrupted",
-    default_repair: Some("ee doctor --fix-plan --json"),
+    // Not `ee db check`: any open of a damaged store writes sidecars into it
+    // (bd-xa6ud). Recovery starts from backups, as for EE-E206.
+    default_repair: Some("ee backup list --workspace ."),
 };
 
 pub const WRITE_FAILED: ErrorCode = ErrorCode {
@@ -276,14 +280,14 @@ pub const REDACTION_BLOCKED: ErrorCode = ErrorCode {
     id: "EE-E600",
     category: ErrorCategory::PolicyDenied,
     description: "Operation blocked by redaction policy",
-    default_repair: Some("ee doctor --fix-plan --json"),
+    default_repair: Some("ee config show --json"),
 };
 
 pub const RETENTION_BLOCKED: ErrorCode = ErrorCode {
     id: "EE-E601",
     category: ErrorCategory::PolicyDenied,
     description: "Operation blocked by retention policy",
-    default_repair: Some("ee doctor --fix-plan --json"),
+    default_repair: Some("ee config show --json"),
 };
 
 pub const SCOPE_VIOLATION: ErrorCode = ErrorCode {
@@ -538,5 +542,28 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// `ee doctor --fix-plan` turns each failing check's default repair into
+    /// the step's command, so a default repair that says "run the fix plan"
+    /// is a step telling the agent to run the command it is reading
+    /// (bd-223vl M3: EE-E101, E102, E202, E600, E601 did exactly that).
+    #[test]
+    fn default_repairs_never_point_back_to_the_fix_plan() -> TestResult {
+        let circular = ALL_ERROR_CODES
+            .iter()
+            .filter(|code| {
+                code.default_repair
+                    .is_some_and(|repair| repair.contains("doctor --fix-plan"))
+            })
+            .map(|code| code.id)
+            .collect::<Vec<_>>();
+        if circular.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "default repairs point back to --fix-plan: {circular:?}"
+            ))
+        }
     }
 }

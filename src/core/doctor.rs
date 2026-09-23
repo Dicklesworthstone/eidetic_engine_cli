@@ -402,18 +402,32 @@ impl DoctorReport {
         &self,
         agent_inventory: &AgentInventoryReport,
     ) -> FixPlan {
+        let store_unreadable = super::doctor_fixers::store_unreadable(
+            self.checks
+                .iter()
+                .map(|check| (check.name, check.error_code.map(|code| code.id))),
+        );
         let steps: Vec<FixStep> = self
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .enumerate()
-            .map(|(idx, check)| FixStep {
-                order: idx + 1,
-                subsystem: check.name,
-                severity: check.severity,
-                issue: check.message.clone(),
-                error_code: check.error_code,
-                command: check.repair.unwrap_or_default(),
+            .map(|(idx, check)| {
+                let (fix_mode, fix_finding) = super::doctor_fixers::fix_mode_for_check(
+                    check.error_code.map(|code| code.id),
+                    check.name,
+                    store_unreadable,
+                );
+                FixStep {
+                    order: idx + 1,
+                    subsystem: check.name,
+                    severity: check.severity,
+                    issue: check.message.clone(),
+                    error_code: check.error_code,
+                    command: check.repair.unwrap_or_default(),
+                    fix_mode,
+                    fix_finding,
+                }
             })
             .collect();
 
@@ -422,7 +436,12 @@ impl DoctorReport {
             .iter()
             .filter(|c| !c.severity.is_healthy())
             .count();
-        let fixable_issues = steps.len();
+        // Fixable means `ee doctor --fix` repairs it, not that the check has
+        // repair text: a step with only a hint is manual (bd-223vl M3).
+        let fixable_issues = steps
+            .iter()
+            .filter(|step| step.fix_mode == super::doctor_fixers::FixMode::AutoRepair)
+            .count();
 
         FixPlan {
             version: self.version,
@@ -1565,6 +1584,10 @@ pub struct FixStep {
     pub issue: String,
     pub error_code: Option<ErrorCode>,
     pub command: &'static str,
+    /// What `ee doctor --fix` does for this step.
+    pub fix_mode: super::doctor_fixers::FixMode,
+    /// The finding `ee doctor --fix` dispatches for this step, if any.
+    pub fix_finding: Option<&'static str>,
 }
 
 /// CASS import guidance status derived from agent detection.
@@ -5449,15 +5472,111 @@ mod tests {
             .count();
         ensure(plan.total_issues, unhealthy_count, "total_issues matches")?;
 
-        let fixable_count = report
+        let step_count = report
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .count();
-        ensure(plan.fixable_issues, fixable_count, "fixable_issues matches")?;
-        ensure(plan.steps.len(), fixable_count, "steps count matches")?;
+        ensure(plan.steps.len(), step_count, "steps count matches")?;
+        let auto_repair_count = plan
+            .steps
+            .iter()
+            .filter(|step| step.fix_mode == crate::core::doctor_fixers::FixMode::AutoRepair)
+            .count();
+        ensure(
+            plan.fixable_issues,
+            auto_repair_count,
+            "fixable_issues matches",
+        )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn fix_plan_counts_only_what_fix_repairs_as_fixable() -> TestResult {
+        use crate::core::doctor_fixers::FixMode;
+
+        fn plan_for(checks: Vec<CheckResult>) -> FixPlan {
+            let mut report = DoctorReport::gather_with_workspace(None);
+            report.checks = checks;
+            report.to_fix_plan()
+        }
+        fn modes(plan: &FixPlan) -> Vec<(&'static str, FixMode, Option<&'static str>)> {
+            plan.steps
+                .iter()
+                .map(|step| (step.subsystem, step.fix_mode, step.fix_finding))
+                .collect()
+        }
+
+        // Readable store: a repair, a guidance-only dispatch, and a step with
+        // only a hint.
+        let plan = plan_for(vec![
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+            CheckResult::warning(
+                "cass",
+                "CASS capabilities limited.",
+                error_codes::CASS_DEGRADED,
+            ),
+            CheckResult::warning(
+                "shard_fanout",
+                "Shard fan-out configuration is unsafe.",
+                error_codes::CONFIG_INVALID_VALUE,
+            ),
+            CheckResult::ok("runtime", "ok"),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "search_index",
+                    FixMode::AutoRepair,
+                    Some("search_index_missing"),
+                ),
+                (
+                    "cass",
+                    FixMode::AutoGuidance,
+                    Some("cass_integration_drift"),
+                ),
+                ("shard_fanout", FixMode::Manual, None),
+            ],
+            "readable store: per-step fix modes",
+        )?;
+        ensure(plan.total_issues, 3, "readable store: total issues")?;
+        // Only the index repair is fixable. Before bd-223vl M3 this counted 3.
+        ensure(plan.fixable_issues, 1, "readable store: fixable issues")?;
+
+        // Unopenable store (bd-xa6ud): the database gets guidance and the
+        // index rebuild that would read it is not dispatched, so nothing here
+        // is fixable even though the index step has a repair hint.
+        let plan = plan_for(vec![
+            CheckResult::error(
+                "database",
+                "Database readiness check failed.",
+                error_codes::DATABASE_CORRUPTED,
+            ),
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "database",
+                    FixMode::AutoGuidance,
+                    Some("database_corrupted"),
+                ),
+                ("search_index", FixMode::Manual, None),
+            ],
+            "unreadable store: per-step fix modes",
+        )?;
+        ensure(plan.fixable_issues, 0, "unreadable store: fixable issues")
     }
 
     #[test]

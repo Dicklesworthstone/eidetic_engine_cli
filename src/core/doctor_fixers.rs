@@ -376,9 +376,205 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "state_file_permission_drift",
 ];
 
+/// How `ee doctor --fix` treats one failing doctor check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FixMode {
+    /// `--fix` dispatches a writing fixer that repairs the finding.
+    AutoRepair,
+    /// `--fix` dispatches an advisory fixer: it records guidance and repairs
+    /// nothing, so the finding is still reported afterwards.
+    AutoGuidance,
+    /// `--fix` dispatches nothing; only the check's repair hint applies.
+    Manual,
+}
+
+impl FixMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoRepair => "auto_repair",
+            Self::AutoGuidance => "auto_guidance",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// bd-xa6ud / bd-wswg0: the store is unreadable when the `database` check
+/// reports it empty (EE-E206) or unopenable (EE-E202). `checks` yields each
+/// check's name and error code.
+#[must_use]
+pub fn store_unreadable<'a>(checks: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> bool {
+    checks
+        .into_iter()
+        .any(|(name, code)| name == "database" && matches!(code, Some("EE-E206" | "EE-E202")))
+}
+
+/// The finding `ee doctor --fix` dispatches for a failing doctor check.
+/// `--fix` and `--fix-plan` both read this one table, so the plan cannot call
+/// a step fixable that `--fix` never touches (bd-223vl M3).
+///
+/// An empty or unreadable store (see [`store_unreadable`]) gets guidance for
+/// the database, and the repairs that read it (index rebuild, migration) are
+/// skipped: running them crashes or builds over lost data (bd-xa6ud).
+/// Otherwise the finding is keyed on the error code, and any other failing
+/// `search_index` check is repaired as stale.
+#[must_use]
+pub fn fix_finding_for_check(
+    error_code: Option<&str>,
+    check_name: &str,
+    store_unreadable: bool,
+) -> Option<&'static str> {
+    if check_name == "database" {
+        match error_code {
+            Some("EE-E206") => return Some("database_empty"),
+            Some("EE-E202") => return Some("database_corrupted"),
+            _ => {}
+        }
+    }
+    if store_unreadable
+        && (check_name == "search_index"
+            || matches!(error_code, Some("EE-E300" | "EE-E301" | "EE-E700")))
+    {
+        return None;
+    }
+    match error_code {
+        Some("EE-E300") => Some("search_index_missing"),
+        Some("EE-E301") => Some("search_index_stale"),
+        Some("EE-E700") => Some("schema_migration_pending"),
+        Some("EE-E507") => Some("cass_integration_drift"),
+        _ if check_name == "search_index" => Some("search_index_stale"),
+        _ => None,
+    }
+}
+
+/// The dispatch for a finding [`fix_finding_for_check`] returns; `None` for
+/// any other finding.
+#[must_use]
+pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<FixerDispatch> {
+    match finding {
+        "database_empty" => Some(fix_database_empty(workspace_root)),
+        "database_corrupted" => Some(fix_database_corrupted(workspace_root)),
+        "search_index_missing" => Some(fix_search_index_missing(workspace_root)),
+        "search_index_stale" => Some(fix_search_index_stale(workspace_root)),
+        "schema_migration_pending" => {
+            Some(fix_schema_migration_pending(workspace_root, "V_LATEST"))
+        }
+        "cass_integration_drift" => Some(fix_cass_integration_drift(workspace_root)),
+        _ => None,
+    }
+}
+
+/// What `ee doctor --fix` does for a failing check, and the finding it
+/// dispatches, if any. The Op kind does not depend on the workspace path.
+#[must_use]
+pub fn fix_mode_for_check(
+    error_code: Option<&str>,
+    check_name: &str,
+    store_unreadable: bool,
+) -> (FixMode, Option<&'static str>) {
+    let Some(finding) = fix_finding_for_check(error_code, check_name, store_unreadable) else {
+        return (FixMode::Manual, None);
+    };
+    match fix_dispatch_for_finding(Path::new("."), finding) {
+        Some(dispatch) if dispatch.op.is_advisory() => (FixMode::AutoGuidance, Some(finding)),
+        Some(_) => (FixMode::AutoRepair, Some(finding)),
+        None => (FixMode::Manual, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_fix_finding_constructs_a_dispatch_with_that_code() {
+        let checks = [
+            (Some("EE-E300"), "search_index", false),
+            (Some("EE-E301"), "search_index", false),
+            (Some("EE-E700"), "database", false),
+            (Some("EE-E507"), "cass", false),
+            (Some("EE-E999"), "search_index", false),
+            (Some("EE-E206"), "database", true),
+            (Some("EE-E202"), "database", true),
+        ];
+        for (code, name, unreadable) in checks {
+            let finding =
+                fix_finding_for_check(code, name, unreadable).expect("dispatched finding");
+            let dispatch = fix_dispatch_for_finding(&root(), finding).expect("dispatch");
+            assert_eq!(dispatch.finding_code, finding);
+        }
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E102"), "shard_fanout", false),
+            None
+        );
+        assert_eq!(fix_finding_for_check(None, "database", false), None);
+        assert!(fix_dispatch_for_finding(&root(), "graph_snapshot_stale").is_none());
+    }
+
+    #[test]
+    fn unreadable_store_skips_the_repairs_that_read_it() {
+        assert!(store_unreadable([
+            ("search_index", Some("EE-E300")),
+            ("database", Some("EE-E202")),
+        ]));
+        assert!(store_unreadable([("database", Some("EE-E206"))]));
+        assert!(!store_unreadable([("database", Some("EE-E700"))]));
+        assert!(!store_unreadable([("search_index", Some("EE-E202"))]));
+        for (code, name) in [
+            (Some("EE-E300"), "search_index"),
+            (Some("EE-E301"), "search_index"),
+            (Some("EE-E999"), "search_index"),
+            (Some("EE-E700"), "database"),
+        ] {
+            assert_eq!(
+                fix_finding_for_check(code, name, true),
+                None,
+                "{code:?} {name}"
+            );
+        }
+        // CASS drift does not read the store, so it is still dispatched.
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E507"), "cass", true),
+            Some("cass_integration_drift")
+        );
+    }
+
+    #[test]
+    fn fix_mode_separates_repairs_from_guidance_and_manual_steps() {
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E300"), "search_index", false),
+            (FixMode::AutoRepair, Some("search_index_missing"))
+        );
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E301"), "search_index", false),
+            (FixMode::AutoRepair, Some("search_index_stale"))
+        );
+        // Op::RunMigration is advisory: --fix records `ee migrate run` as
+        // guidance and migrates nothing, so a pending migration is NOT fixable.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E700"), "database", false),
+            (FixMode::AutoGuidance, Some("schema_migration_pending"))
+        );
+        // cass_integration_drift is an Op::Manual dispatch: guidance only.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E507"), "cass", false),
+            (FixMode::AutoGuidance, Some("cass_integration_drift"))
+        );
+        // bd-xa6ud: an unopenable store gets guidance, never a repair, and
+        // the index it would feed is left alone.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E202"), "database", true),
+            (FixMode::AutoGuidance, Some("database_corrupted"))
+        );
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E300"), "search_index", true),
+            (FixMode::Manual, None)
+        );
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E102"), "shard_fanout", false),
+            (FixMode::Manual, None)
+        );
+    }
 
     fn root() -> PathBuf {
         PathBuf::from("/tmp/doctor-fixers-test")

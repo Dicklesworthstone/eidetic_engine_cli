@@ -6876,6 +6876,10 @@ pub fn render_fix_plan_json(plan: &FixPlan) -> String {
                 obj.field_str("errorCode", code.id);
             }
             obj.field_str("command", step.command);
+            obj.field_str("fixMode", step.fix_mode.as_str());
+            if let Some(finding) = step.fix_finding {
+                obj.field_str("fixFinding", finding);
+            }
         });
         d.field_object("cassImportGuidance", |guidance| {
             guidance.field_str("status", plan.cass_import_guidance.status.as_str());
@@ -6923,24 +6927,32 @@ pub fn render_fix_plan_human(plan: &FixPlan) -> String {
         output.push_str("No issues to fix. All subsystems are healthy.\n");
     } else {
         output.push_str(&format!(
-            "Found {} issue(s), {} fixable:\n\n",
+            "Found {} issue(s), {} repaired by `ee doctor --fix`:\n\n",
             plan.total_issues, plan.fixable_issues
         ));
 
         for step in &plan.steps {
+            let auto = match (step.fix_mode, step.fix_finding) {
+                (crate::core::doctor_fixers::FixMode::AutoRepair, Some(finding)) => {
+                    format!("--fix repairs this ({finding})")
+                }
+                (crate::core::doctor_fixers::FixMode::AutoGuidance, Some(finding)) => {
+                    format!("--fix records guidance only ({finding}); nothing is repaired")
+                }
+                _ => "manual: --fix does not act on this".to_owned(),
+            };
             output.push_str(&format!(
-                "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n\n",
+                "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n   Auto:  {}\n\n",
                 step.order,
                 step.subsystem,
                 step.severity.as_str().to_uppercase(),
                 step.issue,
-                step.command
+                step.command,
+                auto
             ));
         }
 
-        if plan.fixable_issues > 0 {
-            output.push_str("Run commands in order to resolve issues.\n");
-        }
+        output.push_str("Run commands in order to resolve issues.\n");
     }
 
     output.push_str("\nCASS import guidance:\n");
