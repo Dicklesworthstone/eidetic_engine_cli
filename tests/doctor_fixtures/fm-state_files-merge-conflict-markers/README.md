@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Failure-mode id | `fm-state_files-merge-conflict-markers` |
-| Severity | P0 |
+| Severity | P1 |
 | Subsystem | state_files |
 | Repair spec | [`docs/doctor/repair-specs/state_files.md#fm-state_files-merge-conflict-markers`](../../../docs/doctor/repair-specs/state_files.md#fm-state_files-merge-conflict-markers) |
 

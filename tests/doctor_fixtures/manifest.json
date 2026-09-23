@@ -26,7 +26,7 @@
     },
     {
       "id": "fm-state_files-merge-conflict-markers",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "state_files",
       "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/state_files.md"
@@ -96,14 +96,14 @@
     },
     {
       "id": "fm-search_indexes-index_corrupt",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "search_indexes",
       "label": "REPAIR",
       "spec": "docs/doctor/repair-specs/search_indexes.md"
     },
     {
       "id": "fm-cass_integration-cass_not_found",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "cass_integration",
       "label": "GUIDANCE-ONLY",
       "spec": "docs/doctor/repair-specs/cass_integration.md"
@@ -145,14 +145,14 @@
     },
     {
       "id": "fm-graph_subsystem-snapshot-write-lock-held",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "graph_subsystem",
       "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/graph_subsystem.md"
     },
     {
       "id": "fm-agent_coordination-rch-workers-all-blocked-by-pressure",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "agent_coordination",
       "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/agent_coordination.md"

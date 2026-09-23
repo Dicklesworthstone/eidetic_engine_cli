@@ -33,7 +33,7 @@ Labels, fields and the coverage rule are defined in
 - **Label:** NOT-DETECTED (pinned gap; NOT coverage)
 - **Severity:** P0. Scored P0 as `pop-shard-content_drift`.
 - **Detector:** None. The catalog's `last_verified_hashes` is never computed or compared, so the `shard_fanout` check stays `ok` in `doctor --full`.
-- **Real trigger:** A real `ee migrate shard-fanout --shards-dir <root>/shards` with `EE_SHARD_FANOUT_ENABLED=1` writes `catalog.db` and the workspace shard. SQL then appends text to one row of `memories` in the shard. The migrated shard is kept as `.fixture_baseline/shard.migrated.db`.
+- **Real trigger:** A real `ee migrate shard-fanout --shards-dir <root>/shards` with `EE_SHARD_FANOUT_ENABLED=1` writes `catalog.db` and the workspace shard. SQL then appends text to one row of `memories` in the shard. The migrated shard is kept as `.fixture_baseline/shard.migrated.db`. The flag is passed explicitly because `migrate shard-fanout` ignores an exported `EE_SHARDS_DIR` (bd-qxc0b), while doctor reads it.
 - **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
 - **Undo:** Not applicable. The harness asserts the shard is unchanged by `--fix`.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` on the shard file. The witness: the shard digest differs from `shard.migrated.db` while the catalog row is byte-identical to the one recorded before the tamper, and `shard_fanout` has severity `ok`.

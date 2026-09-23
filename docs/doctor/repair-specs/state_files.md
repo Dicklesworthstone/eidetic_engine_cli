@@ -43,7 +43,7 @@ Labels, fields and the coverage rule are defined in
 ## fm-state_files-merge-conflict-markers
 
 - **Label:** NOT-DETECTED (pinned gap; NOT coverage)
-- **Severity:** P0. Scored P1 as `pop-config-malformed`: an unparseable config blocks search and pack until edited, but loses no data.
+- **Severity:** P1. Scored P1 as `pop-config-malformed`: an unparseable config blocks search and pack until edited, but loses no data. Settled by execution (bd-2oh15 c9891/c9892) on a stamped 11f6e832e build: `status`, `remember` and `doctor` succeed on the conflicted workspace and only `search` fails (exit 2, `configuration`), so the failure does not block every command and P0 clause 2 does not apply. The manifest said P0 until then.
 - **Detector:** None. Doctor swallows `config.toml` parse errors.
 - **Real trigger:** A valid comment-only `.ee/config.toml` baseline is replaced by the same file wrapped in `<<<<<<<` / `=======` / `>>>>>>>` markers.
 - **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.

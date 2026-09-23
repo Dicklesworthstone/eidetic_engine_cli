@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Failure-mode id | `fm-agent_coordination-rch-workers-all-blocked-by-pressure` |
-| Severity | P0 |
+| Severity | P1 |
 | Subsystem | agent_coordination |
 | Repair spec | [`docs/doctor/repair-specs/agent_coordination.md#fm-agent_coordination-rch-workers-all-blocked-by-pressure`](../../../docs/doctor/repair-specs/agent_coordination.md#fm-agent_coordination-rch-workers-all-blocked-by-pressure) |
 

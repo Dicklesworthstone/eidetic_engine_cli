@@ -7,7 +7,7 @@ Labels, fields and the coverage rule are defined in
 ## fm-cass_integration-cass_not_found
 
 - **Label:** GUIDANCE-ONLY (report-only)
-- **Severity:** P0. Scored P1 as `pop-cass-absent` in `docs/doctor/failure_mode_scores.jsonl`: cass is an optional integration, and its absence disables session import only.
+- **Severity:** P1. Scored P1 as `pop-cass-absent` in `docs/doctor/failure_mode_scores.jsonl`: cass is an optional integration, and its absence disables session import only. The manifest said P0 until the bd-2oh15 c9891 ruling (the rubric governs).
 - **Detector:** `cass` reports EE-E506, in `doctor --full` only. Concise doctor shows nothing.
 - **Real trigger:** The failure is environmental. `corrupt.sh` records, in `.fixture_baseline/path-without-cass`, the current `PATH` with every directory holding a `cass` executable removed; doctor runs under that `PATH`.
 - **Repair:** None. EE-E506 has no dispatch in `doctor_fix_json`, so `--fix` reports 0 actions.

@@ -33,7 +33,7 @@ mv "$target/.ee/config.toml" "$base/config.toml.clean"
     printf '<<<<<<< HEAD\n# ours\n=======\n# theirs\n>>>>>>> branch\n'
 } > "$target/.ee/config.toml"
 
-doctor_fixture_corrupt "$FM" "P0" "state_files"
+doctor_fixture_corrupt "$FM" "P1" "state_files"
 set +e
 "$ee_bin" search "source memory" --workspace "$target" --json > "$base/search-conflicted.json" 2>&1
 rc=$?

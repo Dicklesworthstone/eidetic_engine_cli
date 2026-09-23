@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Failure-mode id | `fm-search_indexes-index_corrupt` |
-| Severity | P0 |
+| Severity | P1 |
 | Subsystem | search_indexes |
 | Repair spec | [`docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_corrupt`](../../../docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_corrupt) |
 

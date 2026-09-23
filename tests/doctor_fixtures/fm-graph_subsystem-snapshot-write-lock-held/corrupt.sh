@@ -24,7 +24,7 @@ wsp="$(sqlite3 "$target/.ee/ee.db" "SELECT id FROM workspaces LIMIT 1;")"
 test -n "$wsp"
 sqlite3 "$target/.ee/ee.db" "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES ('graph_snapshot:$wsp:memory_links', 'graph_snapshot', '$wsp:memory_links', 'ee-graph-snapshot-1-fixture', '2026-09-23T00:00:00Z', '2099-01-01T00:00:00Z', 'bd-2oh15 doctor fixture');"
 
-doctor_fixture_corrupt "$FM" "P0" "graph_subsystem"
+doctor_fixture_corrupt "$FM" "P1" "graph_subsystem"
 set +e
 "$ee_bin" graph centrality-refresh --workspace "$target" --json > "$base/refresh-corrupt.json" 2>&1
 rc=$?

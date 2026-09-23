@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Failure-mode id | `fm-graph_subsystem-snapshot-write-lock-held` |
-| Severity | P0 |
+| Severity | P1 |
 | Subsystem | graph_subsystem |
 | Repair spec | [`docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-write-lock-held`](../../../docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-write-lock-held) |
 

@@ -11,7 +11,7 @@ fi
 
 # REPAIR round trip: --fix rebuilds, doctor is healthy, undo restores the exact
 # corrupted baseline (so EE-E301 returns), and a second undo is a no-op.
-doctor_fixture_assert "$FM" "P0" "search_indexes"
+doctor_fixture_assert "$FM" "P1" "search_indexes"
 target="$(doctor_fixture_target)"
 ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
 base="$target/.fixture_baseline"

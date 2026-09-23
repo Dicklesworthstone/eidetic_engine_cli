@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Failure-mode id | `fm-cass_integration-cass_not_found` |
-| Severity | P0 |
+| Severity | P1 |
 | Subsystem | cass_integration |
 | Repair spec | [`docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_not_found`](../../../docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_not_found) |
 

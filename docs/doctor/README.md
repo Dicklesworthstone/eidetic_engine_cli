@@ -70,7 +70,10 @@ mapped fixture's manifest severity).
   `fm-agent_coordination-mcp-agent-mail-file-reservation-conflict`,
   `fm-policy_safety-trauma-guard-policy-denied-exit-7` and
   `fm-policy_safety-redaction-class-coverage-gap`. All six are UNCLASSIFIED.
-- Five manifest P0 fixtures score P1: `index_corrupt`, `cass_not_found`,
-  `rch-workers-all-blocked-by-pressure`, `snapshot-write-lock-held` and
-  `merge-conflict-markers`. Each row's `severity_note` gives the reason. The
-  manifest severities are left unchanged for now.
+- Five fixtures were P0 in the manifest but score P1: `index_corrupt`,
+  `cass_not_found`, `rch-workers-all-blocked-by-pressure`,
+  `snapshot-write-lock-held` and `merge-conflict-markers`. By the bd-2oh15
+  c9891 ruling the rubric governs, so the manifest now says P1 for all five.
+  `merge-conflict-markers` was settled by running status, remember, search
+  and doctor on the conflicted workspace: only search fails. Each row's
+  `severity_note` records the reason.
