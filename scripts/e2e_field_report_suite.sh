@@ -76,10 +76,27 @@ arm_workspace() {
 
 # ee_in <workspace> <args...> — run the real binary against one workspace.
 # stderr is deliberately NOT silenced: this output is cited as evidence.
+#
+# bd-rvrj2: every spawn gets its own ee data dir. ee keeps its model cache and
+# global store under XDG_DATA_HOME (else HOME/.local/share), so a spawn that
+# inherits the worker's HOME scores against whatever that worker holds. HOME
+# and XDG_* point beside the workspace (one set per arm, so arms stay
+# independent), model downloads are off, and inherited model or workspace
+# selectors are dropped. The prefix is on `env`, an external command, so it
+# never leaks into the caller the way `VAR=val func` does.
 ee_in() {
     local ws="${1:?ee_in: workspace required}"
     shift
-    "$EE_BIN" --workspace "$ws" "$@"
+    local iso="${ws}.ee-data"
+    mkdir -p "$iso/home" "$iso/xdg-data" "$iso/xdg-config" "$iso/xdg-cache" "$iso/xdg-state"
+    env -u EE_WORKSPACE -u EE_WORKSPACE_REGISTRY \
+        -u EE_EMBED_BACKEND -u EE_EMBED_MODEL_DIR -u EE_EMBED_MODEL_PATH \
+        -u EE_EMBED_MODEL_FIXTURE_DIR -u EE_EMBED_REMOTE_URL -u EE_EMBED_REMOTE_API_KEY \
+        -u EE_EMBED_REMOTE_MODEL -u EE_EMBED_REMOTE_DIMENSION \
+        HOME="$iso/home" XDG_DATA_HOME="$iso/xdg-data" XDG_CONFIG_HOME="$iso/xdg-config" \
+        XDG_CACHE_HOME="$iso/xdg-cache" XDG_STATE_HOME="$iso/xdg-state" \
+        EE_EMBED_DOWNLOAD=off \
+        "$EE_BIN" --workspace "$ws" "$@"
 }
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
@@ -94,7 +111,7 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 # the same conditions as the arms. The probe is recorded, never asserted: it
 # describes the run, it does not grade it.
 # ---------------------------------------------------------------------------
-SUITE_DATA_ISOLATION="inherited"
+SUITE_DATA_ISOLATION="isolated"
 SUITE_HOST_MODEL="unknown"
 SUITE_HOST_GLOBAL="unknown"
 SUITE_PROBE_CODES="unknown"
