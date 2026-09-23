@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-policy_safety-redaction-class-coverage-gap` |
 | Severity | P1 |
 | Subsystem | policy_safety |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/policy_safety.md`](../../../doctor_workspace/analysis/repair_specs/policy_safety.md) |
+| Repair spec | [`docs/doctor/repair-specs/policy_safety.md#fm-policy_safety-redaction-class-coverage-gap`](../../../docs/doctor/repair-specs/policy_safety.md#fm-policy_safety-redaction-class-coverage-gap) |
 
 ## Round-trip contract
 

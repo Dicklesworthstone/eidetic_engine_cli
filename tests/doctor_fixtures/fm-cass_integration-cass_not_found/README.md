@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-cass_integration-cass_not_found` |
 | Severity | P0 |
 | Subsystem | cass_integration |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/cass_integration.md`](../../../doctor_workspace/analysis/repair_specs/cass_integration.md) |
+| Repair spec | [`docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_not_found`](../../../docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_not_found) |
 
 ## Round-trip contract
 

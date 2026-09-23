@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-cass_integration-cass_unavailable-contract-mismatch` |
 | Severity | P1 |
 | Subsystem | cass_integration |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/cass_integration.md`](../../../doctor_workspace/analysis/repair_specs/cass_integration.md) |
+| Repair spec | [`docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_unavailable-contract-mismatch`](../../../docs/doctor/repair-specs/cass_integration.md#fm-cass_integration-cass_unavailable-contract-mismatch) |
 
 ## Round-trip contract
 

@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-schema_migrations-migration-drift-checksum-mismatch` |
 | Severity | P0 |
 | Subsystem | schema_migrations |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/schema_migrations.md`](../../../doctor_workspace/analysis/repair_specs/schema_migrations.md) |
+| Repair spec | [`docs/doctor/repair-specs/schema_migrations.md#fm-schema_migrations-migration-drift-checksum-mismatch`](../../../docs/doctor/repair-specs/schema_migrations.md#fm-schema_migrations-migration-drift-checksum-mismatch) |
 
 ## Round-trip contract
 

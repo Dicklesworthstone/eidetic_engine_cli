@@ -9,8 +9,10 @@ surface. Each fixture has:
 
 The scripts are intentionally conservative. They retain all temporary data for
 audit, avoid deletion, avoid Git mutation, and never run Cargo. The Rust
-contract test `tests/doctor_fixtures_contract.rs` validates that every P0/P1
-failure mode in `doctor_workspace/failure_mode_scores.jsonl` has this triplet.
+contract test `tests/doctor_fixtures_contract.rs` validates the triplets, the
+labels and the repair specs against `docs/doctor/` (see
+[`docs/doctor/README.md`](../../docs/doctor/README.md) for the labels, the spec
+fields and the scored population in `docs/doctor/failure_mode_scores.jsonl`).
 
 To run the shell fixtures manually:
 
@@ -56,10 +58,11 @@ trip, verified against a real doctor in both directions. The shared content
 digest excludes `ee.db-shm` and checks `ee.write.lock` by its semantics
 (present, epoch >= baseline); everything else stays byte-compared.
 `doctor_fixture_assert_guidance_only` remains available for failure modes
-whose repair doctor can only describe. The other 24
-corruption scripts still write markers rather than their named corruptions.
-The independently scored
-failure-mode population and eight referenced repair specs are absent. Also,
+whose repair doctor can only describe. Nine P0 fixtures build their named
+corruption for real (labels REPAIR, GUIDANCE-ONLY, NOT-DETECTED and
+PINNED-DEFECT; NOT-DETECTED and PINNED-DEFECT pin a gap and are not coverage).
+The remaining 14 P1 fixtures and the UNRESOLVED WAL/SHM P0 fixture still write
+markers only. Also,
 `doctor --only` is currently advisory, so the after-report does not establish
 per-FM detector coverage. The helper's health check follows the doctor's core
 health contract; it does not certify optional advisory subsystems as repaired.

@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-graph_subsystem-snapshot-write-lock-held` |
 | Severity | P0 |
 | Subsystem | graph_subsystem |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/graph_subsystem.md`](../../../doctor_workspace/analysis/repair_specs/graph_subsystem.md) |
+| Repair spec | [`docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-write-lock-held`](../../../docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-write-lock-held) |
 
 ## Round-trip contract
 

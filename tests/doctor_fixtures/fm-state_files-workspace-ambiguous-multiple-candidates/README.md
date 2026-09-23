@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-state_files-workspace-ambiguous-multiple-candidates` |
 | Severity | P1 |
 | Subsystem | state_files |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/state_files.md`](../../../doctor_workspace/analysis/repair_specs/state_files.md) |
+| Repair spec | [`docs/doctor/repair-specs/state_files.md#fm-state_files-workspace-ambiguous-multiple-candidates`](../../../docs/doctor/repair-specs/state_files.md#fm-state_files-workspace-ambiguous-multiple-candidates) |
 
 ## Round-trip contract
 

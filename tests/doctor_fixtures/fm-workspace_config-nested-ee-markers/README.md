@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-workspace_config-nested-ee-markers` |
 | Severity | P1 |
 | Subsystem | workspace_config |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/workspace_config.md`](../../../doctor_workspace/analysis/repair_specs/workspace_config.md) |
+| Repair spec | [`docs/doctor/repair-specs/workspace_config.md#fm-workspace_config-nested-ee-markers`](../../../docs/doctor/repair-specs/workspace_config.md#fm-workspace_config-nested-ee-markers) |
 
 ## Round-trip contract
 

@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-agent_coordination-rch-workers-all-blocked-by-pressure` |
 | Severity | P0 |
 | Subsystem | agent_coordination |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/agent_coordination.md`](../../../doctor_workspace/analysis/repair_specs/agent_coordination.md) |
+| Repair spec | [`docs/doctor/repair-specs/agent_coordination.md#fm-agent_coordination-rch-workers-all-blocked-by-pressure`](../../../docs/doctor/repair-specs/agent_coordination.md#fm-agent_coordination-rch-workers-all-blocked-by-pressure) |
 
 ## Round-trip contract
 

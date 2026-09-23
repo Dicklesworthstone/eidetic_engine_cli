@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-search_indexes-index_missing` |
 | Severity | P1 |
 | Subsystem | search_indexes |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/search_indexes.md`](../../../doctor_workspace/analysis/repair_specs/search_indexes.md) |
+| Repair spec | [`docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_missing`](../../../docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_missing) |
 
 ## Repair round-trip contract (bd-2oh15, option A)
 

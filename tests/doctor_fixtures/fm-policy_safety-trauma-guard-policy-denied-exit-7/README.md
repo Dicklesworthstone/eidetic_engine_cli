@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-policy_safety-trauma-guard-policy-denied-exit-7` |
 | Severity | P1 |
 | Subsystem | policy_safety |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/policy_safety.md`](../../../doctor_workspace/analysis/repair_specs/policy_safety.md) |
+| Repair spec | [`docs/doctor/repair-specs/policy_safety.md#fm-policy_safety-trauma-guard-policy-denied-exit-7`](../../../docs/doctor/repair-specs/policy_safety.md#fm-policy_safety-trauma-guard-policy-denied-exit-7) |
 
 ## Round-trip contract
 

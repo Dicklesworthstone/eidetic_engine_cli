@@ -14,7 +14,7 @@
 //! setup. Index repair builds from a read-only canonical source snapshot and
 //! journals each real mutation with hash-checked backups and inverse actions.
 //!
-//! The 13 fixers cover the eight repair_specs/ subsystems
+//! The 13 fixers cover the eight docs/doctor/repair-specs/ subsystems
 //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
 //! schema_migrations, search_indexes, state_files, workspace_config) plus
 //! WAL checkpoint and snapshot-backup as cross-cutting Ops. Each fixer

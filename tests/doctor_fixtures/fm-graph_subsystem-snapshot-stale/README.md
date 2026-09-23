@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-graph_subsystem-snapshot-stale` |
 | Severity | P1 |
 | Subsystem | graph_subsystem |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/graph_subsystem.md`](../../../doctor_workspace/analysis/repair_specs/graph_subsystem.md) |
+| Repair spec | [`docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-stale`](../../../docs/doctor/repair-specs/graph_subsystem.md#fm-graph_subsystem-snapshot-stale) |
 
 ## Round-trip contract
 

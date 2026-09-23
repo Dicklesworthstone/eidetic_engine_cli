@@ -5,7 +5,7 @@
 | Failure-mode id | `fm-schema_migrations-pending-migrations-detected` |
 | Severity | P1 |
 | Subsystem | schema_migrations |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/schema_migrations.md`](../../../doctor_workspace/analysis/repair_specs/schema_migrations.md) |
+| Repair spec | [`docs/doctor/repair-specs/schema_migrations.md#fm-schema_migrations-pending-migrations-detected`](../../../docs/doctor/repair-specs/schema_migrations.md#fm-schema_migrations-pending-migrations-detected) |
 
 ## Round-trip contract
 
