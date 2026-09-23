@@ -9,8 +9,10 @@ surface. Each fixture has:
 
 The scripts are intentionally conservative. They retain all temporary data for
 audit, avoid deletion, avoid Git mutation, and never run Cargo. The Rust
-contract test `tests/doctor_fixtures_contract.rs` validates that every P0/P1
-failure mode in `doctor_workspace/failure_mode_scores.jsonl` has this triplet.
+contract test `tests/doctor_fixtures_contract.rs` validates the triplets, the
+labels and the repair specs against `docs/doctor/` (see
+[`docs/doctor/README.md`](../../docs/doctor/README.md) for the labels, the spec
+fields and the scored population in `docs/doctor/failure_mode_scores.jsonl`).
 
 To run the shell fixtures manually:
 
@@ -50,14 +52,18 @@ verifies the assertion helper, not real doctor repairs.
 
 The suite remains incomplete (bd-2oh15): `fm-search_indexes-index_missing` now
 initializes a real workspace, requires a healthy baseline, preserves the index
-by moving it aside, and requires a real `EE-E300` diagnostic. It is a
-guidance-only failure mode (orchestrator decision C): its `assert.sh` uses
-`doctor_fixture_assert_guidance_only`, which requires `doctor --fix` to report
-`guidance_recorded` (never `applied`) and the finding to remain, instead of a
-repair round trip. The other 24
-corruption scripts still write markers rather than their named corruptions.
-The independently scored
-failure-mode population and eight referenced repair specs are absent. Also,
+by moving it aside, and requires a real `EE-E300` diagnostic. Since the
+option-A doctor index repair, its `assert.sh` asserts the full repair round
+trip, verified against a real doctor in both directions. The shared content
+digest excludes `ee.db-shm` and checks `ee.write.lock` by its semantics
+(present, epoch >= baseline); everything else stays byte-compared.
+`doctor_fixture_assert_guidance_only` checks failure modes whose repair doctor
+can only describe (the truncated-database fixture uses it). Nine more fixtures
+build their named corruption for real (labels REPAIR, GUIDANCE-ONLY and
+NOT-DETECTED; NOT-DETECTED and PINNED-DEFECT pin a gap and are not coverage).
+The remaining UNCLASSIFIED fixtures (count pinned in `lib.sh`), the UNRESOLVED
+WAL/SHM fixture and the two OUT-OF-SCOPE fixtures still write markers only.
+Also,
 `doctor --only` is currently advisory, so the after-report does not establish
 per-FM detector coverage. The helper's health check follows the doctor's core
 health contract; it does not certify optional advisory subsystems as repaired.

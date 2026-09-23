@@ -76,13 +76,70 @@ arm_workspace() {
 
 # ee_in <workspace> <args...> — run the real binary against one workspace.
 # stderr is deliberately NOT silenced: this output is cited as evidence.
+#
+# bd-rvrj2: every spawn gets its own ee data dir. ee keeps its model cache and
+# global store under XDG_DATA_HOME (else HOME/.local/share), so a spawn that
+# inherits the worker's HOME scores against whatever that worker holds. HOME
+# and XDG_* point beside the workspace (one set per arm, so arms stay
+# independent), model downloads are off, and inherited model or workspace
+# selectors are dropped. The prefix is on `env`, an external command, so it
+# never leaks into the caller the way `VAR=val func` does.
 ee_in() {
     local ws="${1:?ee_in: workspace required}"
     shift
-    "$EE_BIN" --workspace "$ws" "$@"
+    local iso="${ws}.ee-data"
+    mkdir -p "$iso/home" "$iso/xdg-data" "$iso/xdg-config" "$iso/xdg-cache" "$iso/xdg-state"
+    env -u EE_WORKSPACE -u EE_WORKSPACE_REGISTRY \
+        -u EE_EMBED_BACKEND -u EE_EMBED_MODEL_DIR -u EE_EMBED_MODEL_PATH \
+        -u EE_EMBED_MODEL_FIXTURE_DIR -u EE_EMBED_REMOTE_URL -u EE_EMBED_REMOTE_API_KEY \
+        -u EE_EMBED_REMOTE_MODEL -u EE_EMBED_REMOTE_DIMENSION \
+        HOME="$iso/home" XDG_DATA_HOME="$iso/xdg-data" XDG_CONFIG_HOME="$iso/xdg-config" \
+        XDG_CACHE_HOME="$iso/xdg-cache" XDG_STATE_HOME="$iso/xdg-state" \
+        EE_EMBED_DOWNLOAD=off \
+        "$EE_BIN" --workspace "$ws" "$@"
 }
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+
+# ---------------------------------------------------------------------------
+# bd-rvrj2 A5: record WHERE every verdict below came from.
+#
+# ee reads its model cache and global store from XDG_DATA_HOME (else
+# HOME/.local/share), so a tally is comparable across workers only when it
+# states the worker, whether ee's data dir was the host's or isolated, what the
+# host holds there, and which degradation codes a trivial pack reports under
+# the same conditions as the arms. The probe is recorded, never asserted: it
+# describes the run, it does not grade it.
+# ---------------------------------------------------------------------------
+SUITE_DATA_ISOLATION="isolated"
+SUITE_HOST_MODEL="unknown"
+SUITE_HOST_GLOBAL="unknown"
+SUITE_PROBE_CODES="unknown"
+suite_environment_probe() {
+    local host_data ws pack_json
+    host_data="${XDG_DATA_HOME:-$HOME/.local/share}/ee"
+    SUITE_HOST_MODEL="absent"
+    [ -d "$host_data/models" ] && SUITE_HOST_MODEL="present"
+    SUITE_HOST_GLOBAL="absent"
+    [ -d "$host_data/global" ] && SUITE_HOST_GLOBAL="present"
+    ws="$(arm_workspace bd-rvrj2 environment_probe)"
+    ee_in "$ws" init --json >/dev/null 2>&1
+    ee_in "$ws" remember "Environment probe memory for the field report suite." \
+        --level semantic --kind fact --json >/dev/null 2>&1
+    pack_json="$(ee_in "$ws" pack "environment probe" --max-tokens 500 --json 2>/dev/null)"
+    SUITE_PROBE_CODES="$(printf '%s' "$pack_json" \
+        | jq -c '[(.degraded // .data.degraded // [])[]? | .code] | unique' 2>/dev/null)"
+    [ -n "$SUITE_PROBE_CODES" ] || SUITE_PROBE_CODES="unreadable"
+    log_event suite_environment phase setup host "$SUITE_HOST" \
+        data_isolation "$SUITE_DATA_ISOLATION" host_model "$SUITE_HOST_MODEL" \
+        host_global "$SUITE_HOST_GLOBAL" probe_codes "$SUITE_PROBE_CODES"
+}
+
+suite_environment_line() {
+    printf '[suite] environment host=%s data_isolation=%s host_model=%s host_global=%s probe_codes=%s\n' \
+        "$SUITE_HOST" "$SUITE_DATA_ISOLATION" "$SUITE_HOST_MODEL" "$SUITE_HOST_GLOBAL" \
+        "$SUITE_PROBE_CODES" >&2
+}
 
 # ---------------------------------------------------------------------------
 # Arm: bd-status-search-lexical-honesty-ejdpo
@@ -691,6 +748,9 @@ arm_cross_surface_verdict_vocabulary() {
         duration_ms "$(( $(now_ms) - started ))"
 }
 
+suite_environment_probe
+suite_environment_line
+
 arm_status_lexical_honesty
 arm_auto_index_rebuild_request
 arm_fallback_relevance_floor
@@ -701,4 +761,6 @@ arm_pack_banner_names_its_scope
 arm_cross_surface_verdict_vocabulary
 
 printf '[suite] artifacts retained under %s\n' "$SUITE_ROOT" >&2
+# Repeated next to the tally so the tally states where it came from.
+suite_environment_line
 harness_summary

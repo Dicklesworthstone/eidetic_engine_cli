@@ -85,7 +85,7 @@ fn prepare_read_only_search_embedder_with_settings(
     ))
 }
 
-fn cached_local_selection(
+pub(super) fn cached_local_selection(
     registry: Option<(&DbConnection, &str)>,
     settings: &EeEmbedderSettings,
     remote_selected: bool,

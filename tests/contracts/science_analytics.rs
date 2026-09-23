@@ -155,7 +155,7 @@ fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult 
         payload
             .pointer("/data/report/schema")
             .ok_or("missing report schema")?,
-        &json!("ee.eval.report.v1"),
+        &json!("ee.eval.report.v2"),
         context,
     )?;
     ensure_json_equal(
