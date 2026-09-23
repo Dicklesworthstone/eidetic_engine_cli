@@ -1802,6 +1802,88 @@ impl DbConnection {
         Ok(count)
     }
 
+    /// A logical digest of every user table, to tell a byte-level file change
+    /// (a WAL checkpoint) from a change to the rows themselves
+    /// (bd-reality-core-convergence-1azkt.10). Each row is serialized, the rows
+    /// are sorted so that physical order cannot matter, and the sorted rows are
+    /// hashed with BLAKE3. The value per table is `<row count>:<hex digest>`.
+    ///
+    /// Read-only: `SELECT` only, and a table name that is not a plain SQL
+    /// identifier is refused rather than quoted.
+    pub fn logical_table_digests(&self) -> Result<BTreeMap<String, String>> {
+        let mut digests = BTreeMap::new();
+        for table in self.list_user_tables()? {
+            if !is_plain_sql_identifier(&table) {
+                return Err(DbError::InvalidPath {
+                    operation: DbOperation::Query,
+                    path: PathBuf::from(&table),
+                    message: format!("invalid table name {table:?} for a logical digest"),
+                });
+            }
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!("SELECT * FROM \"{table}\""),
+                &[],
+            )?;
+            let mut serialized: Vec<String> = rows
+                .iter()
+                .map(|row| {
+                    let values: Vec<Option<&Value>> =
+                        (0..row.len()).map(|index| row.get(index)).collect();
+                    format!("{values:?}")
+                })
+                .collect();
+            serialized.sort_unstable();
+            let mut hasher = blake3::Hasher::new();
+            for row in &serialized {
+                hasher.update(row.as_bytes());
+                hasher.update(b"\n");
+            }
+            digests.insert(
+                table,
+                format!("{}:{}", serialized.len(), hasher.finalize().to_hex()),
+            );
+        }
+        Ok(digests)
+    }
+
+    /// A BLAKE3 digest of every row in `table`, keyed by rowid, so an
+    /// append-only check can tell an appended row from a modified or deleted
+    /// one (bd-reality-core-convergence-1azkt.10, ruling 20:40Z condition 2).
+    /// A row count cannot: a delete plus an insert keeps it equal.
+    ///
+    /// Read-only: `SELECT` only, and a table name that is not a plain SQL
+    /// identifier is refused rather than quoted.
+    pub fn table_row_digests_by_rowid(&self, table: &str) -> Result<BTreeMap<i64, String>> {
+        if !is_plain_sql_identifier(table) {
+            return Err(DbError::InvalidPath {
+                operation: DbOperation::Query,
+                path: PathBuf::from(table),
+                message: format!("invalid table name {table:?} for rowid row digests"),
+            });
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!("SELECT rowid, * FROM \"{table}\""),
+            &[],
+        )?;
+        let mut digests = BTreeMap::new();
+        for row in &rows {
+            let rowid = required_i64(row, 0, DbOperation::Query, "rowid")?;
+            let values: Vec<Option<&Value>> = (1..row.len()).map(|index| row.get(index)).collect();
+            let digest = blake3::hash(format!("{values:?}").as_bytes())
+                .to_hex()
+                .to_string();
+            if digests.insert(rowid, digest).is_some() {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: format!("table {table:?} returned rowid {rowid} twice"),
+                });
+            }
+        }
+        Ok(digests)
+    }
+
     /// Count current, non-tombstoned memory heads for exactly one workspace.
     ///
     /// Nearby-store discovery uses this instead of a whole-table row count so
@@ -3166,6 +3248,15 @@ fn required_value<'a>(
         operation,
         message: format!("missing {column} column at index {index}"),
     })
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`: a table name safe to splice into SQL, because
+/// SQLite cannot bind identifiers as parameters.
+fn is_plain_sql_identifier(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn required_i64(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<i64> {
@@ -39403,6 +39494,83 @@ mod tests {
                 "database disk image is malformed: page 30 is corrupt"
             )
         );
+    }
+
+    /// bd-reality-core-convergence-1azkt.10: the logical digest is blind to
+    /// physical row order and sees any change to a row.
+    #[test]
+    fn logical_table_digests_ignore_row_order_and_see_row_changes() -> TestResult {
+        let digest_of = |inserts: &[&str]| -> std::result::Result<
+            std::collections::BTreeMap<String, String>,
+            DbError,
+        > {
+            let connection = DbConnection::open_memory()?;
+            connection.execute_raw("CREATE TABLE facts (id INTEGER, body TEXT)")?;
+            for insert in inserts {
+                connection.execute_raw(insert)?;
+            }
+            connection.logical_table_digests()
+        };
+        let forward = digest_of(&[
+            "INSERT INTO facts VALUES (1, 'alpha')",
+            "INSERT INTO facts VALUES (2, 'beta')",
+        ])?;
+        let reversed = digest_of(&[
+            "INSERT INTO facts VALUES (2, 'beta')",
+            "INSERT INTO facts VALUES (1, 'alpha')",
+        ])?;
+        let changed = digest_of(&[
+            "INSERT INTO facts VALUES (1, 'alpha')",
+            "INSERT INTO facts VALUES (2, 'gamma')",
+        ])?;
+        assert_eq!(forward, reversed, "insert order must not change the digest");
+        assert_ne!(forward, changed, "a changed row must change the digest");
+        assert!(
+            forward
+                .get("facts")
+                .is_some_and(|digest| digest.starts_with("2:")),
+            "{forward:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rowid_row_digests_key_rows_by_rowid_and_see_modify_and_delete() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.execute_raw("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, body TEXT)")?;
+        connection.execute_raw("INSERT INTO audit_log VALUES (1, 'alpha'), (2, 'beta')")?;
+        let before = connection.table_row_digests_by_rowid("audit_log")?;
+        assert_eq!(before.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+
+        connection.execute_raw("INSERT INTO audit_log VALUES (3, 'gamma')")?;
+        let appended = connection.table_row_digests_by_rowid("audit_log")?;
+        assert_eq!(
+            appended.get(&1),
+            before.get(&1),
+            "an append leaves row 1 alone"
+        );
+        assert_eq!(
+            appended.get(&2),
+            before.get(&2),
+            "an append leaves row 2 alone"
+        );
+        assert!(appended.contains_key(&3));
+
+        connection.execute_raw("UPDATE audit_log SET body = 'changed' WHERE id = 1")?;
+        let modified = connection.table_row_digests_by_rowid("audit_log")?;
+        assert!(modified.get(&1).is_some() && modified.get(&1) != before.get(&1));
+
+        connection.execute_raw("DELETE FROM audit_log WHERE id = 2")?;
+        let deleted = connection.table_row_digests_by_rowid("audit_log")?;
+        assert!(!deleted.contains_key(&2));
+
+        assert!(
+            connection
+                .table_row_digests_by_rowid("audit_log; DROP TABLE audit_log")
+                .is_err(),
+            "a non-identifier table name is refused"
+        );
+        Ok(())
     }
 
     #[test]

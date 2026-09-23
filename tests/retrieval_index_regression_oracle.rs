@@ -886,50 +886,150 @@ fn expected_commit_refusal(expected: Option<&str>, observed: &str) -> Option<Str
     }
 }
 
-/// What the read-only window must leave untouched: both generation counters
-/// AND the bytes of every workspace file (bd-reality-core-convergence-1azkt.10,
-/// ruling 17:12Z item 1). The counters alone miss any write that does not bump
-/// a generation (a file touch, a WAL, a cache or registry row), which is why
-/// the file digest is compared too.
+/// What the probe window must leave untouched (bd-reality-core-convergence-
+/// 1azkt.10): both generation counters (ruling 17:12Z item 1), the bytes of
+/// every workspace file other than the database's own files, the database
+/// ROWS beyond what the probes declare (ruling 20:40Z), and the write lock by
+/// its semantics (bd-xa6ud). The counters alone miss any write that does not
+/// bump a generation; the bytes of `ee.db` and its WAL alone mislabel a
+/// declared audit append (search writes `audit_log`, effect.rs) as a mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DurableState {
     db_generation: Option<String>,
     index_generation: Option<String>,
     files: BTreeMap<String, String>,
+    rows: RowSnapshot,
+    write_lock: WriteLock,
 }
 
-/// Judge a read-only window. `None` means nothing durable moved.
+/// Judge a probe window against the tables the probes `declared` in the
+/// effect manifest. `None` means nothing durable moved beyond them.
 ///
-/// An empty `before` digest is `InfraError`, not a pass: a workspace with no
-/// files means the digest measured nothing, and "nothing changed" over nothing
-/// is the vacuous agreement this oracle refuses to count.
-fn durable_mutation(before: &DurableState, after: &DurableState) -> Option<Verdict> {
+/// An empty `before` file digest or row snapshot is `InfraError`, not a pass:
+/// "nothing changed" over nothing measured is the vacuous agreement this
+/// oracle refuses to count. So is an unreadable baseline write lock.
+fn durable_mutation(
+    before: &DurableState,
+    after: &DurableState,
+    declared: &BTreeSet<String>,
+) -> Option<Verdict> {
     if before.files.is_empty() {
         return Some(Verdict::InfraError(
             "the pre-window workspace digest is empty, so durable mutation was not measured"
                 .to_owned(),
         ));
     }
+    if before.rows.tables.is_empty() {
+        return Some(Verdict::InfraError(
+            "the pre-window row snapshot has no tables, so durable mutation was not measured"
+                .to_owned(),
+        ));
+    }
     let mut findings = Vec::new();
+    let mut unmeasured = Vec::new();
     if before.db_generation != after.db_generation
         || before.index_generation != after.index_generation
     {
         findings.push(format!(
-            "durable mutation under read-only probes: generation moved from db={:?}/index={:?} to db={:?}/index={:?}",
-            before.db_generation, before.index_generation, after.db_generation, after.index_generation
+            "durable mutation: generation moved from db={:?}/index={:?} to db={:?}/index={:?}",
+            before.db_generation,
+            before.index_generation,
+            after.db_generation,
+            after.index_generation
         ));
     }
-    let changed = tree_diff(&before.files, &after.files);
+    let before_files: BTreeMap<String, String> = before
+        .files
+        .iter()
+        .filter(|(path, _)| !is_db_state_file(path))
+        .map(|(path, digest)| (path.clone(), digest.clone()))
+        .collect();
+    let after_files: BTreeMap<String, String> = after
+        .files
+        .iter()
+        .filter(|(path, _)| !is_db_state_file(path))
+        .map(|(path, digest)| (path.clone(), digest.clone()))
+        .collect();
+    let changed = tree_diff(&before_files, &after_files);
     if !changed.is_empty() {
         findings.push(format!(
-            "durable mutation under read-only probes: workspace files changed: {changed:?}"
+            "durable mutation: workspace files changed: {changed:?}"
         ));
     }
-    if findings.is_empty() {
-        None
-    } else {
-        Some(Verdict::RaceReproduced(findings))
+    let (row_findings, row_unmeasured) = row_mutation(&before.rows, &after.rows, declared);
+    if !row_findings.is_empty() {
+        findings.push(format!(
+            "durable mutation beyond the declared writes {declared:?}: {row_findings:?}"
+        ));
     }
+    unmeasured.extend(row_unmeasured);
+    match write_lock_regression(&before.write_lock, &after.write_lock) {
+        Ok(Some(finding)) => findings.push(format!("durable mutation: {finding}")),
+        Ok(None) => {}
+        Err(reason) => unmeasured.push(reason),
+    }
+    if !findings.is_empty() {
+        findings.extend(
+            unmeasured
+                .into_iter()
+                .map(|reason| format!("also unmeasured: {reason}")),
+        );
+        Some(Verdict::RaceReproduced(findings))
+    } else if !unmeasured.is_empty() {
+        Some(Verdict::InfraError(unmeasured.join("; ")))
+    } else {
+        None
+    }
+}
+
+/// The database files' byte churn, classified for the record but not judged by
+/// bytes (ruling 20:40Z condition 4: "classified, not ignored"). An `ee.db`
+/// byte change is recorded as UNEXPLAINED (condition 6): the rows cover its
+/// consequence, but nothing here explains it.
+fn db_file_churn(before: &DurableState, after: &DurableState) -> Vec<Value> {
+    tree_diff(&before.files, &after.files)
+        .into_iter()
+        .filter_map(|change| {
+            let path = change
+                .split_once(' ')
+                .map_or(change.as_str(), |(_, path)| path);
+            if !is_db_state_file(path) {
+                return None;
+            }
+            let class = if path == ".ee/ee.db" {
+                "db-bytes-UNEXPLAINED"
+            } else {
+                classify_workspace_path(path)
+            };
+            Some(serde_json::json!({ "change": change, "class": class }))
+        })
+        .collect()
+}
+
+/// The fixture workspace's durable state: the file digest first, then the
+/// rows (read from a copy under the scratch dir, never the live files), then
+/// the write lock.
+fn durable_state(
+    fixture: &Fixture,
+    tag: &str,
+    db_generation: Option<String>,
+    index_generation: Option<String>,
+    declared: &BTreeSet<String>,
+) -> Result<DurableState, String> {
+    let files = digest_tree(&fixture.workspace)?;
+    let rows = row_snapshot(
+        &fixture.workspace,
+        &fixture.scratch.join(format!("rows-{tag}")),
+        declared,
+    )?;
+    let write_lock = read_write_lock(&fixture.workspace.join(".ee").join("ee.write.lock"));
+    Ok(DurableState {
+        db_generation,
+        index_generation,
+        files,
+        rows,
+        write_lock,
+    })
 }
 
 // ── Harness knobs ──────────────────────────────────────────────────────────
@@ -955,6 +1055,331 @@ struct Fixture {
     workspace: PathBuf,
     data_home: PathBuf,
     scratch: PathBuf,
+}
+
+/// The realistic isolated workspace every live arm runs against: eight rules,
+/// one of them off-topic, then an index rebuild.
+fn build_realistic_workspace(fixture: &Fixture) -> Result<(), String> {
+    run_ee(fixture, &["init", "--json"])?;
+    let rules = [
+        "Run cargo fmt --check before every release tag.",
+        "Release verification must go through the remote RCH lane, never local cargo.",
+        "Clippy nursery and pedantic lints are errors in CI; fix them before a release.",
+        "Never publish a release without a SHA-256 checksum for every asset.",
+        "The release workflow triggers on a version tag pushed to main.",
+        "Backups must be verified before a release restore drill.",
+        "Search index generation must equal DB generation before release smoke tests.",
+        "Frontend CSS tweaks are unrelated to release verification.",
+    ];
+    for rule in rules {
+        run_ee(
+            fixture,
+            &[
+                "remember",
+                rule,
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+                "--json",
+            ],
+        )?;
+    }
+    run_ee(fixture, &["index", "rebuild", "--json"])?;
+    Ok(())
+}
+
+/// Which kind of workspace file a path names (GraniteKite 2026-09-23, after the
+/// bd-xa6ud precedent "classify, don't ignore"): `shm` is the WAL shared-memory
+/// index that readers legitimately touch; `wal` covers the write-ahead log and
+/// its FrankenSQLite certification files; `lock` is a lock file, judged
+/// semantically rather than by bytes; anything else is `durable`.
+fn classify_workspace_path(path: &str) -> &'static str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name.ends_with("-shm") {
+        "shm"
+    } else if name.ends_with("-wal") || name.contains("-wal-") {
+        "wal"
+    } else if name.ends_with(".lock") {
+        "lock"
+    } else {
+        "durable"
+    }
+}
+
+/// What an `ee.db` byte change was (GraniteKite 2026-09-23, byte vs logical;
+/// pre-registered in 1azkt.10 comment 10021). `checkpoint`: the rows are equal
+/// and the WAL shrank, truncated or went away. `durable`: the rows differ.
+/// `db-bytes-other`: the rows are equal but the WAL did not shrink, which is
+/// reported rather than guessed at. `db-bytes-unjudged`: the logical digest
+/// could not be taken, so the change is not classified.
+fn classify_db_byte_change(
+    logical_equal: Option<bool>,
+    wal_before: Option<u64>,
+    wal_after: Option<u64>,
+) -> &'static str {
+    match logical_equal {
+        None => "db-bytes-unjudged",
+        Some(false) => "durable",
+        Some(true) => {
+            let wal_shrank = match (wal_before, wal_after) {
+                (Some(before), Some(after)) => after < before,
+                (Some(before), None) => before > 0,
+                (None, _) => false,
+            };
+            if wal_shrank {
+                "checkpoint"
+            } else {
+                "db-bytes-other"
+            }
+        }
+    }
+}
+
+/// The size of `.ee/ee.db-wal`, or `None` when there is none.
+fn wal_size(workspace: &Path) -> Option<u64> {
+    std::fs::metadata(workspace.join(".ee").join("ee.db-wal"))
+        .ok()
+        .map(|metadata| metadata.len())
+}
+
+/// The rows of the workspace database (1azkt.10 comment 10021, ruling 20:40Z).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowSnapshot {
+    /// Every user table: `<row count>:<blake3 over its sorted rows>`.
+    tables: BTreeMap<String, String>,
+    /// Each declared table present in the database: rowid -> row digest.
+    declared_rows: BTreeMap<String, BTreeMap<i64, String>>,
+    /// The database files the snapshot was read from.
+    copied: Vec<String>,
+}
+
+impl RowSnapshot {
+    /// One digest over every table's digest.
+    fn all_digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for (table, digest) in &self.tables {
+            hasher.update(format!("{table}={digest}\n").as_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
+/// The rows of the workspace database: every table's logical digest, plus the
+/// rowid-keyed rows of each `declared` table.
+///
+/// It never opens the live files, because opening them could itself
+/// checkpoint the WAL. It copies `ee.db`, `ee.db-wal` and `ee.db-wal-cert*`
+/// (not `-shm`) into `copy_dir` and opens the COPY read-write: a read-only
+/// open of a copied WAL database is refused with "database is busy (recovery
+/// in progress)" (evidence 577dae27), because WAL recovery needs a writer.
+/// Recovery only replays committed frames, so the rows read are the rows any
+/// reader of the live files would see.
+fn row_snapshot(
+    workspace: &Path,
+    copy_dir: &Path,
+    declared: &BTreeSet<String>,
+) -> Result<RowSnapshot, String> {
+    let db_dir = workspace.join(".ee");
+    std::fs::create_dir_all(copy_dir)
+        .map_err(|error| format!("create {}: {error}", copy_dir.display()))?;
+    let mut copied = Vec::new();
+    let entries = std::fs::read_dir(&db_dir)
+        .map_err(|error| format!("read_dir {}: {error}", db_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "ee.db" || name == "ee.db-wal" || name.starts_with("ee.db-wal-cert") {
+            std::fs::copy(entry.path(), copy_dir.join(&name))
+                .map_err(|error| format!("copy {name}: {error}"))?;
+            copied.push(name);
+        }
+    }
+    copied.sort();
+    if !copied.iter().any(|name| name == "ee.db") {
+        return Err(format!("no ee.db under {}", db_dir.display()));
+    }
+    let connection = ee::db::DbConnection::open_file(copy_dir.join("ee.db"))
+        .map_err(|error| format!("open the ee.db copy: {error}"))?;
+    let tables = connection
+        .logical_table_digests()
+        .map_err(|error| format!("logical digest of the ee.db copy: {error}"))?;
+    if tables.is_empty() {
+        return Err(
+            "the ee.db copy has no user tables, so the logical digest measured nothing".to_owned(),
+        );
+    }
+    let mut declared_rows = BTreeMap::new();
+    for table in declared.iter().filter(|table| tables.contains_key(*table)) {
+        let rows = connection
+            .table_row_digests_by_rowid(table)
+            .map_err(|error| format!("rowid digests of {table} in the ee.db copy: {error}"))?;
+        declared_rows.insert(table.clone(), rows);
+    }
+    Ok(RowSnapshot {
+        tables,
+        declared_rows,
+        copied,
+    })
+}
+
+/// The tables the effect manifest lets these invocations write (ruling 20:40Z
+/// condition 1): each argv is parsed by the real CLI, mapped to its command
+/// path the way `ee` itself maps it, and looked up in `EffectManifest`. Never
+/// a hand-list, so the oracle cannot drift from the declarations. An argv
+/// that does not parse, or a path with no declaration, is an error: an
+/// undeclared command cannot be judged. Also returns what was derived, for
+/// the evidence.
+fn declared_write_tables(invocations: &[&[&str]]) -> Result<(BTreeSet<String>, Value), String> {
+    use clap::Parser as _;
+    let manifest = ee::core::effect::EffectManifest::build();
+    let mut tables = BTreeSet::new();
+    let mut derived = Vec::new();
+    for args in invocations {
+        let cli = ee::cli::Cli::try_parse_from(std::iter::once("ee").chain(args.iter().copied()))
+            .map_err(|error| format!("probe argv {args:?} does not parse: {error}"))?;
+        let command_path = ee::cli::NormalizedInvocation::from_cli(&cli, &[]).command_path;
+        let effect = manifest.get(&command_path).ok_or_else(|| {
+            format!("command path {command_path:?} (argv {args:?}) has no effect declaration")
+        })?;
+        tables.extend(
+            effect
+                .write_surfaces
+                .db_tables
+                .iter()
+                .map(|table| (*table).to_owned()),
+        );
+        derived.push(serde_json::json!({
+            "argv": args,
+            "commandPath": command_path,
+            "dbTables": effect.write_surfaces.db_tables,
+        }));
+    }
+    Ok((tables, Value::Array(derived)))
+}
+
+/// Judge two row snapshots (ruling 20:40Z conditions 2 and 3). Returns the
+/// findings, and separately what could not be measured.
+///
+/// - An undeclared table must be row-equal: any change, and any table that
+///   appears or disappears, is a finding.
+/// - A declared table is APPEND-ONLY by rowid: every row present before must
+///   be present after with the same digest. A missing rowid is DELETED, a
+///   changed digest is MODIFIED; new rowids are allowed. A count is never
+///   compared, because a delete plus an insert keeps it equal.
+fn row_mutation(
+    before: &RowSnapshot,
+    after: &RowSnapshot,
+    declared: &BTreeSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut findings = Vec::new();
+    let mut unmeasured = Vec::new();
+    let names: BTreeSet<&String> = before.tables.keys().chain(after.tables.keys()).collect();
+    for table in names {
+        let (was, is) = (before.tables.get(table), after.tables.get(table));
+        if !declared.contains(table) {
+            if was != is {
+                findings.push(format!(
+                    "undeclared table {table} changed: {} -> {}",
+                    was.map_or("absent", String::as_str),
+                    is.map_or("absent", String::as_str)
+                ));
+            }
+            continue;
+        }
+        match (was, is) {
+            (None, None) => {}
+            (None, Some(_)) => findings.push(format!("declared table {table} was created")),
+            (Some(_), None) => findings.push(format!("declared table {table} was removed")),
+            (Some(_), Some(_)) => {
+                let (Some(rows_before), Some(rows_after)) = (
+                    before.declared_rows.get(table),
+                    after.declared_rows.get(table),
+                ) else {
+                    unmeasured.push(format!("declared table {table} has no rowid digests"));
+                    continue;
+                };
+                for (rowid, digest) in rows_before {
+                    match rows_after.get(rowid) {
+                        None => {
+                            findings.push(format!("declared table {table}: row {rowid} DELETED"));
+                        }
+                        Some(now) if now != digest => {
+                            findings.push(format!("declared table {table}: row {rowid} MODIFIED"));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    (findings, unmeasured)
+}
+
+/// `.ee/ee.write.lock` read by its semantics (bd-xa6ud precedent,
+/// tests/doctor_fixtures/lib.sh): 21 bytes, a 20-digit epoch and a newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteLock {
+    Absent,
+    Epoch(String),
+    Unreadable(String),
+}
+
+fn read_write_lock(path: &Path) -> WriteLock {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return WriteLock::Absent,
+        Err(error) => return WriteLock::Unreadable(error.to_string()),
+    };
+    if !metadata.is_file() {
+        return WriteLock::Unreadable("not a regular file".to_owned());
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => return WriteLock::Unreadable(error.to_string()),
+    };
+    match bytes.split_last() {
+        Some((b'\n', digits)) if digits.len() == 20 && digits.iter().all(u8::is_ascii_digit) => {
+            WriteLock::Epoch(String::from_utf8_lossy(digits).into_owned())
+        }
+        _ => WriteLock::Unreadable(format!(
+            "{} bytes, not a 20-digit epoch and a newline",
+            bytes.len()
+        )),
+    }
+}
+
+/// The xa6ud rule: absent stays absent; a present lock stays readable and its
+/// epoch never goes backwards. `Err` means the baseline itself is unreadable.
+fn write_lock_regression(before: &WriteLock, after: &WriteLock) -> Result<Option<String>, String> {
+    match (before, after) {
+        (WriteLock::Unreadable(reason), _) => Err(format!(
+            "the baseline ee.write.lock is unreadable: {reason}"
+        )),
+        (WriteLock::Absent, WriteLock::Absent) => Ok(None),
+        (WriteLock::Absent, _) => Ok(Some("ee.write.lock appeared".to_owned())),
+        (WriteLock::Epoch(_), WriteLock::Absent) => {
+            Ok(Some("ee.write.lock disappeared".to_owned()))
+        }
+        (WriteLock::Epoch(_), WriteLock::Unreadable(reason)) => {
+            Ok(Some(format!("ee.write.lock became unreadable: {reason}")))
+        }
+        // Zero-padded to 20 digits, so string order is numeric order.
+        (WriteLock::Epoch(was), WriteLock::Epoch(is)) if is < was => Ok(Some(format!(
+            "ee.write.lock epoch went backwards: {was} -> {is}"
+        ))),
+        (WriteLock::Epoch(_), WriteLock::Epoch(_)) => Ok(None),
+    }
+}
+
+/// The database files judged by their rows or semantics instead of their
+/// bytes: `ee.db` (rows), its shm/WAL sidecars (classified churn) and
+/// `ee.write.lock` (xa6ud). Every other workspace file stays byte-compared.
+fn is_db_state_file(path: &str) -> bool {
+    path == ".ee/ee.db"
+        || path == ".ee/ee.write.lock"
+        || (path.starts_with(".ee/ee.db-")
+            && matches!(classify_workspace_path(path), "shm" | "wal"))
 }
 
 fn ee_command(fixture: &Fixture, args: &[&str]) -> Command {
@@ -1144,6 +1569,21 @@ fn evidence_body(events: &[Value]) -> String {
     body
 }
 
+/// Echo the evidence body between markers on STDOUT (ruling 20:40Z). rch
+/// merges the remote stdout into its stderr with no ordering between the
+/// two, and libtest writes its own lines to stdout, so a body on stderr got
+/// libtest lines spliced into it (evidence 577dae27, c5dbda5e). One stream
+/// is ordered. The leading newline ends libtest's pending `test ... ` line.
+fn echo_evidence_body(events: &[Value]) {
+    let body = evidence_body(events);
+    println!(
+        "\noracle evidence body blake3={} begin",
+        blake3::hash(body.as_bytes()).to_hex()
+    );
+    print!("{body}");
+    println!("oracle evidence body end");
+}
+
 fn event(phase: &str, status: &str, details: Value) -> Value {
     serde_json::json!({
         "schema": TEST_EVENT_SCHEMA,
@@ -1321,36 +1761,7 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
     }
 
     // ── Realistic isolated workspace ────────────────────────────────────────
-    let setup = (|| -> Result<(), String> {
-        run_ee(&fixture, &["init", "--json"])?;
-        let rules = [
-            "Run cargo fmt --check before every release tag.",
-            "Release verification must go through the remote RCH lane, never local cargo.",
-            "Clippy nursery and pedantic lints are errors in CI; fix them before a release.",
-            "Never publish a release without a SHA-256 checksum for every asset.",
-            "The release workflow triggers on a version tag pushed to main.",
-            "Backups must be verified before a release restore drill.",
-            "Search index generation must equal DB generation before release smoke tests.",
-            "Frontend CSS tweaks are unrelated to release verification.",
-        ];
-        for rule in rules {
-            run_ee(
-                &fixture,
-                &[
-                    "remember",
-                    rule,
-                    "--level",
-                    "procedural",
-                    "--kind",
-                    "rule",
-                    "--json",
-                ],
-            )?;
-        }
-        run_ee(&fixture, &["index", "rebuild", "--json"])?;
-        Ok(())
-    })();
-    if let Err(error) = setup {
+    if let Err(error) = build_realistic_workspace(&fixture) {
         return finish(
             &Verdict::InfraError(format!("fixture setup failed: {error}")),
             &proof_dir,
@@ -1391,32 +1802,6 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }),
     ));
 
-    // ── Durable state before the read-only window (ruling 17:12Z item 1) ────
-    // Everything from here to the end of the rounds is a read.
-    let durable_before = match digest_tree(&fixture.workspace) {
-        Ok(files) => DurableState {
-            db_generation: db_generation.clone(),
-            index_generation: index_generation.clone(),
-            files,
-        },
-        Err(error) => {
-            return finish(
-                &Verdict::InfraError(format!("pre-window workspace digest failed: {error}")),
-                &proof_dir,
-                &mut events,
-            );
-        }
-    };
-    events.push(event(
-        "durable_state_before",
-        "info",
-        serde_json::json!({
-            "workspaceFiles": durable_before.files.len(),
-            "dbGeneration": &durable_before.db_generation,
-            "indexGeneration": &durable_before.index_generation,
-        }),
-    ));
-
     let search_args = [
         "search",
         "release verification remote lane",
@@ -1432,6 +1817,69 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         "1500",
         "--json",
     ];
+    let status_args = ["index", "status", "--json"];
+
+    // ── Durable state before the probe window (rulings 17:12Z item 1, 20:40Z) ─
+    // Every command from here to the end of the window is one of these three.
+    // What they may write comes from the effect manifest, not from this file.
+    let declared = match declared_write_tables(&[
+        search_args.as_slice(),
+        pack_args.as_slice(),
+        status_args.as_slice(),
+    ]) {
+        Ok((tables, derived)) => {
+            events.push(event(
+                "declared_write_tables",
+                "info",
+                serde_json::json!({ "tables": &tables, "derivedFrom": derived }),
+            ));
+            tables
+        }
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "the probes' declared writes could not be derived: {error}"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    let durable_before = match durable_state(
+        &fixture,
+        "before",
+        db_generation.clone(),
+        index_generation.clone(),
+        &declared,
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("pre-window durable state failed: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    events.push(event(
+        "durable_state_before",
+        "info",
+        serde_json::json!({
+            "workspaceFiles": durable_before.files.len(),
+            "dbGeneration": &durable_before.db_generation,
+            "indexGeneration": &durable_before.index_generation,
+            "tables": durable_before.rows.tables.len(),
+            "rowsDigest": durable_before.rows.all_digest(),
+            "declaredRows": durable_before
+                .rows
+                .declared_rows
+                .iter()
+                .map(|(table, rows)| (table.clone(), rows.len()))
+                .collect::<BTreeMap<_, _>>(),
+            "writeLock": format!("{:?}", durable_before.write_lock),
+            "walBytes": wal_size(&fixture.workspace),
+        }),
+    ));
 
     // ── Concurrent-cold round (ruling 17:12Z item 3) ────────────────────────
     // With ORACLE_COLD_CONCURRENT=1 the FIRST touch after the rebuild is a
@@ -1670,19 +2118,23 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }
     }
 
-    // ── Durable mutation under read-only ────────────────────────────────────
-    // Every probe above was a read (`search`, and `pack --read-only`). The
-    // window is judged on the generation counters AND the workspace file
-    // bytes, by `durable_mutation`, whose planted controls live in
-    // `mod durable_mutation_controls`.
-    match run_ee(&fixture, &["index", "status", "--json"]) {
-        Ok(after) => match digest_tree(&fixture.workspace) {
-            Ok(files) => {
-                let durable_after = DurableState {
-                    db_generation: pointer_string(&after, "/data/dbGeneration"),
-                    index_generation: pointer_string(&after, "/data/indexGeneration"),
-                    files,
-                };
+    // ── Durable mutation beyond the declared writes ─────────────────────────
+    // The probes are `search` (declared to append to audit_log, effect.rs),
+    // `pack --read-only` and `index status`. The window is judged on the
+    // generation counters, the non-database file bytes, the database ROWS
+    // against the declared tables, and the write lock, by `durable_mutation`,
+    // whose planted controls live in `mod durable_mutation_controls`.
+    match run_ee(&fixture, &status_args) {
+        Ok(after) => match durable_state(
+            &fixture,
+            "after",
+            pointer_string(&after, "/data/dbGeneration"),
+            pointer_string(&after, "/data/indexGeneration"),
+            &declared,
+        ) {
+            Ok(durable_after) => {
+                let (row_findings, _) =
+                    row_mutation(&durable_before.rows, &durable_after.rows, &declared);
                 events.push(event(
                     "durable_state_after",
                     "info",
@@ -1691,14 +2143,30 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                         "dbGeneration": &durable_after.db_generation,
                         "indexGeneration": &durable_after.index_generation,
                         "changed": tree_diff(&durable_before.files, &durable_after.files),
+                        "dbFileChurn": db_file_churn(&durable_before, &durable_after),
+                        "rowsDigest": durable_after.rows.all_digest(),
+                        "changedTables": durable_before
+                            .rows
+                            .tables
+                            .keys()
+                            .chain(durable_after.rows.tables.keys())
+                            .filter(|table| {
+                                durable_before.rows.tables.get(*table)
+                                    != durable_after.rows.tables.get(*table)
+                            })
+                            .collect::<BTreeSet<_>>(),
+                        "rowFindings": row_findings,
+                        "writeLock": format!("{:?}", durable_after.write_lock),
+                        "walBytes": wal_size(&fixture.workspace),
                     }),
                 ));
-                if let Some(verdict) = durable_mutation(&durable_before, &durable_after) {
+                if let Some(verdict) = durable_mutation(&durable_before, &durable_after, &declared)
+                {
                     round_verdicts.push(verdict);
                 }
             }
             Err(error) => round_verdicts.push(Verdict::InfraError(format!(
-                "post-window workspace digest failed, so durable mutation could not be checked: {error}"
+                "post-window durable state failed, so durable mutation could not be checked: {error}"
             ))),
         },
         Err(error) => round_verdicts.push(Verdict::InfraError(format!(
@@ -1734,13 +2202,7 @@ fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestR
     // Ruling 9964 (ii): a proof file on an RCH worker does not outlive the
     // job, so the body is echoed as well. Its BLAKE3 equals the file name,
     // which is how a copy retained elsewhere proves it is the same evidence.
-    let body = evidence_body(events);
-    eprintln!(
-        "oracle evidence body blake3={} begin",
-        blake3::hash(body.as_bytes()).to_hex()
-    );
-    eprint!("{body}");
-    eprintln!("oracle evidence body end");
+    echo_evidence_body(events);
     if verdict.is_product_pass() {
         // bd-0v23w: a pass used to compute this path and discard it. The
         // artifact was always written — it was simply never named, so no green
@@ -1762,6 +2224,236 @@ fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestR
         verdict.detail(),
         proof.display()
     ))
+}
+
+/// Attribution of the durable-mutation red seen at 42c8408
+/// (bd-reality-core-convergence-1azkt.10; arms suggested by GraniteKite
+/// 2026-09-23). On ONE realistic workspace, the files are digested before and
+/// after each arm, and every changed path is classified shm / wal / lock /
+/// durable. Each arm also records the `-wal` size and a logical digest of the
+/// database rows (taken from a read-only copy), so an `ee.db` byte change is
+/// split into checkpoint / durable / db-bytes-other (comment 10021):
+///
+/// - N1: nothing between the two digests (null control; must show no change)
+/// - S:  one `ee index status --json` (declared read_only_db in effect.rs)
+/// - PS: one concurrent round of search probes, with no status call inside
+/// - PP: one concurrent round of `pack --read-only` probes, likewise
+/// - N2: nothing again (null control after the probes)
+/// - W:  one `ee remember` (positive control: the logical digest must differ,
+///   or it is blind and a `checkpoint` reading elsewhere proves nothing)
+///
+/// It records; it renders no product verdict. A `durable` change in S is a
+/// read_only_db command writing durable state. A `durable` change in PS or PP
+/// is the read-only race signal. Run it deliberately:
+/// `cargo test --locked --test integration_n_r -- --ignored --exact --nocapture
+/// retrieval_index_regression_oracle::read_only_window_attribution`.
+#[test]
+#[ignore = "attribution probe for the 1azkt.10 durable-mutation red; run it deliberately"]
+fn read_only_window_attribution() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = Fixture {
+        workspace: tempdir.path().join("workspace"),
+        data_home: tempdir.path().join("home"),
+        scratch: tempdir.path().join("scratch"),
+    };
+    for dir in [&fixture.workspace, &fixture.data_home, &fixture.scratch] {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    let proof_dir = std::env::var("ORACLE_PROOF_DIR")
+        .map_or_else(|_| tempdir.path().join("proof"), PathBuf::from);
+    let probes = knob("ORACLE_PROBES", 8);
+    let timeout = Duration::from_secs(knob("ORACLE_TIMEOUT_SECS", 120) as u64);
+    build_realistic_workspace(&fixture)?;
+    // As in the live oracle, one status read precedes the window.
+    run_ee(&fixture, &["index", "status", "--json"])?;
+
+    let search_args = [
+        "search",
+        "release verification remote lane",
+        "--limit",
+        "5",
+        "--json",
+    ];
+    let pack_args = [
+        "pack",
+        "prepare release",
+        "--read-only",
+        "--max-tokens",
+        "1500",
+        "--json",
+    ];
+    let status_args = ["index", "status", "--json"];
+    let remember_args = [
+        "remember",
+        "Attribution control: this row must change the logical digest.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ];
+    let copies = tempdir.path().join("logical");
+    let mut events = Vec::new();
+    // Who closed last before each after-digest (comment 10021 item 3). Every
+    // arm's processes have exited before its after-digest is taken.
+    let mut last_closer = "setup: the pre-window `ee index status --json`".to_owned();
+    for arm in ["N1", "S", "PS", "PP", "N2", "W"] {
+        // The tables this arm's command declares (ruling 20:40Z), so the row
+        // judgment below is the one the oracle applies. W is the logical
+        // digest's positive control, not a probe: remember is a durable write,
+        // not an append-only one, so it is not judged.
+        let invocations: Vec<&[&str]> = match arm {
+            "S" => vec![status_args.as_slice()],
+            "PS" => vec![search_args.as_slice()],
+            "PP" => vec![pack_args.as_slice()],
+            "W" => vec![remember_args.as_slice()],
+            _ => Vec::new(),
+        };
+        let (declared, derived) = declared_write_tables(&invocations)?;
+        // The byte digest first, then the WAL size, then the copy for the
+        // row snapshot, so the instrument reads what the arm left.
+        let before = digest_tree(&fixture.workspace)?;
+        let wal_before = wal_size(&fixture.workspace);
+        let rows_before = row_snapshot(
+            &fixture.workspace,
+            &copies.join(format!("{arm}-before")),
+            &declared,
+        );
+        let mut unwaited = 0usize;
+        match arm {
+            "S" => {
+                run_ee(&fixture, &status_args)?;
+                last_closer = "S: its one `ee index status --json` (exited)".to_owned();
+            }
+            "W" => {
+                run_ee(&fixture, &remember_args)?;
+                last_closer = "W: its one `ee remember --json` (exited)".to_owned();
+            }
+            "PS" | "PP" => {
+                let (args, extract) = if arm == "PS" {
+                    (
+                        search_args.as_slice(),
+                        search_record as fn(&Value) -> Record,
+                    )
+                } else {
+                    (pack_args.as_slice(), pack_record as fn(&Value) -> Record)
+                };
+                let children = spawn_probes(&fixture, args, probes, 0, arm)?;
+                let outcomes = collect_probes(children, timeout, extract);
+                let completed = outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_)))
+                    .count();
+                // A probe whose wait failed was never reaped, so its exit
+                // before the after-digest is not proven.
+                unwaited = outcomes
+                    .iter()
+                    .filter(|outcome| {
+                        matches!(outcome, ProbeOutcome::DidNotComplete(reason) if reason.starts_with("could not wait"))
+                    })
+                    .count();
+                eprintln!("attribution arm {arm}: {completed}/{probes} probes completed");
+                last_closer = format!(
+                    "{arm}: one of its {probes} probes; {} of {probes} reaped before the after-digest; which one closed last is not instrumented",
+                    probes - unwaited
+                );
+            }
+            _ => {
+                last_closer = format!("no process inside {arm}; the last before it: {last_closer}");
+            }
+        }
+        let after = digest_tree(&fixture.workspace)?;
+        let wal_after = wal_size(&fixture.workspace);
+        let rows_after = row_snapshot(
+            &fixture.workspace,
+            &copies.join(format!("{arm}-after")),
+            &declared,
+        );
+        let logical_equal = match (&rows_before, &rows_after) {
+            (Ok(was), Ok(is)) => Some(was.all_digest() == is.all_digest()),
+            _ => None,
+        };
+        let changed_tables: Vec<String> = match (&rows_before, &rows_after) {
+            (Ok(was), Ok(is)) => was
+                .tables
+                .keys()
+                .chain(is.tables.keys())
+                .filter(|table| was.tables.get(*table) != is.tables.get(*table))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let row_judgment = match (arm, &rows_before, &rows_after) {
+            ("W", _, _) => serde_json::json!("not judged: the digest's positive control"),
+            (_, Ok(was), Ok(is)) => {
+                let (findings, unmeasured) = row_mutation(was, is, &declared);
+                serde_json::json!({ "findings": findings, "unmeasured": unmeasured })
+            }
+            _ => serde_json::json!("unmeasured: no row snapshot"),
+        };
+        let changed: Vec<(String, &'static str)> = tree_diff(&before, &after)
+            .into_iter()
+            .map(|change| {
+                let path = change
+                    .split_once(' ')
+                    .map_or(change.as_str(), |(_, path)| path);
+                let class = if path == ".ee/ee.db" {
+                    classify_db_byte_change(logical_equal, wal_before, wal_after)
+                } else {
+                    classify_workspace_path(path)
+                };
+                (change.clone(), class)
+            })
+            .collect();
+        let logical_json = |snapshot: &Result<RowSnapshot, String>| match snapshot {
+            Ok(snapshot) => serde_json::json!({
+                "all": snapshot.all_digest(),
+                "tables": &snapshot.tables,
+                "declaredRows": snapshot
+                    .declared_rows
+                    .iter()
+                    .map(|(table, rows)| (table.clone(), rows.len()))
+                    .collect::<BTreeMap<_, _>>(),
+                "copied": &snapshot.copied,
+            }),
+            Err(error) => serde_json::json!({ "error": error }),
+        };
+        eprintln!(
+            "attribution arm {arm}: files {} -> {}, wal {wal_before:?} -> {wal_after:?}, logicalEqual {logical_equal:?}, changedTables {changed_tables:?}, declared {declared:?}, rowJudgment {row_judgment}, changed {changed:?}, lastCloser {last_closer}",
+            before.len(),
+            after.len(),
+        );
+        events.push(event(
+            "attribution_arm",
+            "info",
+            serde_json::json!({
+                "arm": arm,
+                "filesBefore": before.len(),
+                "filesAfter": after.len(),
+                "walBytesBefore": wal_before,
+                "walBytesAfter": wal_after,
+                "logicalBefore": logical_json(&rows_before),
+                "logicalAfter": logical_json(&rows_after),
+                "logicalEqual": logical_equal,
+                "changedTables": changed_tables,
+                "declared": &declared,
+                "declaredFrom": derived,
+                "rowJudgment": row_judgment,
+                "lastCloser": last_closer,
+                "unreapedProbes": unwaited,
+                "changed": changed
+                    .iter()
+                    .map(|(change, class)| serde_json::json!({ "change": change, "class": class }))
+                    .collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    let proof = write_content_addressed_evidence(&proof_dir, &events)?;
+    println!("attribution recorded\nevidence: {}", proof.display());
+    echo_evidence_body(&events);
+    Ok(())
 }
 
 /// Sequential proof that `ee pack --read-only` does not mutate workspace files
@@ -2051,31 +2743,93 @@ mod durable_mutation_controls {
     //! Each failure class gets a planted red and an untouched twin, so a judge
     //! that flags everything fails as surely as one that flags nothing.
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{DurableState, durable_mutation, expected_commit_refusal};
+    use super::{
+        DurableState, Fixture, RowSnapshot, Verdict, WriteLock, classify_db_byte_change,
+        classify_workspace_path, db_file_churn, declared_write_tables, durable_mutation,
+        durable_state, expected_commit_refusal, read_write_lock, write_lock_regression,
+    };
+
+    #[test]
+    fn db_byte_changes_split_into_checkpoint_durable_other_and_unjudged() {
+        let cases = [
+            // Rows equal and the WAL shrank, truncated or went away.
+            (Some(true), Some(4096), Some(1024), "checkpoint"),
+            (Some(true), Some(4096), Some(0), "checkpoint"),
+            (Some(true), Some(4096), None, "checkpoint"),
+            // Rows differ: durable, whatever the WAL did.
+            (Some(false), Some(4096), Some(0), "durable"),
+            (Some(false), None, None, "durable"),
+            // Rows equal but the WAL did not shrink: reported, not guessed at.
+            (Some(true), Some(4096), Some(4096), "db-bytes-other"),
+            (Some(true), Some(0), None, "db-bytes-other"),
+            (Some(true), None, Some(4096), "db-bytes-other"),
+            // No logical digest: not classified at all.
+            (None, Some(4096), Some(0), "db-bytes-unjudged"),
+        ];
+        for (logical_equal, wal_before, wal_after, expected) in cases {
+            assert_eq!(
+                classify_db_byte_change(logical_equal, wal_before, wal_after),
+                expected,
+                "logical_equal={logical_equal:?} wal {wal_before:?} -> {wal_after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_paths_are_classified_shm_wal_lock_or_durable() {
+        for (path, class) in [
+            (".ee/ee.db-shm", "shm"),
+            (".ee/ee.db-wal", "wal"),
+            (".ee/ee.db-wal-cert", "wal"),
+            (".ee/ee.db-wal-cert-head", "wal"),
+            (".ee/ee.write.lock", "lock"),
+            (".ee/ee.db", "durable"),
+            (".ee/index/meta.json", "durable"),
+            (".ee/walrus/notes.json", "durable"),
+        ] {
+            assert_eq!(classify_workspace_path(path), class, "{path}");
+        }
+    }
+
+    fn declared() -> BTreeSet<String> {
+        BTreeSet::from(["audit_log".to_owned()])
+    }
 
     fn state() -> DurableState {
         let mut files = BTreeMap::new();
         files.insert(".ee/ee.db".to_owned(), "aaaa".to_owned());
         files.insert(".ee/index/meta.json".to_owned(), "bbbb".to_owned());
+        let tables = BTreeMap::from([
+            ("audit_log".to_owned(), "2:aa".to_owned()),
+            ("memories".to_owned(), "1:bb".to_owned()),
+        ]);
+        let audit_rows = BTreeMap::from([(1, "r1".to_owned()), (2, "r2".to_owned())]);
         DurableState {
             db_generation: Some("8".to_owned()),
             index_generation: Some("8".to_owned()),
             files,
+            rows: RowSnapshot {
+                tables,
+                declared_rows: BTreeMap::from([("audit_log".to_owned(), audit_rows)]),
+                copied: vec!["ee.db".to_owned()],
+            },
+            write_lock: WriteLock::Epoch("00000000000000000005".to_owned()),
         }
     }
 
     #[test]
     fn an_untouched_window_is_not_a_mutation() {
-        assert!(durable_mutation(&state(), &state()).is_none());
+        assert!(durable_mutation(&state(), &state(), &declared()).is_none());
     }
 
     #[test]
     fn a_moved_generation_is_a_mutation() {
         let mut after = state();
         after.db_generation = Some("9".to_owned());
-        let verdict = durable_mutation(&state(), &after).expect("a moved counter must red");
+        let verdict =
+            durable_mutation(&state(), &after, &declared()).expect("a moved counter must red");
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
         assert!(verdict.detail().contains("generation moved"), "{verdict:?}");
     }
@@ -2086,11 +2840,12 @@ mod durable_mutation_controls {
         let mut after = state();
         after
             .files
-            .insert(".ee/ee.db".to_owned(), "cccc".to_owned());
-        let verdict = durable_mutation(&state(), &after).expect("a changed file must red");
+            .insert(".ee/index/meta.json".to_owned(), "cccc".to_owned());
+        let verdict =
+            durable_mutation(&state(), &after, &declared()).expect("a changed file must red");
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
         assert!(
-            verdict.detail().contains("changed .ee/ee.db"),
+            verdict.detail().contains("changed .ee/index/meta.json"),
             "{verdict:?}"
         );
     }
@@ -2100,25 +2855,217 @@ mod durable_mutation_controls {
         let mut added = state();
         added
             .files
-            .insert(".ee/ee.db-wal".to_owned(), "dddd".to_owned());
+            .insert(".ee/index/new.json".to_owned(), "dddd".to_owned());
         assert!(
-            durable_mutation(&state(), &added)
-                .is_some_and(|verdict| verdict.detail().contains("added .ee/ee.db-wal"))
+            durable_mutation(&state(), &added, &declared())
+                .is_some_and(|verdict| verdict.detail().contains("added .ee/index/new.json"))
         );
         let mut removed = state();
         removed.files.remove(".ee/index/meta.json");
         assert!(
-            durable_mutation(&state(), &removed)
+            durable_mutation(&state(), &removed, &declared())
                 .is_some_and(|verdict| verdict.detail().contains("removed .ee/index/meta.json"))
         );
     }
 
     #[test]
-    fn an_empty_digest_measured_nothing_and_is_infra_error() {
+    fn database_file_churn_is_classified_not_judged_by_bytes() {
+        // ee.db, its WAL and shm change bytes and the lock advances, but no row
+        // changed: not a mutation (ruling 20:40Z), and the churn is recorded
+        // with ee.db's byte change as UNEXPLAINED (condition 6).
+        let mut after = state();
+        for path in [".ee/ee.db", ".ee/ee.db-wal", ".ee/ee.db-shm"] {
+            after.files.insert(path.to_owned(), "churned".to_owned());
+        }
+        after.write_lock = WriteLock::Epoch("00000000000000000006".to_owned());
+        assert_eq!(durable_mutation(&state(), &after, &declared()), None);
+        let churn = db_file_churn(&state(), &after);
+        let classes: Vec<(&str, &str)> = churn
+            .iter()
+            .filter_map(|entry| Some((entry["change"].as_str()?, entry["class"].as_str()?)))
+            .collect();
+        assert_eq!(
+            classes,
+            vec![
+                ("added .ee/ee.db-shm", "shm"),
+                ("added .ee/ee.db-wal", "wal"),
+                ("changed .ee/ee.db", "db-bytes-UNEXPLAINED"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_digest_or_row_snapshot_measured_nothing_and_is_infra_error() {
         let mut empty = state();
         empty.files.clear();
-        let verdict = durable_mutation(&empty, &empty).expect("an empty world must not pass");
+        let verdict =
+            durable_mutation(&empty, &empty, &declared()).expect("an empty world must not pass");
         assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
+        let mut no_tables = state();
+        no_tables.rows.tables.clear();
+        let verdict = durable_mutation(&no_tables, &no_tables, &declared())
+            .expect("an empty row snapshot must not pass");
+        assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
+    }
+
+    #[test]
+    fn the_write_lock_follows_the_xa6ud_precedent() {
+        let epoch = |digits: &str| WriteLock::Epoch(digits.to_owned());
+        let unreadable = WriteLock::Unreadable("garbage".to_owned());
+        let five = "00000000000000000005";
+        let six = "00000000000000000006";
+        // (before, after, is a finding)
+        let cases = [
+            (WriteLock::Absent, WriteLock::Absent, false),
+            (WriteLock::Absent, epoch(five), true),
+            (epoch(five), epoch(five), false),
+            (epoch(five), epoch(six), false),
+            (epoch(six), epoch(five), true),
+            (epoch(five), WriteLock::Absent, true),
+            (epoch(five), unreadable.clone(), true),
+        ];
+        for (before, after, red) in cases {
+            let judged = write_lock_regression(&before, &after);
+            assert_eq!(
+                judged.as_ref().map(Option::is_some),
+                Ok(red),
+                "{before:?} -> {after:?}: {judged:?}"
+            );
+        }
+        // An unreadable baseline is not a pass and not a finding: unmeasured.
+        assert!(write_lock_regression(&unreadable, &epoch(five)).is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("ee.write.lock");
+        assert_eq!(read_write_lock(&lock), WriteLock::Absent);
+        std::fs::write(&lock, format!("{six}\n")).expect("write lock");
+        assert_eq!(read_write_lock(&lock), epoch(six));
+        for malformed in [
+            six.to_owned(),
+            format!("{six}\n\n"),
+            "0000000000000000000x\n".to_owned(),
+        ] {
+            std::fs::write(&lock, &malformed).expect("write lock");
+            assert!(
+                matches!(read_write_lock(&lock), WriteLock::Unreadable(_)),
+                "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_writes_are_derived_from_the_effect_manifest() {
+        // The derivation itself, both ways: search declares audit_log (effect.rs
+        // append_only_write), index status declares nothing (read_only_db), and
+        // an argv the CLI rejects is an error, never an empty allowlist.
+        let derive = |argv: &[&str]| declared_write_tables(&[argv]);
+        let (search, derived) =
+            derive(&["search", "q", "--limit", "5", "--json"]).expect("search derives");
+        assert!(search.contains("audit_log"), "{search:?}");
+        assert_eq!(derived[0]["commandPath"], "search", "{derived}");
+        let (status, derived) = derive(&["index", "status", "--json"]).expect("status derives");
+        assert!(status.is_empty(), "{status:?}");
+        assert_eq!(derived[0]["commandPath"], "index status", "{derived}");
+        let (_, derived) = derive(&["pack", "q", "--read-only", "--json"]).expect("pack derives");
+        assert_eq!(derived[0]["commandPath"], "pack build", "{derived}");
+        assert!(derive(&["no-such-command"]).is_err());
+    }
+
+    /// A real workspace database (ruling 20:40Z condition 5): `audit_log` is
+    /// the declared table, `memories` an undeclared one. The state is taken
+    /// through the oracle's own `durable_state`, the plants run as SQL on the
+    /// live file between the two snapshots, and the window is judged by
+    /// `durable_mutation`. `None` for `plants` is the untouched twin.
+    fn judge_planted(plants: Option<&[&str]>) -> Option<Verdict> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixture = Fixture {
+            workspace: dir.path().join("workspace"),
+            data_home: dir.path().join("home"),
+            scratch: dir.path().join("scratch"),
+        };
+        let db_path = fixture.workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        std::fs::create_dir_all(fixture.workspace.join("notes")).expect("mkdir");
+        std::fs::write(fixture.workspace.join("notes").join("keep.txt"), "kept").expect("file");
+        {
+            let connection = ee::db::DbConnection::open_file(&db_path).expect("open");
+            for sql in [
+                "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, body TEXT)",
+                "CREATE TABLE memories (id INTEGER PRIMARY KEY, body TEXT)",
+                "INSERT INTO audit_log VALUES (1, 'executed'), (2, 'returned')",
+                "INSERT INTO memories VALUES (1, 'run cargo fmt')",
+            ] {
+                connection.execute_raw(sql).expect("seed");
+            }
+        }
+        let declared = declared();
+        let before = durable_state(&fixture, "before", None, None, &declared).expect("before");
+        if let Some(plants) = plants {
+            let connection = ee::db::DbConnection::open_file(&db_path).expect("reopen");
+            for sql in plants {
+                connection.execute_raw(sql).expect("plant");
+            }
+        }
+        let after = durable_state(&fixture, "after", None, None, &declared).expect("after");
+        durable_mutation(&before, &after, &declared)
+    }
+
+    fn assert_red(verdict: Option<Verdict>, needle: &str) {
+        let verdict = verdict.unwrap_or_else(|| panic!("a plant must red ({needle})"));
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "{verdict:?}");
+        assert!(verdict.detail().contains(needle), "{needle}: {verdict:?}");
+    }
+
+    #[test]
+    fn a_declared_append_on_a_real_database_passes() {
+        assert_eq!(judge_planted(None), None, "untouched twin");
+        assert_eq!(
+            judge_planted(Some(&["INSERT INTO audit_log VALUES (3, 'returned')"])),
+            None,
+            "an append to the declared table is its contract"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_row_change_on_a_real_database_is_red() {
+        assert_eq!(judge_planted(None), None, "untouched twin");
+        assert_red(
+            judge_planted(Some(&["UPDATE memories SET body = 'changed' WHERE id = 1"])),
+            "undeclared table memories changed",
+        );
+        assert_red(
+            judge_planted(Some(&["INSERT INTO memories VALUES (2, 'new')"])),
+            "undeclared table memories changed",
+        );
+    }
+
+    #[test]
+    fn a_declared_row_modified_on_a_real_database_is_red() {
+        assert_eq!(judge_planted(None), None, "untouched twin");
+        assert_red(
+            judge_planted(Some(&[
+                "UPDATE audit_log SET body = 'rewritten' WHERE id = 1",
+            ])),
+            "declared table audit_log: row 1 MODIFIED",
+        );
+    }
+
+    #[test]
+    fn a_declared_row_deleted_on_a_real_database_is_red_even_when_the_count_holds() {
+        assert_eq!(judge_planted(None), None, "untouched twin");
+        assert_red(
+            judge_planted(Some(&["DELETE FROM audit_log WHERE id = 2"])),
+            "declared table audit_log: row 2 DELETED",
+        );
+        // A delete plus an insert keeps the row count at 2; a count check
+        // would pass this, the rowid check must not.
+        assert_red(
+            judge_planted(Some(&[
+                "DELETE FROM audit_log WHERE id = 2",
+                "INSERT INTO audit_log VALUES (3, 'returned')",
+            ])),
+            "declared table audit_log: row 2 DELETED",
+        );
     }
 
     #[test]
