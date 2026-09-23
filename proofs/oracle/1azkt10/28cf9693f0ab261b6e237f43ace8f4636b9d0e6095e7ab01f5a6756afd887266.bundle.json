@@ -1,0 +1,28 @@
+{
+  "schema": "ee.oracle_evidence_bundle.v1",
+  "bead": "bd-reality-core-convergence-1azkt.10",
+  "lane": "substitute lane per GraniteKite c9964 / 15:03Z option C (rch exec --clean-overlay --no-overlay --base <sha>; not scripts/rch_verify.sh)",
+  "not_attested": {
+    "c": "crates.io tarballs are NOT verified against franken-stack.lock source revisions",
+    "a": "no ee.rch.verify proof envelope (no source_manifest_hash, source_bundle_hash, dependency_manifest_hash, git_tree)",
+    "e": "no build-admission, local-cargo tripwire or known-blocker bookkeeping",
+    "d": "dirty-state classification not reported; moot at --no-overlay on a pushed sha",
+    "frankentorch_provenance": "frankentorch-* crates have no franken-stack.lock source revision"
+  },
+  "command": "RCH_ENV_ALLOWLIST=VERGEN_GIT_SHA,VERGEN_GIT_DIRTY,ORACLE_REQUIRE_ATTESTATION,ORACLE_EXPECTED_COMMIT VERGEN_GIT_SHA=f1cbd6327a4bf066535099ab900e0c57e83b1ca0 VERGEN_GIT_DIRTY=false ORACLE_REQUIRE_ATTESTATION=1 ORACLE_EXPECTED_COMMIT=f1cbd6327a4bf066535099ab900e0c57e83b1ca0 RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=7200 RCH_BUILD_TIMEOUT_SEC=4500 rch exec --clean-overlay --no-overlay --base f1cbd6327a4bf066535099ab900e0c57e83b1ca0 -- cargo test --locked --test integration_n_r -- retrieval_index_regression_oracle::concurrent_retrieval_over_one_generation_is_classified --exact --ignored --test-threads=1 --nocapture",
+  "rch_receipt": "[RCH] clean-overlay receipt: base=f1cbd6327a4bf066535099ab900e0c57e83b1ca0 overlay-fingerprint=fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+  "worker": "vmi1227854",
+  "window_utc": [
+    "2026-09-23T16:22:00Z",
+    "2026-09-23T16:38:24Z"
+  ],
+  "base_commit": "f1cbd6327a4bf066535099ab900e0c57e83b1ca0",
+  "cargo_lock_sha256": "e988e417506acdce7962d97bf9ade94af142871130db0508267ebaf8cc4caedd",
+  "cargo_lock_sha256_local_check": "equal to sha256(git show <base>:Cargo.lock) computed on the operator host",
+  "candidate_binary_sha256": "41722ab6bcab75d4d6f4c3e32df4bec9cd950f17c08ca6b74b92ca77387258ab",
+  "candidate": "CARGO_BIN_EXE_ee built by the same cargo test invocation",
+  "verdict": "RACE_ABSENT",
+  "libtest": "running 1 test; 1 passed; 682 filtered out; finished in 113.49s",
+  "evidence_file": "28cf9693f0ab261b6e237f43ace8f4636b9d0e6095e7ab01f5a6756afd887266.ee-test-event.jsonl",
+  "evidence_blake3_verification": "b3sum of the echoed body == begin-marker digest == worker proof file name"
+}
