@@ -872,6 +872,66 @@ fn tree_diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>
     diffs
 }
 
+/// Why an attested candidate may not carry a verdict for the requested base,
+/// or `None` if its `gitCommit` is that base (ruling 2026-09-23 15:03Z).
+fn expected_commit_refusal(expected: Option<&str>, observed: &str) -> Option<String> {
+    match expected {
+        None => Some(
+            "ORACLE_REQUIRE_ATTESTATION=1 needs ORACLE_EXPECTED_COMMIT=<the rch --base sha> to check the candidate's gitCommit against".to_owned(),
+        ),
+        Some(expected) if expected != observed => Some(format!(
+            "candidate gitCommit {observed} is not the requested base {expected}"
+        )),
+        Some(_) => None,
+    }
+}
+
+/// What the read-only window must leave untouched: both generation counters
+/// AND the bytes of every workspace file (bd-reality-core-convergence-1azkt.10,
+/// ruling 17:12Z item 1). The counters alone miss any write that does not bump
+/// a generation (a file touch, a WAL, a cache or registry row), which is why
+/// the file digest is compared too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableState {
+    db_generation: Option<String>,
+    index_generation: Option<String>,
+    files: BTreeMap<String, String>,
+}
+
+/// Judge a read-only window. `None` means nothing durable moved.
+///
+/// An empty `before` digest is `InfraError`, not a pass: a workspace with no
+/// files means the digest measured nothing, and "nothing changed" over nothing
+/// is the vacuous agreement this oracle refuses to count.
+fn durable_mutation(before: &DurableState, after: &DurableState) -> Option<Verdict> {
+    if before.files.is_empty() {
+        return Some(Verdict::InfraError(
+            "the pre-window workspace digest is empty, so durable mutation was not measured"
+                .to_owned(),
+        ));
+    }
+    let mut findings = Vec::new();
+    if before.db_generation != after.db_generation
+        || before.index_generation != after.index_generation
+    {
+        findings.push(format!(
+            "durable mutation under read-only probes: generation moved from db={:?}/index={:?} to db={:?}/index={:?}",
+            before.db_generation, before.index_generation, after.db_generation, after.index_generation
+        ));
+    }
+    let changed = tree_diff(&before.files, &after.files);
+    if !changed.is_empty() {
+        findings.push(format!(
+            "durable mutation under read-only probes: workspace files changed: {changed:?}"
+        ));
+    }
+    if findings.is_empty() {
+        None
+    } else {
+        Some(Verdict::RaceReproduced(findings))
+    }
+}
+
 // ── Harness knobs ──────────────────────────────────────────────────────────
 //
 // Deliberately NOT `EE_*`-prefixed: these configure the test harness, not `ee`
@@ -1112,6 +1172,12 @@ fn event(phase: &str, status: &str, details: Value) -> Value {
 /// `ORACLE_EXPECTED_COMMIT` (the `rch exec --base` sha), and the build
 /// environment must carry no resolution redirect (`scan_build_environment`).
 ///
+/// Two more knobs select cells and controls (ruling 2026-09-23 17:12Z):
+/// `ORACLE_COLD_CONCURRENT=1` makes the first concurrent round the first touch
+/// after the rebuild (the concurrent-cold index cell), and
+/// `ORACLE_PLANT=index_aside` moves `.ee/index` aside for the warm rounds, a
+/// planted control that MUST come out red.
+///
 /// The filter follows `--` so it reaches the test harness, not Cargo.
 ///
 /// `--test-threads=1` matters: the oracle owns the machine's contention budget
@@ -1248,16 +1314,8 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                 &mut events,
             );
         }
-        let refusal = match expected_commit.as_deref() {
-            None => Some(
-                "ORACLE_REQUIRE_ATTESTATION=1 needs ORACLE_EXPECTED_COMMIT=<the rch --base sha> to check the candidate's gitCommit against".to_owned(),
-            ),
-            Some(expected) if expected != observed_commit => Some(format!(
-                "candidate gitCommit {observed_commit} is not the requested base {expected}"
-            )),
-            Some(_) => None,
-        };
-        if let Some(reason) = refusal {
+        if let Some(reason) = expected_commit_refusal(expected_commit.as_deref(), &observed_commit)
+        {
             return finish(&Verdict::InfraError(reason), &proof_dir, &mut events);
         }
     }
@@ -1333,6 +1391,32 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }),
     ));
 
+    // ── Durable state before the read-only window (ruling 17:12Z item 1) ────
+    // Everything from here to the end of the rounds is a read.
+    let durable_before = match digest_tree(&fixture.workspace) {
+        Ok(files) => DurableState {
+            db_generation: db_generation.clone(),
+            index_generation: index_generation.clone(),
+            files,
+        },
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("pre-window workspace digest failed: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    events.push(event(
+        "durable_state_before",
+        "info",
+        serde_json::json!({
+            "workspaceFiles": durable_before.files.len(),
+            "dbGeneration": &durable_before.db_generation,
+            "indexGeneration": &durable_before.index_generation,
+        }),
+    ));
+
     let search_args = [
         "search",
         "release verification remote lane",
@@ -1348,6 +1432,42 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         "1500",
         "--json",
     ];
+
+    // ── Concurrent-cold round (ruling 17:12Z item 3) ────────────────────────
+    // With ORACLE_COLD_CONCURRENT=1 the FIRST touch after the rebuild is a
+    // concurrent search round (then a pack round), judged below against the
+    // serial baselines taken AFTER it. A workspace is cold only once, so in this
+    // mode the serial baselines are not cold; the default mode covers
+    // serial-cold instead, and the two runs together cover the four cells.
+    let cold_concurrent = std::env::var("ORACLE_COLD_CONCURRENT").is_ok_and(|value| value == "1");
+    let mut cold_rounds: Vec<(ProbeKind, Vec<ProbeOutcome>)> = Vec::new();
+    if cold_concurrent {
+        for (kind, args, extract) in [
+            (
+                ProbeKind::Search,
+                search_args.as_slice(),
+                search_record as fn(&Value) -> Record,
+            ),
+            (
+                ProbeKind::Pack,
+                pack_args.as_slice(),
+                pack_record as fn(&Value) -> Record,
+            ),
+        ] {
+            let tag = format!("{}-cold", kind.label());
+            let children = match spawn_probes(&fixture, args, probes, 0, &tag) {
+                Ok(children) => children,
+                Err(error) => {
+                    return finish(
+                        &Verdict::InfraError(format!("could not spawn cold probes: {error}")),
+                        &proof_dir,
+                        &mut events,
+                    );
+                }
+            };
+            cold_rounds.push((kind, collect_probes(children, timeout, extract)));
+        }
+    }
 
     // ── Serial baselines, cold then warm ────────────────────────────────────
     // The cold baseline is the first touch after the rebuild (cold model/index
@@ -1393,11 +1513,86 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
     events.push(event(
         "serial_baseline",
         "pass",
-        serde_json::json!({ "search": warm, "pack": pack_baseline }),
+        // The serial-cold record is kept too (ruling 17:12Z item 3). It equals
+        // `search` by construction here (a disagreement returned above), but it
+        // is retained so that equality is evidence, not an inference.
+        serde_json::json!({
+            "search": warm,
+            "searchCold": cold,
+            "pack": pack_baseline,
+            "serialIsFirstTouch": !cold_concurrent,
+        }),
     ));
 
-    // ── Concurrent rounds ───────────────────────────────────────────────────
     let mut round_verdicts = Vec::new();
+    for (kind, outcomes) in cold_rounds {
+        let baseline = match kind {
+            ProbeKind::Search => &warm,
+            ProbeKind::Pack => &pack_baseline,
+        };
+        let verdict = classify_round(kind, baseline, &outcomes, quorum, index_generation_valid);
+        events.push(event(
+            "concurrent_round",
+            match &verdict {
+                Verdict::RaceAbsent => "pass",
+                _ => "fail",
+            },
+            serde_json::json!({
+                "round": "cold",
+                "kind": kind.label(),
+                "probes": probes,
+                "quorum": quorum,
+                "verdict": verdict.class(),
+                "detail": verdict.detail(),
+                "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
+                "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
+                    ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
+                    ProbeOutcome::Completed(_) => None,
+                }).collect::<Vec<_>>(),
+            }),
+        ));
+        round_verdicts.push(verdict);
+    }
+
+    // ── Planted control: invisible index (ruling 17:12Z item 5) ─────────────
+    // ORACLE_PLANT=index_aside moves `.ee/index` aside INSIDE this job's own
+    // temp workspace for the warm rounds, and moves it back before the durable
+    // check. A run with the plant must come out red, naming the invisible
+    // index; a green means the oracle is blind to "Search index not found while
+    // a valid generation exists". Nothing is deleted.
+    let plant = std::env::var("ORACLE_PLANT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let index_dir = fixture.workspace.join(".ee").join("index");
+    let index_aside = fixture
+        .workspace
+        .join(".ee")
+        .join("index.oracle-planted-aside");
+    if let Some(plant) = plant.as_deref() {
+        if plant != "index_aside" {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "unknown ORACLE_PLANT {plant:?}; known: index_aside"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+        if let Err(error) = std::fs::rename(&index_dir, &index_aside) {
+            return finish(
+                &Verdict::InfraError(format!("could not move .ee/index aside: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+        events.push(event(
+            "plant",
+            "info",
+            serde_json::json!({ "plant": plant, "moved": ".ee/index -> .ee/index.oracle-planted-aside" }),
+        ));
+    }
+
+    // ── Concurrent rounds ───────────────────────────────────────────────────
     for round in 0..rounds {
         for (kind, args, baseline, extract) in [
             (
@@ -1449,19 +1644,63 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }
     }
 
-    // ── Durable mutation under read-only ────────────────────────────────────
-    // Every probe above was a read (`search`, and `pack --read-only`). If the
-    // generation moved, something wrote during a read-only window.
-    match run_ee(&fixture, &["index", "status", "--json"]) {
-        Ok(after) => {
-            let after_db = pointer_string(&after, "/data/dbGeneration");
-            let after_index = pointer_string(&after, "/data/indexGeneration");
-            if after_db != db_generation || after_index != index_generation {
-                round_verdicts.push(Verdict::RaceReproduced(vec![format!(
-                    "durable mutation under read-only probes: generation moved from db={db_generation:?}/index={index_generation:?} to db={after_db:?}/index={after_index:?}"
-                )]));
-            }
+    // Undo the plant before the durable check, without clobbering: if `ee`
+    // recreated `.ee/index` while it was aside, that is itself a write during a
+    // read-only window and is reported as such.
+    if plant.is_some() {
+        if index_dir.exists() {
+            round_verdicts.push(Verdict::RaceReproduced(vec![
+                "durable mutation under read-only probes: ee recreated .ee/index while the planted original was aside".to_owned(),
+            ]));
+            events.push(event(
+                "plant_restored",
+                "fail",
+                serde_json::json!({ "restored": false, "reason": ".ee/index was recreated during the rounds" }),
+            ));
+        } else if let Err(error) = std::fs::rename(&index_aside, &index_dir) {
+            round_verdicts.push(Verdict::InfraError(format!(
+                "could not move the planted .ee/index back: {error}"
+            )));
+        } else {
+            events.push(event(
+                "plant_restored",
+                "info",
+                serde_json::json!({ "restored": true }),
+            ));
         }
+    }
+
+    // ── Durable mutation under read-only ────────────────────────────────────
+    // Every probe above was a read (`search`, and `pack --read-only`). The
+    // window is judged on the generation counters AND the workspace file
+    // bytes, by `durable_mutation`, whose planted controls live in
+    // `mod durable_mutation_controls`.
+    match run_ee(&fixture, &["index", "status", "--json"]) {
+        Ok(after) => match digest_tree(&fixture.workspace) {
+            Ok(files) => {
+                let durable_after = DurableState {
+                    db_generation: pointer_string(&after, "/data/dbGeneration"),
+                    index_generation: pointer_string(&after, "/data/indexGeneration"),
+                    files,
+                };
+                events.push(event(
+                    "durable_state_after",
+                    "info",
+                    serde_json::json!({
+                        "workspaceFiles": durable_after.files.len(),
+                        "dbGeneration": &durable_after.db_generation,
+                        "indexGeneration": &durable_after.index_generation,
+                        "changed": tree_diff(&durable_before.files, &durable_after.files),
+                    }),
+                ));
+                if let Some(verdict) = durable_mutation(&durable_before, &durable_after) {
+                    round_verdicts.push(verdict);
+                }
+            }
+            Err(error) => round_verdicts.push(Verdict::InfraError(format!(
+                "post-window workspace digest failed, so durable mutation could not be checked: {error}"
+            ))),
+        },
         Err(error) => round_verdicts.push(Verdict::InfraError(format!(
             "post-probe index status unavailable, so durable mutation could not be checked: {error}"
         ))),
@@ -1803,6 +2042,97 @@ mod classifier {
                 verdict.class()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod durable_mutation_controls {
+    //! bd-reality-core-convergence-1azkt.10, ruling 17:12Z items 1 and 2.
+    //! Each failure class gets a planted red and an untouched twin, so a judge
+    //! that flags everything fails as surely as one that flags nothing.
+
+    use std::collections::BTreeMap;
+
+    use super::{DurableState, durable_mutation, expected_commit_refusal};
+
+    fn state() -> DurableState {
+        let mut files = BTreeMap::new();
+        files.insert(".ee/ee.db".to_owned(), "aaaa".to_owned());
+        files.insert(".ee/index/meta.json".to_owned(), "bbbb".to_owned());
+        DurableState {
+            db_generation: Some("8".to_owned()),
+            index_generation: Some("8".to_owned()),
+            files,
+        }
+    }
+
+    #[test]
+    fn an_untouched_window_is_not_a_mutation() {
+        assert!(durable_mutation(&state(), &state()).is_none());
+    }
+
+    #[test]
+    fn a_moved_generation_is_a_mutation() {
+        let mut after = state();
+        after.db_generation = Some("9".to_owned());
+        let verdict = durable_mutation(&state(), &after).expect("a moved counter must red");
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+        assert!(verdict.detail().contains("generation moved"), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_changed_file_with_unmoved_counters_is_a_mutation() {
+        // The case the counters alone missed: bytes changed, generation did not.
+        let mut after = state();
+        after
+            .files
+            .insert(".ee/ee.db".to_owned(), "cccc".to_owned());
+        let verdict = durable_mutation(&state(), &after).expect("a changed file must red");
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+        assert!(
+            verdict.detail().contains("changed .ee/ee.db"),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_added_or_removed_file_is_a_mutation() {
+        let mut added = state();
+        added
+            .files
+            .insert(".ee/ee.db-wal".to_owned(), "dddd".to_owned());
+        assert!(
+            durable_mutation(&state(), &added)
+                .is_some_and(|verdict| verdict.detail().contains("added .ee/ee.db-wal"))
+        );
+        let mut removed = state();
+        removed.files.remove(".ee/index/meta.json");
+        assert!(
+            durable_mutation(&state(), &removed)
+                .is_some_and(|verdict| verdict.detail().contains("removed .ee/index/meta.json"))
+        );
+    }
+
+    #[test]
+    fn an_empty_digest_measured_nothing_and_is_infra_error() {
+        let mut empty = state();
+        empty.files.clear();
+        let verdict = durable_mutation(&empty, &empty).expect("an empty world must not pass");
+        assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
+    }
+
+    #[test]
+    fn the_expected_commit_refuses_absence_and_mismatch_and_admits_a_match() {
+        let sha = "f1cbd6327a4bf066535099ab900e0c57e83b1ca0";
+        assert!(
+            expected_commit_refusal(None, sha)
+                .is_some_and(|reason| reason.contains("ORACLE_EXPECTED_COMMIT"))
+        );
+        assert!(
+            expected_commit_refusal(Some("0000000000000000000000000000000000000000"), sha)
+                .is_some_and(|reason| reason.contains("is not the requested base"))
+        );
+        assert_eq!(expected_commit_refusal(Some(sha), sha), None);
     }
 }
 
