@@ -3,16 +3,20 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/core/context_task_paths.rs'
+      - 'src/core/context*.rs'
+      - 'src/cli/mod.rs'
       - 'src/cli/pack_stream_tests.rs'
-      - 'scripts/delivery/integrate-task-target-diff.py.xz.b64'
+      - 'src/pack/mod.rs'
+      - 'src/output/streaming.rs'
       - 'tests/pack_task_paths_cli.py'
+      - 'benches/*.rs'
+      - 'docs/schemas/ee.pack*.json'
       - '.github/workflows/pack-task-paths.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: task-pack-diff-integration-${{ github.ref }}
+  group: task-pack-committed-verification-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   integrate:
@@ -28,36 +32,45 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
-        with:
-          toolchain: nightly-2026-08-31
-          components: rustfmt
-      - name: Attribute task-target changes in durable pack diff
+      - name: Finish no-target benchmark callers and retire source writes
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          if ! grep -Fq 'fn pack_record_task_path_hashes(' src/cli/mod.rs; then
-            grep -Fq 'mod pack_stream_tests;' src/cli/mod.rs
-            python3 - <<'PY'
-          import base64, hashlib, lzma, os
+          grep -Fq 'fn pack_record_task_path_hashes(' src/cli/mod.rs
+          python3 - <<'PY'
+          import re
           from pathlib import Path
-          encoded = Path('scripts/delivery/integrate-task-target-diff.py.xz.b64').read_text()
-          script = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
-          if hashlib.sha256(script).hexdigest() != '011e8a834afb3059ed01dffae7b4ab2caf942262b32e15730256ce14b0998d5d':
-              raise SystemExit('Target-diff integration checksum mismatch')
-          Path(os.environ['RUNNER_TEMP'], 'task-target-diff.py').write_bytes(script)
+          prepared = {}
+          for name in ['tiered_recall.rs', 'context.rs', 'pack_size.rs', 'graph_full_stack.rs', 'context_with_ppr.rs']:
+              path = Path('benches', name)
+              text = path.read_text()
+              old = r'ContextPackOptions \{\n([ \t]*)task_lens: None,'
+              matches = list(re.finditer(old, text))
+              if len(matches) == 1:
+                  prepared[path] = re.sub(old, lambda m: 'ContextPackOptions {\n' + m[1] + 'task_paths: Vec::new(),\n' + m[1] + 'task_lens: None,', text)
+              elif 'task_paths: Vec::new(),' not in text:
+                  raise SystemExit(f'Unexpected benchmark constructor: {name}')
+          path = Path('.github/workflows/pack-task-paths.yml')
+          text = path.read_text()
+          start = text.index('  integrate:\n')
+          end = text.index('  verify:\n', start)
+          text = text[:start] + text[end:]
+          text = text.replace('    needs: integrate\n', '')
+          text = text.replace('          ref: ${{ needs.integrate.outputs.source }}\n', '')
+          if 'contents: write' in text or 'needs.integrate' in text:
+              raise SystemExit('Verification must not retain source-write authority')
+          prepared[path] = text
+          for path, text in prepared.items():
+              path.write_text(text)
           PY
-            python3 "$RUNNER_TEMP/task-target-diff.py" > "$RUNNER_TEMP/task-target-files.txt"
-            files=()
-            while IFS= read -r path; do files+=("$path"); done < "$RUNNER_TEMP/task-target-files.txt"
-            rustfmt --edition 2024 --config skip_children=true src/cli/mod.rs src/cli/pack_stream_tests.rs
-            python3 -m py_compile tests/pack_task_paths_cli.py
-            git diff --check
-            git add -- "${files[@]}"
+          files=(benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs .github/workflows/pack-task-paths.yml)
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(pack): distinguish task-scope changes from corpus drift in replay diffs' -m 'Compare admitted target commitments independently of redacted display wrappers. Name task_paths_changed instead of attributing a target-only hash change to memory or index drift. Preserve the historical empty-target comparison and central untrusted-ledger gate. Update the strict diff schema, documentation and public two-pack/self-diff regression.'
+            git commit -m 'fix(pack): retain no-target benchmark behavior after scoped-pack migration' -m 'Complete all five benchmark option constructors without changing benchmark workloads. Retire temporary source integration and contents-write permissions; future task-pack runs compile and exercise committed source only, including the public scoped selection, replay, diff and stream journey.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -68,16 +81,9 @@ jobs:
             done
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          git rev-parse HEAD > "$RUNNER_TEMP/task-pack-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py docs/schemas/ee.pack.diff.v2.json docs/pack-replay.md
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ !cancelled() }}
-        with:
-          name: task-pack-source
-          path: ${{ runner.temp }}/task-pack-source*
-          retention-days: 7
   verify:
     needs: integrate
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -93,9 +99,22 @@ jobs:
         with:
           ref: ${{ needs.integrate.outputs.source }}
           persist-credentials: false
+      - name: Record exact committed source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src tests benches Cargo.toml Cargo.lock rust-toolchain.toml docs/schemas docs/pack-replay.md .github/workflows/pack-task-paths.yml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: task-pack-source
+          path: |
+            ${{ runner.temp }}/task-pack-identity.log
+            ${{ runner.temp }}/task-pack-source.tar.gz
+          retention-days: 7
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
+          components: rustfmt
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
@@ -108,10 +127,15 @@ jobs:
             recall-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Exercise targets, native authorization, streaming and diff commitments
+      - name: Compile every Cargo target and check changed modules
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/task-pack-check.log"
+          rustfmt --check --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs src/output/streaming.rs src/pack/mod.rs benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs 2>&1 | tee "$RUNNER_TEMP/task-pack-format.log"
+      - name: Exercise targets, native authorization, streaming and diff commitments
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
           failed=0
           for group in cli::pack_stream_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
             log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
@@ -156,16 +180,20 @@ jobs:
           name: task-pack-cli-results
           path: ${{ runner.temp }}/task-pack-*.log
           retention-days: 7
-      - name: Compile existing callers and exercise replay contracts
+      - name: Exercise existing persisted replay and streaming contracts
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/task-pack-check.log"
+          failed=0
           for group in pack_stream_conformance_v1 context_show_persisted_pack; do
             log="$RUNNER_TEMP/task-pack-$group.log"
-            cargo test --locked --test contracts "$group" -- --test-threads=2 2>&1 | tee "$log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
+            if ! cargo test --locked --test contracts "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
           done
+          exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
