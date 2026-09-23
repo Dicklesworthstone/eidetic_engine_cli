@@ -129,3 +129,62 @@ extractor unmodified.
   `pack build` declaration at `src/core/effect.rs:2533` names it, but the
   schema's pack table is `pack_records`. That declaration drift is reported on
   the bead and is not fixed here.
+
+## Attested runs of the rows-check oracle at `25a9d7f`
+
+These two runs are the oracle's first attested verdicts with the rows check in
+place. The base is the pushed commit
+`25a9d7f8d47712559059f9daf91402e23891d7b3`, which contains the rows check
+(`7e07a91`). The lane is the substitute lane of c9964/c9970, the same as the
+first run above: `--no-overlay`, the candidate built by the same `cargo test`,
+its `gitCommit` checked against `ORACLE_EXPECTED_COMMIT`, and the build
+environment scanned in-process.
+
+```text
+RCH_ENV_ALLOWLIST=VERGEN_GIT_SHA,VERGEN_GIT_DIRTY,ORACLE_REQUIRE_ATTESTATION,ORACLE_EXPECTED_COMMIT,ORACLE_COLD_CONCURRENT \
+VERGEN_GIT_SHA=25a9d7f8d47712559059f9daf91402e23891d7b3 VERGEN_GIT_DIRTY=false \
+ORACLE_REQUIRE_ATTESTATION=1 ORACLE_EXPECTED_COMMIT=25a9d7f8d47712559059f9daf91402e23891d7b3 \
+ORACLE_COLD_CONCURRENT=<empty for Run A, 1 for Run B> \
+RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=7200 RCH_BUILD_TIMEOUT_SEC=4500 \
+rch exec --clean-overlay --no-overlay --base 25a9d7f8d47712559059f9daf91402e23891d7b3 -- \
+  cargo test --locked --test integration_n_r -- \
+  retrieval_index_regression_oracle::concurrent_retrieval_over_one_generation_is_classified \
+  --exact --ignored --test-threads=1 --nocapture
+```
+
+Both runs printed the receipt
+`[RCH] clean-overlay receipt: base=25a9d7f8d47712559059f9daf91402e23891d7b3 overlay-fingerprint=fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195`.
+In both, `observedCommit` equalled `expectedCommit` (`25a9d7f`), 12 config
+locations were probed, and there were no build-environment hits.
+
+| File | Run | What it holds |
+| --- | --- | --- |
+| `3a216754ed5d565f25dd6fd21635877f4515020558aea42c5100faec2c8ec73e.ee-test-event.jsonl` | Run A, the default order: serial-cold first touch, then 3 concurrent rounds. Worker hz4, 2026-09-23T21:36-22:17Z. | `RACE_ABSENT`. Every round agreed (quorum 7 of 8). |
+| `51003314b443b392264996e8b7cf345b821b2a50e20bda501f2cabfd36818091.ee-test-event.jsonl` | Run B, `ORACLE_COLD_CONCURRENT=1`: a concurrent-cold search round and pack round as the first touch, then 3 concurrent rounds. Worker hz3, 22:17-23:28Z. | `RACE_ABSENT`. The cold rounds and every warm round agreed, 8 of 8 each. |
+
+Together, the two runs cover the four no-model cells of ruling 17:12Z item 3
+(serial or concurrent, cold or warm) at this base. The rows check gave the
+same result in both runs:
+
+- only `audit_log` changed (search's declared append);
+- the append-only check found nothing;
+- the generations stayed at 8;
+- the `ee.write.lock` epoch did not go backwards;
+- the `ee.db` byte change is recorded as `db-bytes-UNEXPLAINED`.
+
+Both bodies were echoed on stdout and came through the extractor unmodified.
+Each file's `b3sum` equals its name.
+
+**What these files are NOT:**
+
+- **Not a model-backed verdict.** Every probe ran on `hash_fallback`
+  (`embed_model_unavailable`, `lexical_only`). The model dimension is item 4.
+- **Not index-not-found end to end.** That is item 5 (the corrected plant).
+- **Not a statement about #49.** The outside PR at
+  `5dfa99a822007780771d34e482ea0d523165ff75` ("perf(drift): resolve git facts
+  once per pack and per drift report") changes pack assembly. It landed after
+  `25a9d7f`, and these runs do not cover it.
+- **Not a proof that no interleaving diverges.** Each run is one run under
+  shared fleet load.
+- **Not `rch_verify.sh` attestation.** The same NOT-ATTESTED list as the first
+  run above applies.
