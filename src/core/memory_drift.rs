@@ -1,8 +1,9 @@
 //! Read-only provenance snapshots for memory drift checks.
 
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -1431,10 +1432,11 @@ fn memory_drift_report_all_memories(
             message: format!("Failed to list memories for drift report: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
+    let git = GitDriftProbe::new(workspace_path);
     memories
         .iter()
         .take(limit as usize)
-        .map(|memory| memory_drift_report_hint_from_memory(connection, workspace_path, memory))
+        .map(|memory| memory_drift_report_hint_from_memory(connection, &git, memory))
         .collect()
 }
 
@@ -1462,7 +1464,7 @@ fn memory_drift_report_one_memory(
             repair: Some("rerun with --include-tombstoned or list active memories".to_owned()),
         });
     }
-    memory_drift_report_hint_from_memory(connection, workspace_path, &memory)
+    memory_drift_report_hint_from_memory(connection, &GitDriftProbe::new(workspace_path), &memory)
 }
 
 fn memory_drift_report_recent_pack_items(
@@ -1490,6 +1492,7 @@ fn memory_drift_report_recent_pack_items_with_scan_cap(
     requested_as_of: Option<DateTime<Utc>>,
     scan_cap: u32,
 ) -> Result<(Vec<MemoryDriftSelectionHint>, Option<String>), DomainError> {
+    let git = GitDriftProbe::new(workspace_path);
     let scan_cap = scan_cap.max(1);
     let scan_limit = scan_cap.saturating_add(1);
     let mut pack_record_ids = connection
@@ -1785,7 +1788,7 @@ fn memory_drift_report_recent_pack_items_with_scan_cap(
 
         findings_by_chain.insert(
             logical_id,
-            memory_drift_report_hint_from_memory(connection, workspace_path, live_memory)?,
+            memory_drift_report_hint_from_memory(connection, &git, live_memory)?,
         );
     }
 
@@ -1981,12 +1984,16 @@ fn parse_recent_pack_selection_time(raw: &str) -> Result<DateTime<Utc>, ()> {
         .map_err(|_| ())
 }
 
+/// Drift hint for one memory selected into a pack.
+///
+/// Pass one [`GitDriftProbe`] for every item of the same pack so git facts are
+/// resolved once per pack rather than once per item (GH #49).
 pub fn memory_drift_selection_hint_for_memory(
     connection: &DbConnection,
-    workspace_path: &Path,
+    git: &GitDriftProbe,
     memory: &StoredMemory,
 ) -> Result<Option<MemoryDriftSelectionHint>, DomainError> {
-    let hint = memory_drift_report_hint_from_memory(connection, workspace_path, memory)?;
+    let hint = memory_drift_report_hint_from_memory(connection, git, memory)?;
     let provenance_selection = matches!(
         memory.provenance_verification_status.trim(),
         "mismatch" | "missing" | "skipped"
@@ -2005,7 +2012,7 @@ pub fn memory_drift_selection_hint_for_memory(
 
 fn memory_drift_report_hint_from_memory(
     connection: &DbConnection,
-    workspace_path: &Path,
+    git: &GitDriftProbe,
     memory: &StoredMemory,
 ) -> Result<MemoryDriftSelectionHint, DomainError> {
     let anchors = connection
@@ -2015,24 +2022,18 @@ fn memory_drift_report_hint_from_memory(
             repair: Some("ee doctor --json".to_owned()),
         })?;
     Ok(memory_drift_report_hint_from_memory_and_anchors(
-        workspace_path,
-        memory,
-        anchors,
+        git, memory, anchors,
     ))
 }
 
 fn memory_drift_report_hint_from_memory_and_anchors(
-    workspace_path: &Path,
+    git: &GitDriftProbe,
     memory: &StoredMemory,
     anchors: Vec<StoredMemoryAnchor>,
 ) -> MemoryDriftSelectionHint {
     let captured_commit = captured_commit_for_memory(memory, &anchors);
-    let live_resolution = resolve_live_code_anchor_freshness(
-        workspace_path,
-        memory,
-        anchors,
-        captured_commit.as_deref(),
-    );
+    let live_resolution =
+        resolve_live_code_anchor_freshness(git, memory, anchors, captured_commit.as_deref());
     let anchors = live_resolution.anchors;
     let mut hint = memory_drift_report_hint_from_provenance_status(
         &memory.id,
@@ -2061,12 +2062,12 @@ fn memory_drift_report_hint_from_memory_and_anchors(
     let current_commit = if anchors.is_empty() && captured_commit.is_none() {
         None
     } else {
-        current_git_commit(workspace_path)
+        git.current_commit()
     };
     let commit_distance = captured_commit
         .as_deref()
         .zip(current_commit.as_deref())
-        .and_then(|(captured, current)| git_commit_distance(workspace_path, captured, current));
+        .and_then(|(captured, current)| git.commit_distance(captured, current));
     let code_anchors = memory_drift_code_anchors(&anchors, hint.drift_status);
     let mut changed_regions = if stale_anchor {
         code_anchors
@@ -2095,7 +2096,7 @@ struct LiveCodeAnchorResolution {
 }
 
 fn resolve_live_code_anchor_freshness(
-    workspace_path: &Path,
+    git: &GitDriftProbe,
     memory: &StoredMemory,
     mut anchors: Vec<StoredMemoryAnchor>,
     captured_commit: Option<&str>,
@@ -2112,8 +2113,7 @@ fn resolve_live_code_anchor_freshness(
         else {
             continue;
         };
-        let observed =
-            observe_path_anchor_freshness(workspace_path, normalized_path, anchor, captured_commit);
+        let observed = observe_path_anchor_freshness(git, normalized_path, anchor, captured_commit);
         anchor.freshness_state = observed.freshness_state;
         if observed.status != MemoryDriftStatus::Current {
             status = max_memory_drift_status(status, Some((observed.status, observed.reason)));
@@ -2152,7 +2152,7 @@ struct ObservedPathAnchorFreshness {
 }
 
 fn observe_path_anchor_freshness(
-    workspace_path: &Path,
+    git: &GitDriftProbe,
     normalized_path: &str,
     anchor: &StoredMemoryAnchor,
     captured_commit: Option<&str>,
@@ -2165,7 +2165,7 @@ fn observe_path_anchor_freshness(
         );
     }
 
-    let source_path = workspace_path.join(relative_path);
+    let source_path = git.workspace_path().join(relative_path);
     let metadata = match fs::metadata(&source_path) {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => {
@@ -2200,8 +2200,7 @@ fn observe_path_anchor_freshness(
     let current_hash = memory_drift_content_hash(&current_bytes);
 
     if let Some(commit) = captured_commit {
-        if let Some(captured_bytes) = git_blob_at_commit(workspace_path, commit, normalized_path) {
-            let captured_hash = memory_drift_content_hash(&captured_bytes);
+        if let Some(captured_hash) = git.captured_blob_hash(commit, normalized_path) {
             if captured_hash != current_hash {
                 return observed_path_anchor_status(
                     MemoryDriftStatus::Changed,
@@ -2354,25 +2353,113 @@ fn captured_commit_for_memory(
         })
 }
 
-fn current_git_commit(workspace_path: &Path) -> Option<String> {
-    git_output(workspace_path, &["rev-parse", "--verify", "HEAD"])
-        .and_then(|output| first_hex_commit(&output))
+/// Per-evaluation memo of the git facts that drift checks read (GH #49).
+///
+/// Drift evaluation used to spawn `git rev-parse --verify HEAD`,
+/// `git rev-list --count`, and `git show` once per memory or anchor, so a pack
+/// selecting N items ran N identical HEAD lookups against an unchanged
+/// repository, and `ee memory drift` over the whole store ran one per memory.
+///
+/// One probe is scoped to one evaluation (a pack assembly or a drift report):
+/// HEAD is resolved at most once, so every item in that evaluation is judged
+/// against the same commit even if HEAD moves mid-run; commit distances and
+/// captured-blob content hashes are memoized by their exact inputs. Failures
+/// are memoized as well, so a workspace that is not a git checkout costs one
+/// failed spawn per distinct question instead of one per item.
+///
+/// The probe is deliberately not shared across evaluations: a later pack must
+/// observe a new HEAD and rewritten history.
+#[derive(Debug)]
+pub struct GitDriftProbe {
+    workspace_path: PathBuf,
+    head: OnceCell<Option<String>>,
+    commit_distances: RefCell<BTreeMap<(String, String), Option<u32>>>,
+    captured_blob_hashes: RefCell<BTreeMap<(String, String), Option<String>>>,
+    git_invocations: Cell<u32>,
 }
 
-fn git_commit_distance(workspace_path: &Path, captured: &str, current: &str) -> Option<u32> {
-    if captured == current {
-        return Some(0);
+impl GitDriftProbe {
+    #[must_use]
+    pub fn new(workspace_path: &Path) -> Self {
+        Self {
+            workspace_path: workspace_path.to_path_buf(),
+            head: OnceCell::new(),
+            commit_distances: RefCell::new(BTreeMap::new()),
+            captured_blob_hashes: RefCell::new(BTreeMap::new()),
+            git_invocations: Cell::new(0),
+        }
     }
-    if !is_hex_commit(captured) || !is_hex_commit(current) {
-        return None;
+
+    #[must_use]
+    pub fn workspace_path(&self) -> &Path {
+        &self.workspace_path
     }
-    git_output(
-        workspace_path,
-        &["rev-list", "--count", &format!("{captured}..{current}")],
-    )
-    .and_then(|output| output.trim().parse::<u32>().ok())
+
+    /// Number of `git` processes this probe has launched.
+    #[must_use]
+    pub fn git_invocations(&self) -> u32 {
+        self.git_invocations.get()
+    }
+
+    fn current_commit(&self) -> Option<String> {
+        self.head
+            .get_or_init(|| {
+                self.git_output(&["rev-parse", "--verify", "HEAD"])
+                    .and_then(|output| first_hex_commit(&output))
+            })
+            .clone()
+    }
+
+    fn commit_distance(&self, captured: &str, current: &str) -> Option<u32> {
+        if captured == current {
+            return Some(0);
+        }
+        if !is_hex_commit(captured) || !is_hex_commit(current) {
+            return None;
+        }
+        let key = (captured.to_owned(), current.to_owned());
+        if let Some(cached) = self.commit_distances.borrow().get(&key) {
+            return *cached;
+        }
+        let distance = self
+            .git_output(&["rev-list", "--count", &format!("{captured}..{current}")])
+            .and_then(|output| output.trim().parse::<u32>().ok());
+        self.commit_distances.borrow_mut().insert(key, distance);
+        distance
+    }
+
+    /// Content hash of `normalized_path` as committed at `commit`, or `None`
+    /// when the inputs are unsafe or git cannot produce the blob.
+    fn captured_blob_hash(&self, commit: &str, normalized_path: &str) -> Option<String> {
+        if !is_hex_commit(commit) || !is_safe_workspace_relative_path(Path::new(normalized_path)) {
+            return None;
+        }
+        let key = (commit.to_owned(), normalized_path.to_owned());
+        if let Some(cached) = self.captured_blob_hashes.borrow().get(&key) {
+            return cached.clone();
+        }
+        let object = format!("{commit}:{normalized_path}");
+        let hash = self
+            .git_output_bytes(&["show", &object])
+            .map(|bytes| memory_drift_content_hash(&bytes));
+        self.captured_blob_hashes
+            .borrow_mut()
+            .insert(key, hash.clone());
+        hash
+    }
+
+    fn git_output(&self, args: &[&str]) -> Option<String> {
+        String::from_utf8(self.git_output_bytes(args)?).ok()
+    }
+
+    fn git_output_bytes(&self, args: &[&str]) -> Option<Vec<u8>> {
+        self.git_invocations
+            .set(self.git_invocations.get().saturating_add(1));
+        git_output_bytes(&self.workspace_path, args)
+    }
 }
 
+#[cfg(test)]
 fn git_output(workspace_path: &Path, args: &[&str]) -> Option<String> {
     String::from_utf8(git_output_bytes(workspace_path, args)?).ok()
 }
@@ -2388,18 +2475,6 @@ fn git_output_bytes(workspace_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
         return None;
     }
     Some(output.stdout)
-}
-
-fn git_blob_at_commit(
-    workspace_path: &Path,
-    commit: &str,
-    normalized_path: &str,
-) -> Option<Vec<u8>> {
-    if !is_hex_commit(commit) || !is_safe_workspace_relative_path(Path::new(normalized_path)) {
-        return None;
-    }
-    let object = format!("{commit}:{normalized_path}");
-    git_output_bytes(workspace_path, &["show", &object])
 }
 
 fn first_hex_commit(input: &str) -> Option<String> {
@@ -4267,7 +4342,11 @@ mod tests {
             valid_to: None,
         };
 
-        let hint = memory_drift_report_hint_from_memory_and_anchors(repo, &memory, vec![anchor]);
+        let hint = memory_drift_report_hint_from_memory_and_anchors(
+            &GitDriftProbe::new(repo),
+            &memory,
+            vec![anchor],
+        );
         assert_eq!(hint.drift_status, MemoryDriftStatus::Changed);
         assert_eq!(hint.top_reason, "code_anchor_hash_changed");
         assert_eq!(hint.freshness, "drifted");
@@ -4340,8 +4419,11 @@ mod tests {
             valid_to: None,
         };
 
-        let hint =
-            memory_drift_report_hint_from_memory_and_anchors(workspace, &memory, vec![anchor]);
+        let hint = memory_drift_report_hint_from_memory_and_anchors(
+            &GitDriftProbe::new(workspace),
+            &memory,
+            vec![anchor],
+        );
         assert_eq!(hint.drift_status, MemoryDriftStatus::Unverifiable);
         assert_eq!(hint.top_reason, "code_anchor_mtime_newer_than_anchor");
         assert_eq!(hint.freshness, "unknown");
@@ -4354,6 +4436,162 @@ mod tests {
         assert_eq!(hint.anchors[0].freshness_state, "suspect");
         assert_eq!(hint.anchors[0].freshness, "unknown");
         assert!(hint.anchors[0].stale_anchor);
+        Ok(())
+    }
+
+    fn git_probe_test_memory(
+        id: &str,
+        captured: &str,
+        path: &str,
+    ) -> (StoredMemory, StoredMemoryAnchor) {
+        let anchor_hash =
+            crate::models::memory_anchor_value_hash(crate::models::MemoryAnchorKind::Path, path);
+        let anchor = StoredMemoryAnchor {
+            memory_id: id.to_owned(),
+            anchor_kind: crate::models::MemoryAnchorKind::Path,
+            anchor_value_hash: anchor_hash.clone(),
+            redacted_anchor_value: format!("path:{path}"),
+            confidence: 1.0,
+            source: crate::models::MemoryAnchorSource::Explicit,
+            provenance: format!("git-sha://{captured}"),
+            captured_span_hash: anchor_hash,
+            freshness_state: MemoryAnchorFreshnessState::Current,
+            generation: 1,
+            created_at: "2026-06-18T00:00:00Z".to_owned(),
+            updated_at: "2026-06-18T00:00:00Z".to_owned(),
+        };
+        let memory = StoredMemory {
+            id: id.to_owned(),
+            workspace_id: "wsp_probe".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+            content: format!("Captured at commit {captured} for ee-anchor:path:{path}."),
+            workflow_id: None,
+            confidence: 0.8,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some(format!("git-sha://{captured}")),
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: Some("blake3:verified".to_owned()),
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "verified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-06-18T00:00:00Z".to_owned(),
+            updated_at: "2026-06-18T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        };
+        (memory, anchor)
+    }
+
+    fn commit_all(repo: &Path, message: &str) -> Result<String, String> {
+        run_memory_drift_git(repo, &["add", "-A"])?;
+        run_memory_drift_git(
+            repo,
+            &["-c", "commit.gpgsign=false", "commit", "-q", "-m", message],
+        )?;
+        git_output(repo, &["rev-parse", "--verify", "HEAD"])
+            .and_then(|output| first_hex_commit(&output))
+            .ok_or_else(|| "commit should resolve".to_owned())
+    }
+
+    /// GH #49: one probe shared across a pack's selected items resolves HEAD,
+    /// each commit distance, and each captured blob once, and produces exactly
+    /// the hints that independent per-item evaluation produces.
+    #[test]
+    fn shared_git_probe_resolves_repeated_git_facts_once_with_identical_hints() -> Result<(), String>
+    {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let repo = tempdir.path();
+        std::fs::create_dir_all(repo.join("src")).map_err(|error| error.to_string())?;
+        run_memory_drift_git(repo, &["init", "-q", "-b", "main"])?;
+        run_memory_drift_git(repo, &["config", "user.email", "ee-test@example.test"])?;
+        run_memory_drift_git(repo, &["config", "user.name", "ee test"])?;
+        std::fs::write(repo.join("src/a.rs"), "pub fn a() {}\n")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(repo.join("src/b.rs"), "pub fn b() {}\n")
+            .map_err(|error| error.to_string())?;
+        let captured = commit_all(repo, "baseline")?;
+        std::fs::write(repo.join("src/a.rs"), "pub fn a_changed() {}\n")
+            .map_err(|error| error.to_string())?;
+        let current = commit_all(repo, "change a")?;
+
+        // Four selected items: three anchor src/a.rs, one anchors src/b.rs,
+        // all captured at the same commit.
+        let items = vec![
+            git_probe_test_memory("mem_a1", &captured, "src/a.rs"),
+            git_probe_test_memory("mem_a2", &captured, "src/a.rs"),
+            git_probe_test_memory("mem_a3", &captured, "src/a.rs"),
+            git_probe_test_memory("mem_b1", &captured, "src/b.rs"),
+        ];
+
+        let mut independent = Vec::new();
+        let mut independent_invocations = 0;
+        for (memory, anchor) in &items {
+            let probe = GitDriftProbe::new(repo);
+            independent.push(memory_drift_report_hint_from_memory_and_anchors(
+                &probe,
+                memory,
+                vec![anchor.clone()],
+            ));
+            independent_invocations += probe.git_invocations();
+        }
+
+        let shared_probe = GitDriftProbe::new(repo);
+        let shared = items
+            .iter()
+            .map(|(memory, anchor)| {
+                memory_drift_report_hint_from_memory_and_anchors(
+                    &shared_probe,
+                    memory,
+                    vec![anchor.clone()],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(shared, independent);
+        assert_eq!(shared[0].drift_status, MemoryDriftStatus::Changed);
+        assert_eq!(shared[3].drift_status, MemoryDriftStatus::Current);
+        for hint in &shared {
+            assert_eq!(hint.current_commit.as_deref(), Some(current.as_str()));
+            assert_eq!(hint.commit_distance, Some(1));
+        }
+        // Per item: HEAD + rev-list + one blob = 3 spawns, 12 in total.
+        assert_eq!(independent_invocations, 12);
+        // Shared: HEAD once, one distance, one blob per distinct path.
+        assert_eq!(shared_probe.git_invocations(), 4);
+        Ok(())
+    }
+
+    /// GH #49: when git cannot answer (here: a checkout with no commits, so
+    /// HEAD is unresolvable and the captured commit is absent), each failed
+    /// git question is paid once per evaluation, not once per selected item.
+    #[test]
+    fn shared_git_probe_memoizes_unresolvable_git_facts() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path();
+        std::fs::create_dir_all(workspace.join("src")).map_err(|error| error.to_string())?;
+        // An empty repository pins the failure mode even when the temp
+        // directory happens to sit inside another checkout.
+        run_memory_drift_git(workspace, &["init", "-q", "-b", "main"])?;
+        std::fs::write(workspace.join("src/a.rs"), "pub fn a() {}\n")
+            .map_err(|error| error.to_string())?;
+        let captured = "0123456789abcdef0123456789abcdef01234567";
+        let probe = GitDriftProbe::new(workspace);
+        for id in ["mem_1", "mem_2", "mem_3"] {
+            let (memory, anchor) = git_probe_test_memory(id, captured, "src/a.rs");
+            let hint =
+                memory_drift_report_hint_from_memory_and_anchors(&probe, &memory, vec![anchor]);
+            assert_eq!(hint.drift_status, MemoryDriftStatus::Unverifiable);
+            assert_eq!(hint.top_reason, "code_anchor_capture_unavailable");
+            assert_eq!(hint.current_commit, None);
+            assert_eq!(hint.commit_distance, None);
+        }
+        // One failed HEAD lookup and one failed blob lookup, not three each.
+        assert_eq!(probe.git_invocations(), 2);
         Ok(())
     }
 

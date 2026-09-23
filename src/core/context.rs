@@ -61,7 +61,9 @@ use crate::core::index::{
     index_corpus_compatibility_is_current, prepare_read_only_search_embedder_for_workspace,
     prepare_search_embedder_for_workspace,
 };
-use crate::core::memory_drift::{MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory};
+use crate::core::memory_drift::{
+    GitDriftProbe, MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory,
+};
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
 };
@@ -4732,10 +4734,13 @@ fn push_selected_context_memory_drift_degradations(
 ) {
     let mut hints = Vec::new();
     let mut read_errors = 0usize;
+    // GH #49: one git probe per pack, so HEAD, commit distances, and captured
+    // blobs are resolved once for all selected items instead of per item.
+    let git = GitDriftProbe::new(workspace_path);
     for item in &mut draft.items {
         match connection.get_memory(&item.memory_id.to_string()) {
             Ok(Some(memory)) => {
-                match memory_drift_selection_hint_for_memory(connection, workspace_path, &memory) {
+                match memory_drift_selection_hint_for_memory(connection, &git, &memory) {
                     Ok(Some(hint)) => {
                         item.freshness_facets
                             .push(pack_freshness_facet_from_memory_drift_hint(&hint));
