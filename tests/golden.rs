@@ -3082,6 +3082,14 @@ mod tests {
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
             )
+            // Isolate the user-global memory store. Unset, ee resolves it
+            // from HOME/.local/share/ee, so the WORKER's own store leaked in:
+            // on a host holding one at an old schema, the pack gains a
+            // global_lane_migration_required degradation and every count and
+            // snapshot digest derived from degraded[] moves. hz3 and hz4 have
+            // one; the workers bd-8ig10 was verified on did not
+            // (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
+            .env("XDG_DATA_HOME", workspace.join(".ee").join("empty-user-data"))
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
             .arg("--workspace")
@@ -3259,6 +3267,10 @@ mod tests {
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
             )
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3347,6 +3359,10 @@ mod tests {
             .env(
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
+            )
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
             )
             .arg("--workspace")
             .arg(&workspace)
@@ -3442,6 +3458,10 @@ mod tests {
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
             )
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3513,6 +3533,8 @@ mod tests {
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
             )
+            // User-global store isolated for the same reason as the JSON twin.
+            .env("XDG_DATA_HOME", workspace.join(".ee").join("empty-user-data"))
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--format")
             .arg("markdown")
