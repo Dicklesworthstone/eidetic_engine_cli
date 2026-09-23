@@ -78,15 +78,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-permissions-too-permissive
 
-- **Label:** UNCLASSIFIED
+- **Label:** NOT-DETECTED (pinned gap; NOT coverage)
 - **Severity:** P1. Scored P1 as `pop-state_files-permission_permissive`.
-- **Detector:** Not measured. The inventory found no check that reads file modes.
-- **Real trigger:** Not yet built.
-- **Repair:** Not classified.
-- **Undo:** Not classified.
-- **Oracle:** None yet. `assert.sh` checks only the marker.
-- **Negative control:** None yet.
-- **Pinned sha:** None. Marker-only; no binary measured.
+- **Detector:** None. No doctor check reads file modes, and the chmod fixer `fix_state_file_permission_drift` is never dispatched by `--fix`.
+- **Real trigger:** A healthy store whose private modes (`ee init` sets `.ee` 0700 and `ee.db` 0600) are opened to `.ee` 0755 and `ee.db` 0644, so any local user can read the memory store. `corrupt.sh` fails unless the baseline was private and the store is group/other readable afterwards.
+- **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
+- **Undo:** Not applicable. The modes are still open after `--fix`.
+- **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/ee.db`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the database bytes are unchanged. The witness is the mode string from `ls -ld` (portable across GNU and BSD): `ee.db` is group- and other-readable, and `.ee` is group- and other-readable and enterable, before and after `--fix`. (A first version used `find -perm`, whose flag text trips the contract's forbidden-token scan; bd-2oh15 c10006.)
+- **Negative control:** `corrupt.sh` requires the healthy store's baseline modes to be private before opening them up; `doctor_fixture_healthy_store` asserts the store is healthy first.
+- **Pinned sha:** 02524267e, measured on its stamped release build on hz3 (corrupt 0, assert 0: "pinned gap confirmed").
 
 ## fm-state_files-workspace-ambiguous-multiple-candidates
 

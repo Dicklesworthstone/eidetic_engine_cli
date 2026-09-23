@@ -49,7 +49,7 @@
       "id": "fm-state_files-permissions-too-permissive",
       "severity": "P1",
       "subsystem": "state_files",
-      "label": "UNCLASSIFIED",
+      "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {

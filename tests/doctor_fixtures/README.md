@@ -58,9 +58,10 @@ trip, verified against a real doctor in both directions. The shared content
 digest excludes `ee.db-shm` and checks `ee.write.lock` by its semantics
 (present, epoch >= baseline); everything else stays byte-compared.
 `doctor_fixture_assert_guidance_only` checks failure modes whose repair doctor
-can only describe (the truncated-database fixture uses it). Nine more fixtures
-build their named corruption for real (labels REPAIR, GUIDANCE-ONLY and
-NOT-DETECTED; NOT-DETECTED and PINNED-DEFECT pin a gap and are not coverage).
+can only describe (the truncated-database fixture uses it). The fixtures
+labelled REPAIR, GUIDANCE-ONLY and NOT-DETECTED in `manifest.json` build their
+named corruption for real (NOT-DETECTED and PINNED-DEFECT pin a gap and are not
+coverage).
 The remaining UNCLASSIFIED fixtures (count pinned in `lib.sh`), the UNRESOLVED
 WAL/SHM fixture and the two OUT-OF-SCOPE fixtures still write markers only.
 Also,
