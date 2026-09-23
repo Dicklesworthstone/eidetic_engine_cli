@@ -2808,11 +2808,27 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
     };
     let database_path = workspace_path.join(".ee").join("ee.db");
     if !database_path.exists() {
-        return CheckResult::warning(
+        // bd-rnqxs: a missing database beside a surviving index or backups is
+        // lost data, so the next step is recovery, never `ee init` over it.
+        let evidence = prior_data_evidence(workspace_path);
+        if evidence.is_empty() {
+            return CheckResult::warning(
+                "database",
+                format!("Database file not found at {}.", database_path.display()),
+                error_codes::DATABASE_NOT_FOUND,
+            );
+        }
+        let mut check = CheckResult::warning(
             "database",
-            format!("Database file not found at {}.", database_path.display()),
+            format!(
+                "Database file not found at {}, but this workspace previously held data (its {} still exist). Do not run ee init over it; recover from a backup (ee backup list --workspace .).",
+                database_path.display(),
+                evidence.join(" and ")
+            ),
             error_codes::DATABASE_NOT_FOUND,
         );
+        check.repair = Some("ee backup list --workspace .");
+        return check;
     }
     // bd-wswg0 / bd-xa6ud: a zero-byte file opens as a valid empty database and
     // would read as pending migrations, but it is a store whose data is gone; a
@@ -2899,7 +2915,7 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
 /// What an empty store's workspace still holds that shows it once had data
 /// (bd-wswg0): a populated search index or backup directory. An empty list
 /// means ee cannot tell, not that the store never held data.
-fn prior_data_evidence(workspace_path: &Path) -> Vec<&'static str> {
+pub(crate) fn prior_data_evidence(workspace_path: &Path) -> Vec<&'static str> {
     let has_entries =
         |path: PathBuf| std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some());
     let mut evidence = Vec::new();

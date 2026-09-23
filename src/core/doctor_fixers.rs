@@ -1,6 +1,7 @@
-//! 15 fixers wired through the `doctor_runtime::mutate()` chokepoint: 13
+//! 16 fixers wired through the `doctor_runtime::mutate()` chokepoint: 13
 //! auto-fixable ones (bd-tu4s8 Pass-2; bd-pbyay added `search_index_missing`)
-//! and 2 guidance-only database fixers (bd-xa6ud / bd-wswg0). Each
+//! and 3 guidance-only database fixers (bd-xa6ud / bd-wswg0 for an empty or
+//! unopenable store, bd-rnqxs for a missing one). Each
 //! fixer maps a specific repair-spec finding code to the `Op` that the doctor
 //! should call `mutate()` with.
 //!
@@ -122,6 +123,40 @@ pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
             "Or accept the loss: move `.ee/ee.db` aside and run `ee init --workspace .` to start an empty store.",
         ],
     )
+}
+
+/// bd-rnqxs (EE-E200): the database file is missing. Index repair and
+/// migration both read it and would fail, so this records guidance only, the
+/// bd-xa6ud shape. The next step depends on whether the workspace ever held
+/// data: a surviving search index or backups mean the store was lost and must
+/// be recovered, not re-created; with neither, `ee init` creates it.
+#[must_use]
+pub fn fix_database_missing(workspace_root: &Path) -> FixerDispatch {
+    let path = workspace_root.join(".ee").join("ee.db");
+    if super::doctor::prior_data_evidence(workspace_root).is_empty() {
+        FixerDispatch::manual(
+            "database_missing",
+            "warning",
+            path,
+            &[
+                "Nothing shows this workspace ever held data: it has no search index and no backups.",
+                "Create the store: `ee init --workspace .`.",
+                "If it did hold data, do not init first: list recoverable backups with `ee backup list --workspace .`.",
+            ],
+        )
+    } else {
+        FixerDispatch::manual(
+            "database_missing",
+            "warning",
+            path,
+            &[
+                "The database is missing, but this workspace held data: its search index or backups still exist.",
+                "Do not run `ee init` or a migration: that builds a fresh empty store and hides the loss.",
+                "List recoverable backups: `ee backup list --workspace .`, recover one into a side path with `ee backup restore`, inspect it, then move it into `.ee/`.",
+                "Or accept the loss: run `ee init --workspace .` to start an empty store.",
+            ],
+        )
+    }
 }
 
 /// The index directory the doctor's `search_index` detector inspects: no
@@ -382,6 +417,7 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "policy_safety_inconsistent",
     "snapshot_backup_owed",
     "state_file_permission_drift",
+    "database_missing",
 ];
 
 /// Every finding [`fix_finding_for_check`] can return: what `ee doctor --fix`
@@ -391,6 +427,7 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
 pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "database_empty",
     "database_corrupted",
+    "database_missing",
     "search_index_missing",
     "search_index_stale",
     "schema_migration_pending",
@@ -420,23 +457,24 @@ impl FixMode {
     }
 }
 
-/// bd-xa6ud / bd-wswg0: the store is unreadable when the `database` check
-/// reports it empty (EE-E206) or unopenable (EE-E202). `checks` yields each
-/// check's name and error code.
+/// bd-xa6ud / bd-wswg0 / bd-rnqxs: the store is unreadable when the
+/// `database` check reports it empty (EE-E206), unopenable (EE-E202) or
+/// missing (EE-E200). `checks` yields each check's name and error code.
 #[must_use]
 pub fn store_unreadable<'a>(checks: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> bool {
-    checks
-        .into_iter()
-        .any(|(name, code)| name == "database" && matches!(code, Some("EE-E206" | "EE-E202")))
+    checks.into_iter().any(|(name, code)| {
+        name == "database" && matches!(code, Some("EE-E206" | "EE-E202" | "EE-E200"))
+    })
 }
 
 /// The finding `ee doctor --fix` dispatches for a failing doctor check.
 /// `--fix` and `--fix-plan` both read this one table, so the plan cannot call
 /// a step fixable that `--fix` never touches (bd-223vl M3).
 ///
-/// An empty or unreadable store (see [`store_unreadable`]) gets guidance for
-/// the database, and the repairs that read it (index rebuild, migration) are
-/// skipped: running them crashes or builds over lost data (bd-xa6ud).
+/// An empty, unreadable or missing store (see [`store_unreadable`]) gets
+/// guidance for the database, and the repairs that read it (index rebuild,
+/// migration) are skipped: running them crashes or builds over lost data
+/// (bd-xa6ud; bd-rnqxs for the missing store).
 /// Otherwise the finding is keyed on the error code, and any other failing
 /// `search_index` check is repaired as stale.
 #[must_use]
@@ -449,6 +487,7 @@ pub fn fix_finding_for_check(
         match error_code {
             Some("EE-E206") => return Some("database_empty"),
             Some("EE-E202") => return Some("database_corrupted"),
+            Some("EE-E200") => return Some("database_missing"),
             _ => {}
         }
     }
@@ -475,6 +514,7 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
     match finding {
         "database_empty" => Some(fix_database_empty(workspace_root)),
         "database_corrupted" => Some(fix_database_corrupted(workspace_root)),
+        "database_missing" => Some(fix_database_missing(workspace_root)),
         "search_index_missing" => Some(fix_search_index_missing(workspace_root)),
         "search_index_stale" => Some(fix_search_index_stale(workspace_root)),
         "schema_migration_pending" => {
@@ -657,6 +697,7 @@ mod tests {
             (Some("EE-E999"), "search_index", false),
             (Some("EE-E206"), "database", true),
             (Some("EE-E202"), "database", true),
+            (Some("EE-E200"), "database", true),
         ];
         for (code, name, unreadable) in checks {
             let finding =
@@ -715,6 +756,12 @@ mod tests {
             ("database", Some("EE-E202")),
         ]));
         assert!(store_unreadable([("database", Some("EE-E206"))]));
+        // bd-rnqxs: a missing store is unusable too; EE-E300 beside it was
+        // dispatched to an index repair that opened the missing ee.db.
+        assert!(store_unreadable([
+            ("database", Some("EE-E200")),
+            ("search_index", Some("EE-E300")),
+        ]));
         assert!(!store_unreadable([("database", Some("EE-E700"))]));
         assert!(!store_unreadable([("search_index", Some("EE-E202"))]));
         for (code, name) in [
@@ -767,10 +814,45 @@ mod tests {
             fix_mode_for_check(Some("EE-E300"), "search_index", true),
             (FixMode::Manual, None)
         );
+        // bd-rnqxs: a missing store is guidance-only, like an empty one.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E200"), "database", true),
+            (FixMode::AutoGuidance, Some("database_missing"))
+        );
         assert_eq!(
             fix_mode_for_check(Some("EE-E102"), "shard_fanout", false),
             (FixMode::Manual, None)
         );
+    }
+
+    /// bd-rnqxs: `ee init` only when nothing shows the workspace ever held
+    /// data; a surviving index or backups point at recovery instead.
+    #[test]
+    fn missing_database_guidance_depends_on_prior_data_evidence() {
+        let steps = |dispatch: &FixerDispatch| match &dispatch.op {
+            Op::Manual { steps } => steps.join("\n"),
+            other => panic!("database_missing must be guidance-only, got {other:?}"),
+        };
+
+        let never_used = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(never_used.path().join(".ee")).expect("bare .ee");
+        let dispatch = fix_database_missing(never_used.path());
+        assert_eq!(dispatch.finding_code, "database_missing");
+        assert!(dispatch.op.is_advisory());
+        let text = steps(&dispatch);
+        assert!(
+            text.contains("Create the store: `ee init --workspace .`"),
+            "{text}"
+        );
+        assert!(!text.contains("Do not run `ee init`"), "{text}");
+
+        let lost = tempfile::tempdir().expect("tempdir");
+        let index = crate::config::workspace::resolve_store_index_dir(lost.path(), None, None);
+        std::fs::create_dir_all(&index).expect("index dir");
+        std::fs::write(index.join("segment"), b"x").expect("index entry");
+        let text = steps(&fix_database_missing(lost.path()));
+        assert!(text.contains("Do not run `ee init`"), "{text}");
+        assert!(text.contains("ee backup list --workspace ."), "{text}");
     }
 
     fn root() -> PathBuf {
@@ -989,6 +1071,7 @@ mod tests {
             fix_search_index_missing(&workspace).finding_code,
             fix_database_empty(&workspace).finding_code,
             fix_database_corrupted(&workspace).finding_code,
+            fix_database_missing(&workspace).finding_code,
             fix_graph_snapshot_stale(&workspace).finding_code,
             fix_wal_checkpoint_pending(&workspace).finding_code,
             fix_schema_migration_pending(&workspace, "V001").finding_code,

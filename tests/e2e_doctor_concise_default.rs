@@ -725,3 +725,326 @@ fn doctor_fix_records_guidance_for_a_truncated_database() -> TestResult {
         "database_corrupted",
     )
 }
+
+/// `run_ee` with the suite's isolated HOME/XDG dirs under `root` (bd-rnqxs).
+fn run_isolated(label: &str, root: &std::path::Path, args: &[&str]) -> Result<Output, String> {
+    log_event(
+        "command_start",
+        label,
+        json!({ "command": "ee (isolated)", "argv": args }),
+    );
+    let output = crate::isolated_ee::isolated_ee_command(root)?
+        .args(args)
+        .env("EE_NO_COLOR", "1")
+        .env_remove("EE_DATABASE_PATH")
+        .env_remove("EE_INDEX_DIR")
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
+    log_event(
+        "command_end",
+        label,
+        json!({
+            "exitCode": output.status.code(),
+            "stdoutPreview": preview(&output.stdout),
+            "stderrPreview": preview(&output.stderr),
+        }),
+    );
+    Ok(output)
+}
+
+/// The store fingerprint without doctor's own lock files, which `--fix`
+/// provisions on first use (`.doctor.lock`) and advances (`ee.write.lock`).
+fn store_fingerprint_without_locks(workspace: &std::path::Path) -> Result<Value, String> {
+    let mut files = store_fingerprint(workspace)?
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    files.remove(".doctor.lock");
+    files.remove("ee.write.lock");
+    Ok(Value::Object(files))
+}
+
+/// What one arm of the bd-rnqxs differential observed.
+struct StoreArm {
+    fix_exit: Option<i32>,
+    fix: Value,
+    plan: Value,
+    posture: Value,
+}
+
+/// Run doctor, `doctor --fix` and `doctor --fix-plan` against `workspace`
+/// (whose `database` check must report `database_code`), and require that
+/// none of them crashes, writes store bytes or changes the posture.
+fn observe_store_arm(
+    label: &str,
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    database_code: &str,
+) -> Result<StoreArm, String> {
+    let arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+    let before = store_fingerprint_without_locks(workspace)?;
+    let doctor = run_isolated(
+        &format!("{label}: doctor"),
+        root,
+        &["--workspace", arg, "doctor", "--json"],
+    )?;
+    let doctor_json = parse_json(&format!("{label}: doctor"), &doctor)?;
+    let database = doctor_json
+        .pointer("/data/actionable")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.iter().find(|check| check["name"] == "database"))
+        .cloned();
+    ensure(
+        database
+            .as_ref()
+            .and_then(|check| check["errorCode"].as_str())
+            == Some(database_code),
+        "the database check reports the expected store finding",
+        json!({ "arm": label, "expected": database_code, "database": database }),
+    )?;
+
+    let fix = run_isolated(
+        &format!("{label}: doctor --fix"),
+        root,
+        &["--workspace", arg, "doctor", "--fix", "--json"],
+    )?;
+    ensure(
+        !String::from_utf8_lossy(&fix.stdout).contains("doctor_runtime_io"),
+        "doctor --fix does not crash with doctor_runtime_io",
+        json!({
+            "arm": label,
+            "exitCode": fix.status.code(),
+            "stdout": preview(&fix.stdout),
+            "stderr": preview(&fix.stderr),
+        }),
+    )?;
+    let fix_json = parse_json(&format!("{label}: doctor --fix"), &fix)?;
+    let plan = run_isolated(
+        &format!("{label}: doctor --fix-plan"),
+        root,
+        &["--workspace", arg, "doctor", "--fix-plan", "--json"],
+    )?;
+    let plan_json = parse_json(&format!("{label}: doctor --fix-plan"), &plan)?;
+    let recheck = run_isolated(
+        &format!("{label}: doctor after --fix"),
+        root,
+        &["--workspace", arg, "doctor", "--json"],
+    )?;
+    let recheck_json = parse_json(&format!("{label}: doctor after --fix"), &recheck)?;
+    ensure(
+        recheck_json.pointer("/data/posture") == doctor_json.pointer("/data/posture"),
+        "guidance does not repair the store, so --fix leaves the posture unchanged",
+        json!({
+            "arm": label,
+            "before": doctor_json.pointer("/data/posture"),
+            "after": recheck_json.pointer("/data/posture"),
+        }),
+    )?;
+    let after = store_fingerprint_without_locks(workspace)?;
+    ensure(
+        after == before,
+        "doctor, --fix and --fix-plan write no store bytes",
+        json!({ "arm": label, "before": before, "after": after }),
+    )?;
+    Ok(StoreArm {
+        fix_exit: fix.status.code(),
+        fix: fix_json,
+        plan: plan_json,
+        posture: doctor_json
+            .pointer("/data/posture")
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn fixer_results(fix: &Value) -> Vec<Value> {
+    fix.pointer("/data/fixerResults")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn plan_step<'a>(plan: &'a Value, subsystem: &str) -> Option<&'a Value> {
+    plan.pointer("/data/steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.iter().find(|step| step["subsystem"] == subsystem))
+}
+
+fn ensure_no_store_reading_repair(label: &str, fix: &Value) -> TestResult {
+    let results = fixer_results(fix);
+    ensure(
+        !results.iter().any(|result| {
+            result["findingCode"].as_str().is_some_and(|code| {
+                code.starts_with("search_index") || code.starts_with("schema_migration")
+            })
+        }),
+        "no index or migration repair is dispatched against a missing store",
+        json!({ "arm": label, "fixerResults": results }),
+    )
+}
+
+// bd-rnqxs: a workspace holding only `.ee/` (no ee.db, no index) crashed
+// `doctor --fix` with doctor_runtime_io: EE-E300 dispatched the index repair,
+// which opened a database that does not exist. A missing store must behave
+// like an empty one (EE-E206, bd-xa6ud), measured as a differential on the
+// same binary: the two worlds differ only in a zero-byte ee.db.
+#[test]
+fn doctor_fix_treats_a_missing_store_like_an_empty_one() -> TestResult {
+    let missing_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing_ws = missing_root.path().join("ws");
+    std::fs::create_dir_all(missing_ws.join(".ee")).map_err(|error| error.to_string())?;
+    let empty_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let empty_ws = empty_root.path().join("ws");
+    std::fs::create_dir_all(empty_ws.join(".ee")).map_err(|error| error.to_string())?;
+    std::fs::write(empty_ws.join(".ee").join("ee.db"), b"").map_err(|error| error.to_string())?;
+
+    let missing = observe_store_arm("missing", missing_root.path(), &missing_ws, "EE-E200")?;
+    let empty = observe_store_arm("empty", empty_root.path(), &empty_ws, "EE-E206")?;
+    ensure(
+        !missing_ws.join(".ee").join("ee.db").exists(),
+        "doctor --fix does not create a store over a missing one",
+        json!({}),
+    )?;
+
+    let results = fixer_results(&missing.fix);
+    ensure(
+        results.iter().any(|result| {
+            result["findingCode"] == "database_missing" && result["outcome"] == "guidance_recorded"
+        }),
+        "a missing store gets the guidance-only database_missing finding",
+        json!({ "fixerResults": results }),
+    )?;
+    ensure_no_store_reading_repair("missing", &missing.fix)?;
+
+    // The differential: whatever the base decides for an empty store, a
+    // missing one gets the same exit class and handled status.
+    ensure(
+        missing.fix_exit == empty.fix_exit,
+        "missing and empty stores give doctor --fix the same exit code",
+        json!({ "missing": missing.fix_exit, "empty": empty.fix_exit }),
+    )?;
+    for pointer in ["/data/status", "/data/fixerDispatchPending"] {
+        ensure(
+            missing.fix.pointer(pointer) == empty.fix.pointer(pointer),
+            "missing and empty stores give doctor --fix the same handled status",
+            json!({
+                "field": pointer,
+                "missing": missing.fix.pointer(pointer),
+                "empty": empty.fix.pointer(pointer),
+            }),
+        )?;
+    }
+    for (label, arm, code) in [
+        ("missing", &missing, "EE-E200"),
+        ("empty", &empty, "EE-E206"),
+    ] {
+        ensure(
+            arm.fix
+                .pointer("/data/unresolvedCoreChecks")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| {
+                    checks
+                        .iter()
+                        .any(|check| check["name"] == "database" && check["errorCode"] == code)
+                }),
+            "the database recovery stays visible as unresolved after --fix",
+            json!({ "arm": label, "data": arm.fix.get("data") }),
+        )?;
+    }
+    // Posture comes from the detector's severity (EE-E200 is a warning,
+    // EE-E206 an error), not from --fix. It is recorded, not asserted equal.
+    log_event(
+        "differential",
+        "doctor posture per arm",
+        json!({ "missing": missing.posture, "empty": empty.posture }),
+    );
+
+    // --fix-plan reads the same dispatch table.
+    let database = plan_step(&missing.plan, "database");
+    ensure(
+        database.is_some_and(|step| {
+            step["fixMode"] == "auto_guidance"
+                && step["fixFinding"] == "database_missing"
+                && step["command"] == "ee init --workspace ."
+        }),
+        "fix-plan: a never-used missing store is guidance, and the next step is ee init",
+        json!({ "step": database }),
+    )?;
+    let index = plan_step(&missing.plan, "search_index");
+    ensure(
+        index.is_none_or(|step| step["fixMode"] == "manual"),
+        "fix-plan: the index step is never auto_repair while the store is missing",
+        json!({ "step": index }),
+    )
+}
+
+// bd-rnqxs W2: a real store whose ee.db went missing while its index remains.
+// That is data loss, so the guidance must be recovery from backup, never
+// `ee init` over it; --fix still dispatches no store-reading repair.
+#[test]
+fn doctor_fix_on_a_store_that_lost_its_database_points_at_backups() -> TestResult {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = root.path().join("ws");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+    for (label, args) in [
+        ("init", vec!["--workspace", arg, "init", "--json"]),
+        (
+            "remember",
+            vec![
+                "--workspace",
+                arg,
+                "remember",
+                "--json",
+                "Run the storage self-check before a release.",
+            ],
+        ),
+        (
+            "index rebuild",
+            vec!["--workspace", arg, "index", "rebuild", "--json"],
+        ),
+        (
+            "provision doctor lock",
+            vec!["--workspace", arg, "doctor", "--fix", "--json"],
+        ),
+    ] {
+        let output = run_isolated(label, root.path(), &args)?;
+        ensure(
+            output.status.success(),
+            "real store setup step succeeds",
+            json!({ "step": label, "stderr": preview(&output.stderr) }),
+        )?;
+    }
+    let store = workspace.join(".ee");
+    let aside = workspace.join(".fixture_baseline");
+    std::fs::create_dir_all(&aside).map_err(|error| error.to_string())?;
+    for name in ["ee.db", "ee.db-wal", "ee.db-shm"] {
+        let path = store.join(name);
+        if path.exists() {
+            std::fs::rename(&path, aside.join(name)).map_err(|error| error.to_string())?;
+        }
+    }
+
+    let arm = observe_store_arm("lost database", root.path(), &workspace, "EE-E200")?;
+    ensure_no_store_reading_repair("lost database", &arm.fix)?;
+    let results = fixer_results(&arm.fix);
+    ensure(
+        results.iter().any(|result| {
+            result["findingCode"] == "database_missing" && result["outcome"] == "guidance_recorded"
+        }),
+        "a lost database gets the guidance-only database_missing finding",
+        json!({ "fixerResults": results }),
+    )?;
+    let database = plan_step(&arm.plan, "database");
+    ensure(
+        database.is_some_and(|step| {
+            step["fixMode"] == "auto_guidance" && step["command"] == "ee backup list --workspace ."
+        }),
+        "fix-plan: a store with a surviving index points at backups, not ee init",
+        json!({ "step": database }),
+    )
+}
