@@ -1,0 +1,108 @@
+name: Doctor repair receipts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/doctor-repair-receipts.yml
+      - scripts/delivery/doctor-repair-receipts.patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: doctor-repair-receipts
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: doctor-receipts-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            doctor-receipts-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            doctor-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply reviewed repair result correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/doctor-receipts"
+          git rev-parse HEAD > "$RUNNER_TEMP/doctor-receipts/source-sha.txt"
+          patch=scripts/delivery/doctor-repair-receipts.patch
+          if grep -q 'fn doctor_fix_guidance_is_not_reported_as_an_applied_repair' src/cli/mod.rs; then
+            echo 'Repair receipt correction already integrated; verify it again'
+          else
+            git apply --check "$patch"
+            git apply "$patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true src/cli/mod.rs src/core/doctor_fixers.rs
+          git diff --check
+          git diff > "$RUNNER_TEMP/doctor-receipts/source.patch"
+      - name: Test real partial repairs and reversible mutations
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib cli::tests::doctor_fix_guidance_ -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/guidance.log"
+          grep -Eq 'test result: ok\. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/guidance.log"
+          cargo test --locked --lib core::doctor_fixers::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/dispatch.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/dispatch.log"
+          cargo test --locked --lib cli::tests::doctor_fix_success_uses_canonical_response_envelope -- --exact
+      - name: Commit tested correction directly to main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git fetch origin main
+          base=$(cat "$RUNNER_TEMP/doctor-receipts/source-sha.txt")
+          git diff --exit-code "$base" origin/main -- src/cli/mod.rs src/core/doctor_fixers.rs
+          git merge --ff-only origin/main
+          cargo test --locked --lib cli::tests::doctor_fix_guidance_ -- --test-threads=1
+          git add src/cli/mod.rs src/core/doctor_fixers.rs
+          if ! git diff --cached --quiet; then
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(doctor): distinguish pending guidance from applied repairs' -m 'Preserve EE-E300 missing-index identity and target the canonical index directory. Planned-only operations now report guidance_recorded, completed_partial, a non-success envelope and a nonzero exit instead of false repair success. Mixed real/manual runs retain auditable undo. Focused receipt, dispatch and envelope tests passed before this normal main push.'
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD | tee "$RUNNER_TEMP/doctor-receipts/integrated-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: doctor-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/doctor-receipts/
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

@@ -1,0 +1,247 @@
+--- a/src/core/doctor_fixers.rs
++++ b/src/core/doctor_fixers.rs
+@@ -62,7 +62,7 @@
+     FixerDispatch {
+         finding_code: "search_index_stale",
+         severity: "warning",
+-        path: workspace_root.join(".ee/indexes"),
++        path: crate::config::workspace::resolve_store_index_dir(workspace_root, None, None),
+         op: Op::RunIndexRebuild {
+             steps: vec![
+                 "ee index rebuild --workspace .".to_string(),
+@@ -71,6 +71,14 @@
+             ],
+         },
+     }
++}
++
++/// FM-SI-02: the derived index is absent, rather than merely stale.
++#[must_use]
++pub fn fix_search_index_missing(workspace_root: &Path) -> FixerDispatch {
++    let mut dispatch = fix_search_index_stale(workspace_root);
++    dispatch.finding_code = "search_index_missing";
++    dispatch
+ }
+ 
+ /// FM-GS-01: graph snapshot is stale relative to memory_links activity.
+@@ -295,9 +303,10 @@
+ 
+ /// The closed set of fixer codes this module exposes. Contract tests
+ /// assert that every entry has a matching `fix_*` function above and that
+-/// the count matches the bead's "12 auto-fixable" deliverable.
++/// missing and stale indexes retain distinct diagnostic identities.
+ pub const FIXER_FINDING_CODES: &[&str] = &[
+     "search_index_stale",
++    "search_index_missing",
+     "graph_snapshot_stale",
+     "wal_checkpoint_pending",
+     "schema_migration_pending",
+@@ -320,8 +329,8 @@
+     }
+ 
+     #[test]
+-    fn twelve_fixer_codes_are_registered() {
+-        assert_eq!(FIXER_FINDING_CODES.len(), 12);
++    fn fixer_codes_are_registered_without_duplicates() {
++        assert_eq!(FIXER_FINDING_CODES.len(), 13);
+         let mut sorted = FIXER_FINDING_CODES.to_vec();
+         sorted.sort();
+         sorted.dedup();
+@@ -343,6 +352,15 @@
+         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
+         assert!(dispatch.op.is_advisory());
+         assert!(!dispatch.op.is_writing());
++        assert_eq!(dispatch.path, root().join(".ee/index"));
++    }
++
++    #[test]
++    fn search_index_missing_preserves_finding_identity_and_canonical_path() {
++        let dispatch = fix_search_index_missing(&root());
++        assert_eq!(dispatch.finding_code, "search_index_missing");
++        assert_eq!(dispatch.path, root().join(".ee/index"));
++        assert!(matches!(dispatch.op, Op::RunIndexRebuild { .. }));
+     }
+ 
+     #[test]
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -23295,6 +23295,7 @@
+         }
+ 
+         let dispatch = match check.error_code.map(|error_code| error_code.id) {
++            Some("EE-E300") => Some(fix_search_index_missing(workspace)),
+             Some("EE-E301") => Some(fix_search_index_stale(workspace)),
+             Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
+             Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
+@@ -23359,7 +23360,7 @@
+                         finding_code,
+                         operation,
+                         path,
+-                        outcome: "applied",
++                        outcome: doctor_fixer_action_outcome(&action),
+                         action_sequence: Some(action.sequence),
+                         error: None,
+                     }),
+@@ -23428,10 +23429,22 @@
+             let run_id = ctx.run_id().to_owned();
+             let run_dir = ctx.run_dir().display().to_string();
+             let action_count = doctor_fixer_action_count(&fixer_results);
+-            match ctx.finish(RunStatus::CompletedOk) {
++            let pending_guidance = fixer_results
++                .iter()
++                .any(|result| result.outcome == "guidance_recorded");
++            let status = if pending_guidance {
++                RunStatus::CompletedPartial
++            } else {
++                RunStatus::CompletedOk
++            };
++            match ctx.finish(status) {
+                 Ok(summary) => DoctorFixCommandResult {
+                     json: doctor_fix_success_json(workspace, &summary, &fixer_results),
+-                    exit_code: ProcessExitCode::Success,
++                    exit_code: if pending_guidance {
++                        ProcessExitCode::Configuration
++                    } else {
++                        ProcessExitCode::Success
++                    },
+                 },
+                 Err(error) => {
+                     let run = DoctorFixRunEvidence {
+@@ -23461,6 +23474,16 @@
+     }
+ }
+ 
++/// A successful audit append is not proof that the requested repair ran.
++/// Classify the actual receipt, not the requested operation: a compound
++/// subsystem repair returns its last real, reversible mutation receipt.
++fn doctor_fixer_action_outcome(action: &crate::core::doctor_runtime::ActionLine) -> &'static str {
++    match action.kind.as_str() {
++        "write_file" | "chmod" | "create_dir_all" | "quarantine_by_rename" => "applied",
++        _ => "guidance_recorded",
++    }
++}
++
+ fn doctor_fixer_action_count(results: &[DoctorFixerResult]) -> u64 {
+     results
+         .iter()
+@@ -23472,7 +23495,9 @@
+ fn doctor_fixer_result_counts(results: &[DoctorFixerResult]) -> (usize, usize, usize) {
+     let attempted = results
+         .iter()
+-        .filter(|result| matches!(result.outcome, "applied" | "idempotent_noop" | "failed"))
++        .filter(|result| {
++            matches!(result.outcome, "applied" | "idempotent_noop" | "failed" | "guidance_recorded")
++        })
+         .count();
+     let failed = results
+         .iter()
+@@ -23492,6 +23517,10 @@
+         .and_then(|value| value.as_str().map(str::to_owned))
+         .unwrap_or_else(|| "unknown".to_owned());
+     let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
++    let guidance = fixer_results
++        .iter()
++        .filter(|result| result.outcome == "guidance_recorded")
++        .count();
+     let data = serde_json::json!({
+         "schema": crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1,
+         "doctor_version": env!("CARGO_PKG_VERSION"),
+@@ -23500,22 +23529,34 @@
+         "runDir": summary.run_dir.display().to_string(),
+         "actionCount": summary.action_count,
+         "status": status_str,
+-        "fixerDispatchPending": false,
++        "fixerDispatchPending": guidance > 0,
+         "failurePolicy": "fail_fast",
+         "fixerResultCount": fixer_results.len(),
+         "attemptedFixerCount": attempted,
+         "failedFixerCount": failed,
+         "skippedFixerCount": skipped,
++        "guidanceFixerCount": guidance,
++        "appliedFixerCount": fixer_results.iter().filter(|result| result.outcome == "applied").count(),
+         "fixerResults": fixer_results,
+         "sideEffectFree": false,
+         "configMutation": "never",
+     });
+ 
++    let degraded = if guidance == 0 {
++        Vec::new()
++    } else {
++        vec![serde_json::json!({
++            "code": "doctor_manual_repair_pending",
++            "message": "One or more repairs recorded operator guidance without applying the repair.",
++            "severity": "medium",
++            "repair": "Inspect this run's actions.jsonl for the pending steps, complete the repairs, then run ee doctor again.",
++        })]
++    };
+     serde_json::json!({
+         "schema": crate::models::RESPONSE_SCHEMA_V2,
+-        "success": true,
++        "success": matches!(summary.status, crate::core::doctor_runtime::RunStatus::CompletedOk),
+         "data": data,
+-        "degraded": [],
++        "degraded": degraded,
+     })
+     .to_string()
+ }
+@@ -85474,6 +85515,60 @@
+     }
+ 
+     #[test]
++    fn doctor_fix_guidance_is_not_reported_as_an_applied_repair() -> TestResult {
++        use crate::core::doctor_fixers::FixerDispatch;
++        use crate::core::doctor_runtime::Op;
++
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let workspace = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let result = doctor_fix_dispatches(&workspace, vec![FixerDispatch {
++            finding_code: "pending_graph_repair",
++            severity: "warning",
++            path: workspace.join(".ee/graph"),
++            op: Op::RunGraphRefresh { steps: vec!["ee graph centrality-refresh".to_owned()] },
++        }]);
++        let value: serde_json::Value = serde_json::from_str(&result.json)
++            .map_err(|error| error.to_string())?;
++        ensure(result.exit_code != ProcessExitCode::Success, "pending repair must not exit successfully")?;
++        ensure_equal(&value["success"], &serde_json::json!(false), "pending success flag")?;
++        ensure_equal(&value["data"]["status"], &serde_json::json!("completed_partial"), "pending run status")?;
++        ensure_equal(&value["data"]["fixerResults"][0]["outcome"], &serde_json::json!("guidance_recorded"), "actual effect")?;
++        ensure_equal(&value["data"]["appliedFixerCount"], &serde_json::json!(0), "no applied repair")?;
++        ensure_equal(&value["data"]["guidanceFixerCount"], &serde_json::json!(1), "guidance count")?;
++        ensure_equal(&value["data"]["skippedFixerCount"], &serde_json::json!(0), "guidance was recorded, not skipped")?;
++        ensure(!workspace.join(".ee/graph").exists(), "guidance did not create a graph")
++    }
++
++    #[test]
++    fn doctor_fix_guidance_does_not_hide_a_real_reversible_mutation() -> TestResult {
++        use crate::core::doctor_fixers::FixerDispatch;
++        use crate::core::doctor_runtime::Op;
++
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let workspace = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let target = workspace.join(".ee/repaired-state");
++        let result = doctor_fix_dispatches(&workspace, vec![
++            FixerDispatch {
++                finding_code: "state_repair", severity: "warning", path: target.clone(),
++                op: Op::WriteFile { bytes: b"repaired".to_vec() },
++            },
++            FixerDispatch {
++                finding_code: "manual_repair", severity: "warning", path: workspace.join(".ee/config.toml"),
++                op: Op::Manual { steps: vec!["Review the configuration".to_owned()] },
++            },
++        ]);
++        let value: serde_json::Value = serde_json::from_str(&result.json)
++            .map_err(|error| error.to_string())?;
++        ensure_equal(&value["data"]["appliedFixerCount"], &serde_json::json!(1), "real mutation count")?;
++        ensure_equal(&value["data"]["guidanceFixerCount"], &serde_json::json!(1), "pending guidance count")?;
++        ensure_equal(&std::fs::read(&target).map_err(|error| error.to_string())?, &b"repaired".to_vec(), "real file was repaired")?;
++        let run = value["data"]["runId"].as_str().ok_or("missing run ID")?;
++        crate::core::doctor_runtime::replay_undo_for_workspace(&workspace, run)
++            .map_err(|error| error.to_string())?;
++        ensure(!target.exists(), "partial run remains undoable")
++    }
++
++    #[test]
+     fn doctor_fix_success_uses_canonical_response_envelope() -> TestResult {
+         let workspace = Path::new("/workspace");
+         let summary = crate::core::doctor_runtime::RunSummary {
