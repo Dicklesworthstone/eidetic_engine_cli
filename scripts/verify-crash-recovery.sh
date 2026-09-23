@@ -17,8 +17,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EE_BIN="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
 
 if ! command -v "$EE_BIN" >/dev/null 2>&1; then
-    echo "verify-crash-recovery: ee binary '$EE_BIN' not on PATH; skipping (advisory)" >&2
-    exit 0
+    # A harness that ran nothing is not a pass (bd-2oh15 ruling, option a).
+    echo "verify-crash-recovery: SKIPPED: ee binary '$EE_BIN' not found; set EE_DOCTOR_FIXTURE_BINARY" >&2
+    exit 3
 fi
 
 # Round-3 self-review: use mktemp instead of rm -rf on a caller-controlled

@@ -889,6 +889,18 @@ regression_factor = 1.5
 
 [[stage]]
 name = "ee doctor Safety Harness (bd-21joy)"
+# TRACKED RED since bd-2oh15 strand 4 (orchestrator ruling, option a,
+# 2026-09-23). This stage passes no ee binary to run-safety-harness.sh, and
+# until then every sub-harness printed "skipping (advisory)" and exited 0: the
+# stage reported success having run nothing. Each sub-harness now exits 3
+# SKIPPED without a binary, so the stage is red for that true reason, and it
+# fails in ~0s before any work. bd-5l8yh owns wiring the verified binary in
+# and the budget question it raises (a real run measured ~400s on hz3 against
+# the 8s below, with the p50 total at its 600s ceiling). When the stage is
+# green for real, delete `requirement`/`tracked_red_bead` in the SAME commit
+# and drop the count in `no_stage_is_declared_non_required_without_a_bead`.
+requirement = "tracked_red"
+tracked_red_bead = "bd-5l8yh"
 expected_seconds_p50 = 8
 regression_factor = 1.5
 

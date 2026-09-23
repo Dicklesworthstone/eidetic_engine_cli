@@ -394,3 +394,29 @@ doctor_fixture_assert_report_only() {
     printf 'report-only fixture confirmed: %s (%s %s reported, --fix 0 actions, still reported)\n' \
         "$fm_id" "$check_name" "$error_code" >&2
 }
+
+# The harness bucket of a fixture, from its manifest label (bd-2oh15 strand 4,
+# ruling c9954). Prints one of:
+#   coverage  REPAIR, GUIDANCE-ONLY: must pass.
+#   gap       NOT-DETECTED, PINNED-DEFECT: must still reproduce its pinned gap.
+#   untested  UNCLASSIFIED, UNRESOLVED: marker-only; never a pass, never a failure.
+#   unknown:<label>  anything else, including a fixture missing from the manifest.
+doctor_fixture_bucket() {
+    local fm_id="${1:?fm id required}"
+    local manifest="${2:?manifest path required}"
+    local label
+    label="$(jq -r --arg id "$fm_id" '[.fixtures[] | select(.id == $id) | .label] | first // ""' "$manifest")"
+    case "$label" in
+        REPAIR | GUIDANCE-ONLY) printf 'coverage\n' ;;
+        NOT-DETECTED | PINNED-DEFECT) printf 'gap\n' ;;
+        UNCLASSIFIED | UNRESOLVED) printf 'untested\n' ;;
+        *) printf 'unknown:%s\n' "$label" ;;
+    esac
+}
+
+# The manifest label of a fixture ("" when absent).
+doctor_fixture_label() {
+    local fm_id="${1:?fm id required}"
+    local manifest="${2:?manifest path required}"
+    jq -r --arg id "$fm_id" '[.fixtures[] | select(.id == $id) | .label] | first // ""' "$manifest"
+}

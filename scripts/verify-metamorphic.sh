@@ -19,8 +19,9 @@ FIXTURE_ROOT="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures-metam
 FIXTURES_SRC="${EE_DOCTOR_FIXTURES_SRC:-$REPO_ROOT/tests/doctor_fixtures}"
 
 if ! command -v "$EE_BIN" >/dev/null 2>&1; then
-    echo "verify-metamorphic: ee binary '$EE_BIN' not on PATH; skipping (advisory)" >&2
-    exit 0
+    # A harness that ran nothing is not a pass (bd-2oh15 ruling, option a).
+    echo "verify-metamorphic: SKIPPED: ee binary '$EE_BIN' not found; set EE_DOCTOR_FIXTURE_BINARY" >&2
+    exit 3
 fi
 if ! command -v jq >/dev/null 2>&1; then
     echo "verify-metamorphic: jq required" >&2
