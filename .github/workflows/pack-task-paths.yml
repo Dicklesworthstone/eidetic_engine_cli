@@ -5,14 +5,14 @@ on:
     paths:
       - 'src/core/context_task_paths.rs'
       - 'src/cli/pack_stream_tests.rs'
-      - 'scripts/delivery/canonical-pack-stream.patch.xz.b64'
+      - 'scripts/delivery/integrate-task-target-diff.py.xz.b64'
       - 'tests/pack_task_paths_cli.py'
       - '.github/workflows/pack-task-paths.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: canonical-task-pack-stream-${{ github.ref }}
+  group: task-pack-diff-integration-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   integrate:
@@ -32,31 +32,32 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Expose canonical task-pack streaming
+      - name: Attribute task-target changes in durable pack diff
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          if ! grep -Fq 'mod pack_stream_tests;' src/cli/mod.rs; then
+          if ! grep -Fq 'fn pack_record_task_path_hashes(' src/cli/mod.rs; then
+            grep -Fq 'mod pack_stream_tests;' src/cli/mod.rs
             python3 - <<'PY'
           import base64, hashlib, lzma, os
           from pathlib import Path
-          encoded = Path('scripts/delivery/canonical-pack-stream.patch.xz.b64').read_text()
-          patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
-          if hashlib.sha256(patch).hexdigest() != 'eb12cfe25d1aab382371937062045a495154457ad10eccc898880e0d7e4381a4':
-              raise SystemExit('Canonical stream patch checksum mismatch')
-          Path(os.environ['RUNNER_TEMP'], 'canonical-stream.patch').write_bytes(patch)
+          encoded = Path('scripts/delivery/integrate-task-target-diff.py.xz.b64').read_text()
+          script = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
+          if hashlib.sha256(script).hexdigest() != '011e8a834afb3059ed01dffae7b4ab2caf942262b32e15730256ce14b0998d5d':
+              raise SystemExit('Target-diff integration checksum mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'task-target-diff.py').write_bytes(script)
           PY
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/canonical-stream.patch"
-            git apply "$RUNNER_TEMP/canonical-stream.patch"
-            files=(src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py)
+            python3 "$RUNNER_TEMP/task-target-diff.py" > "$RUNNER_TEMP/task-target-files.txt"
+            files=()
+            while IFS= read -r path; do files+=("$path"); done < "$RUNNER_TEMP/task-target-files.txt"
             rustfmt --edition 2024 --config skip_children=true src/cli/mod.rs src/cli/pack_stream_tests.rs
             python3 -m py_compile tests/pack_task_paths_cli.py
             git diff --check
             git add -- "${files[@]}"
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(pack): expose canonical task-query streaming with live target admission' -m 'Forward pack --stream into the existing source-bound context streaming pipeline. Retain JSON/JSONL format validation and reject file, query-file, cursor, delta and performance combinations that would otherwise be ignored. Prevent path-dependent CLI JSON shortcuts. Add parser and cache regressions, and correct the public test to use the established context-show command without weakening replay assertions.'
+            git commit -m 'fix(pack): distinguish task-scope changes from corpus drift in replay diffs' -m 'Compare admitted target commitments independently of redacted display wrappers. Name task_paths_changed instead of attributing a target-only hash change to memory or index drift. Preserve the historical empty-target comparison and central untrusted-ledger gate. Update the strict diff schema, documentation and public two-pack/self-diff regression.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -68,7 +69,7 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py
+          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs tests/pack_task_paths_cli.py docs/schemas/ee.pack.diff.v2.json docs/pack-replay.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -107,7 +108,7 @@ jobs:
             recall-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Exercise targets, native authorization and stream contracts
+      - name: Exercise targets, native authorization, streaming and diff commitments
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
@@ -143,7 +144,7 @@ jobs:
             ${{ runner.temp }}/task-pack-identity.log
             ${{ runner.temp }}/task-pack-binary-sha256.log
           retention-days: 7
-      - name: Run the public scoped-pack lifecycle
+      - name: Run the public scoped-pack, replay, diff and streaming lifecycle
         if: ${{ !cancelled() && steps.binary.outcome == 'success' }}
         run: |
           set -euo pipefail
