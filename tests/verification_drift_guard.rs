@@ -657,8 +657,14 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     // The guard was REQUIRED when introduced at e99eb0bbb, which fail-fasted
     // verify.sh on this fleet. Returns to 1 when bd-iqg34 is fixed and the
     // guard goes back to required, and to 0 when the pins themselves go green.
+    // 3 since 2026-09-23:
+    //   "ee doctor Safety Harness (bd-21joy)" -> bd-5l8yh
+    //       red because the stage passes no ee binary, and every sub-harness
+    //       now exits 3 SKIPPED instead of passing having run nothing
+    //       (bd-2oh15 strand 4, option a). Drops back by one when bd-5l8yh
+    //       wires the verified binary in and the stage is green for real.
     assert_eq!(
-        non_required, 2,
+        non_required, 3,
         "stages are declared non-required. That may be correct, but it is a \
          deliberate act: update this count in the same commit so the excused \
          population stays visible in review."

@@ -3219,3 +3219,358 @@ fn backup_restore_re_extracts_the_same_memory_anchors() -> TestResult {
         "anchors re-extracted on restore",
     )
 }
+
+/// The latest sentinel status per spec for one memory.
+fn sentinel_statuses(
+    conn: &DbConnection,
+    memory_id: &str,
+    side: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    Ok(conn
+        .latest_memory_sentinel_results_for_memory(memory_id)
+        .map_err(|error| format!("{side} latest_memory_sentinel_results_for_memory: {error}"))?
+        .into_iter()
+        .map(|result| (result.spec_hash, format!("{:?}", result.status)))
+        .collect())
+}
+
+/// Run `ee sentinel check` on a workspace. Its exit status is not asserted: a
+/// failing sentinel is a result, not a command error. The caller's guard on
+/// the stored results carries this output if nothing was recorded.
+fn sentinel_check(workspace: &str) -> Result<String, String> {
+    let output = run_ee_output(&["sentinel", "check", "--workspace", workspace, "--json"])?;
+    Ok(format!(
+        "exit {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    ))
+}
+
+/// bd-1n0np.23.2: sentinel results are not copied by backup. Restore records
+/// that they "must be checked afresh" (backup_table_policy:
+/// derived_rebuildable / rebuild_on_restore), so the oracle is a re-check:
+/// `ee sentinel check` on the restored store gives the same status per spec as
+/// it gave on the source. Both targets are independent of the working tree,
+/// because restore brings back the store, not the workspace's files.
+#[test]
+fn backup_restore_then_sentinel_recheck_reproduces_statuses() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-sentinel-results-")?;
+    let ws = world.ws();
+    let remembered = run_ee(&[
+        "remember",
+        "No generated file should exist, and EE_WORKSPACE stays a registered variable.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--sentinel",
+        "path_exists:no/such/generated/file.txt",
+        "--sentinel",
+        "env_var_registered:EE_WORKSPACE",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source_check = sentinel_check(&ws)?;
+    let source = sentinel_statuses(&world.source_db()?, &memory_id, "source")?;
+    // Empty-world guard: two specs were attached and checked, so there must be
+    // a result for each, or the comparison below compares two empty maps.
+    ensure(
+        source.len() == 2,
+        format!("expected a source result per spec, got {source:?}\n{source_check}"),
+    )?;
+
+    world.backup_minimal_and_restore()?;
+
+    let restored_check = sentinel_check(&world.side_path.to_string_lossy())?;
+    ensure_equal(
+        &sentinel_statuses(&world.restored_db()?, &memory_id, "restored")?,
+        &source,
+        &format!("sentinel statuses after restore and a re-check\n{restored_check}"),
+    )
+}
+
+/// bd-1n0np.23.2: workspace generations are not copied (backup_table_policy:
+/// derived_rebuildable / rebuild_on_restore); triggers on workspace and memory
+/// writes rebuild them while restore imports. The value counts writes, so a
+/// restored store legitimately differs from its source. The oracle is that the
+/// restored store HAS a generation and that it still increases on a new write.
+#[test]
+fn backup_restore_rebuilds_a_workspace_generation_that_still_increases() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-generation-")?;
+    run_ee(&[
+        "remember",
+        "Generations advance on every durable write.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &world.ws(),
+        "--json",
+    ])?;
+    let source_conn = world.source_db()?;
+    let source_workspace_id = workspace_id_from_db(&source_conn, &world.workspace)?;
+    // Empty-world guard: without a source generation there is nothing for the
+    // restore to have rebuilt.
+    ensure(
+        source_conn
+            .get_workspace_generation(&source_workspace_id)
+            .map_err(|error| format!("source get_workspace_generation: {error}"))?
+            .is_some(),
+        "source store has no workspace generation",
+    )?;
+    drop(source_conn);
+
+    world.backup_minimal_and_restore()?;
+
+    let restored_conn = world.restored_db()?;
+    let restored_workspace_id = workspace_id_from_db(&restored_conn, &world.side_path)?;
+    let restored = restored_conn
+        .get_workspace_generation(&restored_workspace_id)
+        .map_err(|error| format!("restored get_workspace_generation: {error}"))?
+        .ok_or("restored store has no workspace generation")?;
+    drop(restored_conn);
+    run_ee(&[
+        "remember",
+        "A write after restore advances the restored generation.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &world.side_path.to_string_lossy(),
+        "--json",
+    ])?;
+    let after_write = world
+        .restored_db()?
+        .get_workspace_generation(&restored_workspace_id)
+        .map_err(|error| format!("restored get_workspace_generation after write: {error}"))?
+        .ok_or("restored store lost its workspace generation after a write")?;
+    ensure(
+        after_write > restored,
+        format!("restored generation did not increase on a write: {restored} -> {after_write}"),
+    )
+}
+
+/// The `hash` of the hash-manifest entry with this `label`.
+fn attest_manifest_hash<'a>(attest: &'a JsonValue, label: &str) -> Option<&'a str> {
+    attest
+        .pointer("/data/bundle/hashManifest/entries")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("label").and_then(JsonValue::as_str) == Some(label))?
+        .get("hash")?
+        .as_str()
+}
+
+/// The `(id, contentHash)` of each evidence entry of this `kind`, sorted.
+fn attest_evidence(attest: &JsonValue, kind: &str) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = attest
+        .pointer("/data/bundle/evidenceManifest/entries")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("kind").and_then(JsonValue::as_str) == Some(kind))
+        .map(|entry| {
+            let field = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (field("id"), field("contentHash"))
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// The replacement hashes the redaction manifest records for this `field`, sorted.
+fn attest_redaction_hashes(attest: &JsonValue, field: &str) -> Vec<String> {
+    let mut hashes: Vec<String> = attest
+        .pointer("/data/bundle/redactionManifest/entries")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("field").and_then(JsonValue::as_str) == Some(field))
+        .filter_map(|entry| entry.get("replacementHash").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect();
+    hashes.sort();
+    hashes
+}
+
+/// The `field` of every omission the bundle declares.
+fn attest_omissions(attest: &JsonValue) -> Vec<String> {
+    attest
+        .pointer("/data/bundle/omissions")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|omission| omission.get("field").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// bd-1n0np.23.2: attestation bundles are not stored; `ee attest memory` builds
+/// one on read from the memory, its links, anchors, audit rows and seal. The
+/// bundle attests CUSTODY as well as content, and a restored memory's custody
+/// genuinely differs, so the oracle (orchestrator ruling, option a) is split:
+///
+/// - CONTENT is equal: the subject, the redacted content and links hashes, the
+///   memory's own evidence hash, and the anchors' ids and redacted values.
+/// - CUSTODY differs in exactly the intended ways: the import gives the memory
+///   a provenance URI (jsonl-import://..) that the public bundle omits, the
+///   re-extracted anchors carry that URI as their provenance, restore adds
+///   exactly one audit row for the memory, and so the provenance chain hash
+///   moves.
+/// - NOT ASSERTED in either direction: `memory.trust_validity`. A side-path
+///   restore currently downgrades trust (bd-cjt23 item 2, awaiting a ruling);
+///   pinning either value would red the day that is decided. The aggregate
+///   `memory.anchors` / `memory.audit` hashes and the bundle hash are not
+///   asserted separately: they are derived from the custody facts above.
+///
+/// `--redaction minimal` keeps the memory ID the bundle names.
+#[test]
+fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-attestation-")?;
+    let ws = world.ws();
+    let remembered = run_ee(&[
+        "remember",
+        "Backups carry ee.backup.recovery_inventory.v1 and anchor:path:src/core/backup.rs.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source = run_ee(&["attest", "memory", &memory_id, "--workspace", &ws, "--json"])?;
+    // Empty-world guard: the source attestation must name this memory and
+    // carry a bundle hash, or the comparison below compares two empty shapes.
+    ensure_equal(
+        &source
+            .pointer("/data/subjectId")
+            .and_then(JsonValue::as_str),
+        &Some(memory_id.as_str()),
+        "source attestation names the memory",
+    )?;
+    ensure(
+        source
+            .pointer("/data/bundleHash")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|hash| !hash.is_empty()),
+        "source attestation has a bundle hash",
+    )?;
+
+    world.backup_minimal_and_restore()?;
+
+    let restored = run_ee(&[
+        "attest",
+        "memory",
+        &memory_id,
+        "--workspace",
+        &world.side_path.to_string_lossy(),
+        "--json",
+    ])?;
+
+    // CONTENT: equal.
+    for pointer in ["/data/subjectKind", "/data/subjectId"] {
+        ensure_equal(
+            &restored.pointer(pointer),
+            &source.pointer(pointer),
+            pointer,
+        )?;
+    }
+    for label in ["memory.redacted_content", "memory.links"] {
+        ensure_equal(
+            &attest_manifest_hash(&restored, label),
+            &attest_manifest_hash(&source, label),
+            label,
+        )?;
+    }
+    ensure_equal(
+        &attest_evidence(&restored, "memory"),
+        &attest_evidence(&source, "memory"),
+        "the memory's own evidence entry (id and content hash)",
+    )?;
+    let anchor_ids = |attest: &JsonValue| -> Vec<String> {
+        attest_evidence(attest, "memory_anchor")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    ensure(
+        !anchor_ids(&source).is_empty(),
+        "source attestation has no anchor evidence",
+    )?;
+    ensure_equal(
+        &anchor_ids(&restored),
+        &anchor_ids(&source),
+        "anchor evidence ids",
+    )?;
+    for field in ["memory.content", "memoryAnchors[].redactedAnchorValue"] {
+        ensure_equal(
+            &attest_redaction_hashes(&restored, field),
+            &attest_redaction_hashes(&source, field),
+            field,
+        )?;
+    }
+
+    // CUSTODY: the provenance URI the import records, omitted from the public bundle.
+    ensure(
+        attest_redaction_hashes(&source, "memory.provenanceUri").is_empty(),
+        "the source memory has no provenance URI",
+    )?;
+    let restored_uri = attest_redaction_hashes(&restored, "memory.provenanceUri");
+    ensure_equal(
+        &restored_uri.len(),
+        &1,
+        "the restored memory carries one provenance URI",
+    )?;
+    let omission = "publicProjection.provenanceUri".to_owned();
+    ensure(
+        !attest_omissions(&source).contains(&omission)
+            && attest_omissions(&restored).contains(&omission),
+        "only the restored bundle declares the provenance URI omission",
+    )?;
+
+    // CUSTODY: the re-extracted anchors carry that URI as their provenance.
+    let restored_anchor_provenance =
+        attest_redaction_hashes(&restored, "memoryAnchors[].provenance");
+    ensure(
+        !restored_anchor_provenance.is_empty()
+            && restored_anchor_provenance
+                .iter()
+                .all(|hash| *hash == restored_uri[0])
+            && !attest_redaction_hashes(&source, "memoryAnchors[].provenance")
+                .contains(&restored_uri[0]),
+        format!(
+            "restored anchor provenance {restored_anchor_provenance:?} is not the restored \
+             provenance URI {}",
+            restored_uri[0]
+        ),
+    )?;
+
+    // CUSTODY: restore adds exactly one audit row and keeps every source row.
+    let source_audit = attest_evidence(&source, "audit_log");
+    let restored_audit = attest_evidence(&restored, "audit_log");
+    ensure(
+        restored_audit.len() == source_audit.len() + 1
+            && source_audit.iter().all(|row| restored_audit.contains(row)),
+        format!("audit evidence: source {source_audit:?}, restored {restored_audit:?}"),
+    )?;
+
+    // CUSTODY: the provenance chain therefore moves.
+    ensure(
+        attest_manifest_hash(&restored, "memory.provenance_chain")
+            != attest_manifest_hash(&source, "memory.provenance_chain"),
+        "the provenance chain hash did not change across restore",
+    )
+}

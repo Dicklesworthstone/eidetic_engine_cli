@@ -9,7 +9,7 @@ Labels, fields and the coverage rule are defined in
 - **Label:** UNRESOLVED
 - **Severity:** P0. Scored P0 as `pop-wal_shm-stale_sidecar` in `docs/doctor/failure_mode_scores.jsonl`.
 - **Detector:** None known. No doctor check reads `.ee/ee.db-wal` contents or `.ee/ee.db-shm`; `wal_pressure` (EE-E205) compares WAL size only.
-- **Real trigger:** Not yet built. Random sidecar bytes produce no failure: SQLite rejects a WAL whose salts do not match the database header. The trigger still to measure is a stale WAL with matching salts, replayed over a newer database file.
+- **Real trigger:** Not yet built. Random sidecar bytes produce no failure: fsqlite-wal rejects frames whose salts or checksum chain disagree with the WAL's OWN header (fsqlite-wal-0.4.0 `checksum.rs`). It does not compare the WAL with the database header, and ee reads only the WAL's size (`wal_status`, `wal_pressure`) and never the `-shm`. So the recipe to measure is an internally consistent WAL captured with an older `ee.db`, placed beside a newer `ee.db`: it would pass validation and replay. This is a code reading from the bd-2oh15 survey, not a measurement; the fsqlite-pager open path was not traced, so a database-binding check there is not ruled out.
 - **Repair:** None. No fixer is dispatched for sidecar state.
 - **Undo:** Not applicable until a trigger exists.
 - **Oracle:** None yet. The fixture is marker-only and does not run ee.

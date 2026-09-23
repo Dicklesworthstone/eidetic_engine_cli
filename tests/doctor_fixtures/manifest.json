@@ -168,15 +168,34 @@
       "id": "fm-policy_safety-trauma-guard-policy-denied-exit-7",
       "severity": "P1",
       "subsystem": "policy_safety",
-      "label": "UNCLASSIFIED",
-      "spec": "docs/doctor/repair-specs/policy_safety.md"
+      "label": "OUT-OF-SCOPE",
+      "spec": "docs/doctor/repair-specs/policy_safety.md",
+      "scopeReason": {
+        "category": "A trauma-guard policy denial exiting 7 is a correct command outcome, not damaged workspace state that doctor could read or repair.",
+        "citations": [
+          "src/models/mod.rs:2285",
+          "src/models/mod.rs:2304",
+          "src/core/trauma_guard.rs:35",
+          "src/core/doctor_fixers.rs:292"
+        ],
+        "search": "grep -rlniE 'trauma' src (trauma_guard.rs, preflight_guard.rs, preflight.rs, core/mod.rs, cli/mod.rs, curate/mod.rs: the guard exists); grep -niE 'trauma|policy_denied|PolicyDenied' src/core/doctor.rs src/core/doctor_fixers.rs src/core/doctor_runtime.rs: 4 hits, none about the trauma guard (doctor_runtime.rs:96/2232 are doctor's own unsafe-undo refusal, doctor.rs:3910 is rch pressure policy). The nearest doctor family, FM-PS-01 at doctor_fixers.rs:292, is policy rules out of sync with the binary's registry: a different condition. Measured at a1d4afe8b."
+      }
     },
     {
       "id": "fm-policy_safety-redaction-class-coverage-gap",
       "severity": "P1",
       "subsystem": "policy_safety",
-      "label": "UNCLASSIFIED",
-      "spec": "docs/doctor/repair-specs/policy_safety.md"
+      "label": "OUT-OF-SCOPE",
+      "spec": "docs/doctor/repair-specs/policy_safety.md",
+      "scopeReason": {
+        "category": "Redaction classes are mesh lane policy (which memories a lane grant may carry), not doctor-readable workspace state. If this gap matters, it needs a mesh-owned check; FM-PS-01 is not stretched over it.",
+        "citations": [
+          "src/mesh/lane_grant_preview.rs:232",
+          "src/mesh/lane_grant_preview.rs:495",
+          "src/mesh/team.rs:7215"
+        ],
+        "search": "grep -rnE 'RedactionClass|redaction_class|redaction class' src: hits in src/mesh/lane_grant_preview.rs and src/mesh/team.rs (plus eval); grep -nciE 'redaction_class|RedactionClass|redaction class|lane_grant' src/core/doctor.rs src/core/doctor_fixers.rs src/core/doctor_runtime.rs: 0 hits in each. Measured at a1d4afe8b."
+      }
     }
   ]
 }
