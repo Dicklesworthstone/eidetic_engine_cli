@@ -6200,6 +6200,8 @@ mod ask_model;
 pub(crate) use ask_model::{
     local_read_only_embedder, prepare_read_only_search_embedder_for_workspace,
 };
+// Doctor index staging (bd-65jem) reuses the cached-only resolution.
+use ask_model::cached_local_selection;
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";
