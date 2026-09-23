@@ -1158,7 +1158,7 @@ fn public_cli_learns_all_structured_cross_window_episodes_and_applies_them_indep
         };
         assert_eq!(source.memory_id.as_ref(), Some(owner));
     }
-    for pair in memory_ids.chunks_exact(2) {
+    for pair in memory_ids.as_chunks::<2>().0 {
         let links = db.list_memory_links_for_memory(&pair[0], Some(MemoryLinkRelation::Related))?;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].src_memory_id, pair[0]);

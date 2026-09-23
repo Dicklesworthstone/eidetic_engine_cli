@@ -1,0 +1,145 @@
+name: Task-scoped context packs
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/context*.rs'
+      - 'src/cli/mod.rs'
+      - 'src/cli/pack_stream_tests.rs'
+      - 'src/pack/mod.rs'
+      - 'src/output/streaming.rs'
+      - 'tests/pack_task_paths_cli.py'
+      - 'benches/*.rs'
+      - 'docs/schemas/ee.pack*.json'
+      - '.github/workflows/pack-task-paths.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: task-pack-committed-verification-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Record exact committed source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src tests benches Cargo.toml Cargo.lock rust-toolchain.toml docs/schemas docs/pack-replay.md .github/workflows/pack-task-paths.yml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: task-pack-source
+          path: |
+            ${{ runner.temp }}/task-pack-identity.log
+            ${{ runner.temp }}/task-pack-source.tar.gz
+          retention-days: 7
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: task-pack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            task-pack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recall-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile every Cargo target and check changed modules
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/task-pack-check.log"
+          rustfmt --check --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs src/output/streaming.rs src/pack/mod.rs benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs 2>&1 | tee "$RUNNER_TEMP/task-pack-format.log"
+      - name: Exercise targets, native authorization, streaming and diff commitments
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for group in cli::pack_stream_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
+            log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
+            if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: task-pack-unit-results
+          path: ${{ runner.temp }}/task-pack-*.log
+          retention-days: 7
+      - name: Build the public command
+        id: binary
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/task-pack-build.log"
+          sha256sum target/debug/ee | tee "$RUNNER_TEMP/task-pack-binary-sha256.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.binary.outcome == 'success' }}
+        with:
+          name: task-pack-tested-binary
+          path: |
+            target/debug/ee
+            ${{ runner.temp }}/task-pack-identity.log
+            ${{ runner.temp }}/task-pack-binary-sha256.log
+          retention-days: 7
+      - name: Run the public scoped-pack, replay, diff and streaming lifecycle
+        if: ${{ !cancelled() && steps.binary.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 tests/pack_task_paths_cli.py target/debug/ee 2>&1 | tee "$RUNNER_TEMP/task-pack-cli.log"
+          grep -q '^PASS: literal task scopes' "$RUNNER_TEMP/task-pack-cli.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: task-pack-cli-results
+          path: ${{ runner.temp }}/task-pack-*.log
+          retention-days: 7
+      - name: Exercise existing persisted replay and streaming contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for group in pack_stream_conformance_v1 context_show_persisted_pack; do
+            log="$RUNNER_TEMP/task-pack-$group.log"
+            if ! cargo test --locked --test contracts "$group" -- --test-threads=2 2>&1 | tee "$log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: task-pack-results
+          path: ${{ runner.temp }}/task-pack-*.log
+          retention-days: 7
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}

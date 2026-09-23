@@ -2132,6 +2132,7 @@ mod tests {
             .insert_pack_record(
                 "pack_00000000000000000000001001",
                 &CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: WORKSPACE.to_owned(),
                     query: "prepare release".to_owned(),
                     profile: "balanced".to_owned(),
@@ -2239,6 +2240,7 @@ mod tests {
             .insert_pack_record(
                 "pack_00000000000000000000001002",
                 &CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: WORKSPACE.to_owned(),
                     query: query.to_owned(),
                     profile: "balanced".to_owned(),

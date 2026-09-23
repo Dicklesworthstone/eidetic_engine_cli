@@ -88,6 +88,7 @@ fn seed_pack_record(
     pack_hash: &str,
 ) -> TestResult {
     let input = CreatePackRecordInput {
+        task_paths: Vec::new(),
         workspace_id: workspace_id.to_string(),
         query: "baseline ledger seed".to_string(),
         profile: "balanced".to_string(),

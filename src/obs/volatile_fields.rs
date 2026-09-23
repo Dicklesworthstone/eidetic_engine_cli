@@ -364,6 +364,60 @@ pub fn normalize_pack_timing_markdown(text: &str) -> (String, usize) {
     )
 }
 
+/// Stand-in for a per-workspace daemon socket path in comparable output.
+pub const WORKSPACE_DAEMON_SOCKET_PLACEHOLDER: &str = "<workspace-daemon-socket>";
+
+/// Replace every per-workspace daemon socket path with
+/// [`WORKSPACE_DAEMON_SOCKET_PLACEHOLDER`], returning the text and how many
+/// paths were replaced.
+///
+/// `crate::daemon::workspace_daemon_socket_path` names the socket
+/// `d-<first 24 hex of blake3(canonical workspace)>.sock` beside the default
+/// socket, and falls back to `/tmp/ee-<euid>/` when that would exceed 65
+/// bytes. All three inputs -- the euid, the absolute workspace path inside
+/// the hash, and the length fallback -- belong to the HOST, not the
+/// workspace state, so `ee doctor` reads `/tmp/ee-1000/d-dd8d….sock` on one
+/// worker and something else on the next (bd-j4njd). The default
+/// `…/daemon.sock` form is NOT touched: only the hashed per-workspace name.
+pub fn normalize_workspace_daemon_socket_paths(text: &str) -> (String, usize) {
+    const NAME_PREFIX: &str = "/d-";
+    const HEX_LEN: usize = 24;
+    const SUFFIX: &str = ".sock";
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = 0usize;
+    let mut cursor = 0usize;
+    let mut search_from = 0usize;
+    while let Some(offset) = text[search_from..].find(NAME_PREFIX) {
+        let slash = search_from + offset;
+        let hex_start = slash + NAME_PREFIX.len();
+        let hex_end = hex_start + HEX_LEN;
+        let is_socket_name = text
+            .get(hex_start..hex_end)
+            .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            && text
+                .get(hex_end..)
+                .is_some_and(|rest| rest.starts_with(SUFFIX));
+        if !is_socket_name {
+            search_from = hex_start;
+            continue;
+        }
+        // The path token starts after the nearest preceding ASCII whitespace
+        // or quote, never before the end of the previous replacement. Every
+        // delimiter is one byte, which is what makes `at + 1` a char boundary.
+        let token_start = text[cursor..slash]
+            .rfind(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | '`' | '('))
+            .map_or(cursor, |at| cursor + at + 1);
+        let token_end = hex_end + SUFFIX.len();
+        out.push_str(&text[cursor..token_start]);
+        out.push_str(WORKSPACE_DAEMON_SOCKET_PLACEHOLDER);
+        replaced += 1;
+        cursor = token_end;
+        search_from = token_end;
+    }
+    out.push_str(&text[cursor..]);
+    (out, replaced)
+}
+
 /// One predicate for "this line is the timing bullet", shared by the counter
 /// above and the stripper below so the number subtracted from the prose is
 /// always the number of bullets actually removed.
@@ -491,8 +545,9 @@ fn log_volatile_strip(report: &VolatileStripReport) {
 #[cfg(test)]
 mod tests {
     use super::{
-        VOLATILE_FIELD_NAMES, is_volatile_field_name, normalize_pack_timing_degradations,
-        normalize_pack_timing_markdown, strip_volatile_fields,
+        VOLATILE_FIELD_NAMES, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER, is_volatile_field_name,
+        normalize_pack_timing_degradations, normalize_pack_timing_markdown,
+        normalize_workspace_daemon_socket_paths, strip_volatile_fields,
     };
 
     type TestResult = Result<(), String>;
@@ -731,6 +786,60 @@ mod tests {
             ));
         }
         println!("normalized markdown:\n{slow_out}");
+        Ok(())
+    }
+
+    /// Two hosts, one workspace state: the doctor message must read the same.
+    ///
+    /// The socket path depends on the euid, on the absolute workspace path
+    /// (inside the hash) and on a 65-byte length fallback, so the two readings
+    /// below are what the same check prints on two different workers.
+    #[test]
+    fn workspace_daemon_socket_reads_the_same_on_two_hosts() -> TestResult {
+        let message = |path: &str| {
+            format!(
+                "Optional daemon socket is not present at {path}; in-process CLI execution remains authoritative."
+            )
+        };
+        let worker = message("/tmp/ee-1000/d-dd8d8dfe03d558040e031a6f.sock");
+        let laptop = message("/run/user/501/ee/d-0123456789abcdef01234567.sock");
+        if worker == laptop {
+            return Err("fixtures are identical; the test proves nothing".into());
+        }
+        let (worker_out, worker_hits) = normalize_workspace_daemon_socket_paths(&worker);
+        let (laptop_out, laptop_hits) = normalize_workspace_daemon_socket_paths(&laptop);
+        if worker_hits != 1 || laptop_hits != 1 {
+            return Err(format!(
+                "each reading must replace exactly one path, got {worker_hits} and {laptop_hits}"
+            ));
+        }
+        if worker_out != laptop_out {
+            return Err(format!(
+                "host-dependent output:\n{worker_out}\n{laptop_out}"
+            ));
+        }
+        if worker_out != message(WORKSPACE_DAEMON_SOCKET_PLACEHOLDER) {
+            return Err(format!("unexpected normalized message: {worker_out}"));
+        }
+        Ok(())
+    }
+
+    /// Only the hashed per-workspace name is scrubbed. The default socket, a
+    /// non-hex `d-` name and a short hash all pass through byte-identical, so
+    /// the scrubber cannot hide a socket that is not host-derived.
+    #[test]
+    fn non_workspace_socket_paths_are_untouched() -> TestResult {
+        for text in [
+            "Optional daemon socket is not present at <workspace>/.runtime/ee/daemon.sock; ok.",
+            "path /tmp/ee-1000/d-zzzzzzzzzzzzzzzzzzzzzzzz.sock is not hex",
+            "path /tmp/ee-1000/d-dd8d8dfe.sock is too short",
+            "no socket here at all",
+        ] {
+            let (out, hits) = normalize_workspace_daemon_socket_paths(text);
+            if hits != 0 || out != text {
+                return Err(format!("must be untouched, got {hits} hits: {out}"));
+            }
+        }
         Ok(())
     }
 

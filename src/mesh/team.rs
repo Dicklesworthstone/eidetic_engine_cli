@@ -9126,6 +9126,7 @@ mod tests {
         );
         let packed =
             crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                task_paths: Vec::new(),
                 workspace_path: joiner_dir.path().to_path_buf(),
                 database_path: Some(joiner_db),
                 index_dir: Some(joiner_ee.join("index")),
@@ -10754,6 +10755,7 @@ mod tests {
 
         let packed =
             crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                task_paths: Vec::new(),
                 workspace_path: workspace.path().to_path_buf(),
                 database_path: Some(ee_dir.join("ee.db")),
                 index_dir: Some(ee_dir.join("index")),

@@ -4,89 +4,14 @@ on:
     branches: [main]
     paths:
       - 'src/core/recall*.rs'
-      - 'scripts/delivery/recall-admitted-scan-20260922.patch'
       - 'tests/recall_source_lifecycle_cli.py'
       - '.github/workflows/recall-source-admission.yml'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: macos-14
-    timeout-minutes: 8
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.source.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
-        with:
-          toolchain: nightly-2026-08-31
-          components: rustfmt
-      - name: Integrate bounded admitted anchor traversal
-        id: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=$(git rev-parse HEAD)
-          new_files=(src/core/recall_scan.rs scripts/delivery/recall-admitted-scan-20260922.patch tests/recall_source_lifecycle_cli.py tests/fixtures/failure_modes/recall_anchor_filtered.json tests/fixtures/failure_modes/recall_scan_incomplete.json)
-          files=(src/core/recall.rs src/core/recall_admission.rs "${new_files[@]}")
-          if ! grep -Fq 'let scan = scan::load(' src/core/recall.rs; then
-            test "$(git hash-object src/core/recall.rs)" = f46e30453fc59aed49f2203540fe15f0d65bfb04
-            test "$(git hash-object src/core/recall_admission.rs)" = 3911882901f25215fa9bb43acbbc276886c31206
-            reviewed=270a987de2db628af16107ee14ef625266bbb307
-            git fetch --no-tags origin "$reviewed"
-            for file in "${new_files[@]}"; do
-              test ! -L "$file"
-              if test -e "$file"; then
-                test "$(git hash-object "$file")" = "$(git rev-parse "$reviewed:$file")"
-              else
-                mkdir -p "$(dirname "$file")"
-                git show "$reviewed:$file" > "$file"
-              fi
-            done
-            test "$(git hash-object src/core/recall_scan.rs)" = 2e0e2eabfe905d20047aaa7011fa518919da1e42
-            test "$(git hash-object tests/recall_source_lifecycle_cli.py)" = a4e09160eb077987edba8f809047f08ccc7814bc
-            patch=scripts/delivery/recall-admitted-scan-20260922.patch
-            test "$(git hash-object "$patch")" = 53311669eab557e9053308343a7bf76014344b25
-            git apply --check --whitespace=error-all "$patch"
-            git apply "$patch"
-          fi
-          rustfmt --edition 2024 --config skip_children=true src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs
-          python3 -m py_compile tests/recall_source_lifecycle_cli.py
-          git add -- "${files[@]}"
-          git diff --cached --check -- . ':!scripts/delivery/recall-admitted-scan-20260922.patch'
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(recall): page admitted code anchors before ranked retention' -m 'Replace prefix-limited raw anchor reads with fair path/symbol keyset streams, exact source admission, canonical locator validation and ranked retention. Load only retained memory bodies in bounded batches. Preserve existing filters, drift flags, cursor and token-budget behavior; explicitly report incomplete source scans. Add beyond-4096, obsolete-page, late-ranking, selector and locator substitution regressions plus a public capture/revise/seal/reveal journey.'
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 3
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${files[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          git rev-parse HEAD > "$RUNNER_TEMP/recall-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs tests/recall_source_lifecycle_cli.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ !cancelled() }}
-        with:
-          name: recall-source-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/recall-source-sha.log
-            ${{ runner.temp }}/recall-source.tar.gz
-          retention-days: 7
   verify:
-    needs: integrate
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
@@ -100,8 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.integrate.outputs.source }}
           persist-credentials: false
+      - name: Capture exact committed recall source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/recall-identity.log"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs tests/recall_source_lifecycle_cli.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recall-source-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/recall-identity.log
+            ${{ runner.temp }}/recall-source.tar.gz
+          retention-days: 7
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
@@ -121,7 +57,6 @@ jobs:
       - name: Exercise production recall and live source regressions
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/recall-identity.log"
           cargo test --locked --lib core::recall:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-engine.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-engine.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -149,6 +84,13 @@ jobs:
           set -euo pipefail
           cargo test --locked --test integration_n_r recall_cli_golden -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-contracts.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-contracts.log"
+      - name: Check complete compilation and recall formatting
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recall-check.log"
+          rustfmt --edition 2024 --config skip_children=true --check src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs src/core/recall_projection.rs
+          python3 -m py_compile tests/recall_source_lifecycle_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:

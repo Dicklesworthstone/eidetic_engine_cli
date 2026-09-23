@@ -11,13 +11,15 @@ use chrono::{DateTime, Utc};
 use sqlmodel_core::{Row, Value};
 
 use super::{
-    RECALL_CANDIDATE_SCAN_CAP, RecallCandidateRow, RecallDegradation, RecallProvenanceRef,
-    RecallQuery, anchor_row_preference, normalize_recall_path_selector, recall_glob_match,
-    score_row,
+    RECALL_CANDIDATE_SCAN_CAP, RecallCandidateRow, RecallDegradation, RecallQuery,
+    anchor_row_preference, normalize_recall_path_selector, recall_glob_match, score_row,
 };
 use crate::db::{DbConnection, DbError, DbOperation};
 use crate::models::memory_anchor::memory_anchor_value_hash;
 use crate::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
+
+#[path = "recall_projection.rs"]
+mod projection;
 
 const PAGE_SIZE: usize = 256;
 const SOURCE_ROW_LIMIT: usize = 65_536;
@@ -244,6 +246,17 @@ fn load_bounded(
                     denied.insert(key.0, reason);
                     continue;
                 }
+                if key.0.parse::<crate::models::MemoryId>().is_err()
+                    || text(&row, 18)?
+                        .parse::<crate::models::MemoryLevel>()
+                        .is_err()
+                    || text(&row, 19)?
+                        .parse::<crate::models::MemoryKind>()
+                        .is_err()
+                {
+                    denied.insert(key.0, "malformed");
+                    continue;
+                }
                 let kind = MemoryAnchorKind::parse(&key.1).ok_or_else(error)?;
                 let value = match (kind, path.as_deref(), symbol.as_deref()) {
                     (MemoryAnchorKind::Path, Some(path), None) => path,
@@ -263,6 +276,12 @@ fn load_bounded(
                 }
                 let freshness =
                     MemoryAnchorFreshnessState::parse(text(&row, 16)?).ok_or_else(error)?;
+                // A private locator cannot become a redaction marker and
+                // still be presented as a real file or symbol.
+                if !projection::locator_is_public(value) {
+                    denied.insert(key.0, "private_anchor");
+                    continue;
+                }
                 let confidence = row
                     .get(20)
                     .and_then(Value::as_f64)
@@ -325,6 +344,7 @@ fn load_bounded(
     let filtered_empty = !surface_matches.is_empty() && ranked.is_empty();
     ranked.truncate(max_results);
     let mut rows = ranked.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
+    let mut redacted_memories = 0;
     for page in rows.chunks_mut(PAGE_SIZE) {
         let ids = page
             .iter()
@@ -337,18 +357,8 @@ fn load_bounded(
             if source.workspace_id != workspace {
                 return Err(error());
             }
-            row.content.clone_from(&source.content);
-            row.tags = tags.get(&row.memory_id).cloned().unwrap_or_default();
-            row.provenance = source
-                .provenance_uri
-                .as_ref()
-                .map(|uri| {
-                    vec![RecallProvenanceRef {
-                        uri: uri.clone(),
-                        source_type: "memory_provenance".to_owned(),
-                    }]
-                })
-                .unwrap_or_default();
+            let source_tags = tags.get(&row.memory_id).map_or(&[][..], Vec::as_slice);
+            redacted_memories += usize::from(projection::apply(row, source, source_tags));
         }
     }
     let mut counts = BTreeMap::new();
@@ -356,6 +366,14 @@ fn load_bounded(
         *counts.entry(reason).or_insert(0) += 1;
     }
     let mut degraded = super::admission::degradations(counts);
+    if redacted_memories > 0 {
+        degraded.push(RecallDegradation {
+            code: "recall_egress_redacted",
+            severity: "info",
+            message: format!("Applied public-egress redaction to {redacted_memories} recalled memories before previews and token budgeting; private origins use an explicitly labeled memory identity, not fabricated source provenance."),
+            repair: None,
+        });
+    }
     if filtered_empty {
         degraded.push(RecallDegradation {
             code: super::RECALL_FILTERED_EMPTY_CODE,
@@ -709,6 +727,72 @@ mod tests {
                 .iter()
                 .any(|d| d.code == "recall_anchor_filtered")
         );
+    }
+
+    #[test]
+    fn private_legacy_fields_are_redacted_before_public_rendering_and_budgeting() {
+        let db = fixture();
+        let id = seed(&db, 1, "Release guidance. anchor:path:src/release.rs", 0.9);
+        let token = ["AKIA", "ABCDEFGHIJKLMNOP"].concat();
+        let raw = format!(
+            "{} /custom-private-root/session {token} anchor:path:src/release.rs",
+            "Release guidance. ".repeat(100)
+        );
+        // Simulate durable legacy/configured-allow data, not a new ingress
+        // bypass. Recall must neither publish it raw nor rewrite its source.
+        db.execute_raw(&format!("UPDATE memories SET content = '{raw}', provenance_uri = 'file:///custom-private-root/notes.txt#L1' WHERE id = '{id}'")).unwrap();
+        db.execute_raw(&format!(
+            "UPDATE memory_tags SET tag = 'source-{token}' WHERE memory_id = '{id}'"
+        ))
+        .unwrap();
+        let before = db.get_memory(&id).unwrap();
+        let original_tags = db.get_memory_tags(&id).unwrap();
+        let audits = db.count_table_rows("audit_log").unwrap();
+        let query = RecallQuery {
+            paths: vec!["src/release.rs".to_owned()],
+            ..RecallQuery::default()
+        };
+        let report = super::super::run_recall(&db, WORKSPACE, &query).unwrap();
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert_eq!(item.memory_id, id);
+        assert_eq!(item.provenance[0].uri, format!("ee-mem://{id}"));
+        assert_eq!(item.provenance[0].source_type, "memory_identity");
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|d| d.code == "recall_egress_redacted")
+        );
+        let echo = super::super::RecallQueryEcho {
+            paths: query.paths.clone(),
+            ..Default::default()
+        };
+        for output in [
+            super::super::recall_data_json(&report, &echo).to_string(),
+            super::super::render_recall_markdown(&report, &[]),
+            format!("{report:?}"),
+        ] {
+            assert!(!output.contains(&token));
+            assert!(!output.contains("/custom-private-root"));
+            assert!(output.contains("[REDACTED"));
+        }
+        let cost = super::super::recall_item_token_estimate(item);
+        assert!(raw.split_whitespace().count() > cost);
+        let budgeted = super::super::run_recall(
+            &db,
+            WORKSPACE,
+            &RecallQuery {
+                max_tokens: Some(u32::try_from(cost).unwrap()),
+                ..query
+            },
+        )
+        .unwrap();
+        assert_eq!(budgeted.items, report.items);
+        assert!(!budgeted.truncated);
+        assert_eq!(db.get_memory(&id).unwrap(), before);
+        assert_eq!(db.get_memory_tags(&id).unwrap(), original_tags);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
     }
 
     #[test]

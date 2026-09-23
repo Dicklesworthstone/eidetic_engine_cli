@@ -155,7 +155,7 @@ Compares two ledgers and reports:
 - Degradation deltas
 - Redaction deltas
 - Derived-asset changes
-- Likely causes (`query_changed`, `profile_changed`, `budget_changed`,
+- Likely causes (`query_changed`, `task_paths_changed`, `profile_changed`, `budget_changed`,
   `derived_asset_changed`, `degradation_changed`, `redaction_changed`,
   `selection_changed`, `memory_or_index_state_changed`, `no_change`, or
   `ledger_unavailable_or_untrusted`)

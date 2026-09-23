@@ -283,6 +283,7 @@ fn workload_queries() -> Vec<String> {
 
 fn context_options(fixture: &BenchFixture, query: &str, mode: CacheMode) -> ContextPackOptions {
     ContextPackOptions {
+        task_paths: Vec::new(),
         task_lens: None,
         workspace_path: fixture.workspace_path.clone(),
         database_path: Some(fixture.db_path.clone()),

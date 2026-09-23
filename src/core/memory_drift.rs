@@ -3099,6 +3099,7 @@ mod tests {
             .insert_pack_record_at(
                 &pack_id,
                 &CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.to_owned(),
                     query: "recent pack drift test".to_owned(),
                     profile: "balanced".to_owned(),
@@ -3438,6 +3439,7 @@ mod tests {
             .insert_pack_record_at(
                 pack_id,
                 &CreatePackRecordInput {
+                    task_paths: Vec::new(),
                     workspace_id: workspace_id.clone(),
                     query: "output limit regression".to_owned(),
                     profile: "balanced".to_owned(),

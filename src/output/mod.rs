@@ -2892,6 +2892,9 @@ pub fn render_context_response_json_with_options(
         );
         d.field_object("request", |request| {
             request.field_str("query", &response.data.request.query);
+            if !response.data.request.task_paths.is_empty() {
+                request.field_raw("taskPaths", &string_array_json(response.data.request.task_paths.iter().map(String::as_str)));
+            }
             request.field_str("profile", response.data.request.profile.as_str());
             request.field_u32("maxTokens", response.data.request.budget.max_tokens());
             request.field_u32("candidatePool", response.data.request.candidate_pool);

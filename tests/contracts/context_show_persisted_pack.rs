@@ -84,6 +84,7 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
 
     // Run a live context pack so a persisted record lands in pack_records.
     let response = run_context_pack(&ContextPackOptions {
+        task_paths: Vec::new(),
         task_lens: None,
         workspace_path: workspace.clone(),
         database_path: Some(database.clone()),

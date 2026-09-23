@@ -240,6 +240,7 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
         .insert_pack_record(
             PACK_ID,
             &CreatePackRecordInput {
+                task_paths: Vec::new(),
                 workspace_id: workspace_id.clone(),
                 query: QUERY.to_string(),
                 profile: "compact".to_string(),

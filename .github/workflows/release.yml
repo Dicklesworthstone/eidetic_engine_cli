@@ -158,7 +158,7 @@ jobs:
       # workflow ships. Whether that is acceptable is a licensing-policy
       # ruling, not an engineering one, and it is unmade.
       - name: RustSec advisory audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check advisories
 
@@ -166,7 +166,7 @@ jobs:
       # one thing. A bans or sources regression must not hide behind an
       # unrelated advisory failure.
       - name: Ban and source audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check bans sources
 
@@ -368,7 +368,7 @@ jobs:
           Remove-Item ee.exe
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: Install provenance hash tools
         shell: bash
@@ -718,7 +718,7 @@ jobs:
           fi
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: Verify Sigstore bundles and provenance
         run: |
