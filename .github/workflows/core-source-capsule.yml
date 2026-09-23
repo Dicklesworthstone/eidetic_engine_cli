@@ -25,8 +25,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/core-source"
           git rev-parse HEAD > "$RUNNER_TEMP/core-source/source-sha.txt"
           test "$(cat "$RUNNER_TEMP/core-source/source-sha.txt")" = "$GITHUB_SHA"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/core-source/source-blobs.txt"
           git archive --format=tar.gz --output="$RUNNER_TEMP/core-source/source.tar.gz" HEAD
-          sha256sum "$RUNNER_TEMP/core-source/source.tar.gz"
+          (cd "$RUNNER_TEMP/core-source" && sha256sum source.tar.gz) | tee "$RUNNER_TEMP/core-source/source.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: core-source-${{ github.sha }}
