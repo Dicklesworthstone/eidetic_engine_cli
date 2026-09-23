@@ -38,7 +38,12 @@ fn inventory(root: &Path) -> Result<Inventory, DoctorRuntimeError> {
     let mut result = Inventory::default();
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err(repair_error("inspect index repair root", "expected a directory")),
+        Ok(_) => {
+            return Err(repair_error(
+                "inspect index repair root",
+                "expected a directory",
+            ));
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(result),
         Err(error) => return Err(repair_error("inspect index repair root", error)),
     }
@@ -58,7 +63,10 @@ fn inventory(root: &Path) -> Result<Inventory, DoctorRuntimeError> {
             } else {
                 return Err(repair_error(
                     "inspect index repair tree",
-                    format!("refusing symlink or special entry {}", entry.path().display()),
+                    format!(
+                        "refusing symlink or special entry {}",
+                        entry.path().display()
+                    ),
                 ));
             }
         }
@@ -73,12 +81,17 @@ pub(super) fn rebuild(
 ) -> Result<ActionLine, DoctorRuntimeError> {
     let expected = crate::config::workspace::resolve_store_index_dir(&ctx.workspace, None, None);
     if index != expected {
-        return Err(repair_error("select doctor index target", "target is not this workspace's index"));
+        return Err(repair_error(
+            "select doctor index target",
+            "target is not this workspace's index",
+        ));
     }
     // Reject planted redirects/special files before even building scratch data.
     inventory(index)?;
     let workspace = ctx.workspace.clone();
-    let staging = ctx.run_dir.join(format!("index-stage-{:06}", ctx.state.action_count + 1));
+    let staging = ctx
+        .run_dir
+        .join(format!("index-stage-{:06}", ctx.state.action_count + 1));
     validate_doctor_lifecycle_paths([staging.as_path()])?;
     crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
         let prepared = doctor_repair::stage(&cx, &workspace, &staging)
@@ -88,27 +101,39 @@ pub(super) fn rebuild(
         let _lease = doctor_repair::publication_lease(&cx, index)
             .await
             .map_err(|error| repair_error("fence doctor index repair", error))?;
-        prepared.check_source_generation()
+        prepared
+            .check_source_generation()
             .map_err(|error| repair_error("validate doctor index source", error))?;
         ensure_doctor_lifecycle_bindings(&ctx.lifecycle, &ctx.workspace, &ctx.run_dir)?;
         // Rescan after fencing: a normal publisher may have completed during
         // staging. Only this current tree is the before-state for our journal.
         let previous = inventory(index)?;
         let receipt = publish_files(ctx, index, &staging, &staged, &previous)?;
-        prepared.check_source_generation()
-            .map_err(|error| repair_error("source advanced during doctor index publication", error))?;
+        prepared.check_source_generation().map_err(|error| {
+            repair_error("source advanced during doctor index publication", error)
+        })?;
         Ok(receipt)
     })
     .map_err(|error| repair_error("start doctor index repair runtime", error))?
 }
 
-fn quarantine_file(ctx: &mut RunContext, index: &Path, relative: &Path) -> Result<(), DoctorRuntimeError> {
+fn quarantine_file(
+    ctx: &mut RunContext,
+    index: &Path,
+    relative: &Path,
+) -> Result<(), DoctorRuntimeError> {
     let target = index.join(relative);
     validate_doctor_lifecycle_paths([target.as_path()])?;
     let destination = PathBuf::from("index-rebuild")
         .join(format!("{:06}", ctx.state.action_count + 1))
         .join(relative);
-    mutate(ctx, &target, Op::QuarantineByRename { dest_under_quarantine: destination })?;
+    mutate(
+        ctx,
+        &target,
+        Op::QuarantineByRename {
+            dest_under_quarantine: destination,
+        },
+    )?;
     Ok(())
 }
 
@@ -126,7 +151,10 @@ fn write_staged_file(
     configure_doctor_inspect_open_no_follow(&mut options);
     let mut file = options.open(&source)?;
     if !file.metadata()?.is_file() {
-        return Err(repair_error("read staged index file", "source is not a regular file"));
+        return Err(repair_error(
+            "read staged index file",
+            "source is not a regular file",
+        ));
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
@@ -142,12 +170,24 @@ fn publish_files(
 ) -> Result<ActionLine, DoctorRuntimeError> {
     let manifest = Path::new(MANIFEST);
     if !staged.files.contains(manifest) {
-        return Err(repair_error("publish doctor index", "staged generation has no admission marker"));
+        return Err(repair_error(
+            "publish doctor index",
+            "staged generation has no admission marker",
+        ));
     }
-    if staged.files.iter().any(|path| previous.directories.contains(path))
-        || staged.directories.iter().any(|path| previous.files.contains(path))
+    if staged
+        .files
+        .iter()
+        .any(|path| previous.directories.contains(path))
+        || staged
+            .directories
+            .iter()
+            .any(|path| previous.files.contains(path))
     {
-        return Err(repair_error("publish doctor index", "file/directory type conflict; no repair was published"));
+        return Err(repair_error(
+            "publish doctor index",
+            "file/directory type conflict; no repair was published",
+        ));
     }
     // Publication and undo both invalidate the admission marker BEFORE changing
     // any tier. A crash cannot leave a valid marker for a half-written repair.
@@ -182,9 +222,10 @@ pub(super) fn undo_lease(
     actions: &[ActionLine],
 ) -> Result<Option<IndexGenerationLease>, DoctorRuntimeError> {
     let index = crate::config::workspace::resolve_store_index_dir(workspace, None, None);
-    if !actions.iter().any(|action| {
-        is_mutating_action_kind(&action.kind) && action.path.starts_with(&index)
-    }) {
+    if !actions
+        .iter()
+        .any(|action| is_mutating_action_kind(&action.kind) && action.path.starts_with(&index))
+    {
         return Ok(None);
     }
     crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
@@ -200,8 +241,8 @@ pub(super) fn undo_lease(
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::*;
     use super::super::{RunStatus, default_blast_radius_roots, replay_undo_for_workspace};
+    use super::*;
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 
     const WORKSPACE: &str = "wsp_00000000000000000000000081";
@@ -213,27 +254,57 @@ mod tests {
         fs::create_dir(workspace.join(".ee")).expect("store directory");
         let db = DbConnection::open_file(&workspace.join(".ee/ee.db")).expect("store");
         db.migrate().expect("schema");
-        db.insert_workspace(WORKSPACE, &CreateWorkspaceInput {
-            path: workspace.display().to_string(), name: Some("doctor repair".to_owned()),
-        }).expect("workspace");
-        db.insert_memory_revision(MEMORY, MEMORY, &CreateMemoryInput {
-            workspace_id: WORKSPACE.to_owned(), level: "procedural".to_owned(), kind: "rule".to_owned(),
-            content: "Run `cargo fmt --check` before publishing the release.".to_owned(),
-            workflow_id: None, confidence: 0.9, utility: 0.5, importance: 0.5,
-            provenance_uri: None, trust_class: "human_explicit".to_owned(), trust_subclass: None,
-            tags: Vec::new(), valid_from: None, valid_to: None,
-        }).expect("unanchored memory");
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: Some("doctor repair".to_owned()),
+            },
+        )
+        .expect("workspace");
+        db.insert_memory_revision(
+            MEMORY,
+            MEMORY,
+            &CreateMemoryInput {
+                workspace_id: WORKSPACE.to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Run `cargo fmt --check` before publishing the release.".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .expect("unanchored memory");
         drop(db);
         (root, workspace)
     }
 
     fn start(workspace: &Path) -> RunContext {
-        RunContext::start(workspace, "index-repair-test", default_blast_radius_roots(workspace), false)
-            .expect("doctor run")
+        RunContext::start(
+            workspace,
+            "index-repair-test",
+            default_blast_radius_roots(workspace),
+            false,
+        )
+        .expect("doctor run")
     }
 
     fn repair(ctx: &mut RunContext, index: &Path) -> Result<ActionLine, DoctorRuntimeError> {
-        mutate(ctx, index, Op::RunIndexRebuild { steps: vec!["ee index rebuild".to_owned()] })
+        mutate(
+            ctx,
+            index,
+            Op::RunIndexRebuild {
+                steps: vec!["ee index rebuild".to_owned()],
+            },
+        )
     }
 
     #[test]
@@ -249,8 +320,9 @@ mod tests {
         assert!(index.join("vector.fast.idx").is_file());
         #[cfg(feature = "lexical-bm25")]
         assert!(index.join("lexical/meta.json").is_file());
-        let metadata: serde_json::Value = serde_json::from_slice(&fs::read(index.join(MANIFEST)).expect("metadata"))
-            .expect("metadata JSON");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(index.join(MANIFEST)).expect("metadata"))
+                .expect("metadata JSON");
         assert_eq!(metadata["documentCounts"]["memories"], 1);
         assert_eq!(fs::read(&database).expect("unchanged source"), before);
         let db = DbConnection::open_file_read_only(&database).expect("read source");
@@ -262,7 +334,8 @@ mod tests {
         assert_eq!(undo.status, RunStatus::Undone, "{:?}", undo.first_error);
         assert!(!index.exists());
         assert_eq!(fs::read(database).expect("source after undo"), before);
-        let again = replay_undo_for_workspace(&workspace, &summary.run_id).expect("idempotent undo");
+        let again =
+            replay_undo_for_workspace(&workspace, &summary.run_id).expect("idempotent undo");
         assert_eq!(again.actions_undone, 0);
     }
 
@@ -280,10 +353,22 @@ mod tests {
         let summary = ctx.finish(RunStatus::CompletedOk).expect("finish");
         let undo = replay_undo_for_workspace(&workspace, &summary.run_id).expect("undo");
         assert_eq!(undo.status, RunStatus::Undone, "{:?}", undo.first_error);
-        assert_eq!(fs::read(index.join(MANIFEST)).expect("restored marker"), b"old corrupt metadata");
-        assert_eq!(fs::read(index.join("vector.fast.idx")).expect("restored vector"), b"old corrupt vector");
-        assert_eq!(fs::read(index.join("retired.segment")).expect("restored segment"), b"preserve obsolete bytes");
-        assert_eq!(inventory(&index).expect("restored inventory").files.len(), 3);
+        assert_eq!(
+            fs::read(index.join(MANIFEST)).expect("restored marker"),
+            b"old corrupt metadata"
+        );
+        assert_eq!(
+            fs::read(index.join("vector.fast.idx")).expect("restored vector"),
+            b"old corrupt vector"
+        );
+        assert_eq!(
+            fs::read(index.join("retired.segment")).expect("restored segment"),
+            b"preserve obsolete bytes"
+        );
+        assert_eq!(
+            inventory(&index).expect("restored inventory").files.len(),
+            3
+        );
     }
 
     #[test]
@@ -307,8 +392,13 @@ mod tests {
         let (_root, workspace) = fixture();
         let database = workspace.join(".ee/ee.db");
         let before = fs::read(&database).expect("source bytes");
-        let mut ctx = RunContext::start(&workspace, "dry-index", default_blast_radius_roots(&workspace), true)
-            .expect("dry run");
+        let mut ctx = RunContext::start(
+            &workspace,
+            "dry-index",
+            default_blast_radius_roots(&workspace),
+            true,
+        )
+        .expect("dry run");
         let receipt = repair(&mut ctx, &workspace.join(".ee/index")).expect("plan");
         assert_eq!(receipt.kind, "run_index_rebuild");
         assert!(!workspace.join(".ee/index").exists());
@@ -327,7 +417,10 @@ mod tests {
         let mut ctx = start(&workspace);
         assert!(repair(&mut ctx, &index).is_err());
         assert_eq!(ctx.state.action_count, 0);
-        assert_eq!(fs::read(index.join(MANIFEST)).expect("marker preserved"), b"preserved");
+        assert_eq!(
+            fs::read(index.join(MANIFEST)).expect("marker preserved"),
+            b"preserved"
+        );
         assert!(!workspace.join(".ee/ee.db").exists());
         ctx.finish(RunStatus::CompletedPartial).expect("finish");
     }

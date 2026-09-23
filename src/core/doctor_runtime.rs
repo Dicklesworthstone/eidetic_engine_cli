@@ -60,6 +60,10 @@ use chrono::Utc;
 use fs4::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[path = "doctor_index_repair.rs"]
+mod index_repair;
+
 /// Public schema string for the doctor capabilities report. Bump only on a
 /// breaking contract change; additive changes keep `v1`.
 pub const CAPABILITIES_SCHEMA_V1: &str = "ee.doctor.capabilities.v1";
@@ -394,10 +398,9 @@ pub enum Op {
     /// blast-radius check would otherwise refuse.
     EmitDiagnostic { code: String, severity: String },
 
-    /// Run the search-index rebuild pipeline. Phase-1 (bd-tu4s8): records
-    /// the planned rebuild as actions.jsonl evidence with manual operator
-    /// steps until the subsystem actor handle lands; the doctor never
-    /// directly performs the rebuild from this Op today.
+    /// Rebuild the derived index from a read-only source snapshot. Unix repair
+    /// and undo use the ordinary generation lease and journal every primitive
+    /// mutation. Dry runs record guidance only; unsupported platforms refuse.
     RunIndexRebuild { steps: Vec<String> },
 
     /// Refresh the graph snapshot subsystem. Phase-1 (bd-tu4s8): records
@@ -446,6 +449,7 @@ impl Op {
                 | Self::Chmod { .. }
                 | Self::QuarantineByRename { .. }
                 | Self::CreateDirAll { .. }
+                | Self::RunIndexRebuild { .. }
         )
     }
 
@@ -456,7 +460,6 @@ impl Op {
             self,
             Self::Manual { .. }
                 | Self::EmitDiagnostic { .. }
-                | Self::RunIndexRebuild { .. }
                 | Self::RunGraphRefresh { .. }
                 | Self::RunWalCheckpoint { .. }
                 | Self::RunMigration { .. }
@@ -862,6 +865,19 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         return Err(DoctorRuntimeError::BlastRadiusExceeded {
             path: path.to_path_buf(),
             allowed_roots: ctx.blast_radius_roots.clone(),
+        });
+    }
+
+    if matches!(&op, Op::RunIndexRebuild { .. }) && !ctx.dry_run {
+        #[cfg(unix)]
+        return index_repair::rebuild(ctx, path);
+        #[cfg(not(unix))]
+        return Err(DoctorRuntimeError::Io {
+            context: "rebuild index with audited doctor undo".to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "audited index repair requires Unix generation leases; use ee index rebuild explicitly",
+            ),
         });
     }
 
@@ -1316,6 +1332,8 @@ pub fn replay_undo_with_authorized_roots(
     }
     let observed_action_count =
         validate_undo_action_ledger(&run_dir, &state, &recorded_roots, &allowed_roots, &lines)?;
+    #[cfg(unix)]
+    let _index_lease = index_repair::undo_lease(&workspace, &lines)?;
     // Read existing undo_log to skip already-undone actions.
     //
     // Only a SUCCESSFUL entry retires an action. Failure entries carry the

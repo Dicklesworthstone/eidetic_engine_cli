@@ -49,7 +49,10 @@ pub(crate) async fn stage(
 ) -> Result<PreparedRepair, IndexRebuildError> {
     index_checkpoint(cx)?;
     ensure_index_path_has_no_symlinks(staging, "stage doctor index repair")?;
-    if staging.try_exists().map_err(|error| IndexRebuildError::Index(error.to_string()))? {
+    if staging
+        .try_exists()
+        .map_err(|error| IndexRebuildError::Index(error.to_string()))?
+    {
         return Err(IndexRebuildError::Index(
             "doctor index staging directory already exists".to_owned(),
         ));
@@ -62,7 +65,9 @@ pub(crate) async fn stage(
     let stack = if source.documents_total == 0 {
         DEFAULT_SEARCH_EMBEDDER
             .get()
-            .map_or_else(hash_fallback_embedder_stack, |selection| selection.stack.clone())
+            .map_or_else(hash_fallback_embedder_stack, |selection| {
+                selection.stack.clone()
+            })
     } else {
         workspace_embedder_stack(&db, &workspace_id)?.0
     };
@@ -70,7 +75,12 @@ pub(crate) async fn stage(
     let stats = build_index_generation(cx, staging, stack, source.documents).await?;
     validate_built_generation(staging, stats, source.document_counts)
         .map_err(IndexRebuildError::Index)?;
-    write_index_metadata(staging, source.generation, source.document_counts, fingerprint.as_ref())?;
+    write_index_metadata(
+        staging,
+        source.generation,
+        source.document_counts,
+        fingerprint.as_ref(),
+    )?;
     sync_index_generation(staging, || index_checkpoint(cx))?;
     Ok(PreparedRepair {
         database_path,

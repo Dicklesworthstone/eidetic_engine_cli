@@ -56,6 +56,10 @@ use frankensearch::{
 };
 use sqlmodel_core::Value as SqlValue;
 
+#[cfg(unix)]
+#[path = "index_doctor_repair.rs"]
+pub(crate) mod doctor_repair;
+
 #[path = "index_storage.rs"]
 mod storage;
 

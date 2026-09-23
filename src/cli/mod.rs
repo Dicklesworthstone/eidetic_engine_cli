@@ -86905,7 +86905,7 @@ mod tests {
 
     #[test]
     fn doctor_fix_reports_advisory_ops_as_guidance_not_applied() -> TestResult {
-        use crate::core::doctor_fixers::{FixerDispatch, fix_search_index_missing};
+        use crate::core::doctor_fixers::{FixerDispatch, fix_graph_snapshot_stale};
         use crate::core::doctor_runtime::Op;
 
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -86913,7 +86913,7 @@ mod tests {
         fs::create_dir(&workspace).map_err(|error| error.to_string())?;
         let created = workspace.join(".ee").join("doctor-guidance-probe");
         let dispatches = vec![
-            fix_search_index_missing(&workspace),
+            fix_graph_snapshot_stale(&workspace),
             FixerDispatch {
                 finding_code: "test_real_write",
                 severity: "warning",
@@ -86939,20 +86939,20 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        // The index rebuild is advisory: it records steps and changes nothing,
+        // The graph refresh is advisory: it records steps and changes nothing,
         // so it must not claim "applied". The write really happened, so it must.
         ensure_equal(
             &outcomes,
             &vec![
-                ("search_index_missing", "guidance_recorded"),
+                ("graph_snapshot_stale", "guidance_recorded"),
                 ("test_real_write", "applied"),
             ],
             "per-fixer outcomes",
         )?;
         ensure(created.is_dir(), "the writing op must have created its dir")?;
         ensure(
-            !workspace.join(".ee").join("index").exists(),
-            "the advisory index op must not have built an index",
+            !workspace.join(".ee").join("graph").exists(),
+            "the advisory graph op must not have built a graph",
         )?;
         ensure_equal(
             &data["attemptedFixerCount"],

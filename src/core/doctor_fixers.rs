@@ -3,17 +3,16 @@
 //! fixer maps a specific repair-spec finding code to the `Op` that the doctor
 //! should call `mutate()` with.
 //!
-//! Only `Op::is_writing` Ops change the filesystem. Advisory Ops (every `RunX`
-//! below) record guidance, and `ee doctor --fix` reports them as
+//! Only `Op::is_writing` Ops change the filesystem. Index rebuild executes
+//! through reversible primitives. Other unwired subsystem operations record
+//! guidance, and `ee doctor --fix` reports them as
 //! `guidance_recorded`, never `applied`.
 //!
-//! Phase-1 scope: the fixers are pure dispatchers — they return the
+//! The fixers are pure dispatchers — they return the
 //! `(path, Op)` pair the caller will hand to `mutate()`. They do NOT call
 //! `mutate()` themselves so the test surface stays free of `RunContext`
-//! setup. Subsystem-actor wiring for the `RunX` family of variants lands
-//! in the bd-3boan CLI-wiring slice and follow-up actor beads; until those
-//! land, `RunX` Ops record their planned-mutation evidence through the same
-//! `actions.jsonl` channel as `Manual{steps}`.
+//! setup. Index repair builds from a read-only canonical source snapshot and
+//! journals each real mutation with hash-checked backups and inverse actions.
 //!
 //! The 13 fixers cover the eight repair_specs/ subsystems
 //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
@@ -60,8 +59,8 @@ impl FixerDispatch {
 }
 
 /// FM-SI-01: search index manifest is stale relative to the underlying
-/// memories table. Auto-fix dispatches an index rebuild plan; the actor
-/// handle materialises the rebuild in a follow-up subsystem-wiring bead.
+/// memories table. The runtime stages a validated generation and journals
+/// every live-file change so the repair can be undone without source writes.
 #[must_use]
 pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
     FixerDispatch {
@@ -372,8 +371,8 @@ mod tests {
         };
         assert_eq!(steps[0], "ee index rebuild --workspace .");
         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
-        assert!(dispatch.op.is_advisory());
-        assert!(!dispatch.op.is_writing());
+        assert!(!dispatch.op.is_advisory());
+        assert!(dispatch.op.is_writing());
     }
 
     #[test]
@@ -400,7 +399,8 @@ mod tests {
         };
         assert_eq!(steps[0], "ee index rebuild --workspace .");
         assert!(steps[1].contains("EE-E300"), "{steps:?}");
-        assert!(dispatch.op.is_advisory());
+        assert!(!dispatch.op.is_advisory());
+        assert!(dispatch.op.is_writing());
     }
 
     #[test]
