@@ -734,6 +734,45 @@ struct SearchTierState<'a> {
 /// `search.relevance_floor` config.
 pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
 
+/// Weak-semantic-evidence threshold on a hit's raw `neural_local` fast-tier
+/// score (bead bd-reality-core-convergence-1azkt.11.1).
+///
+/// A Hybrid hit's relevance is its RRF rank position, `61 / (2 * (60 + rank))`
+/// for a hit present in one list, so [`DEFAULT_RELEVANCE_FLOOR`] admits every
+/// candidate and cannot tell an unrelated query from a related one. The
+/// semantic score on the hit can, within limits.
+///
+/// PROVISIONAL. Calibrated on 13 queries against one 8-rule fixture with
+/// potion-multilingual-128M: 5 unrelated queries peaked at 0.328, and the
+/// targets of 8 paraphrase queries scored 0.214..=0.597. The ranges OVERLAP,
+/// so this threshold never drops a hit. A query whose best semantic evidence
+/// is below it keeps every result and is flagged `weak_query_recall` with
+/// `qualityAssessment: "weak"`; weak-but-correct paraphrases are flagged too,
+/// which reports low confidence rather than losing recall. Replace it with a
+/// value derived from a larger calibration set.
+pub const WEAK_SEMANTIC_EVIDENCE_THRESHOLD: f32 = 0.35;
+
+/// The strongest semantic fast-tier score among `hits`, when it is below
+/// [`WEAK_SEMANTIC_EVIDENCE_THRESHOLD`] and `backend` is `neural_local`.
+///
+/// `None` when the evidence is strong, when no hit carries semantic evidence,
+/// or when another backend produced it: the threshold is calibrated on
+/// Model2Vec cosines only, and hash-fallback or remote vectors live on other
+/// scales. Lexical and hash-control hits carry no semantic evidence.
+#[must_use]
+pub fn weak_semantic_evidence_top(hits: &[SearchHit], backend: EmbedBackend) -> Option<f32> {
+    if backend != EmbedBackend::NeuralLocal {
+        return None;
+    }
+    let top = hits
+        .iter()
+        .filter(|hit| !matches!(hit.source, ScoreSource::Lexical | ScoreSource::HashControl))
+        .filter_map(|hit| hit.fast_score)
+        .filter(|score| score.is_finite())
+        .reduce(f32::max)?;
+    (top < WEAK_SEMANTIC_EVIDENCE_THRESHOLD).then_some(top)
+}
+
 const DEFAULT_SEARCH_LEXICAL_WEIGHT: f32 = 0.45;
 const DEFAULT_SEARCH_SEMANTIC_WEIGHT: f32 = 0.45;
 const DEFAULT_SEARCH_GRAPH_WEIGHT: f32 = 0.10;
@@ -2115,6 +2154,11 @@ pub struct RetrievalMetrics {
     /// `candidates_below_floor` is informational for agents that want
     /// to understand recall.
     pub candidates_below_floor: usize,
+    /// Best semantic evidence when it is weak (bead
+    /// bd-reality-core-convergence-1azkt.11.1). Always `None` from
+    /// [`Self::from_hits_with_floor`]; only [`Self::with_semantic_evidence`],
+    /// which knows the backend, can set it.
+    pub weak_semantic_evidence_top: Option<f32>,
 }
 
 /// Retrieval scores rank candidates; they do not establish task-level quality.
@@ -2125,6 +2169,10 @@ pub enum QualityAssessment {
     Unknown,
     /// No results survived retrieval and admission.
     Empty,
+    /// Results exist, but the best semantic evidence among them is below
+    /// [`WEAK_SEMANTIC_EVIDENCE_THRESHOLD`]. A statement of LOW confidence,
+    /// never a certification of quality.
+    Weak,
 }
 
 impl QualityAssessment {
@@ -2135,6 +2183,7 @@ impl QualityAssessment {
         match self {
             Self::Unknown => "unknown",
             Self::Empty => "empty",
+            Self::Weak => "weak",
         }
     }
 }
@@ -2701,6 +2750,25 @@ impl SearchDegradation {
             severity: "low".to_string(),
             message: format!(
                 "Top score {top_score:.4} is below the weak-recall threshold for relevance floor {floor:.4}; embedder may not recognize query synonyms, or the corpus lacks strong matches.",
+            ),
+            repair: Some(
+                "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.".to_string(),
+            ),
+        }
+    }
+
+    /// The best semantic evidence is weak (bead
+    /// bd-reality-core-convergence-1azkt.11.1). Same code as the relevance
+    /// form: every hit is kept, and the message names the semantic cause,
+    /// because a Hybrid hit's relevance is a rank position and cannot say
+    /// whether anything related was found.
+    #[must_use]
+    fn weak_semantic_evidence(threshold: f32, top_semantic_score: f32) -> Self {
+        Self {
+            code: "weak_query_recall".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Best semantic evidence {top_semantic_score:.4} is below the weak-evidence threshold {threshold:.4}; results are kept but may be unrelated to the query.",
             ),
             repair: Some(
                 "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.".to_string(),
@@ -3334,6 +3402,7 @@ impl SearchReport {
             self.relevance_floor_applied,
             self.candidates_below_floor,
         )
+        .with_semantic_evidence(&self.results, self.embed_backend)
     }
 
     #[must_use]
@@ -3522,6 +3591,7 @@ impl SearchReport {
             self.relevance_floor_applied,
             self.candidates_below_floor,
         )
+        .with_semantic_evidence(&visible_results, self.embed_backend)
         .data_json();
         if let Some(metrics_obj) = metrics.as_object_mut() {
             metrics_obj.insert(
@@ -6313,7 +6383,17 @@ impl RetrievalMetrics {
             relevance_floor,
             candidates_above_floor: hits.len(),
             candidates_below_floor: below_floor_count,
+            weak_semantic_evidence_top: None,
         }
+    }
+
+    /// Record weak semantic evidence among `hits` for `backend`, through the
+    /// same predicate the search path uses to emit `weak_query_recall`, so the
+    /// quality assessment and the degradation cannot disagree.
+    #[must_use]
+    pub fn with_semantic_evidence(mut self, hits: &[SearchHit], backend: EmbedBackend) -> Self {
+        self.weak_semantic_evidence_top = weak_semantic_evidence_top(hits, backend);
+        self
     }
 
     #[must_use]
@@ -6354,12 +6434,16 @@ impl RetrievalMetrics {
         })
     }
 
-    /// Report absence or abstain. Score size, spread and result count cannot
-    /// certify recall or correctness without labeled, scoped calibration.
+    /// Report absence, weakness, or abstain. Score size, spread and result
+    /// count cannot certify recall or correctness without labeled, scoped
+    /// calibration, so there is no "good". `Weak` only states low confidence,
+    /// from the provisional [`WEAK_SEMANTIC_EVIDENCE_THRESHOLD`].
     #[must_use]
     pub fn quality_assessment(&self) -> QualityAssessment {
         if self.returned_count == 0 {
             QualityAssessment::Empty
+        } else if self.weak_semantic_evidence_top.is_some() {
+            QualityAssessment::Weak
         } else {
             QualityAssessment::Unknown
         }
@@ -9548,6 +9632,20 @@ async fn run_search_inner_with_performance(
                     degraded.push(SearchDegradation::weak_query_recall(floor, top));
                 }
             }
+            // bd-reality-core-convergence-1azkt.11.1: a Hybrid top relevance
+            // is a rank position, so the check above never fires on it. Judge
+            // the semantic evidence itself, with the predicate the metrics
+            // use for `qualityAssessment`.
+            if !degraded
+                .iter()
+                .any(|entry| entry.code == "weak_query_recall")
+                && let Some(top) = weak_semantic_evidence_top(&above_floor, embed_backend)
+            {
+                degraded.push(SearchDegradation::weak_semantic_evidence(
+                    WEAK_SEMANTIC_EVIDENCE_THRESHOLD,
+                    top,
+                ));
+            }
 
             // Emit floor degradations from the immutable partition snapshot.
             // Empty workspaces stay plain `NoResults`; significant floor loss
@@ -10060,6 +10158,16 @@ async fn run_diag_search_in_snapshot(
         if top.is_finite() && top >= floor && top < floor * 2.0 {
             degraded.push(SearchDegradation::weak_query_recall(floor, top));
         }
+    }
+    if !degraded
+        .iter()
+        .any(|entry| entry.code == "weak_query_recall")
+        && let Some(top) = weak_semantic_evidence_top(&above_floor, embed_backend)
+    {
+        degraded.push(SearchDegradation::weak_semantic_evidence(
+            WEAK_SEMANTIC_EVIDENCE_THRESHOLD,
+            top,
+        ));
     }
     // Keep diagnostic search aligned with the live path by deriving floor
     // degradations from the same pre-visibility partition snapshot.
@@ -24435,6 +24543,83 @@ mod tests {
         // Wire enum: do not rename without contract bump.
         assert_eq!(QualityAssessment::Unknown.as_str(), "unknown");
         assert_eq!(QualityAssessment::Empty.as_str(), "empty");
+        assert_eq!(QualityAssessment::Weak.as_str(), "weak");
+    }
+
+    // ========================================================================
+    // Bead bd-reality-core-convergence-1azkt.11.1 (N4) — weak semantic evidence
+    // ========================================================================
+
+    fn semantic_hit(doc_id: &str, source: ScoreSource, fast_score: f32) -> SearchHit {
+        let mut hit = synthetic_hit(doc_id, fast_score);
+        hit.source = source;
+        hit
+    }
+
+    #[test]
+    fn weak_semantic_evidence_flags_only_weak_neural_local_evidence() {
+        let neural = EmbedBackend::NeuralLocal;
+        // The calibration's worst unrelated query peaked at 0.328.
+        let unrelated = [semantic_hit("a", ScoreSource::Hybrid, 0.328)];
+        assert_eq!(weak_semantic_evidence_top(&unrelated, neural), Some(0.328));
+        // The threshold itself is not weak.
+        let at_threshold = [semantic_hit(
+            "a",
+            ScoreSource::Hybrid,
+            WEAK_SEMANTIC_EVIDENCE_THRESHOLD,
+        )];
+        assert_eq!(weak_semantic_evidence_top(&at_threshold, neural), None);
+        // One strong hit clears the whole query.
+        let mixed = [
+            semantic_hit("a", ScoreSource::Hybrid, 0.20),
+            semantic_hit("b", ScoreSource::SemanticFast, 0.451),
+        ];
+        assert_eq!(weak_semantic_evidence_top(&mixed, neural), None);
+        // No semantic evidence means no claim at all.
+        let lexical = [semantic_hit("a", ScoreSource::Lexical, 0.05)];
+        assert_eq!(weak_semantic_evidence_top(&lexical, neural), None);
+        let hash_control = [semantic_hit("a", ScoreSource::HashControl, 0.05)];
+        assert_eq!(weak_semantic_evidence_top(&hash_control, neural), None);
+        assert_eq!(weak_semantic_evidence_top(&[], neural), None);
+        // The threshold is calibrated on Model2Vec only.
+        for backend in [EmbedBackend::HashFallback, EmbedBackend::RemoteApi] {
+            assert_eq!(weak_semantic_evidence_top(&unrelated, backend), None);
+        }
+    }
+
+    #[test]
+    fn weak_semantic_evidence_sets_quality_weak_only_through_the_backend_aware_path() {
+        let hits = vec![semantic_hit("a", ScoreSource::Hybrid, 0.20)];
+        let plain = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 0);
+        assert_eq!(plain.quality_assessment(), QualityAssessment::Unknown);
+
+        let neural = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 0)
+            .with_semantic_evidence(&hits, EmbedBackend::NeuralLocal);
+        assert_eq!(neural.quality_assessment(), QualityAssessment::Weak);
+        assert_eq!(neural.data_json()["qualityAssessment"], "weak");
+
+        let hash = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 0)
+            .with_semantic_evidence(&hits, EmbedBackend::HashFallback);
+        assert_eq!(hash.quality_assessment(), QualityAssessment::Unknown);
+
+        let strong = vec![semantic_hit("a", ScoreSource::Hybrid, 0.60)];
+        let strong = RetrievalMetrics::from_hits_with_floor(10, 5.0, &strong, 0, Some(0.05), 0)
+            .with_semantic_evidence(&strong, EmbedBackend::NeuralLocal);
+        assert_eq!(strong.quality_assessment(), QualityAssessment::Unknown);
+
+        let empty = RetrievalMetrics::from_hits_with_floor(10, 5.0, &[], 0, Some(0.05), 3)
+            .with_semantic_evidence(&[], EmbedBackend::NeuralLocal);
+        assert_eq!(empty.quality_assessment(), QualityAssessment::Empty);
+    }
+
+    #[test]
+    fn weak_semantic_evidence_degradation_keeps_the_weak_query_recall_code() {
+        let degradation =
+            SearchDegradation::weak_semantic_evidence(WEAK_SEMANTIC_EVIDENCE_THRESHOLD, 0.3170);
+        assert_eq!(degradation.code, "weak_query_recall");
+        assert_eq!(degradation.severity, "low");
+        assert!(degradation.message.contains("0.3170"));
+        assert!(degradation.message.contains("0.3500"));
     }
 
     #[test]

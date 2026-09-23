@@ -2689,6 +2689,157 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     network_tripwire.assert_unused()
 }
 
+/// Bead bd-reality-core-convergence-1azkt.11.1 (N4). Under Model2Vec, a hybrid
+/// hit's relevance is its RRF rank position, so every candidate clears the
+/// 0.05 floor and an unrelated query used to come back as 8 of 8 with
+/// `degraded: []`. The fix keeps every hit but flags weak semantic evidence.
+/// This is a PAIR on purpose: the unrelated query must be flagged, and the
+/// direct hit must not be, so neither "never flag" nor "always flag" passes.
+/// Both halves also require `neural_local`, because the lexical fallback
+/// returns nothing for the unrelated query and would pass it vacuously.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn neural_unrelated_query_is_not_admitted_at_full_relevance() -> TestResult {
+    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
+    let manifest = ModelManifest::potion_128m();
+
+    let workspace = E2eWorkspace::create("neural-unrelated-query")?;
+    let model_parent = workspace.path.join("explicit-model-override");
+    fs::create_dir_all(&model_parent)
+        .map_err(|error| format!("create {}: {error}", model_parent.display()))?;
+    let model_dir = model_parent.join(BUNDLED_EMBEDDING_MODEL_ID);
+    materialize_regular_model_fixture(&fixture_model_dir, &model_dir, &manifest)?;
+
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut env = network_tripwire.proxy_env();
+    env.extend([
+        ("EE_EMBED_MODEL_DIR".to_string(), path_string(&model_dir)),
+        ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
+    ]);
+    let workspace_arg = workspace.workspace_arg()?;
+
+    let init = run_ee_with_env(
+        &workspace,
+        "neural_unrelated_init",
+        &["init", "--workspace", workspace_arg, "--json"],
+        &env,
+    )?;
+    ensure_success(&init, "neural unrelated ee init")?;
+
+    // The shipped-binary probe's corpus (scripts/release_binary_probe.sh).
+    // The first rule is the direct-hit target.
+    let rules = [
+        "Run cargo fmt --check before every release tag.",
+        "Never force-push to main; open a revert commit instead.",
+        "Pin the nightly toolchain in rust-toolchain.toml.",
+        "Use RCH for cargo builds on shared hosts.",
+        "Record the pack hash in every release note.",
+        "Keep degraded codes in the failure-mode catalog.",
+        "Rebuild the search index after bulk imports.",
+        "Prefer git commit --only in a shared checkout.",
+    ];
+    let mut direct_hit_id = None;
+    for (index, rule) in rules.iter().enumerate() {
+        let remember = run_ee_with_env(
+            &workspace,
+            &format!("neural_unrelated_remember_{index}"),
+            &[
+                "remember",
+                rule,
+                "--workspace",
+                workspace_arg,
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+                "--json",
+            ],
+            &env,
+        )?;
+        ensure_success(&remember, "neural unrelated remember")?;
+        if index == 0 {
+            let value = stdout_json(&remember, "neural unrelated remember")?;
+            direct_hit_id = Some(
+                string_member(
+                    response_data(&value, "neural unrelated remember")?,
+                    "memoryId",
+                )?
+                .to_string(),
+            );
+        }
+    }
+    let direct_hit_id =
+        direct_hit_id.ok_or_else(|| "the direct-hit rule was not remembered".to_string())?;
+    let rebuild = run_ee_with_env(
+        &workspace,
+        "neural_unrelated_index_rebuild",
+        &["index", "rebuild", "--workspace", workspace_arg, "--json"],
+        &env,
+    )?;
+    ensure_success(&rebuild, "neural unrelated index rebuild")?;
+
+    let unrelated = run_ee_with_env(
+        &workspace,
+        "neural_unrelated_search",
+        &[
+            "search",
+            "kubernetes helm chart ingress annotations",
+            "--workspace",
+            workspace_arg,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&unrelated, "unrelated search")?;
+    ensure_response_embed_backend(&unrelated, "unrelated search", "neural_local")?;
+    ensure_degraded_code_count(&unrelated, "unrelated search", "weak_query_recall", 1)?;
+    let unrelated_value = stdout_json(&unrelated, "unrelated search")?;
+    let unrelated_quality = unrelated_value
+        .pointer("/data/metrics/qualityAssessment")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "unrelated search missing data.metrics.qualityAssessment".to_string())?;
+    if unrelated_quality != "weak" {
+        return Err(format!(
+            "unrelated search must report qualityAssessment \"weak\", got {unrelated_quality:?}"
+        ));
+    }
+
+    let direct = run_ee_with_env(
+        &workspace,
+        "neural_direct_hit_search",
+        &[
+            "search",
+            "run cargo fmt check before every release tag",
+            "--workspace",
+            workspace_arg,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&direct, "direct-hit search")?;
+    ensure_response_embed_backend(&direct, "direct-hit search", "neural_local")?;
+    ensure_degraded_code_count(&direct, "direct-hit search", "weak_query_recall", 0)?;
+    let direct_value = stdout_json(&direct, "direct-hit search")?;
+    let top_doc = direct_value
+        .pointer("/data/results/0/docId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "direct-hit search returned no top result".to_string())?;
+    ensure_eq_str(top_doc, &direct_hit_id, "direct-hit top result")?;
+    let direct_quality = direct_value
+        .pointer("/data/metrics/qualityAssessment")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "direct-hit search missing data.metrics.qualityAssessment".to_string())?;
+    if direct_quality == "weak" {
+        return Err("direct-hit search must not be flagged weak".to_string());
+    }
+
+    network_tripwire.assert_unused()
+}
+
 #[cfg(unix)]
 fn model2vec_registry_entry(workspace: &E2eWorkspace) -> TestResult<StoredModelRegistryEntry> {
     let database_path = workspace.path.join(".ee").join("ee.db");
