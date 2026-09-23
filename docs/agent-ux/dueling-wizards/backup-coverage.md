@@ -122,7 +122,7 @@ on it. What it rules out is crediting a clause to a test that never touches it.
 
 ### Compliance status
 
-`complianceStatus` takes one of three values, and the gate ties each to the
+`complianceStatus` takes one of four values, and the gate ties each to the
 row's evidence:
 
 - `declared_conformant` requires
@@ -137,6 +137,12 @@ row's evidence:
   `roundTripEvidenceStatus=planned_contract_only`. The row cites no tests and
   must name the bead its evidence is pending on in `evidencePendingOn`. Its
   counters must be internally consistent but are not forced to full coverage.
+- `not_applicable_not_stored` is legal only with `storageClass=planned_not_stored`,
+  and `planned_not_stored` only with it. It is for a kind whose migration
+  allocation is still `planned` in the registry, so nothing is stored and there
+  is nothing to back up. The row cites no tests, counts nothing
+  (`tested=passing=divergent=0`), has no `evidencePendingOn`, and must name its
+  `plannedAllocation` and the `scopeRuling` that put it out of scope.
 
 Until bd-nwyir, all eleven rows claimed `declared_conformant` with full
 counters on planned-only evidence. The current state:
@@ -149,7 +155,12 @@ counters on planned-only evidence. The current state:
   `hash_blake3` are uncovered for all three. Only the pack round trip calls
   `verify_backup`, so `backup_verify` is uncovered for the other two. The
   remaining clauses are owned by `bd-vxrcu`.
-- The other eight kinds are `not_conformant_evidence_pending` on
+- `source_write_stats` is `not_applicable_not_stored`. Its registry allocation
+  (V128_SOURCE_WRITE_STATS) is only `planned`, and bd-1n0np.8.5 closed on
+  computing write-stats from caller-supplied observations, with no table. The
+  bd-1n0np.23.2 orchestrator ruling puts it out of that bead's scope; whether
+  to build V128 or withdraw the reservation is an operator decision.
+- The other seven kinds are `not_conformant_evidence_pending` on
   `bd-1n0np.23.2`.
 
 ## Failure Scenarios
