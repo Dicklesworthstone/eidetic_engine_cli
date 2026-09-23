@@ -58,8 +58,8 @@ impl FixerDispatch {
     }
 }
 
-/// FM-SI-01: search index manifest is stale relative to the underlying
-/// memories table. The runtime stages a validated generation and journals
+/// FM-SI-01: the search index generation is stale relative to the source
+/// corpus. The runtime stages a validated generation and journals
 /// every live-file change so the repair can be undone without source writes.
 #[must_use]
 pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
@@ -68,11 +68,7 @@ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
         severity: "warning",
         path: search_index_dir(workspace_root),
         op: Op::RunIndexRebuild {
-            steps: vec![
-                "ee index rebuild --workspace .".to_string(),
-                "Confirm `manifest.last_built_at` advances past the latest memories.updated_at."
-                    .to_string(),
-            ],
+            steps: search_index_repair_steps(workspace_root),
         },
     }
 }
@@ -87,10 +83,7 @@ pub fn fix_search_index_missing(workspace_root: &Path) -> FixerDispatch {
         severity: "warning",
         path: search_index_dir(workspace_root),
         op: Op::RunIndexRebuild {
-            steps: vec![
-                "ee index rebuild --workspace .".to_string(),
-                "Confirm `ee doctor --json` no longer reports search_index EE-E300.".to_string(),
-            ],
+            steps: search_index_repair_steps(workspace_root),
         },
     }
 }
@@ -134,6 +127,15 @@ pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
 /// database or index override, so the workspace default (`.ee/index`).
 fn search_index_dir(workspace_root: &Path) -> PathBuf {
     crate::config::workspace::resolve_store_index_dir(workspace_root, None, None)
+}
+
+fn search_index_repair_steps(workspace_root: &Path) -> Vec<String> {
+    let workspace = shell_quote_arg(&workspace_root.to_string_lossy());
+    vec![
+        format!("ee index rebuild --workspace {workspace} --json"),
+        format!("ee index status --workspace {workspace} --json"),
+        "Confirm the index is ready and its source and index generations agree.".to_owned(),
+    ]
 }
 
 /// FM-GS-01: graph snapshot is stale relative to memory_links activity.
@@ -495,9 +497,149 @@ pub fn fix_mode_for_check(
     }
 }
 
+/// A required core check that this run cannot repair. Keep this separate from
+/// fixer receipts: an undispatched check has no mutation, action sequence or
+/// undo operation. Only static diagnostic metadata is exposed, never the
+/// check's potentially private message or source content.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedCoreCheck {
+    pub name: &'static str,
+    pub severity: &'static str,
+    pub error_code: Option<&'static str>,
+    pub repair: Option<&'static str>,
+    pub fix_mode: &'static str,
+    pub fix_finding: Option<&'static str>,
+}
+
+/// Report all unhealthy core checks that receive only guidance or no dispatch.
+/// Use the same dispatch and tier contracts as `--fix-plan` and the top-line
+/// health verdict. In particular, missing optional CASS tooling is advisory,
+/// while a damaged database or unavailable required capability remains pending.
+#[must_use]
+pub fn unresolved_core_checks(checks: &[super::doctor::CheckResult]) -> Vec<UnresolvedCoreCheck> {
+    let unreadable = store_unreadable(
+        checks
+            .iter()
+            .map(|check| (check.name, check.error_code.map(|code| code.id))),
+    );
+    checks
+        .iter()
+        .filter(|check| !check.is_topline_healthy())
+        .filter_map(|check| {
+            let error_code = check.error_code.map(|code| code.id);
+            let (mode, finding) = fix_mode_for_check(error_code, check.name, unreadable);
+            if mode == FixMode::AutoRepair {
+                return None;
+            }
+            Some(UnresolvedCoreCheck {
+                name: check.name,
+                severity: check.severity.as_str(),
+                error_code,
+                repair: check.repair,
+                fix_mode: mode.as_str(),
+                fix_finding: finding,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_core_checks_retain_undispatched_and_guidance_failures_only() {
+        use crate::core::doctor::{CheckResult, CheckSeverity};
+        use crate::models::error_codes::{CASS_DEGRADED, INDEX_NOT_FOUND, MIGRATION_REQUIRED};
+
+        let mut uncoded = CheckResult::ok("runtime", "PRIVATE-CHECK-MESSAGE");
+        uncoded.severity = CheckSeverity::Error;
+        let checks = [
+            CheckResult::ok("configuration", "ready"),
+            CheckResult::warning("search_index", "rebuildable", INDEX_NOT_FOUND),
+            CheckResult::warning("cass", "optional", CASS_DEGRADED).advisory(),
+            CheckResult::error("database", "PRIVATE-MIGRATION-MESSAGE", MIGRATION_REQUIRED),
+            uncoded,
+        ];
+        let pending = unresolved_core_checks(&checks);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].name, "database");
+        assert_eq!(pending[0].fix_mode, "auto_guidance");
+        assert_eq!(pending[0].fix_finding, Some("schema_migration_pending"));
+        assert_eq!(pending[1].name, "runtime");
+        assert_eq!(pending[1].fix_mode, "manual");
+        assert_eq!(pending[1].error_code, None);
+        assert_eq!(pending[1].repair, None);
+        let json = serde_json::to_string(&pending).expect("serializable pending checks");
+        assert!(!json.contains("PRIVATE"));
+        assert_eq!(pending, unresolved_core_checks(&checks));
+    }
+
+    #[test]
+    fn unresolved_core_checks_keep_suppressed_repairs_without_dispatching_them() {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::{DATABASE_CORRUPTED, INDEX_NOT_FOUND, MIGRATION_REQUIRED};
+
+        let pending = unresolved_core_checks(&[
+            CheckResult::error("database", "damaged store", DATABASE_CORRUPTED),
+            CheckResult::warning("search_index", "no safe source", INDEX_NOT_FOUND),
+            CheckResult::error("migration", "no safe source", MIGRATION_REQUIRED),
+        ]);
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending[0].fix_finding, Some("database_corrupted"));
+        for check in &pending[1..] {
+            assert_eq!(check.fix_mode, "manual");
+            assert_eq!(check.fix_finding, None);
+        }
+    }
+
+    #[test]
+    fn unresolved_core_checks_follow_health_tiers_not_severity_alone() {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::RUNTIME_UNAVAILABLE;
+
+        let core = CheckResult::warning("runtime", "required", RUNTIME_UNAVAILABLE);
+        assert_eq!(unresolved_core_checks(&[core]).len(), 1);
+        let advisory = CheckResult::error("runtime", "optional", RUNTIME_UNAVAILABLE).advisory();
+        assert!(unresolved_core_checks(&[advisory]).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_index_repair_commands_preserve_the_selected_workspace_as_one_argument() {
+        for workspace in [
+            "/tmp/doctor workspace",
+            "/tmp/agent's store",
+            "/tmp/$(exit 99); literal",
+        ] {
+            for dispatch in [
+                fix_search_index_missing(Path::new(workspace)),
+                fix_search_index_stale(Path::new(workspace)),
+            ] {
+                let Op::RunIndexRebuild { steps } = dispatch.op else {
+                    panic!("expected a real index rebuild");
+                };
+                for (step, verb) in [(&steps[0], "rebuild"), (&steps[1], "status")] {
+                    // Parse the quoted command with the real shell without
+                    // executing ee or any interpolated workspace content.
+                    let output = std::process::Command::new("sh")
+                        .args(["-c", &format!("set -- {step}; printf '%s\\0' \"$@\"")])
+                        .output()
+                        .expect("shell argument probe");
+                    assert!(output.status.success());
+                    let args: Vec<_> = output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|arg| !arg.is_empty())
+                        .collect();
+                    let expected = ["ee", "index", verb, "--workspace", workspace, "--json"];
+                    assert_eq!(args, expected.map(str::as_bytes));
+                }
+                assert!(!steps.join(" ").contains("manifest.last_built_at"));
+            }
+        }
+    }
 
     #[test]
     fn every_fix_finding_constructs_a_dispatch_with_that_code() {
@@ -649,7 +791,10 @@ mod tests {
         let Op::RunIndexRebuild { steps } = &dispatch.op else {
             panic!("expected RunIndexRebuild");
         };
-        assert_eq!(steps[0], "ee index rebuild --workspace .");
+        assert_eq!(
+            steps[0],
+            "ee index rebuild --workspace '/tmp/doctor-fixers-test' --json"
+        );
         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
         assert!(!dispatch.op.is_advisory());
         assert!(dispatch.op.is_writing());
@@ -677,8 +822,14 @@ mod tests {
         let Op::RunIndexRebuild { steps } = &dispatch.op else {
             panic!("expected RunIndexRebuild");
         };
-        assert_eq!(steps[0], "ee index rebuild --workspace .");
-        assert!(steps[1].contains("EE-E300"), "{steps:?}");
+        assert_eq!(
+            steps[0],
+            "ee index rebuild --workspace '/tmp/doctor-fixers-test' --json"
+        );
+        assert_eq!(
+            steps[1],
+            "ee index status --workspace '/tmp/doctor-fixers-test' --json"
+        );
         assert!(!dispatch.op.is_advisory());
         assert!(dispatch.op.is_writing());
     }

@@ -22,8 +22,6 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-08-31
       CARGO_BUILD_JOBS: '2'
@@ -39,76 +37,20 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - name: Apply the reviewed patch with exact source guards
+      - name: Record exact source and verify the shell assertion contract
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/doctor-core"
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, pathlib, subprocess
-          expected = {
-              'docs/agent-ux/ee-doctor-first-aid-precedence.md': 'c7d68bae535bbbc81e1ace0cbbd89c27d30f3c44',
-              'src/cli/mod.rs': '332b80225abe8feeea76b2bd98e30d3a7375353e',
-              'src/core/doctor_fixers.rs': '5f40fec947e230b053a5a5e2d1145a4bed468165',
-              'tests/doctor_fixtures/assertion_contract.py': '41e1addd9884aab0c71c679a66eceb22260bd8d0',
-              'tests/doctor_fixtures/fm-schema_migrations-migration-drift-checksum-mismatch/assert.sh': '36417ffa6511aff0660531e1e4cd03894b390097',
-              'tests/doctor_fixtures/fm-state_files-empty-or-truncated-database/assert.sh': 'a560e35689a6104d17006c3993240779ac9ee644',
-              'tests/doctor_fixtures/lib.sh': '719e8e98a8bc2b45e2a32de2237dd8b95729e7bf',
-              'tests/e2e_doctor_concise_default.rs': 'dd6335efc9970450978d4099ed3894fd4710e536',
-          }
-          for path, sha in expected.items():
-              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
-              if actual != sha:
-                  raise SystemExit('Concurrent source change; reconcile before integration: ' + path)
-          encoded = '''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'''
-          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
-          if hashlib.sha256(patch).hexdigest() != '9fe7f7efea25be2717a180ca5b33666dcf02fc2040c0704f66b0333809717caf':
-              raise SystemExit('Patch digest mismatch')
-          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'doctor-core'
-          path = output / 'reviewed.patch'
-          path.write_bytes(patch)
-          subprocess.run(['git', 'apply', '--check', str(path)], check=True)
-          subprocess.run(['git', 'apply', str(path)], check=True)
-          (output / 'preimages.json').write_text(json.dumps(expected, indent=2))
-          (output / 'source-sha.txt').write_text(subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True))
-          PY
-          rustfmt --edition 2024 --config skip_children=true src/cli/mod.rs src/core/doctor_fixers.rs tests/e2e_doctor_concise_default.rs
-          git diff --check
-          git diff > "$RUNNER_TEMP/doctor-core/prepared.patch"
+          {
+            git rev-parse HEAD
+            rustc --version --verbose
+            sha256sum Cargo.lock
+          } | tee "$RUNNER_TEMP/doctor-core/source.log"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustfmt --check --edition 2024 --config skip_children=true src/cli/mod.rs src/core/doctor_fixers.rs tests/e2e_doctor_concise_default.rs
           python3 -m unittest discover -s tests/doctor_fixtures -p assertion_contract.py -k GuidanceOnlyContract > "$RUNNER_TEMP/doctor-core/assertions.log" 2>&1
-      - name: Export prepared source blobs without updating any branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import base64, json, os, pathlib, subprocess, urllib.request, zipfile
-          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'doctor-core'
-          preimages = json.loads((output / 'preimages.json').read_text())
-          entries = []
-          with zipfile.ZipFile(output / 'prepared-source.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-              for path, before in preimages.items():
-                  content = pathlib.Path(path).read_bytes()
-                  body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(content).decode()}).encode()
-                  request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs', data=body, method='POST', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'User-Agent': 'doctor-core-source-integration'})
-                  with urllib.request.urlopen(request, timeout=60) as response:
-                      sha = json.load(response)['sha']
-                  expected = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
-                  if sha != expected:
-                      raise SystemExit('Published blob identity mismatch: ' + path)
-                  mode = subprocess.check_output(['git', 'ls-files', '-s', '--', path], text=True).split()[0]
-                  entries.append({'path': path, 'preimage': before, 'sha': sha, 'mode': mode, 'type': 'blob'})
-                  archive.writestr(path, content)
-          (output / 'source-blobs.json').write_text(json.dumps({'sourceCommit': (output / 'source-sha.txt').read_text().strip(), 'entries': entries, 'runtimeValidation': 'pending'}, indent=2))
-          print((output / 'source-blobs.json').read_text())
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: doctor-core-source-${{ github.sha }}
-          path: ${{ runner.temp }}/doctor-core/
-          retention-days: 7
-          if-no-files-found: error
+          git diff --exit-code
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -120,6 +62,7 @@ jobs:
             doctor-receipts-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
       - name: Exercise required guidance, optional advisories, and real repair receipts
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -uo pipefail

@@ -141,9 +141,8 @@ doctor_fixture_assert_health_report() {
 }
 
 # Guidance-only failure modes (bd-2oh15, orchestrator decision C): doctor's
-# repair for these writes state that cannot pass through
-# doctor_runtime::mutate() or be undone (for example, an index rebuild writes
-# SQLite rows), so doctor records guidance instead of repairing. The contract is
+# repair for these is not implemented or cannot safely run on the damaged
+# source, so doctor records guidance instead of repairing. The contract is
 # honesty, not repair: --fix must report the finding as guidance_recorded and
 # never as applied, the finding must still be reported afterwards, and the path
 # the real repair would create must still be absent.
@@ -162,10 +161,20 @@ doctor_fixture_assert_guidance_only() {
         return 2
     fi
     local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
-    "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json"
-    if ! jq -es --arg code "$finding_code" '
+    local fix_exit=0
+    "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json" || fix_exit=$?
+    if [ "$fix_exit" -ne 6 ]; then
+        printf 'fixture assert: %s unresolved core guidance must exit 6, got %s\n' "$fm_id" "$fix_exit" >&2
+        if [ "$fix_exit" -eq 0 ]; then return 1; fi
+        return "$fix_exit"
+    fi
+    if ! jq -es --arg code "$finding_code" --arg check "$check_name" --arg error "$error_code" '
         length == 1 and (.[0] |
             .schema == "ee.response.v2" and .success == true and
+            .data.status == "completed_partial" and .data.fixerDispatchPending == true and
+            (.data.unresolvedCoreCheckCount | type == "number" and . >= 1) and
+            (.data.unresolvedCoreChecks | type == "array" and
+                any(.[]; .name == $check and .errorCode == $error)) and
             (.data.guidanceOnlyFixerCount | type == "number" and . >= 1) and
             (.data.fixerResults | type == "array") and
             any(.data.fixerResults[]; .findingCode == $code and .outcome == "guidance_recorded") and

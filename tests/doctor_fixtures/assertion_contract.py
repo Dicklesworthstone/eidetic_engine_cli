@@ -30,7 +30,7 @@ def doctor_double():
     with Path(os.environ["DOCTOR_ASSERTION_CALLS"]).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"phase": phase, "args": args}) + "\n")
     exit_code = scenario.get("exits", {}).get(phase, 0)
-    if exit_code:
+    if exit_code and not (phase == "--fix" and "fix_data" in scenario and exit_code == 6):
         return exit_code
     if phase == "--fix" and "fix_data" in scenario:
         # Guidance-only mode: the double reports what the scenario says the
@@ -39,7 +39,7 @@ def doctor_double():
             (workspace / scenario["create_path"]).mkdir(parents=True)
         print(json.dumps({"schema": "ee.response.v2", "success": True,
                           "data": scenario["fix_data"], "degraded": []}))
-        return 0
+        return exit_code
     if phase == "--fix":
         (workspace / ".ee/config.toml").write_bytes(REPAIRED)
         if scenario.get("extra_file"):
@@ -256,8 +256,12 @@ class GuidanceOnlyContract(unittest.TestCase):
         self.workspace = self.root / "workspace"
         (self.workspace / ".ee").mkdir(parents=True)
         self.scenario = {
+            "exits": {"--fix": 6},
             "fix_data": {
                 "schema": "ee.doctor.fix_summary.v1", "runId": "guidance-control",
+                "status": "completed_partial", "fixerDispatchPending": True,
+                "unresolvedCoreCheckCount": 1,
+                "unresolvedCoreChecks": [{"name": "search_index", "errorCode": "EE-E300"}],
                 "guidanceOnlyFixerCount": 1,
                 "fixerResults": [{"findingCode": "search_index_missing",
                                   "operation": "run_index_rebuild",
@@ -310,6 +314,22 @@ class GuidanceOnlyContract(unittest.TestCase):
         calls = [json.loads(row)["phase"] for row in
                  (self.root / "calls.jsonl").read_text().splitlines()]
         self.assertEqual(calls, ["--fix", "report"])
+
+    def test_zero_exit_cannot_hide_required_core_recovery(self):
+        self.scenario["exits"]["--fix"] = 0
+        self.assert_outcome(True, "must exit 6")
+
+    def test_completed_ok_cannot_hide_required_core_recovery(self):
+        self.scenario["fix_data"]["status"] = "completed_ok"
+        self.assert_outcome(True, "guidance_recorded")
+
+    def test_pending_flag_cannot_disagree_with_required_core_recovery(self):
+        self.scenario["fix_data"]["fixerDispatchPending"] = False
+        self.assert_outcome(True, "guidance_recorded")
+
+    def test_required_core_check_must_remain_in_the_summary(self):
+        self.scenario["fix_data"]["unresolvedCoreChecks"] = []
+        self.assert_outcome(True, "guidance_recorded")
 
     def test_applied_outcome_is_rejected(self):
         self.scenario["fix_data"]["fixerResults"][0]["outcome"] = "applied"

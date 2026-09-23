@@ -23305,22 +23305,30 @@ impl DoctorFixRunEvidence {
 /// return `ee.error.v2` plus a non-zero process exit.
 fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
     use crate::core::doctor::DoctorReport;
-    use crate::core::doctor_fixers::{
-        fix_dispatch_for_finding, fix_finding_for_check, store_unreadable,
-    };
 
     let report = DoctorReport::gather_for_workspace(workspace);
+    doctor_fix_checks(workspace, &report.checks)
+}
+
+fn doctor_fix_checks(
+    workspace: &Path,
+    checks: &[crate::core::doctor::CheckResult],
+) -> DoctorFixCommandResult {
+    use crate::core::doctor_fixers::{
+        fix_dispatch_for_finding, fix_finding_for_check, store_unreadable, unresolved_core_checks,
+    };
+
     // bd-xa6ud / bd-wswg0: an empty or unreadable store gets guidance for the
     // database, and the repairs that read it are skipped. The rule lives in
     // the one dispatch table `--fix-plan` also reads (bd-223vl M3).
     let unreadable = store_unreadable(
-        report
-            .checks
+        checks
             .iter()
             .map(|check| (check.name, check.error_code.map(|error_code| error_code.id))),
     );
+    let unresolved = unresolved_core_checks(checks);
     let mut dispatches = Vec::new();
-    for check in report.checks {
+    for check in checks {
         if check.severity.is_healthy() {
             continue;
         }
@@ -23335,12 +23343,13 @@ fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
         }
     }
 
-    doctor_fix_dispatches(workspace, dispatches)
+    doctor_fix_dispatches(workspace, dispatches, &unresolved)
 }
 
 fn doctor_fix_dispatches(
     workspace: &Path,
     dispatches: Vec<crate::core::doctor_fixers::FixerDispatch>,
+    unresolved: &[crate::core::doctor_fixers::UnresolvedCoreCheck],
 ) -> DoctorFixCommandResult {
     use crate::core::doctor_runtime::{
         DoctorRuntimeError, RunContext, RunStatus, blast_radius_roots_from_env, mutate,
@@ -23465,10 +23474,22 @@ fn doctor_fix_dispatches(
             let run_id = ctx.run_id().to_owned();
             let run_dir = ctx.run_dir().display().to_string();
             let action_count = doctor_fixer_action_count(&fixer_results);
-            match ctx.finish(RunStatus::CompletedOk) {
+            // A successful guidance receipt does not resolve its core check.
+            // Persist the same partial status returned to the caller so run
+            // inspection and undo never describe this as a completed repair.
+            let status = if unresolved.is_empty() {
+                RunStatus::CompletedOk
+            } else {
+                RunStatus::CompletedPartial
+            };
+            match ctx.finish(status) {
                 Ok(summary) => DoctorFixCommandResult {
-                    json: doctor_fix_success_json(workspace, &summary, &fixer_results),
-                    exit_code: ProcessExitCode::Success,
+                    json: doctor_fix_success_json(workspace, &summary, &fixer_results, unresolved),
+                    exit_code: if unresolved.is_empty() {
+                        ProcessExitCode::Success
+                    } else {
+                        ProcessExitCode::UnsatisfiedDegradedMode
+                    },
                 },
                 Err(error) => {
                     let run = DoctorFixRunEvidence {
@@ -23534,6 +23555,7 @@ fn doctor_fix_success_json(
     workspace: &Path,
     summary: &crate::core::doctor_runtime::RunSummary,
     fixer_results: &[DoctorFixerResult],
+    unresolved: &[crate::core::doctor_fixers::UnresolvedCoreCheck],
 ) -> String {
     let status_str = serde_json::to_value(&summary.status)
         .ok()
@@ -23548,7 +23570,9 @@ fn doctor_fix_success_json(
         "runDir": summary.run_dir.display().to_string(),
         "actionCount": summary.action_count,
         "status": status_str,
-        "fixerDispatchPending": false,
+        "fixerDispatchPending": !unresolved.is_empty(),
+        "unresolvedCoreCheckCount": unresolved.len(),
+        "unresolvedCoreChecks": unresolved,
         "failurePolicy": "fail_fast",
         "fixerResultCount": fixer_results.len(),
         "attemptedFixerCount": attempted,
@@ -23560,11 +23584,26 @@ fn doctor_fix_success_json(
         "configMutation": "never",
     });
 
+    let degraded = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        vec![serde_json::json!({
+            "code": "doctor_core_repair_pending",
+            "severity": if unresolved.iter().any(|check| check.severity == "error") {
+                "high"
+            } else {
+                "medium"
+            },
+            "source": "doctor",
+            "message": "Required core checks remain unresolved; recorded guidance is not a repair.",
+            "repair": "Inspect data.unresolvedCoreChecks and complete the indicated recovery actions, then rerun ee doctor.",
+        })]
+    };
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": [],
+        "degraded": degraded,
     })
     .to_string()
 }
@@ -85592,7 +85631,7 @@ mod tests {
             action_count: 3,
             status: crate::core::doctor_runtime::RunStatus::CompletedOk,
         };
-        let raw = super::doctor_fix_success_json(workspace, &summary, &[]);
+        let raw = super::doctor_fix_success_json(workspace, &summary, &[], &[]);
         let value: serde_json::Value =
             serde_json::from_str(&raw).map_err(|error| error.to_string())?;
 
@@ -86917,6 +86956,118 @@ mod tests {
     }
 
     #[test]
+    fn doctor_fix_core_guidance_and_unmapped_checks_persist_partial_status() -> TestResult {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::{
+            DATABASE_CORRUPTED, INDEX_NOT_FOUND, RUNTIME_UNAVAILABLE,
+        };
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let result = super::doctor_fix_checks(
+            &workspace,
+            &[
+                CheckResult::error("database", "PRIVATE-DATABASE-MESSAGE", DATABASE_CORRUPTED),
+                CheckResult::warning("search_index", "PRIVATE-INDEX-MESSAGE", INDEX_NOT_FOUND),
+                CheckResult::error("runtime", "PRIVATE-RUNTIME-MESSAGE", RUNTIME_UNAVAILABLE),
+            ],
+        );
+        assert_eq!(result.exit_code, ProcessExitCode::UnsatisfiedDegradedMode);
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        assert_eq!(value["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        let data = &value["data"];
+        assert_eq!(data["status"], "completed_partial");
+        assert_eq!(data["fixerDispatchPending"], true);
+        assert_eq!(data["unresolvedCoreCheckCount"], 3);
+        assert_eq!(data["fixerResultCount"], 1);
+        assert_eq!(data["guidanceOnlyFixerCount"], 1);
+        assert_eq!(data["fixerResults"][0]["findingCode"], "database_corrupted");
+        assert_eq!(data["fixerResults"][0]["outcome"], "guidance_recorded");
+        assert_eq!(data["unresolvedCoreChecks"][1]["fixMode"], "manual");
+        assert_eq!(value["degraded"][0]["code"], "doctor_core_repair_pending");
+        assert!(!result.json.contains("PRIVATE"));
+        assert!(!workspace.join(".ee/ee.db").exists());
+        assert!(!workspace.join(".ee/index").exists());
+        let run_dir = PathBuf::from(data["runDir"].as_str().ok_or("runDir")?);
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(state["status"], "completed_partial");
+        ensure_persistent_doctor_lock_released(&workspace)?;
+        let run_id = data["runId"].as_str().ok_or("runId")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace.to_str().ok_or("workspace")?,
+            "doctor",
+            "--undo",
+            run_id,
+            "--json",
+        ]);
+        assert_eq!(exit, ProcessExitCode::Success);
+        assert!(stderr.is_empty());
+        let undo: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        assert_eq!(undo["data"]["status"], "undone");
+        assert!(!workspace.join(".ee/ee.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_fix_optional_guidance_does_not_block_core_readiness() -> TestResult {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::CASS_DEGRADED;
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let result = super::doctor_fix_checks(
+            &workspace,
+            &[
+                CheckResult::ok("database", "ready"),
+                CheckResult::warning("cass", "optional", CASS_DEGRADED).advisory(),
+            ],
+        );
+        assert_eq!(result.exit_code, ProcessExitCode::Success);
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        assert_eq!(value["data"]["status"], "completed_ok");
+        assert_eq!(value["data"]["fixerDispatchPending"], false);
+        assert_eq!(value["data"]["unresolvedCoreCheckCount"], 0);
+        assert_eq!(value["data"]["guidanceOnlyFixerCount"], 1);
+        assert_eq!(value["degraded"], serde_json::json!([]));
+        ensure_persistent_doctor_lock_released(&workspace)
+    }
+
+    #[test]
+    fn doctor_fix_empty_dispatch_is_not_success_when_a_core_check_is_unhandled() -> TestResult {
+        use crate::core::doctor::{CheckResult, CheckSeverity};
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut check = CheckResult::ok("future_core_check", "private diagnostic");
+        check.severity = CheckSeverity::Error;
+        let result = super::doctor_fix_checks(root.path(), &[check]);
+        assert_eq!(result.exit_code, ProcessExitCode::UnsatisfiedDegradedMode);
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        assert_eq!(value["data"]["actionCount"], 0);
+        assert_eq!(value["data"]["fixerResultCount"], 0);
+        assert_eq!(value["data"]["unresolvedCoreCheckCount"], 1);
+        assert_eq!(value["data"]["status"], "completed_partial");
+        assert_eq!(
+            value["data"]["unresolvedCoreChecks"][0]["repair"],
+            serde_json::Value::Null
+        );
+        assert!(!result.json.contains("private diagnostic"));
+        Ok(())
+    }
+
+    #[test]
     fn doctor_fix_reports_advisory_ops_as_guidance_not_applied() -> TestResult {
         use crate::core::doctor_fixers::{FixerDispatch, fix_graph_snapshot_stale};
         use crate::core::doctor_runtime::Op;
@@ -86935,7 +87086,7 @@ mod tests {
             },
         ];
 
-        let result = doctor_fix_dispatches(&workspace, dispatches);
+        let result = doctor_fix_dispatches(&workspace, dispatches, &[]);
 
         ensure_equal(&result.exit_code, &ProcessExitCode::Success, "fix exit")?;
         let value: serde_json::Value =
@@ -87017,7 +87168,7 @@ mod tests {
             },
         ];
 
-        let result = doctor_fix_dispatches(&workspace, dispatches);
+        let result = doctor_fix_dispatches(&workspace, dispatches, &[]);
 
         ensure_equal(
             &result.exit_code,

@@ -22,7 +22,12 @@
    It always runs every dispatchable finding: `--fix --only <id>` is a
    usage error, because `--fix` declares a conflict with `--only`. A
    failing check with no dispatch is left untouched and gets no
-   `fixerResults` entry.
+   `fixerResults` entry. Required core checks that receive only guidance or
+   no dispatch remain in `unresolvedCoreChecks`, including checks without a
+   repair hint. Such a run is persisted as `completed_partial`, reports
+   `fixerDispatchPending: true`, and exits **6**. Optional advisory checks do
+   not trigger that exit. Successful mutation receipts remain `applied` and
+   can still be undone even when other required repairs remain pending.
 3. **`ee doctor --json` (read-only)** — the diagnostic report. Use it to
    inspect findings `--fix` does not dispatch, or that require human
    approval (e.g. anything that would touch the work tree's tracked
@@ -75,7 +80,10 @@ accepts, most of which no dispatched fixer produces (bd-223vl M5).
 
 If `ee doctor --fix` leaves a failing check without a `fixerResults`
 entry, or records it with outcome `guidance_recorded`, that is the
-hand-off signal to the fallback skill.
+hand-off signal to the fallback skill. `success: true` means the command
+produced its report; it does not override exit 6 or the persisted partial
+status. Inspect `unresolvedCoreChecks` before treating the workspace as
+repaired, then rerun the read-only doctor after manual recovery.
 
 ## Why this precedence
 
