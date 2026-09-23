@@ -997,6 +997,122 @@ mod tests {
         ))
     }
 
+    // bd-2vq2z.11. The reserved "What NOT to do" slice admits only candidates
+    // filed under PackSection::Failures, and the section comes from the
+    // level/kind taxonomy. A procedural anti-pattern -- the natural way to store
+    // "never do X" -- was filed under ProceduralRules and could never reach the
+    // slice, while the pack-level unit test built its candidates with
+    // section: Failures directly and stayed green. This test stores real
+    // memories and packs them, so the mapping is exercised end to end.
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn procedural_anti_pattern_memory_reaches_the_reserved_what_not_to_do_slice() -> TestResult {
+        let root_dir = tempfile::Builder::new()
+            .prefix("ee-anti-pattern-first-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let root = root_dir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: root.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize anti-pattern fixture: {:?}",
+                init.action_errors
+            ));
+        }
+        let workspace_id = {
+            let connection = DbConnection::open_file_read_only(&init.database_path)
+                .map_err(|error| error.to_string())?;
+            connection
+                .get_workspace_by_path(&root.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .ok_or("fixture workspace missing")?
+                .id
+        };
+        let _guard = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let remember = |content: &str, kind: &str| {
+            crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+                workspace_path: &root,
+                database_path: None,
+                content,
+                workflow_id: None,
+                level: "procedural",
+                kind,
+                tags: None,
+                confidence: 0.9,
+                source: Some("manual://bd-2vq2z.11/anti-pattern-first"),
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            })
+            .map_err(|error| error.to_string())
+        };
+        let anti_pattern = remember(
+            "Never run local cargo builds during swarm verification batches.",
+            "anti-pattern",
+        )?;
+        remember(
+            "Run swarm verification batches through the central cargo verifier.",
+            "rule",
+        )?;
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: root.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        if rebuilt.status != crate::core::index::IndexRebuildStatus::Success {
+            return Err(format!("fixture index failed: {rebuilt:?}"));
+        }
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = root;
+        options.database_path = Some(init.database_path);
+        options.query = "swarm verification local cargo builds".to_owned();
+        options.source_mode = crate::core::search::SearchSourceMode::LexicalOnly;
+        options.speed = crate::search::SpeedMode::Instant;
+        options.max_tokens = Some(120);
+        options.coordination_snapshot_path = None;
+        options.persist_pack = false;
+
+        let response = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        let item = response
+            .data
+            .pack
+            .items
+            .iter()
+            .find(|item| item.memory_id == anti_pattern.memory_id)
+            .ok_or("the procedural anti-pattern must be packed")?;
+        assert_eq!(
+            item.section,
+            PackSection::Failures,
+            "a procedural anti-pattern is filed under failures"
+        );
+        assert_eq!(
+            item.selected_in,
+            crate::pack::PackSelectionPhase::AntiPatternFirst,
+            "a procedural anti-pattern is selected by the reserved slice"
+        );
+        assert!(
+            item.why.starts_with("What NOT to do:"),
+            "reserved selection is labelled: {}",
+            item.why
+        );
+        Ok(())
+    }
+
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn read_only_semantic_pack_keeps_embedding_preparation_local() -> TestResult {
