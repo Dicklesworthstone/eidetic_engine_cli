@@ -66,8 +66,15 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
+#[path = "support/isolated_ee.rs"]
+mod isolated_ee;
+
+/// bd-rvrj2: each workspace gets its own ee data dir beside it, so a verdict
+/// never depends on the model or global store the host holds.
+fn ee_command(workspace: &Path) -> Result<Command, String> {
+    let mut root = workspace.as_os_str().to_os_string();
+    root.push(".ee-data");
+    isolated_ee::isolated_ee_command(Path::new(&root))
 }
 
 fn target_root() -> PathBuf {
@@ -91,23 +98,19 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee_with_workspace(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    ee_command(workspace)?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_ee_with_workspace_str(workspace: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    ee_command(Path::new(workspace))?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -490,7 +493,7 @@ fn pack_hash_invariant_under_relative_vs_absolute_workspace_alias() -> TestResul
     // Run 2: from inside the workspace via `--workspace .`. We use
     // `current_dir(workspace)` on the Command so the relative `.` resolves
     // to the same directory as `absolute_str`.
-    let relative_output = Command::new(ee_binary())
+    let relative_output = ee_command(&absolute)?
         .arg("--workspace")
         .arg(".")
         .args([
@@ -505,8 +508,6 @@ fn pack_hash_invariant_under_relative_vs_absolute_workspace_alias() -> TestResul
             "--json",
         ])
         .current_dir(&absolute)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee context with relative workspace: {error}"))?;
     let with_relative = ee_stdout_json(relative_output, "ee context --workspace .")?;
