@@ -53,7 +53,7 @@ auto-resolve safely.
 
 ## How to know if `ee doctor --fix` already handles your situation
 
-`ee doctor --fix` dispatches six findings, keyed on the failing check's
+`ee doctor --fix` dispatches seven findings, keyed on the failing check's
 error code, and only the two index findings repair anything. The other
 fixers in `src/core/doctor_fixers.rs` are not dispatched by `--fix`:
 
@@ -61,14 +61,15 @@ fixers in `src/core/doctor_fixers.rs` are not dispatched by `--fix`:
 | --- | --- | --- | --- |
 | `database_empty` | `database` `EE-E206` (0-byte store) | `manual` | guidance only (`guidance_recorded`): recover from backups |
 | `database_corrupted` | `database` `EE-E202` (store cannot be opened) | `manual` | guidance only (`guidance_recorded`): recover from backups |
+| `database_missing` | `database` `EE-E200` (no store file) | `manual` | guidance only (`guidance_recorded`): `ee init` if the workspace never held data, recover from backups if a search index or backups survive |
 | `search_index_missing` | `EE-E300` | `run_index_rebuild` | repairs (`applied`) |
 | `search_index_stale` | `EE-E301`, or any other failing `search_index` check | `run_index_rebuild` | repairs (`applied`) |
 | `schema_migration_pending` | `EE-E700` | `run_migration` | guidance only (`guidance_recorded`): records `ee migrate run`, migrates nothing |
 | `cass_integration_drift` | `EE-E507` | `manual` | guidance only (`guidance_recorded`) |
 
-While the store is empty or cannot be opened (`EE-E206` or `EE-E202` on
-the `database` check), `--fix` skips the index and migration findings:
-they read the damaged store (bd-xa6ud).
+While the store is empty, cannot be opened or is missing (`EE-E206`,
+`EE-E202` or `EE-E200` on the `database` check), `--fix` skips the index
+and migration findings: they read the store (bd-xa6ud, bd-rnqxs).
 
 Anything else still needs the manual skill content. The table is the
 dispatch in `fix_finding_for_check` (`src/core/doctor_fixers.rs`), which

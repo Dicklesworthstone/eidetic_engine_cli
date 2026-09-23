@@ -36,6 +36,11 @@
       "effect": "guidance"
     },
     {
+      "finding": "database_missing",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
       "finding": "search_index_missing",
       "op_kind": "run_index_rebuild",
       "effect": "repair"
