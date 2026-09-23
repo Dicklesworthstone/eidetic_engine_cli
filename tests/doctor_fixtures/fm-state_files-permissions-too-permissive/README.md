@@ -15,14 +15,14 @@ Per `bd-2oh15`, the fixture lifecycle is:
    `$EE_DOCTOR_FIXTURE_TARGET` and writes the marker
    `.ee/doctor-fixtures/fm-state_files-permissions-too-permissive.json`, plus a baseline
    `.fixture_baseline/before.sha256`.
-2. `assert.sh` confirms the marker is present. When
-   `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary is provided in
-   `EE_DOCTOR_FIXTURE_BINARY`, `doctor_fixture_assert` in `lib.sh`
-   additionally runs an unscoped `ee doctor --fix`, a follow-up `ee doctor`
-   report (the `--only` it passes filters nothing without `--fix`), then
-   `ee doctor --undo <runId>`, and finally compares the post-undo SHA-256
-   manifest against the pre-fix baseline (round-trip byte-identical). The
-   marker is not real damage, so this round trip exercises undo only.
+2. `assert.sh` requires `EE_DOCTOR_FIXTURE_RUN_EE=1` (it exits 2 without
+   it). Its independent witness is the mode string from `ls -ld`: `.ee` and
+   `.ee/ee.db` must both still be group- and other-readable (and the directory
+   traversable). It then runs `doctor_fixture_assert_pinned_gap` in `lib.sh`:
+   `ee doctor` must report the workspace healthy, an unscoped
+   `ee doctor --fix` must take 0 actions, and `.ee/ee.db` must be
+   byte-identical and still exposed afterwards. No undo step runs because
+   nothing is written.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -32,11 +32,12 @@ state on disk.
 
 ## Wiring status
 
-Label: **UNCLASSIFIED** (repair spec and `manifest.json`). Marker-only: no
-real trigger has been built, so this fixture is not detector or repair coverage
-for `fm-state_files-permissions-too-permissive`. There is no per-FM fix:
-`ee doctor --fix --only <id>` is a usage error, because `--fix` declares a
-conflict with `--only`. `scripts/verify-undo.sh` runs the round trip above with
-`EE_DOCTOR_FIXTURE_RUN_EE=1` when an `ee` binary is on `PATH`; its caller, the
-`ee doctor Safety Harness` stage of `scripts/verify.sh`, is not run by any CI
-workflow (bd-feftl).
+Label: **NOT-DETECTED** (pinned gap; NOT coverage; repair spec and
+`manifest.json`). Doctor reports this damage as healthy, so `ee doctor --fix`
+dispatches nothing for it. A passing run means the gap is still there; when a
+detector lands the fixture goes red on purpose and is relabelled.
+There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
+because `--fix` declares a conflict with `--only`.
+`scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`
+when an `ee` binary is on `PATH`; its caller, the `ee doctor Safety Harness`
+stage of `scripts/verify.sh`, is not run by any CI workflow (bd-feftl).

@@ -48,6 +48,8 @@ binary built at 369c63544 fails at "post-fix health not established".
 
 ## Wiring status
 
+Label: **REPAIR** (repair spec and `manifest.json`). Doctor reports the
+missing index as `EE-E300` and `ee doctor --fix` rebuilds it.
 `scripts/verify-undo.sh` runs this fixture through the existing safety harness.
 `tests/doctor_fixtures/assertion_contract.py` pins the digest classification:
 shm noise is ignored, a WAL change is rejected, and a write lock that goes

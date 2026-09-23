@@ -32,11 +32,10 @@ state on disk.
 
 ## Wiring status
 
-Label: **UNCLASSIFIED** (repair spec and `manifest.json`). Marker-only: no
-real trigger has been built, so this fixture is not detector or repair coverage
-for `fm-policy_safety-redaction-class-coverage-gap`. There is no per-FM
-fix: `ee doctor --fix --only <id>` is a usage error, because `--fix` declares a
-conflict with `--only`. `scripts/verify-undo.sh` runs the round trip above
-with `EE_DOCTOR_FIXTURE_RUN_EE=1` when an `ee` binary is on `PATH`; its caller,
-the `ee doctor Safety Harness` stage of `scripts/verify.sh`, is not run by any
-CI workflow (bd-feftl).
+Label: **OUT-OF-SCOPE** (repair spec and `manifest.json`, whose
+`scopeReason` carries the category, citations and search). Redaction classes
+are mesh lane policy, not doctor-readable workspace state, so this is not a
+doctor failure mode (bd-2oh15 ruling on c9985). The scripts above are still
+marker-only, and no harness runs them: every counting sub-harness skips this
+id, lists it on its OUT-OF-SCOPE line, and never counts it as a pass. The id
+is pinned exactly in `DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS` in `lib.sh`.

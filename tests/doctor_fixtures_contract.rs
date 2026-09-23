@@ -354,6 +354,22 @@ fn doctor_fixtures_have_triplet_files_and_metadata() {
         // V1: the README links to this fixture's own spec section.
         let link = format!("(../../../{spec_rel}#{id})");
         assert!(readme.contains(&link), "README for {id} must link {link}");
+        // The README states exactly one label, and it is the manifest's: a
+        // relabelled fixture must not keep advertising its old bucket.
+        let label = str_field(&fixture, "label", id);
+        let stated: Vec<&str> = readme
+            .match_indices("Label: **")
+            .map(|(at, prefix)| {
+                let rest = &readme[at + prefix.len()..];
+                let end = rest.find("**").unwrap_or(rest.len());
+                rest[..end].split_whitespace().next().unwrap_or("")
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            vec![label],
+            "README for {id} must state its manifest label exactly once"
+        );
     }
 }
 

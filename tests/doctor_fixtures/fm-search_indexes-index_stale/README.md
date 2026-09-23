@@ -15,14 +15,15 @@ Per `bd-2oh15`, the fixture lifecycle is:
    `$EE_DOCTOR_FIXTURE_TARGET` and writes the marker
    `.ee/doctor-fixtures/fm-search_indexes-index_stale.json`, plus a baseline
    `.fixture_baseline/before.sha256`.
-2. `assert.sh` confirms the marker is present. When
-   `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary is provided in
-   `EE_DOCTOR_FIXTURE_BINARY`, `doctor_fixture_assert` in `lib.sh`
-   additionally runs an unscoped `ee doctor --fix`, a follow-up `ee doctor`
-   report (the `--only` it passes filters nothing without `--fix`), then
-   `ee doctor --undo <runId>`, and finally compares the post-undo SHA-256
-   manifest against the pre-fix baseline (round-trip byte-identical). The
-   marker is not real damage, so this round trip exercises undo only.
+2. `assert.sh` requires `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary in
+   `EE_DOCTOR_FIXTURE_BINARY` (it exits 2 without them). The damage is real:
+   the store's workspace generation is one past the generation the index was
+   built from, and doctor reports `search_index` `EE-E301`. `doctor_fixture_assert`
+   in `lib.sh` runs an unscoped `ee doctor --fix`, which must end
+   `completed_ok` with `search_index_stale` / `run_index_rebuild` `applied`
+   (never guidance), then `ee doctor --undo <runId>`, which must be `undone`
+   with the index generation and `EE-E301` back. A second undo must undo 0
+   actions, and the content digest must equal the baseline after both.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -32,9 +33,9 @@ state on disk.
 
 ## Wiring status
 
-Label: **UNCLASSIFIED** (repair spec and `manifest.json`). Marker-only: no
-real trigger has been built, so this fixture is not detector or repair coverage
-for `fm-search_indexes-index_stale`. There is no per-FM fix:
+Label: **REPAIR** (repair spec and `manifest.json`). Doctor reports the
+staleness as `EE-E301` and `ee doctor --fix` repairs it with
+`run_index_rebuild`. The fixture runs `--fix` unscoped, the only form there is:
 `ee doctor --fix --only <id>` is a usage error, because `--fix` declares a
 conflict with `--only`. `scripts/verify-undo.sh` runs the round trip above with
 `EE_DOCTOR_FIXTURE_RUN_EE=1` when an `ee` binary is on `PATH`; its caller, the
