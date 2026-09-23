@@ -1,5 +1,11 @@
 //! Integration modules E–F. Filter with `cargo test --test integration_e_f <module>::`.
 
+// Shared isolated ee spawn helper (bd-rvrj2). Declared once here because
+// ee_spawn_isolation_contract and fanout_rollback both use it, and loading one
+// file as a module twice in the same target trips clippy::duplicate_mod.
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
+
 #[path = "../e16_e17_e12_domain_e2e.rs"]
 mod e16_e17_e12_domain_e2e;
 #[path = "../e2e_agent_sources.rs"]
@@ -190,6 +196,8 @@ mod e2e_typed_fields_decide_script;
 mod e2e_why;
 #[path = "../ee_core_api_no_adapter_logic.rs"]
 mod ee_core_api_no_adapter_logic;
+#[path = "../ee_spawn_isolation_contract.rs"]
+mod ee_spawn_isolation_contract;
 #[path = "../effect_contracts.rs"]
 mod effect_contracts;
 #[path = "../embed_dedup_e2e.rs"]

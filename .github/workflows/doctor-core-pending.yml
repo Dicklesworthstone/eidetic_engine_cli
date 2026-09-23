@@ -1,0 +1,86 @@
+name: Doctor core repair outcomes
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/doctor-core-pending.yml
+      - src/core/doctor*.rs
+      - src/cli/mod.rs
+      - tests/e2e_doctor_concise_default.rs
+      - tests/doctor_fixtures/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: doctor-core-pending-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Record exact source and verify the shell assertion contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/doctor-core"
+          {
+            git rev-parse HEAD
+            rustc --version --verbose
+            sha256sum Cargo.lock
+          } | tee "$RUNNER_TEMP/doctor-core/source.log"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustfmt --check --edition 2024 --config skip_children=true src/cli/mod.rs src/core/doctor_fixers.rs tests/e2e_doctor_concise_default.rs
+          python3 -m unittest discover -s tests/doctor_fixtures -p assertion_contract.py -k GuidanceOnlyContract > "$RUNNER_TEMP/doctor-core/assertions.log" 2>&1
+          git diff --exit-code
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: doctor-core-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            doctor-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            doctor-receipts-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Exercise required guidance, optional advisories, and real repair receipts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          failed=0
+          for filter in core::doctor_fixers::tests:: cli::tests::doctor_fix_ core::doctor_runtime::index_repair::tests::; do
+            label=${filter//:/_}
+            log="$RUNNER_TEMP/doctor-core/$label.log"
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || failed=1
+            tail -n 70 "$log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+          done
+          timeout 12m cargo test --locked --test integration_e_f e2e_doctor_concise_default:: -- --test-threads=1 > "$RUNNER_TEMP/doctor-core/public-cli.log" 2>&1 || failed=1
+          tail -n 70 "$RUNNER_TEMP/doctor-core/public-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-core/public-cli.log" || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: doctor-core-results-${{ github.sha }}
+          path: ${{ runner.temp }}/doctor-core/
+          retention-days: 7

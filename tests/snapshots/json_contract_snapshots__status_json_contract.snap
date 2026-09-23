@@ -33,7 +33,7 @@ expression: canonical_json_text(value)
       "status": "not_collected"
     },
     "posture": {
-      "overall": "degraded_recoverable",
+      "overall": "ok",
       "subsystems": [
         {
           "checksPassed": 1,
@@ -57,11 +57,11 @@ expression: canonical_json_text(value)
           "status": "ok"
         },
         {
-          "checksPassed": 0,
-          "fallback": "ee index rebuild --workspace .",
+          "checksPassed": 1,
+          "fallback": null,
           "id": "search",
-          "reason": "lexical_only",
-          "status": "degraded_recoverable"
+          "reason": null,
+          "status": "ok"
         },
         {
           "checksPassed": 1,
@@ -78,11 +78,11 @@ expression: canonical_json_text(value)
           "status": "ok"
         },
         {
-          "checksPassed": 0,
-          "fallback": "ee index rebuild --workspace .",
+          "checksPassed": 1,
+          "fallback": null,
           "id": "pack",
-          "reason": "pack_uses_degraded_search",
-          "status": "degraded_recoverable"
+          "reason": null,
+          "status": "ok"
         },
         {
           "checksPassed": 1,
@@ -330,8 +330,8 @@ expression: canonical_json_text(value)
   "degraded": [
     {
       "code": "search_lexical_only",
-      "message": "Search index is healthy but semantic retrieval is unavailable; every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content.",
-      "repair": "Run `ee index rebuild --workspace .`.",
+      "message": "Search index is healthy but semantic retrieval is unavailable: the embedder is the deterministic-hash fallback, so every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content. Memory still works; this does not degrade the overall posture.",
+      "repair": "Run `ee model fetch`, then `ee index rebuild --workspace .`.",
       "repairKind": "unknown",
       "severity": "medium",
       "sources": [
