@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 use super::{
     DEFAULT_SEARCH_EMBEDDER, DbConnection, IndexGenerationLease, IndexRebuildError,
-    build_index_generation, collect_workspace_index_source_snapshot,
-    default_workspace_database_path, embedder_fingerprint_for_index_metadata,
-    ensure_index_path_has_no_symlinks, hash_fallback_embedder_stack, index_checkpoint,
-    resolve_index_workspace_id, sync_index_directory, sync_index_generation,
-    validate_built_generation, workspace_embedder_stack, write_index_metadata,
+    build_index_generation, cached_local_selection, collect_workspace_index_source_snapshot,
+    default_embedder_settings, default_workspace_database_path,
+    embedder_fingerprint_for_index_metadata, ensure_index_path_has_no_symlinks,
+    hash_fallback_embedder_stack, index_checkpoint, resolve_index_workspace_id,
+    sync_index_directory, sync_index_generation, validate_built_generation, write_index_metadata,
 };
+use crate::core::remote_embed::{EmbedBackendSelection, configured_embed_backend};
 
 pub(crate) struct PreparedRepair {
     database_path: PathBuf,
@@ -69,7 +70,18 @@ pub(crate) async fn stage(
                 selection.stack.clone()
             })
     } else {
-        workspace_embedder_stack(&db, &workspace_id)?.0
+        // A doctor repair never fetches (bd-65jem). The default Auto stack is
+        // a lazy downloader that pulled the ~531 MiB model into the user model
+        // cache -- a network fetch and a durable write outside the declared
+        // blast radius. Use the registry selection or a verified cached local
+        // model, else the deterministic hash tier; `ee model fetch` followed by
+        // `ee index rebuild` upgrades the index afterwards.
+        cached_local_selection(
+            Some((&db, workspace_id.as_str())),
+            &default_embedder_settings(),
+            configured_embed_backend() == EmbedBackendSelection::Remote,
+        )?
+        .stack
     };
     let fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     let stats = build_index_generation(cx, staging, stack, source.documents).await?;

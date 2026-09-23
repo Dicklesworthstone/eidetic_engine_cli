@@ -277,19 +277,30 @@ grade() {
         "rule add --source-memory succeeds and the rule is the top search hit" \
         "rule=${rule_id:-<none>} top=${rule_top:-<none>}" "$rule_search_ok"
 
-    # 6. bd-3h6bz: the rule packs beside its source memory.
-    local mentions rule_pack_ok=false
-    mentions=0
+    # 6. bd-3h6bz: the rule packs beside its source memory. Since 0a42bdc6b a
+    # packed rule sits under its SOURCE memory's id, so the rule id never
+    # appears as a bare value (bd-p4ia2). Identify the rule by what the pack
+    # emits: a procedural_rules item whose content IS the rule text AND whose
+    # provenance note or why names this rule id as a whole token. The source
+    # memory's own text differs from RULE_TEXT, and the id is a per-run ULID,
+    # so a pack without the rule matches neither.
+    local matched rule_pack_ok=false
+    matched=0
     if [ -n "$rule_id" ] && [ -s "$CAP/rule_pack.json" ]; then
-        mentions="$(jq -r --arg r "$rule_id" '[.data.pack | .. | strings | select(. == $r)] | length' \
-            "$CAP/rule_pack.json" 2>/dev/null || echo 0)"
+        matched="$(jq -r --arg r "$rule_id" --arg t "$RULE_TEXT" '
+            ("(^|[^A-Za-z0-9_])" + $r + "($|[^A-Za-z0-9_])") as $tok
+            | [(.data.pack.items // [])[]
+                | select(.section == "procedural_rules" and .content == $t)
+                | select(any(((.provenance // [])[]?.note), .why;
+                    type == "string" and test($tok)))]
+            | length' "$CAP/rule_pack.json" 2>/dev/null || echo 0)"
     fi
-    if ok_response rule_pack && [ -n "$rule_id" ] && [ "${mentions:-0}" -ge 1 ] 2>/dev/null; then
+    if ok_response rule_pack && [ -n "$rule_id" ] && [ "${matched:-0}" -ge 1 ] 2>/dev/null; then
         rule_pack_ok=true
     fi
     row rule_packs_beside_source check \
-        "pack for the rule's task contains the rule id (bd-3h6bz)" \
-        "rule=${rule_id:-<none>} occurrencesInPack=${mentions:-0} packItems=$(q rule_pack '(.data.pack.items // []) | length')" \
+        "a procedural_rules item carries the rule text and names the rule id (bd-3h6bz, bd-p4ia2)" \
+        "rule=${rule_id:-<none>} matchingItems=${matched:-0} packItems=$(q rule_pack '(.data.pack.items // []) | length')" \
         "$rule_pack_ok"
 
     # 7. An unrelated query abstains instead of admitting everything.
@@ -406,7 +417,16 @@ fixture_ok() {
     resp '{"memoryId":"mem_FAIL"}' >"$d/failure_memory.json"
     resp "{\"ruleId\":\"$rule\"}" >"$d/rule_add.json"
     resp "{\"results\":[{\"docId\":\"$rule\",\"score\":0.9}]}" >"$d/rule_search.json"
-    resp "{\"pack\":{\"hash\":\"blake3:r\",\"items\":[{\"memoryId\":\"mem_FAIL\"},{\"memoryId\":\"$rule\"}]}}" >"$d/rule_pack.json"
+    # The shape a real pack emits since 0a42bdc6b (bd-p4ia2): the rule sits
+    # under its SOURCE memory's id, carries RULE_TEXT, and names the rule id
+    # only inside its provenance note and why.
+    jq -cn --arg rule "$rule" --arg text "$RULE_TEXT" '{schema:"ee.response.v2", success:true, degraded:[],
+        data:{pack:{hash:"blake3:r", items:[
+            {section:"failures", memoryId:"mem_FAIL", content:"Release tagging failed."},
+            {section:"procedural_rules", memoryId:"mem_FAIL", content:$text,
+             provenance:[{note:"Memory mem_FAIL selected for context pack"},
+                         {note:("Promoted procedural rule " + $rule)}],
+             why:("matched; via applied procedural rule " + $rule + " (bd-3h6bz)")}]}}}' >"$d/rule_pack.json"
     resp '{"posture":{"overall":"ok"}}' >"$d/status.json"
     resp '{"posture":"ok","healthy":true}' >"$d/doctor.json"
     jq -cn '{schema:"ee.response.v2", success:true, data:{embed_backend:"hash_fallback"}, degraded:[{code:"embed_model_unavailable"}]}' >"$d/model_missing.json"
@@ -485,6 +505,28 @@ self_test() {
 
     d="$(case_dir rule_not_packed)"; mutate "$d" rule_pack '.data.pack.items = [{"memoryId":"mem_FAIL"}]'
     expect "rule omitted from pack (bd-3h6bz)" "$d" fail "rule_packs_beside_source"
+
+    # bd-p4ia2: each clause of the predicate must be load-bearing.
+    d="$(case_dir rule_bare_id_only)"; mutate "$d" rule_pack '.data.pack.items = [{"memoryId":"rule_R1"}]'
+    expect "rule id as a bare value, no rule text" "$d" fail "rule_packs_beside_source"
+
+    d="$(case_dir rule_text_unlinked)"; mutate "$d" rule_pack '.data.pack.items[1] |= (.provenance = [{"note":"Memory mem_FAIL selected for context pack"}] | .why = "matched")'
+    expect "rule text with no id link" "$d" fail "rule_packs_beside_source"
+
+    d="$(case_dir rule_link_other_text)"; mutate "$d" rule_pack '.data.pack.items[1].content = "Some other procedural text."'
+    expect "id link on different content" "$d" fail "rule_packs_beside_source"
+
+    d="$(case_dir rule_wrong_section)"; mutate "$d" rule_pack '.data.pack.items[1].section = "failures"'
+    expect "rule item outside procedural_rules" "$d" fail "rule_packs_beside_source"
+
+    d="$(case_dir rule_id_prefix)"; mutate "$d" rule_pack '.data.pack.items[1] |= (.provenance[1].note = "Promoted procedural rule rule_R12" | .why = "via applied procedural rule rule_R12")'
+    expect "a longer id sharing the prefix" "$d" fail "rule_packs_beside_source"
+
+    d="$(case_dir rule_linked_by_why)"; mutate "$d" rule_pack '.data.pack.items[1].provenance = [{"note":"Memory mem_FAIL selected for context pack"}]'
+    expect "rule linked by why alone" "$d" pass ""
+
+    d="$(case_dir rule_linked_by_note)"; mutate "$d" rule_pack '.data.pack.items[1].why = "matched"'
+    expect "rule linked by provenance note alone" "$d" pass ""
 
     d="$(case_dir rule_add_refused)"; printf '1\n' >"$d/rule_add.exit"; mutate "$d" rule_add '.success = false | .data = {}'
     expect "rule add refused" "$d" fail "rule_searchable,rule_packs_beside_source"

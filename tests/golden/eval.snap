@@ -4,7 +4,7 @@ assertion: eval commands use deterministic fixtures and metrics
 schema:
   fixture: ee.eval_fixture.v1
   source_memory: ee.eval_source_memory.v1
-  report: ee.eval.report.v1
+  report: ee.eval.report.v2
 contracts:
   - eval list enumerates fixtures from tests/fixtures/eval/
   - eval run loads scenario.json and source_memory.json per fixture

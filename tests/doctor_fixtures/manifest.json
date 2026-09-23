@@ -1,157 +1,201 @@
 {
   "schema": "ee.doctor_fixtures.v1",
-  "source": "doctor_workspace/failure_mode_scores.jsonl",
+  "source": "docs/doctor/failure_mode_scores.jsonl",
   "bead": "bd-2oh15",
   "fixtures": [
     {
       "id": "fm-state_files-sqlite-wal-shm-sidecar-drift",
       "severity": "P0",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "UNRESOLVED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-sqlite-integrity-page-malformed",
       "severity": "P0",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "NOT-DETECTED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-empty-or-truncated-database",
       "severity": "P0",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "GUIDANCE-ONLY",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-merge-conflict-markers",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "NOT-DETECTED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-jsonl-tombstone-drift",
       "severity": "P1",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-orphaned-pid-write-lock",
       "severity": "P1",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-permissions-too-permissive",
       "severity": "P1",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-state_files-workspace-ambiguous-multiple-candidates",
       "severity": "P1",
       "subsystem": "state_files",
-      "spec": "doctor_workspace/analysis/repair_specs/state_files.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
       "id": "fm-schema_migrations-pending-migrations-detected",
       "severity": "P1",
       "subsystem": "schema_migrations",
-      "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/schema_migrations.md"
     },
     {
       "id": "fm-schema_migrations-migration-drift-checksum-mismatch",
       "severity": "P0",
       "subsystem": "schema_migrations",
-      "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md"
+      "label": "GUIDANCE-ONLY",
+      "spec": "docs/doctor/repair-specs/schema_migrations.md"
     },
     {
       "id": "fm-schema_migrations-shard-fanout-catalog-hash-mismatch",
       "severity": "P0",
       "subsystem": "schema_migrations",
-      "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md"
+      "label": "NOT-DETECTED",
+      "spec": "docs/doctor/repair-specs/schema_migrations.md"
     },
     {
       "id": "fm-search_indexes-index_missing",
       "severity": "P1",
       "subsystem": "search_indexes",
-      "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md"
+      "label": "REPAIR",
+      "spec": "docs/doctor/repair-specs/search_indexes.md"
     },
     {
       "id": "fm-search_indexes-index_stale",
       "severity": "P1",
       "subsystem": "search_indexes",
-      "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/search_indexes.md"
     },
     {
       "id": "fm-search_indexes-index_corrupt",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "search_indexes",
-      "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md"
+      "label": "REPAIR",
+      "spec": "docs/doctor/repair-specs/search_indexes.md"
     },
     {
       "id": "fm-cass_integration-cass_not_found",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "cass_integration",
-      "spec": "doctor_workspace/analysis/repair_specs/cass_integration.md"
+      "label": "GUIDANCE-ONLY",
+      "spec": "docs/doctor/repair-specs/cass_integration.md"
     },
     {
       "id": "fm-cass_integration-cass_unavailable-contract-mismatch",
       "severity": "P1",
       "subsystem": "cass_integration",
-      "spec": "doctor_workspace/analysis/repair_specs/cass_integration.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/cass_integration.md"
     },
     {
       "id": "fm-workspace_config-nested-ee-markers",
       "severity": "P1",
       "subsystem": "workspace_config",
-      "spec": "doctor_workspace/analysis/repair_specs/workspace_config.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/workspace_config.md"
     },
     {
       "id": "fm-workspace_config-config-toml-malformed",
       "severity": "P1",
       "subsystem": "workspace_config",
-      "spec": "doctor_workspace/analysis/repair_specs/workspace_config.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/workspace_config.md"
     },
     {
       "id": "fm-graph_subsystem-snapshot-stale",
       "severity": "P1",
       "subsystem": "graph_subsystem",
-      "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/graph_subsystem.md"
     },
     {
       "id": "fm-graph_subsystem-snapshot-missing",
       "severity": "P1",
       "subsystem": "graph_subsystem",
-      "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/graph_subsystem.md"
     },
     {
       "id": "fm-graph_subsystem-snapshot-write-lock-held",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "graph_subsystem",
-      "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md"
+      "label": "NOT-DETECTED",
+      "spec": "docs/doctor/repair-specs/graph_subsystem.md"
     },
     {
       "id": "fm-agent_coordination-rch-workers-all-blocked-by-pressure",
-      "severity": "P0",
+      "severity": "P1",
       "subsystem": "agent_coordination",
-      "spec": "doctor_workspace/analysis/repair_specs/agent_coordination.md"
+      "label": "NOT-DETECTED",
+      "spec": "docs/doctor/repair-specs/agent_coordination.md"
     },
     {
       "id": "fm-agent_coordination-mcp-agent-mail-file-reservation-conflict",
       "severity": "P1",
       "subsystem": "agent_coordination",
-      "spec": "doctor_workspace/analysis/repair_specs/agent_coordination.md"
+      "label": "UNCLASSIFIED",
+      "spec": "docs/doctor/repair-specs/agent_coordination.md"
     },
     {
       "id": "fm-policy_safety-trauma-guard-policy-denied-exit-7",
       "severity": "P1",
       "subsystem": "policy_safety",
-      "spec": "doctor_workspace/analysis/repair_specs/policy_safety.md"
+      "label": "OUT-OF-SCOPE",
+      "spec": "docs/doctor/repair-specs/policy_safety.md",
+      "scopeReason": {
+        "category": "A trauma-guard policy denial exiting 7 is a correct command outcome, not damaged workspace state that doctor could read or repair.",
+        "citations": [
+          "src/models/mod.rs:2285",
+          "src/models/mod.rs:2304",
+          "src/core/trauma_guard.rs:35",
+          "src/core/doctor_fixers.rs:292"
+        ],
+        "search": "grep -rlniE 'trauma' src (trauma_guard.rs, preflight_guard.rs, preflight.rs, core/mod.rs, cli/mod.rs, curate/mod.rs: the guard exists); grep -niE 'trauma|policy_denied|PolicyDenied' src/core/doctor.rs src/core/doctor_fixers.rs src/core/doctor_runtime.rs: 4 hits, none about the trauma guard (doctor_runtime.rs:96/2232 are doctor's own unsafe-undo refusal, doctor.rs:3910 is rch pressure policy). The nearest doctor family, FM-PS-01 at doctor_fixers.rs:292, is policy rules out of sync with the binary's registry: a different condition. Measured at a1d4afe8b."
+      }
     },
     {
       "id": "fm-policy_safety-redaction-class-coverage-gap",
       "severity": "P1",
       "subsystem": "policy_safety",
-      "spec": "doctor_workspace/analysis/repair_specs/policy_safety.md"
+      "label": "OUT-OF-SCOPE",
+      "spec": "docs/doctor/repair-specs/policy_safety.md",
+      "scopeReason": {
+        "category": "Redaction classes are mesh lane policy (which memories a lane grant may carry), not doctor-readable workspace state. If this gap matters, it needs a mesh-owned check; FM-PS-01 is not stretched over it.",
+        "citations": [
+          "src/mesh/lane_grant_preview.rs:232",
+          "src/mesh/lane_grant_preview.rs:495",
+          "src/mesh/team.rs:7215"
+        ],
+        "search": "grep -rnE 'RedactionClass|redaction_class|redaction class' src: hits in src/mesh/lane_grant_preview.rs and src/mesh/team.rs (plus eval); grep -nciE 'redaction_class|RedactionClass|redaction class|lane_grant' src/core/doctor.rs src/core/doctor_fixers.rs src/core/doctor_runtime.rs: 0 hits in each. Measured at a1d4afe8b."
+      }
     }
   ]
 }

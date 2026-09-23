@@ -78,7 +78,7 @@ fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult
     )?;
     ensure_json_equal(
         value.pointer("/data/report/schema"),
-        json!("ee.eval.report.v1"),
+        json!("ee.eval.report.v2"),
         "report schema",
     )?;
     ensure_json_equal(
@@ -117,7 +117,7 @@ fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
         .map_err(|error| format!("stdout JSON parse failed: {error}"))?;
     ensure_json_equal(
         value.pointer("/data/report/schema"),
-        json!("ee.eval.report.v1"),
+        json!("ee.eval.report.v2"),
         "report schema",
     )?;
     ensure_json_equal(value.get("success"), JsonValue::Bool(false), "success")?;
