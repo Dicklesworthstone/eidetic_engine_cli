@@ -1287,6 +1287,29 @@ mod tests {
             ),
         )?;
 
+        // bd-reality-core-convergence-1azkt.10: EVERY franken-stack crate the
+        // committed lockfile resolves must be stamped, not a named sample.
+        // Matched here by plain PREFIX, deliberately looser than build.rs's
+        // anchored family match: that anchor is what dropped `frankentorch-*`
+        // (the tensor runtime under the embedder and reranker) from the stamp,
+        // because `franken` + `torch-api` is neither empty nor `-`-led.
+        let lock = include_str!("../../Cargo.lock");
+        let franken_prefixes = ["asupersync", "fnx", "franken", "fsqlite", "sqlmodel"];
+        let unstamped: Vec<&str> = lock
+            .lines()
+            .filter_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
+            .filter(|name| {
+                franken_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+            })
+            .filter(|name| !names_entry(*name))
+            .collect();
+        ensure(
+            unstamped.is_empty(),
+            format!("Cargo.lock resolves franken-stack crates the stamp omits: {unstamped:?}"),
+        )?;
+
         // POSITIVE: the stamp reaches the reported provenance intact.
         ensure_equal(
             &build_info().franken_stack,

@@ -116,11 +116,17 @@ fn franken_stack_pins() -> Option<String> {
     // workspace member is covered when it appears, instead of silently
     // widening the blind spot. The families are anchored to a `-` so that
     // `tru` cannot match `truncate`; a bare family name matches exactly.
-    const FAMILIES: [&str; 7] = [
+    //
+    // That anchor also means `franken` does NOT cover `frankentorch-*`
+    // (`franken` + `torch-api` is neither empty nor `-`-led), so the tensor
+    // runtime under the embedder and reranker was missing from the stamp
+    // (bd-reality-core-convergence-1azkt.10). Each workspace prefix is listed.
+    const FAMILIES: [&str; 8] = [
         "asupersync",
         "fnx",
         "franken",
         "frankensearch",
+        "frankentorch",
         "fsqlite",
         "sqlmodel",
         "tru",
