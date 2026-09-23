@@ -2110,10 +2110,26 @@ pub struct CapabilitiesReport {
     pub tool_version: String,
     pub run_artifact_schema: String,
     pub blast_radius: Vec<String>,
+    /// Every `Op` kind `mutate()` accepts. This is the chokepoint's
+    /// vocabulary, not what `ee doctor --fix` does: see `fix_dispatch`.
     pub op_kinds: Vec<&'static str>,
+    /// What `ee doctor --fix` actually dispatches: one entry per finding in
+    /// its dispatch table, with the op kind and whether it repairs anything
+    /// (bd-223vl M5).
+    pub fix_dispatch: Vec<FixDispatchEntry>,
     pub exit_codes: Vec<ExitCodeEntry>,
     pub env_vars: Vec<EnvVarEntry>,
     pub action_line_schema: String,
+}
+
+/// One finding `ee doctor --fix` can dispatch.
+#[derive(Clone, Debug, Serialize)]
+pub struct FixDispatchEntry {
+    pub finding: &'static str,
+    pub op_kind: &'static str,
+    /// `repair` for a writing op; `guidance` for an advisory op, which only
+    /// records steps (outcome `guidance_recorded`) and leaves the finding.
+    pub effect: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2160,6 +2176,21 @@ impl CapabilitiesReport {
                 "atomic_rewrite_toml",
                 "snapshot_backup",
             ],
+            fix_dispatch: super::doctor_fixers::FIX_DISPATCHED_FINDINGS
+                .iter()
+                .filter_map(|finding| {
+                    super::doctor_fixers::fix_dispatch_for_finding(workspace, finding)
+                })
+                .map(|dispatch| FixDispatchEntry {
+                    finding: dispatch.finding_code,
+                    op_kind: dispatch.op.kind_str(),
+                    effect: if dispatch.op.is_advisory() {
+                        "guidance"
+                    } else {
+                        "repair"
+                    },
+                })
+                .collect(),
             exit_codes: vec![
                 ExitCodeEntry {
                     code: 0,

@@ -24,6 +24,38 @@
     "atomic_rewrite_toml",
     "snapshot_backup"
   ],
+  "fix_dispatch": [
+    {
+      "finding": "database_empty",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
+      "finding": "database_corrupted",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
+      "finding": "search_index_missing",
+      "op_kind": "run_index_rebuild",
+      "effect": "repair"
+    },
+    {
+      "finding": "search_index_stale",
+      "op_kind": "run_index_rebuild",
+      "effect": "repair"
+    },
+    {
+      "finding": "schema_migration_pending",
+      "op_kind": "run_migration",
+      "effect": "guidance"
+    },
+    {
+      "finding": "cass_integration_drift",
+      "op_kind": "manual",
+      "effect": "guidance"
+    }
+  ],
   "exit_codes": [
     {
       "code": 0,

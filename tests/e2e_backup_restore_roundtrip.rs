@@ -2827,3 +2827,750 @@ fn backup_create_and_restore_dry_run_leave_real_store_hash_unchanged() -> TestRe
     )?;
     Ok(())
 }
+
+fn typed_fields_value(
+    conn: &DbConnection,
+    memory_id: &str,
+    side: &str,
+) -> Result<JsonValue, String> {
+    let raw = conn
+        .get_memory_typed_fields_json(memory_id)
+        .map_err(|error| format!("{side} get_memory_typed_fields_json: {error}"))?
+        .ok_or_else(|| format!("{side} memory {memory_id} has no typed fields"))?;
+    serde_json::from_str(&raw).map_err(|error| format!("{side} typed fields are not JSON: {error}"))
+}
+
+/// bd-1n0np.23.2: typed memory fields survive backup -> restore.
+///
+/// This is the suite's one per-kind round trip at the DEFAULT redaction level
+/// (no `--redaction` flag); the other per-kind tests use `--redaction minimal`,
+/// so without this one the suite would only ever test a non-default mode. The
+/// default re-mints memory IDs (bd-cjt23), so the restored memory is found by
+/// its content, not by its ID.
+#[test]
+fn backup_restore_at_default_redaction_preserves_typed_memory_fields() -> TestResult {
+    const CONTENT: &str = "Decision: keep the build cache on the remote workers.";
+    let staging = tempfile::Builder::new()
+        .prefix("ee-23-2-typed-")
+        .tempdir()
+        .map_err(|error| format!("create temp dir: {error}"))?;
+    let workspace = staging.path().join("ws");
+    let backup_dir = staging.path().join("backups");
+    let side_path = staging.path().join("restored");
+    fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
+    let side_path_arg = side_path.to_string_lossy().into_owned();
+
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    let remembered = run_ee(&[
+        "remember",
+        CONTENT,
+        "--level",
+        "semantic",
+        "--kind",
+        "decision",
+        "--field",
+        "options=local",
+        "--field",
+        "options=remote",
+        "--field",
+        "chosen=remote",
+        "--field",
+        "rationale=keeps the SSD cold",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let source_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source_conn = DbConnection::open_file(workspace.join(".ee/ee.db"))
+        .map_err(|error| format!("open source db: {error}"))?;
+    let source_fields = typed_fields_value(&source_conn, &source_id, "source")?;
+    // Empty-world guard: the comparison below proves nothing unless the source
+    // really holds the fields it was given.
+    ensure_equal(
+        &source_fields
+            .pointer("/fields/chosen")
+            .and_then(JsonValue::as_str),
+        &Some("remote"),
+        "source memory holds the typed field it was given",
+    )?;
+
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let backup_id = json_str(&created, "/data/backupId", "backup create")?;
+    run_ee(&[
+        "backup",
+        "restore",
+        backup_id,
+        "--output-dir",
+        &backup_dir_arg,
+        "--side-path",
+        &side_path_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+
+    let restored_conn = DbConnection::open_file(side_path.join(".ee/ee.db"))
+        .map_err(|error| format!("open restored db: {error}"))?;
+    let restored_workspace_id = workspace_id_from_db(&restored_conn, &side_path)?;
+    let restored: Vec<StoredMemory> = restored_conn
+        .list_memories(&restored_workspace_id, None, true)
+        .map_err(|error| format!("restored list_memories: {error}"))?
+        .into_iter()
+        .filter(|memory| memory.content == CONTENT)
+        .collect();
+    ensure_equal(
+        &restored.len(),
+        &1,
+        "exactly one restored memory carries the content",
+    )?;
+    let restored_fields = typed_fields_value(&restored_conn, &restored[0].id, "restored")?;
+    ensure_equal(
+        &restored_fields,
+        &source_fields,
+        "typed fields after a default-redaction backup -> restore",
+    )
+}
+
+/// A per-kind round-trip world: an initialized workspace plus the paths a
+/// `backup create` / `backup restore --side-path` cycle needs.
+struct KindRoundTrip {
+    _staging: tempfile::TempDir,
+    workspace: PathBuf,
+    backup_dir: PathBuf,
+    side_path: PathBuf,
+}
+
+impl KindRoundTrip {
+    fn new(prefix: &str) -> Result<Self, String> {
+        let staging = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| format!("create temp dir: {error}"))?;
+        let workspace = staging.path().join("ws");
+        fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
+        let world = Self {
+            backup_dir: staging.path().join("backups"),
+            side_path: staging.path().join("restored"),
+            workspace,
+            _staging: staging,
+        };
+        run_ee(&["init", "--workspace", &world.ws(), "--json"])?;
+        Ok(world)
+    }
+
+    fn ws(&self) -> String {
+        self.workspace.to_string_lossy().into_owned()
+    }
+
+    fn source_db(&self) -> Result<DbConnection, String> {
+        DbConnection::open_file(self.workspace.join(".ee/ee.db"))
+            .map_err(|error| format!("open source db: {error}"))
+    }
+
+    fn restored_db(&self) -> Result<DbConnection, String> {
+        DbConnection::open_file(self.side_path.join(".ee/ee.db"))
+            .map_err(|error| format!("open restored db: {error}"))
+    }
+
+    /// `backup create --redaction minimal`, then restore to the side path.
+    /// Minimal keeps memory IDs; the default re-mints them (bd-cjt23), which
+    /// would leave nothing to join a restored row to its source row on.
+    fn backup_minimal_and_restore(&self) -> Result<JsonValue, String> {
+        let ws = self.ws();
+        let backup_dir = self.backup_dir.to_string_lossy().into_owned();
+        let side_path = self.side_path.to_string_lossy().into_owned();
+        let created = run_ee(&[
+            "backup",
+            "create",
+            "--redaction",
+            "minimal",
+            "--output-dir",
+            &backup_dir,
+            "--workspace",
+            &ws,
+            "--json",
+        ])?;
+        let backup_id = json_str(&created, "/data/backupId", "backup create")?;
+        run_ee(&[
+            "backup",
+            "restore",
+            backup_id,
+            "--output-dir",
+            &backup_dir,
+            "--side-path",
+            &side_path,
+            "--workspace",
+            &ws,
+            "--json",
+        ])
+    }
+}
+
+/// bd-1n0np.23.2: sentinel specs survive backup -> restore unchanged, every
+/// field of every spec, including the memory each belongs to.
+#[test]
+fn backup_restore_preserves_memory_sentinel_specs() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-sentinel-specs-")?;
+    let remembered = run_ee(&[
+        "remember",
+        "The workspace keeps a README and a Cargo manifest at its root.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--sentinel",
+        "path_exists:README.md",
+        "--sentinel",
+        "path_exists:Cargo.toml",
+        "--workspace",
+        &world.ws(),
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source_specs = world
+        .source_db()?
+        .list_memory_sentinel_specs(&memory_id)
+        .map_err(|error| format!("source list_memory_sentinel_specs: {error}"))?;
+    // Empty-world guard: two specs were attached, so two must be stored.
+    ensure_equal(&source_specs.len(), &2, "source sentinel specs stored")?;
+
+    world.backup_minimal_and_restore()?;
+
+    let restored_specs = world
+        .restored_db()?
+        .list_memory_sentinel_specs(&memory_id)
+        .map_err(|error| format!("restored list_memory_sentinel_specs: {error}"))?;
+    ensure_equal(
+        &restored_specs,
+        &source_specs,
+        "sentinel specs after backup -> restore",
+    )
+}
+
+/// The query-miss ledger's rows, compared whole except for `workspace_id`,
+/// which names the store the row lives in: a side-path restore is a different
+/// store.
+fn query_miss_rows(
+    conn: &DbConnection,
+    side: &str,
+) -> Result<Vec<ee::db::StoredAuditEntry>, String> {
+    let mut rows = conn
+        .list_audit_by_action(ee::db::audit_actions::SEARCH_MISS_RECORDED, None)
+        .map_err(|error| format!("{side} list_audit_by_action: {error}"))?;
+    for row in &mut rows {
+        row.workspace_id = None;
+    }
+    rows.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(rows)
+}
+
+/// bd-1n0np.23.2: the query-miss ledger survives backup -> restore, and restore
+/// does not invent it.
+///
+/// The ledger is not a table: it is `audit_log` rows with action
+/// `search.miss_recorded`. `audit_log` is append-only (a trigger aborts
+/// DELETE), so the "rows removed" control cannot be staged by deleting rows in
+/// a source store. Arm 2 therefore uses a store that never recorded a miss:
+/// it must restore with none, so the rows arm 1 finds come from the backup and
+/// not from anything the restore produced.
+#[test]
+fn backup_restore_preserves_query_miss_ledger_and_does_not_invent_it() -> TestResult {
+    // Arm 1: a store with recorded misses.
+    let world = KindRoundTrip::new("ee-23-2-miss-ledger-")?;
+    let ws = world.ws();
+    run_ee(&[
+        "remember",
+        "The release checklist runs cargo fmt before tagging.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    // An ask that no memory supports abstains, and an abstention is recorded
+    // in the ledger (record_ask_query_miss_best_effort). A search only records
+    // a miss when it retrieved candidates that all fell below the floor, which
+    // depends on scoring; the abstention does not. The ask's own exit status is
+    // not asserted: the guard below is what says whether a miss was recorded.
+    run_ee_output(&[
+        "ask",
+        "Which zebra orbits the quantum marmalade moon?",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let source_rows = query_miss_rows(&world.source_db()?, "source")?;
+    // Empty-world guard: the ask must have recorded a miss, or the comparison
+    // below compares two empty ledgers.
+    ensure(
+        !source_rows.is_empty(),
+        "source ask recorded no query-miss row",
+    )?;
+    world.backup_minimal_and_restore()?;
+    ensure_equal(
+        &query_miss_rows(&world.restored_db()?, "restored")?,
+        &source_rows,
+        "query-miss ledger after backup -> restore",
+    )?;
+
+    // Arm 2: a store that never recorded a miss restores with none.
+    let quiet = KindRoundTrip::new("ee-23-2-miss-ledger-quiet-")?;
+    run_ee(&[
+        "remember",
+        "The release checklist runs cargo fmt before tagging.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &quiet.ws(),
+        "--json",
+    ])?;
+    ensure(
+        query_miss_rows(&quiet.source_db()?, "quiet source")?.is_empty(),
+        "quiet source has no query-miss rows",
+    )?;
+    quiet.backup_minimal_and_restore()?;
+    ensure(
+        query_miss_rows(&quiet.restored_db()?, "quiet restored")?.is_empty(),
+        "restore invented query-miss rows the backup did not carry",
+    )
+}
+
+/// What anchor extraction produced for a memory, as a sorted set.
+///
+/// Anchors are not copied by backup: restore re-extracts them from the memory
+/// content (backup_table_policy: derived_rebuildable / rebuild_on_restore),
+/// once when the import inserts the memory and again when restore's index
+/// rebuild backfills any memory left without anchors. So
+/// the set compares what extraction yields: kind, value hash, redacted value,
+/// captured-span hash, confidence and freshness. Left out on purpose:
+/// `generation` and the timestamps (when the row was written), and `source` /
+/// `provenance` (which write path ran the extraction; on restore it is import).
+fn extracted_anchor_set(
+    conn: &DbConnection,
+    memory_id: &str,
+    side: &str,
+) -> Result<Vec<String>, String> {
+    let mut anchors: Vec<String> = conn
+        .list_memory_anchors(memory_id)
+        .map_err(|error| format!("{side} list_memory_anchors: {error}"))?
+        .iter()
+        .map(|anchor| {
+            format!(
+                "{:?}|{}|{}|{}|{}|{:?}",
+                anchor.anchor_kind,
+                anchor.anchor_value_hash,
+                anchor.redacted_anchor_value,
+                anchor.captured_span_hash,
+                anchor.confidence,
+                anchor.freshness_state,
+            )
+        })
+        .collect();
+    anchors.sort();
+    Ok(anchors)
+}
+
+/// bd-1n0np.23.2: a restored memory's anchors are the same set its source had.
+#[test]
+fn backup_restore_re_extracts_the_same_memory_anchors() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-anchors-")?;
+    // Extraction is precision-first: it takes explicit `anchor:KIND:VALUE`
+    // tokens, schema IDs and code fragments, not bare prose paths.
+    let remembered = run_ee(&[
+        "remember",
+        "Backups carry ee.backup.recovery_inventory.v1; see anchor:path:src/core/backup.rs and anchor:env_var:EE_WORKSPACE.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--workspace",
+        &world.ws(),
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source_anchors = extracted_anchor_set(&world.source_db()?, &memory_id, "source")?;
+    // Empty-world guard: the content carries a schema ID and two explicit
+    // anchors, so extraction must have produced anchors, or the comparison
+    // below compares two empty sets.
+    ensure(
+        !source_anchors.is_empty(),
+        "source memory has no extracted anchors",
+    )?;
+
+    world.backup_minimal_and_restore()?;
+
+    ensure_equal(
+        &extracted_anchor_set(&world.restored_db()?, &memory_id, "restored")?,
+        &source_anchors,
+        "anchors re-extracted on restore",
+    )
+}
+
+/// The latest sentinel status per spec for one memory.
+fn sentinel_statuses(
+    conn: &DbConnection,
+    memory_id: &str,
+    side: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    Ok(conn
+        .latest_memory_sentinel_results_for_memory(memory_id)
+        .map_err(|error| format!("{side} latest_memory_sentinel_results_for_memory: {error}"))?
+        .into_iter()
+        .map(|result| (result.spec_hash, format!("{:?}", result.status)))
+        .collect())
+}
+
+/// Run `ee sentinel check` on a workspace. Its exit status is not asserted: a
+/// failing sentinel is a result, not a command error. The caller's guard on
+/// the stored results carries this output if nothing was recorded.
+fn sentinel_check(workspace: &str) -> Result<String, String> {
+    let output = run_ee_output(&["sentinel", "check", "--workspace", workspace, "--json"])?;
+    Ok(format!(
+        "exit {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    ))
+}
+
+/// bd-1n0np.23.2: sentinel results are not copied by backup. Restore records
+/// that they "must be checked afresh" (backup_table_policy:
+/// derived_rebuildable / rebuild_on_restore), so the oracle is a re-check:
+/// `ee sentinel check` on the restored store gives the same status per spec as
+/// it gave on the source. Both targets are independent of the working tree,
+/// because restore brings back the store, not the workspace's files.
+#[test]
+fn backup_restore_then_sentinel_recheck_reproduces_statuses() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-sentinel-results-")?;
+    let ws = world.ws();
+    let remembered = run_ee(&[
+        "remember",
+        "No generated file should exist, and EE_WORKSPACE stays a registered variable.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--sentinel",
+        "path_exists:no/such/generated/file.txt",
+        "--sentinel",
+        "env_var_registered:EE_WORKSPACE",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source_check = sentinel_check(&ws)?;
+    let source = sentinel_statuses(&world.source_db()?, &memory_id, "source")?;
+    // Empty-world guard: two specs were attached and checked, so there must be
+    // a result for each, or the comparison below compares two empty maps.
+    ensure(
+        source.len() == 2,
+        format!("expected a source result per spec, got {source:?}\n{source_check}"),
+    )?;
+
+    world.backup_minimal_and_restore()?;
+
+    let restored_check = sentinel_check(&world.side_path.to_string_lossy())?;
+    ensure_equal(
+        &sentinel_statuses(&world.restored_db()?, &memory_id, "restored")?,
+        &source,
+        &format!("sentinel statuses after restore and a re-check\n{restored_check}"),
+    )
+}
+
+/// bd-1n0np.23.2: workspace generations are not copied (backup_table_policy:
+/// derived_rebuildable / rebuild_on_restore); triggers on workspace and memory
+/// writes rebuild them while restore imports. The value counts writes, so a
+/// restored store legitimately differs from its source. The oracle is that the
+/// restored store HAS a generation and that it still increases on a new write.
+#[test]
+fn backup_restore_rebuilds_a_workspace_generation_that_still_increases() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-generation-")?;
+    run_ee(&[
+        "remember",
+        "Generations advance on every durable write.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &world.ws(),
+        "--json",
+    ])?;
+    let source_conn = world.source_db()?;
+    let source_workspace_id = workspace_id_from_db(&source_conn, &world.workspace)?;
+    // Empty-world guard: without a source generation there is nothing for the
+    // restore to have rebuilt.
+    ensure(
+        source_conn
+            .get_workspace_generation(&source_workspace_id)
+            .map_err(|error| format!("source get_workspace_generation: {error}"))?
+            .is_some(),
+        "source store has no workspace generation",
+    )?;
+    drop(source_conn);
+
+    world.backup_minimal_and_restore()?;
+
+    let restored_conn = world.restored_db()?;
+    let restored_workspace_id = workspace_id_from_db(&restored_conn, &world.side_path)?;
+    let restored = restored_conn
+        .get_workspace_generation(&restored_workspace_id)
+        .map_err(|error| format!("restored get_workspace_generation: {error}"))?
+        .ok_or("restored store has no workspace generation")?;
+    drop(restored_conn);
+    run_ee(&[
+        "remember",
+        "A write after restore advances the restored generation.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &world.side_path.to_string_lossy(),
+        "--json",
+    ])?;
+    let after_write = world
+        .restored_db()?
+        .get_workspace_generation(&restored_workspace_id)
+        .map_err(|error| format!("restored get_workspace_generation after write: {error}"))?
+        .ok_or("restored store lost its workspace generation after a write")?;
+    ensure(
+        after_write > restored,
+        format!("restored generation did not increase on a write: {restored} -> {after_write}"),
+    )
+}
+
+/// The `hash` of the hash-manifest entry with this `label`.
+fn attest_manifest_hash<'a>(attest: &'a JsonValue, label: &str) -> Option<&'a str> {
+    attest
+        .pointer("/data/bundle/hashManifest/entries")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("label").and_then(JsonValue::as_str) == Some(label))?
+        .get("hash")?
+        .as_str()
+}
+
+/// The `(id, contentHash)` of each evidence entry of this `kind`, sorted.
+fn attest_evidence(attest: &JsonValue, kind: &str) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = attest
+        .pointer("/data/bundle/evidenceManifest/entries")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("kind").and_then(JsonValue::as_str) == Some(kind))
+        .map(|entry| {
+            let field = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (field("id"), field("contentHash"))
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// The replacement hashes the redaction manifest records for this `field`, sorted.
+fn attest_redaction_hashes(attest: &JsonValue, field: &str) -> Vec<String> {
+    let mut hashes: Vec<String> = attest
+        .pointer("/data/bundle/redactionManifest/entries")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("field").and_then(JsonValue::as_str) == Some(field))
+        .filter_map(|entry| entry.get("replacementHash").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect();
+    hashes.sort();
+    hashes
+}
+
+/// The `field` of every omission the bundle declares.
+fn attest_omissions(attest: &JsonValue) -> Vec<String> {
+    attest
+        .pointer("/data/bundle/omissions")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|omission| omission.get("field").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// bd-1n0np.23.2: attestation bundles are not stored; `ee attest memory` builds
+/// one on read from the memory, its links, anchors, audit rows and seal. The
+/// bundle attests CUSTODY as well as content, and a restored memory's custody
+/// genuinely differs, so the oracle (orchestrator ruling, option a) is split:
+///
+/// - CONTENT is equal: the subject, the redacted content and links hashes, the
+///   memory's own evidence hash, and the anchors' ids and redacted values.
+/// - CUSTODY differs in exactly the intended ways: the import gives the memory
+///   a provenance URI (jsonl-import://..) that the public bundle omits, the
+///   re-extracted anchors carry that URI as their provenance, restore adds
+///   exactly one audit row for the memory, and so the provenance chain hash
+///   moves.
+/// - NOT ASSERTED in either direction: `memory.trust_validity`. A side-path
+///   restore currently downgrades trust (bd-cjt23 item 2, awaiting a ruling);
+///   pinning either value would red the day that is decided. The aggregate
+///   `memory.anchors` / `memory.audit` hashes and the bundle hash are not
+///   asserted separately: they are derived from the custody facts above.
+///
+/// `--redaction minimal` keeps the memory ID the bundle names.
+#[test]
+fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestResult {
+    let world = KindRoundTrip::new("ee-23-2-attestation-")?;
+    let ws = world.ws();
+    let remembered = run_ee(&[
+        "remember",
+        "Backups carry ee.backup.recovery_inventory.v1 and anchor:path:src/core/backup.rs.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?.to_owned();
+    let source = run_ee(&["attest", "memory", &memory_id, "--workspace", &ws, "--json"])?;
+    // Empty-world guard: the source attestation must name this memory and
+    // carry a bundle hash, or the comparison below compares two empty shapes.
+    ensure_equal(
+        &source
+            .pointer("/data/subjectId")
+            .and_then(JsonValue::as_str),
+        &Some(memory_id.as_str()),
+        "source attestation names the memory",
+    )?;
+    ensure(
+        source
+            .pointer("/data/bundleHash")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|hash| !hash.is_empty()),
+        "source attestation has a bundle hash",
+    )?;
+
+    world.backup_minimal_and_restore()?;
+
+    let restored = run_ee(&[
+        "attest",
+        "memory",
+        &memory_id,
+        "--workspace",
+        &world.side_path.to_string_lossy(),
+        "--json",
+    ])?;
+
+    // CONTENT: equal.
+    for pointer in ["/data/subjectKind", "/data/subjectId"] {
+        ensure_equal(
+            &restored.pointer(pointer),
+            &source.pointer(pointer),
+            pointer,
+        )?;
+    }
+    for label in ["memory.redacted_content", "memory.links"] {
+        ensure_equal(
+            &attest_manifest_hash(&restored, label),
+            &attest_manifest_hash(&source, label),
+            label,
+        )?;
+    }
+    ensure_equal(
+        &attest_evidence(&restored, "memory"),
+        &attest_evidence(&source, "memory"),
+        "the memory's own evidence entry (id and content hash)",
+    )?;
+    let anchor_ids = |attest: &JsonValue| -> Vec<String> {
+        attest_evidence(attest, "memory_anchor")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    ensure(
+        !anchor_ids(&source).is_empty(),
+        "source attestation has no anchor evidence",
+    )?;
+    ensure_equal(
+        &anchor_ids(&restored),
+        &anchor_ids(&source),
+        "anchor evidence ids",
+    )?;
+    for field in ["memory.content", "memoryAnchors[].redactedAnchorValue"] {
+        ensure_equal(
+            &attest_redaction_hashes(&restored, field),
+            &attest_redaction_hashes(&source, field),
+            field,
+        )?;
+    }
+
+    // CUSTODY: the provenance URI the import records, omitted from the public bundle.
+    ensure(
+        attest_redaction_hashes(&source, "memory.provenanceUri").is_empty(),
+        "the source memory has no provenance URI",
+    )?;
+    let restored_uri = attest_redaction_hashes(&restored, "memory.provenanceUri");
+    ensure_equal(
+        &restored_uri.len(),
+        &1,
+        "the restored memory carries one provenance URI",
+    )?;
+    let omission = "publicProjection.provenanceUri".to_owned();
+    ensure(
+        !attest_omissions(&source).contains(&omission)
+            && attest_omissions(&restored).contains(&omission),
+        "only the restored bundle declares the provenance URI omission",
+    )?;
+
+    // CUSTODY: the re-extracted anchors carry that URI as their provenance.
+    let restored_anchor_provenance =
+        attest_redaction_hashes(&restored, "memoryAnchors[].provenance");
+    ensure(
+        !restored_anchor_provenance.is_empty()
+            && restored_anchor_provenance
+                .iter()
+                .all(|hash| *hash == restored_uri[0])
+            && !attest_redaction_hashes(&source, "memoryAnchors[].provenance")
+                .contains(&restored_uri[0]),
+        format!(
+            "restored anchor provenance {restored_anchor_provenance:?} is not the restored \
+             provenance URI {}",
+            restored_uri[0]
+        ),
+    )?;
+
+    // CUSTODY: restore adds exactly one audit row and keeps every source row.
+    let source_audit = attest_evidence(&source, "audit_log");
+    let restored_audit = attest_evidence(&restored, "audit_log");
+    ensure(
+        restored_audit.len() == source_audit.len() + 1
+            && source_audit.iter().all(|row| restored_audit.contains(row)),
+        format!("audit evidence: source {source_audit:?}, restored {restored_audit:?}"),
+    )?;
+
+    // CUSTODY: the provenance chain therefore moves.
+    ensure(
+        attest_manifest_hash(&restored, "memory.provenance_chain")
+            != attest_manifest_hash(&source, "memory.provenance_chain"),
+        "the provenance chain hash did not change across restore",
+    )
+}
