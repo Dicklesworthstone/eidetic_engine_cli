@@ -4,14 +4,14 @@ on:
     branches: [main]
     paths:
       - 'src/core/context_task_paths.rs'
-      - 'scripts/delivery/pack-task-paths.py.xz.b64'
+      - 'scripts/delivery/pack-scope-explanations.patch.xz.b64'
       - 'tests/pack_task_paths_cli.py'
       - '.github/workflows/pack-task-paths.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: pack-task-paths-${{ github.ref }}
+  group: pack-task-scope-explanations-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   integrate:
@@ -31,33 +31,31 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Integrate explicit task-target admission and replay
+      - name: Preserve each selected rule's conditional applicability
         id: source
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          if ! grep -Fq 'mod task_paths;' src/core/context.rs; then
+          if ! grep -Fq 'and_then(task_paths::scope_explanation)' src/core/context.rs; then
             python3 - <<'PY'
           import base64, hashlib, lzma, os
           from pathlib import Path
-          encoded = Path('scripts/delivery/pack-task-paths.py.xz.b64').read_text()
-          script = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
-          if hashlib.sha256(script).hexdigest() != '8d60286efaeb05bf1518b995a5e6be3d8d527989227c3e7a57d31cc9d03bbf06':
-              raise SystemExit('Task-target integration checksum mismatch')
-          Path(os.environ['RUNNER_TEMP'], 'pack-task-integrate.py').write_bytes(script)
+          encoded = Path('scripts/delivery/pack-scope-explanations.patch.xz.b64').read_text()
+          patch = lzma.decompress(base64.b64decode(''.join(encoded.split()), validate=True))
+          if hashlib.sha256(patch).hexdigest() != 'b916c014779aab82d3396467941c789991e261d15aa7e70edb301448937d71ab':
+              raise SystemExit('Scope explanation patch checksum mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'pack-scope.patch').write_bytes(patch)
           PY
-            python3 "$RUNNER_TEMP/pack-task-integrate.py" > "$RUNNER_TEMP/pack-task-paths.txt"
-            files=(src/core/context_task_paths.rs)
-            while IFS= read -r path; do files+=("$path"); done < "$RUNNER_TEMP/pack-task-paths.txt"
-            for path in "${files[@]}"; do
-              case "$path" in *.rs) rustfmt --edition 2024 --config skip_children=true "$path";; esac
-            done
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/pack-scope.patch"
+            git apply "$RUNNER_TEMP/pack-scope.patch"
+            files=(src/core/context.rs src/core/context_task_paths.rs tests/pack_task_paths_cli.py)
+            rustfmt --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs
             python3 -m py_compile tests/pack_task_paths_cli.py
             git diff --check
             git add -- "${files[@]}"
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(pack): admit task-scoped rules with replayable literal targets' -m 'Carry repeated --task-path values through canonical pack, context alias and query-file builds. Validate relative literal paths with the rule writer safety boundary, apply live directory/file scopes, bind normalized targets into hashes and stream identities, preserve redacted replay records and rebuild commands, and bypass path-insensitive caches. Keep no-target output and hash bytes unchanged. Source edits passed unique-anchor validation and rustfmt; runtime verdicts are separate.'
+            git commit -m 'feat(pack): retain conditional rule applicability in mixed-target packs' -m 'Attach the admitted native directory/file pattern to each selected rule explanation without rewriting its source body. Account for the additional applicability text in candidate token estimates. Withhold private, control-bearing and oversized patterns before matching or public disclosure. Cover scope explanation, unchanged source bytes and mixed-target public selection.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -69,7 +67,7 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-source-sha.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src Cargo.toml Cargo.lock rust-toolchain.toml tests/pack_task_paths_cli.py docs/schemas/ee.pack.v2.json docs/schemas/ee.pack.stream.v1.json
+          git archive --format=tar.gz --output="$RUNNER_TEMP/task-pack-source.tar.gz" HEAD src/core/context.rs src/core/context_task_paths.rs tests/pack_task_paths_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -107,12 +105,12 @@ jobs:
             recall-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             exact-time-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             workspace-backup-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Exercise target scope and streaming regressions
+      - name: Exercise target scope, native authorization and streaming
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/task-pack-identity.log"
           failed=0
-          for group in core::context::task_paths::tests output::streaming::tests; do
+          for group in core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
             log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
             if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1
