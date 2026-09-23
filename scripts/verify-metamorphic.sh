@@ -68,6 +68,8 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
             UNTESTED=$((UNTESTED + 1))
             continue
             ;;
+        out_of_scope) continue ;; # never run; listed by the ratchet line
+
         coverage | gap) ;;
         *)
             FAIL=$((FAIL + 1))

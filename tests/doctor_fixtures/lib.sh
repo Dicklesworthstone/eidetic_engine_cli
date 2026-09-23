@@ -409,6 +409,8 @@ doctor_fixture_assert_report_only() {
 #   coverage  REPAIR, GUIDANCE-ONLY: must pass.
 #   gap       NOT-DETECTED, PINNED-DEFECT: must still reproduce its pinned gap.
 #   untested  UNCLASSIFIED, UNRESOLVED: marker-only; never a pass, never a failure.
+#   out_of_scope  OUT-OF-SCOPE: not a doctor failure mode (manifest scopeReason);
+#             never run, never a pass, pinned by exact id in the ratchet.
 #   unknown:<label>  anything else, including a fixture missing from the manifest.
 doctor_fixture_bucket() {
     local fm_id="${1:?fm id required}"
@@ -419,6 +421,7 @@ doctor_fixture_bucket() {
         REPAIR | GUIDANCE-ONLY) printf 'coverage\n' ;;
         NOT-DETECTED | PINNED-DEFECT) printf 'gap\n' ;;
         UNCLASSIFIED | UNRESOLVED) printf 'untested\n' ;;
+        OUT-OF-SCOPE) printf 'out_of_scope\n' ;;
         *) printf 'unknown:%s\n' "$label" ;;
     esac
 }
@@ -435,28 +438,43 @@ doctor_fixture_label() {
 # directions: more untested fixtures than the pin fails (a new fixture must
 # arrive classified), and fewer also fails until the pin is lowered in the same
 # commit that classified the fixture, so the pin can only move down.
-DOCTOR_FIXTURE_PIN_UNCLASSIFIED=14
+DOCTOR_FIXTURE_PIN_UNCLASSIFIED=12
 DOCTOR_FIXTURE_PIN_UNRESOLVED=1
+# OUT-OF-SCOPE fixtures are pinned by EXACT id (bd-2oh15 ruling on c9985), so
+# relabelling a fixture OUT-OF-SCOPE can never be used to satisfy the pins
+# above. Sorted, space separated. Each carries a manifest scopeReason.
+DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS="fm-policy_safety-redaction-class-coverage-gap fm-policy_safety-trauma-guard-policy-denied-exit-7"
 
 # Counts the UNCLASSIFIED and UNRESOLVED fixture directories under
 # <fixtures_src>, prints the counts for <harness>, and fails unless both equal
-# their pins.
+# their pins. Also prints the OUT-OF-SCOPE set on its own line and fails
+# unless it equals DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS exactly.
 doctor_fixture_untested_ratchet() {
     local harness="${1:?harness name required}"
     local src="${2:?fixtures source required}"
     local manifest="$src/manifest.json"
-    local unclassified=0 unresolved=0 fm_dir label
+    local unclassified=0 unresolved=0 out_of_scope="" fm_dir fm_id label
     for fm_dir in "$src"/fm-*; do
         [ -d "$fm_dir" ] || continue
-        label="$(doctor_fixture_label "$(basename "$fm_dir")" "$manifest")"
+        fm_id="$(basename "$fm_dir")"
+        label="$(doctor_fixture_label "$fm_id" "$manifest")"
         case "$label" in
             UNCLASSIFIED) unclassified=$((unclassified + 1)) ;;
             UNRESOLVED) unresolved=$((unresolved + 1)) ;;
+            OUT-OF-SCOPE) out_of_scope="$out_of_scope $fm_id" ;;
         esac
     done
+    out_of_scope="$(printf '%s\n' $out_of_scope | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')"
     printf '%s: %s UNCLASSIFIED (not tested, pin %s); %s UNRESOLVED (not tested, pin %s)\n' \
         "$harness" "$unclassified" "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" \
         "$unresolved" "$DOCTOR_FIXTURE_PIN_UNRESOLVED" >&2
+    printf '%s: %s OUT-OF-SCOPE (not doctor failure modes; never run, never a pass): %s\n' \
+        "$harness" "$(printf '%s\n' $out_of_scope | grep -c .)" "${out_of_scope:-none}" >&2
+    if [ "$out_of_scope" != "$DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS" ]; then
+        printf '%s: OUT-OF-SCOPE set changed; it is pinned by exact id (expected: %s)\n' \
+            "$harness" "$DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS" >&2
+        return 1
+    fi
     if [ "$unclassified" -gt "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" ] ||
         [ "$unresolved" -gt "$DOCTOR_FIXTURE_PIN_UNRESOLVED" ]; then
         printf '%s: UNTESTED ratchet exceeded; classify the new fixture instead of raising the pin\n' \

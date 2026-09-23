@@ -23,9 +23,17 @@ Every fixture carries exactly one label, in the manifest and in its spec:
 | PINNED-DEFECT | Detected, but `--fix` behaves wrongly; the fixture pins the named defect bead until it is fixed. | **no**: reported as a GAP |
 | UNRESOLVED | A real trigger has been attempted and did not yet produce the failure. | no |
 | UNCLASSIFIED | Marker-only: no real trigger has been built. | no |
+| OUT-OF-SCOPE | Not a doctor failure mode (a correct command outcome, or state another subsystem owns). Marker-only, never run, and it carries a manifest `scopeReason`: a category, the enumerated search, and file:line citations. | **no**: never a pass, listed on its own line |
 
 A NOT-DETECTED or PINNED-DEFECT fixture passing means the gap is still there.
 When a detector or fix lands, the fixture goes red on purpose and is relabelled.
+
+The UNCLASSIFIED and UNRESOLVED counts are held to one shared pin in
+`tests/doctor_fixtures/lib.sh` (`doctor_fixture_untested_ratchet`), which every
+counting sub-harness enforces. The pin is exact in both directions, so it drops
+in the same commit that classifies a fixture and never rises. The OUT-OF-SCOPE
+set is pinned by exact id, so relabelling a fixture OUT-OF-SCOPE can never
+satisfy the pin.
 
 ## Spec fields
 
@@ -63,13 +71,15 @@ mapped fixture's manifest severity).
 - The scorer also wrote the P0 fixtures and had seen the manifest. Independence
   rests on the blind inventory, not on the scoring step.
 - The failure-class list may be incomplete.
-- Six manifest FMs are outside the doctor surface and are not in the population:
-  `fm-state_files-jsonl-tombstone-drift`,
-  `fm-state_files-workspace-ambiguous-multiple-candidates`,
-  `fm-workspace_config-nested-ee-markers`,
-  `fm-agent_coordination-mcp-agent-mail-file-reservation-conflict`,
-  `fm-policy_safety-trauma-guard-policy-denied-exit-7` and
-  `fm-policy_safety-redaction-class-coverage-gap`. All six are UNCLASSIFIED.
+- Six manifest FMs were outside the blind inventory's doctor surface and are
+  not in the population. An enumerated code search (bd-2oh15 c9985) then
+  settled them. `fm-policy_safety-trauma-guard-policy-denied-exit-7` (a correct
+  command outcome) and `fm-policy_safety-redaction-class-coverage-gap` (mesh
+  lane policy) are OUT-OF-SCOPE. `fm-state_files-jsonl-tombstone-drift` (the
+  FM-SF-02 family), `fm-agent_coordination-mcp-agent-mail-file-reservation-conflict`
+  (FM-AC-01), `fm-state_files-workspace-ambiguous-multiple-candidates` and
+  `fm-workspace_config-nested-ee-markers` are doctor-owned and still
+  UNCLASSIFIED until their NOT-DETECTED fixtures are built.
 - Five fixtures were P0 in the manifest but score P1: `index_corrupt`,
   `cass_not_found`, `rch-workers-all-blocked-by-pressure`,
   `snapshot-write-lock-held` and `merge-conflict-markers`. By the bd-2oh15
