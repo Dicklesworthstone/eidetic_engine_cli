@@ -19,70 +19,7 @@ concurrency:
   group: task-pack-committed-verification-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: macos-14
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.source.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: main
-          fetch-depth: 0
-      - name: Finish no-target benchmark callers and retire source writes
-        id: source
-        run: |
-          set -euo pipefail
-          base=$(git rev-parse HEAD)
-          grep -Fq 'fn pack_record_task_path_hashes(' src/cli/mod.rs
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
-          prepared = {}
-          for name in ['tiered_recall.rs', 'context.rs', 'pack_size.rs', 'graph_full_stack.rs', 'context_with_ppr.rs']:
-              path = Path('benches', name)
-              text = path.read_text()
-              old = r'ContextPackOptions \{\n([ \t]*)task_lens: None,'
-              matches = list(re.finditer(old, text))
-              if len(matches) == 1:
-                  prepared[path] = re.sub(old, lambda m: 'ContextPackOptions {\n' + m[1] + 'task_paths: Vec::new(),\n' + m[1] + 'task_lens: None,', text)
-              elif 'task_paths: Vec::new(),' not in text:
-                  raise SystemExit(f'Unexpected benchmark constructor: {name}')
-          path = Path('.github/workflows/pack-task-paths.yml')
-          text = path.read_text()
-          start = text.index('  integrate:\n')
-          end = text.index('  verify:\n', start)
-          text = text[:start] + text[end:]
-          text = text.replace('    needs: integrate\n', '')
-          text = '\n'.join(line for line in text.split('\n') if 'needs.integrate.outputs.source' not in line)
-          if 'contents: write' in text or 'needs.integrate' in text:
-              raise SystemExit('Verification must not retain source-write authority')
-          prepared[path] = text
-          for path, text in prepared.items():
-              path.write_text(text)
-          PY
-          files=(benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs .github/workflows/pack-task-paths.yml)
-          git diff --check
-          git add -- "${files[@]}"
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(pack): retain no-target benchmark behavior after scoped-pack migration' -m 'Complete all five benchmark option constructors without changing benchmark workloads. Retire temporary source integration and contents-write permissions; future task-pack runs compile and exercise committed source only, including the public scoped selection, replay, diff and stream journey.'
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 3
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${files[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify:
-    needs: integrate
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -97,7 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.integrate.outputs.source }}
           persist-credentials: false
       - name: Record exact committed source
         run: |
