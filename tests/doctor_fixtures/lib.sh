@@ -69,6 +69,60 @@ doctor_fixture_assert_health_report() {
     fi
 }
 
+# Guidance-only failure modes (bd-2oh15, orchestrator decision C): doctor's
+# repair for these writes state that cannot pass through
+# doctor_runtime::mutate() or be undone (for example, an index rebuild writes
+# SQLite rows), so doctor records guidance instead of repairing. The contract is
+# honesty, not repair: --fix must report the finding as guidance_recorded and
+# never as applied, the finding must still be reported afterwards, and the path
+# the real repair would create must still be absent.
+doctor_fixture_assert_guidance_only() {
+    local fm_id="${1:?fm id required}"
+    local finding_code="${2:?finding code required}"
+    local check_name="${3:?check name required}"
+    local error_code="${4:?error code required}"
+    local absent_rel="${5:?path that must stay absent required}"
+    local target
+    target="$(doctor_fixture_target)"
+    test -f "$(doctor_fixture_marker_dir "$target")/$fm_id.json"
+    if [ "${EE_DOCTOR_FIXTURE_RUN_EE:-0}" != "1" ]; then
+        printf 'fixture assert: %s requires EE_DOCTOR_FIXTURE_RUN_EE=1; marker-only checks are insufficient\n' \
+            "$fm_id" >&2
+        return 2
+    fi
+    local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
+    "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json"
+    if ! jq -es --arg code "$finding_code" '
+        length == 1 and (.[0] |
+            .schema == "ee.response.v2" and .success == true and
+            (.data.guidanceOnlyFixerCount | type == "number" and . >= 1) and
+            (.data.fixerResults | type == "array") and
+            any(.data.fixerResults[]; .findingCode == $code and .outcome == "guidance_recorded") and
+            all(.data.fixerResults[]; .findingCode != $code or .outcome == "guidance_recorded"))
+    ' "$target/.fixture_baseline/doctor-fix.json" >/dev/null; then
+        printf 'fixture assert: %s fix did not record %s as guidance_recorded; see %s\n' \
+            "$fm_id" "$finding_code" "$target/.fixture_baseline/doctor-fix.json" >&2
+        return 1
+    fi
+    "$ee_bin" doctor --workspace "$target" --json > "$target/.fixture_baseline/doctor-after.json"
+    if ! jq -es --arg check "$check_name" --arg error "$error_code" '
+        length == 1 and (.[0] |
+            .schema == "ee.response.v2" and .success == true and
+            .data.healthy == false and
+            any(.data.actionable[]; .name == $check and .errorCode == $error))
+    ' "$target/.fixture_baseline/doctor-after.json" >/dev/null; then
+        printf 'fixture assert: %s after guidance, doctor no longer reports %s %s; a real repair happened or the report is unreadable; see %s\n' \
+            "$fm_id" "$check_name" "$error_code" "$target/.fixture_baseline/doctor-after.json" >&2
+        return 1
+    fi
+    if [ -e "$target/$absent_rel" ] || [ -L "$target/$absent_rel" ]; then
+        printf 'fixture assert: %s guidance-only fix created %s\n' "$fm_id" "$absent_rel" >&2
+        return 1
+    fi
+    printf 'guidance-only fixture confirmed: %s (%s guidance_recorded, %s %s unchanged)\n' \
+        "$fm_id" "$finding_code" "$check_name" "$error_code" >&2
+}
+
 doctor_fixture_assert() {
     local fm_id="${1:?fm id required}"
     local severity="${2:?severity required}"

@@ -50,7 +50,11 @@ verifies the assertion helper, not real doctor repairs.
 
 The suite remains incomplete (bd-2oh15): `fm-search_indexes-index_missing` now
 initializes a real workspace, requires a healthy baseline, preserves the index
-by moving it aside, and requires a real `EE-E300` diagnostic. The other 24
+by moving it aside, and requires a real `EE-E300` diagnostic. It is a
+guidance-only failure mode (orchestrator decision C): its `assert.sh` uses
+`doctor_fixture_assert_guidance_only`, which requires `doctor --fix` to report
+`guidance_recorded` (never `applied`) and the finding to remain, instead of a
+repair round trip. The other 24
 corruption scripts still write markers rather than their named corruptions.
 The independently scored
 failure-mode population and eight referenced repair specs are absent. Also,
