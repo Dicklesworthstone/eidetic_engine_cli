@@ -504,9 +504,11 @@ assert_jq_file "$BACKUP_MANIFEST" \
 assert_jq_file "$BACKUP_MANIFEST" \
     '.coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and all(.assets[]; .hashPolicy == "blake3_required" and .missingAssetFailure == "degraded_not_silent_loss" and .coverageSurfaces == ["backup_create","backup_inspect","backup_verify","backup_restore","manifest_rehash","roundtrip_e2e"] and ((.roundTripEvidence // "") | length > 0))' \
     "backup assets declare full fail-visible coverage surfaces"
+# complianceStatus has two legal values (bd-nwyir). A row may admit it is not
+# conformant, but only while its round-trip evidence is still planned.
 assert_jq_file "$BACKUP_MANIFEST" \
-    'all(.assetCoverageMatrix[]; .complianceStatus == "declared_conformant" and .scoreMilli >= 950 and .divergent == 0)' \
-    "backup coverage matrix is conformant"
+    'all(.assetCoverageMatrix[]; (.complianceStatus == "declared_conformant" and .scoreMilli >= 950 and .divergent == 0) or (.complianceStatus == "not_conformant_evidence_pending" and .roundTripEvidenceStatus == "planned_contract_only"))' \
+    "backup coverage matrix claims are consistent with their evidence"
 # shellcheck disable=SC2016
 assert_jq_file "$BACKUP_MANIFEST" \
     '(.assets[] | select(.assetKind == "memory_anchors") | .privacyContract) as $p | $p.rawAnchorValuesAllowed == false and $p.valueMaterialPolicy == "hash_or_redacted_only" and $p.manifestRedactionClass == "hash" and $p.restoreValidation == "hashes_roundtrip_without_raw_values" and (($p.forbiddenFields | sort) == ["anchor_value","raw_anchor_value","raw_command","raw_path","raw_schema","raw_symbol"]) and ($p.serializedFields | index("anchor_value") == null) and ($p.serializedFields | index("raw_anchor_value") == null) and ($p.serializedFields | index("raw_path") == null)' \

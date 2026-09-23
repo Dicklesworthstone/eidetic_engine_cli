@@ -459,38 +459,7 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
             ));
         }
 
-        let must_clauses = u64_field(row, "/mustClauses", &context)?;
-        let tested = u64_field(row, "/tested", &context)?;
-        let passing = u64_field(row, "/passing", &context)?;
-        let divergent = u64_field(row, "/divergent", &context)?;
-        if must_clauses != REQUIRED_ASSET_MUST_CLAUSES {
-            return Err(format!(
-                "{context}: mustClauses must stay {REQUIRED_ASSET_MUST_CLAUSES}"
-            ));
-        }
-        if tested != must_clauses || passing != tested || divergent != 0 {
-            return Err(format!(
-                "{context}: tested, passing, and divergent must describe full conformance"
-            ));
-        }
-
-        let score_milli = u64_field(row, "/scoreMilli", &context)?;
-        let computed_score = passing * 1000 / must_clauses;
-        if score_milli != computed_score {
-            return Err(format!(
-                "{context}: scoreMilli must be {computed_score}, got {score_milli}"
-            ));
-        }
-        if score_milli < MIN_MUST_COVERAGE_MILLI {
-            return Err(format!(
-                "{context}: scoreMilli {score_milli} is below {MIN_MUST_COVERAGE_MILLI}"
-            ));
-        }
-        if string_field(row, "/complianceStatus", &context)? != "declared_conformant" {
-            return Err(format!(
-                "{context}: complianceStatus must be declared_conformant"
-            ));
-        }
+        row_compliance_error(row, &context)?;
     }
 
     if matrix_kinds != expected_kinds {
@@ -498,6 +467,159 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
             "assetCoverageMatrix drifted: missing={:?}, extra={:?}",
             expected_kinds.difference(&matrix_kinds).collect::<Vec<_>>(),
             matrix_kinds.difference(&expected_kinds).collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
+/// The two values `complianceStatus` may hold (bd-nwyir). Until this pair
+/// existed the field had ONE legal value, so "11 of 11 conformant" restated the
+/// row count instead of measuring anything: no row could record the truth.
+const DECLARED_CONFORMANT: &str = "declared_conformant";
+const NOT_CONFORMANT_EVIDENCE_PENDING: &str = "not_conformant_evidence_pending";
+
+/// Check one matrix row's compliance claim against its own counters and its
+/// round-trip evidence status.
+///
+/// `declared_conformant` keeps every full-conformance check. The pending value
+/// is legal only while round-trip evidence is planned, and its counters need
+/// only be internally consistent: a row that has not been round-tripped must
+/// not be forced to report full coverage. Rows declared conformant on
+/// planned-only evidence stay governed by the grandfathered ratchet in
+/// `conformance_is_never_declared_on_planned_only_evidence`.
+fn row_compliance_error(row: &Value, context: &str) -> TestResult {
+    let must_clauses = u64_field(row, "/mustClauses", context)?;
+    let tested = u64_field(row, "/tested", context)?;
+    let passing = u64_field(row, "/passing", context)?;
+    let divergent = u64_field(row, "/divergent", context)?;
+    if must_clauses != REQUIRED_ASSET_MUST_CLAUSES {
+        return Err(format!(
+            "{context}: mustClauses must stay {REQUIRED_ASSET_MUST_CLAUSES}"
+        ));
+    }
+
+    let score_milli = u64_field(row, "/scoreMilli", context)?;
+    let computed_score = passing * 1000 / must_clauses;
+    if score_milli != computed_score {
+        return Err(format!(
+            "{context}: scoreMilli must be {computed_score}, got {score_milli}"
+        ));
+    }
+
+    match string_field(row, "/complianceStatus", context)? {
+        DECLARED_CONFORMANT => {
+            if tested != must_clauses || passing != tested || divergent != 0 {
+                return Err(format!(
+                    "{context}: tested, passing, and divergent must describe full conformance"
+                ));
+            }
+            if score_milli < MIN_MUST_COVERAGE_MILLI {
+                return Err(format!(
+                    "{context}: scoreMilli {score_milli} is below {MIN_MUST_COVERAGE_MILLI}"
+                ));
+            }
+        }
+        NOT_CONFORMANT_EVIDENCE_PENDING => {
+            if string_field(row, "/roundTripEvidenceStatus", context)? != "planned_contract_only" {
+                return Err(format!(
+                    "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} is only legal while \
+                     roundTripEvidenceStatus is planned_contract_only"
+                ));
+            }
+            if tested > must_clauses || passing > tested || divergent > tested {
+                return Err(format!(
+                    "{context}: tested, passing, and divergent must be consistent with mustClauses"
+                ));
+            }
+        }
+        other => {
+            return Err(format!(
+                "{context}: complianceStatus must be {DECLARED_CONFORMANT} or \
+                 {NOT_CONFORMANT_EVIDENCE_PENDING}, got {other}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn compliance_status_can_record_non_conformance_but_only_on_planned_evidence() -> TestResult {
+    let row = |compliance: &str, evidence: &str, tested: u64, passing: u64, divergent: u64| {
+        serde_json::json!({
+            "complianceStatus": compliance,
+            "roundTripEvidenceStatus": evidence,
+            "mustClauses": REQUIRED_ASSET_MUST_CLAUSES,
+            "tested": tested,
+            "passing": passing,
+            "divergent": divergent,
+            "scoreMilli": passing * 1000 / REQUIRED_ASSET_MUST_CLAUSES,
+        })
+    };
+    let full = REQUIRED_ASSET_MUST_CLAUSES;
+
+    // A: a conformant row with runtime evidence and full counters stays legal.
+    row_compliance_error(
+        &row(
+            DECLARED_CONFORMANT,
+            "runtime_evidence_declared",
+            full,
+            full,
+            0,
+        ),
+        "arm A",
+    )?;
+    // B: the state no row could express before bd-nwyir -- not conformant,
+    // evidence pending, nothing tested.
+    row_compliance_error(
+        &row(
+            NOT_CONFORMANT_EVIDENCE_PENDING,
+            "planned_contract_only",
+            0,
+            0,
+            0,
+        ),
+        "arm B",
+    )?;
+    // C: pending cannot be claimed over declared runtime evidence.
+    let c = row_compliance_error(
+        &row(
+            NOT_CONFORMANT_EVIDENCE_PENDING,
+            "runtime_evidence_declared",
+            0,
+            0,
+            0,
+        ),
+        "arm C",
+    );
+    if !c.as_ref().is_err_and(|e| e.contains("only legal while")) {
+        return Err(format!(
+            "arm C must be rejected for its evidence status, got {c:?}"
+        ));
+    }
+    // D: no third value.
+    let d = row_compliance_error(&row("bogus", "planned_contract_only", 0, 0, 0), "arm D");
+    if !d
+        .as_ref()
+        .is_err_and(|e| e.contains("must be declared_conformant or"))
+    {
+        return Err(format!(
+            "arm D must be rejected as an unknown value, got {d:?}"
+        ));
+    }
+    // E: widening the domain did not loosen the conformant branch.
+    let e = row_compliance_error(
+        &row(
+            DECLARED_CONFORMANT,
+            "runtime_evidence_declared",
+            full,
+            full - 1,
+            0,
+        ),
+        "arm E",
+    );
+    if !e.as_ref().is_err_and(|e| e.contains("full conformance")) {
+        return Err(format!(
+            "arm E must keep the full-conformance check, got {e:?}"
         ));
     }
     Ok(())
@@ -748,6 +870,7 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
         "full_surface_set_declared",
         "privacy_contract_enforced",
         "declared_conformant",
+        "not_conformant_evidence_pending",
         "failureScenarios",
         "missing_derived_asset",
         "corrupt_derived_asset_hash",

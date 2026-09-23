@@ -99,10 +99,23 @@ backup surfaces from the checklist. `roundTripEvidenceStatus` is currently
 work has not landed yet. `privacyStatus=privacy_contract_enforced` applies to
 `memory_anchors`; assets without a privacy contract use `not_applicable`.
 
+`complianceStatus` takes one of two values, and the gate ties each to the
+row's evidence:
+
+- `declared_conformant` requires `mustClauses=10`, `tested=10`, `passing=10`,
+  `divergent=0` and `scoreMilli` at or above 950.
+- `not_conformant_evidence_pending` is legal only while
+  `roundTripEvidenceStatus=planned_contract_only`. Its counters must be
+  internally consistent (`tested` at most `mustClauses`, `passing` at most
+  `tested`, `scoreMilli` computed from `passing`) but are not forced to full
+  coverage, so a row that has not been round-tripped can say so.
+
 Every row currently carries `mustClauses=10`, `tested=10`, `passing=10`,
-`divergent=0`, `scoreMilli=1000`, and
-`complianceStatus=declared_conformant`. If a future row diverges, the matrix
-should make the gap visible instead of hiding it in prose.
+`divergent=0`, `scoreMilli=1000`, and `complianceStatus=declared_conformant`,
+all on planned-only evidence. Those eleven claims are unresolved and are held
+in a ratchet list pending a recorded decision on bd-nwyir; they are not
+approved. Until the field could hold a second value, no row could make that
+gap visible.
 
 ## Failure Scenarios
 
