@@ -117,6 +117,19 @@ def main() -> None:
     shown = execute('context-show', pack_id)
     assert shown['pack']['taskPaths'] == records, shown
 
+    # Same query and matching guidance, but a different literal task scope.
+    other_paths = ['src/payments/other.rs', 'tests/expiry.rs']
+    different_scope = pack(other_paths, persist=True)
+    assert different_scope['pack']['hash'] != persisted['pack']['hash']
+    other_id = execute('why', sources[0])['selection']['latestPackSelection']['packId']
+    assert other_id != pack_id
+    compared = execute('pack', 'diff', pack_id, other_id)['diff']
+    assert compared['summary']['replayable'] is True and compared['summary']['hashMatch'] is False, compared
+    assert 'task_paths_changed' in compared['likelyCauses'], compared
+    assert 'memory_or_index_state_changed' not in compared['likelyCauses'], compared
+    identical = execute('pack', 'diff', pack_id, pack_id)['diff']
+    assert identical['summary']['hashMatch'] is True and identical['likelyCauses'] == ['no_change'], identical
+
     stream = execute('pack', query, *flags, '--task-path', paths[0], '--stream', '--read-only', frames=True)
     headers = [frame for frame in stream if frame.get('kind') == 'header']
     assert len(headers) == 1 and headers[0]['taskPaths'] == [paths[0]], stream

@@ -98,3 +98,45 @@ fn existing_stream_format_validation_keeps_machine_frame_contract() {
         );
     }
 }
+
+#[test]
+fn task_target_diff_uses_commitments_not_private_display_wrappers() {
+    let hash = format!("blake3:{}", blake3::hash(b"src/payments/a.rs").to_hex());
+    let plain = ParsedPackLedger::trusted_for_test(serde_json::json!({
+        "request": {"taskPaths": [{"hash": hash, "text": "src/payments/a.rs", "redacted": false}]}
+    }));
+    let hidden = ParsedPackLedger::trusted_for_test(serde_json::json!({
+        "request": {"taskPaths": [{"hash": hash, "redactedText": "[redacted]", "redacted": true}]}
+    }));
+    assert_eq!(
+        pack_record_task_path_hashes(&plain),
+        pack_record_task_path_hashes(&hidden)
+    );
+    let other = ParsedPackLedger::trusted_for_test(serde_json::json!({
+        "request": {"taskPaths": [{"hash": format!("blake3:{}", blake3::hash(b"src/payments/b.rs").to_hex())}]}
+    }));
+    assert_ne!(
+        pack_record_task_path_hashes(&plain),
+        pack_record_task_path_hashes(&other)
+    );
+}
+
+#[test]
+fn historical_missing_targets_compare_as_empty_and_untrusted_ledgers_stay_unavailable() {
+    let historical = ParsedPackLedger::trusted_for_test(serde_json::json!({"request": {}}));
+    let empty =
+        ParsedPackLedger::trusted_for_test(serde_json::json!({"request": {"taskPaths": []}}));
+    assert_eq!(
+        pack_record_task_path_hashes(&historical),
+        pack_record_task_path_hashes(&empty)
+    );
+    for status in [
+        PackLedgerStatus::Missing,
+        PackLedgerStatus::Malformed,
+        PackLedgerStatus::HashMismatch,
+    ] {
+        let untrusted = ParsedPackLedger::unavailable_for_test(status, vec![]);
+        assert!(available_pack_ledger(&untrusted).is_none());
+        assert!(pack_record_task_path_hashes(&untrusted).is_empty());
+    }
+}

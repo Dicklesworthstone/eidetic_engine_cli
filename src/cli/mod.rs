@@ -46812,6 +46812,19 @@ fn set_diff_values(
         .collect()
 }
 
+// Called only after the central replay gate admitted both records. Compare
+// target commitments rather than redaction/display wrappers, and treat old
+// ledgers without task paths as the historical empty target set.
+fn pack_record_task_path_hashes(ledger: &ParsedPackLedger) -> BTreeSet<String> {
+    pack_record_request_value(ledger, "taskPaths")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|record| record.get("hash").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn collect_pack_diff(
     record_a: &crate::db::StoredPackRecord,
     ledger_a: &ParsedPackLedger,
@@ -46952,6 +46965,9 @@ fn collect_pack_diff(
     }
     if record_a.query != record_b.query {
         likely_causes.insert("query_changed");
+    }
+    if pack_record_task_path_hashes(ledger_a) != pack_record_task_path_hashes(ledger_b) {
+        likely_causes.insert("task_paths_changed");
     }
     if record_a.profile != record_b.profile {
         likely_causes.insert("profile_changed");

@@ -454,6 +454,7 @@
       "enum": [
         "ledger_unavailable_or_untrusted",
         "query_changed",
+        "task_paths_changed",
         "profile_changed",
         "budget_changed",
         "derived_asset_changed",
