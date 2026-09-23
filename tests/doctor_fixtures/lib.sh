@@ -20,14 +20,84 @@ doctor_fixture_content_digest() {
     # Exclude the doctor's own audit trail, the fixture's baseline directory,
     # the test wrapper's assert.* capture files, and macOS HFS+/ExFAT resource
     # fork sidecars (the `._*` files that appear on non-HFS volumes).
+    #
+    # Two runtime files are CLASSIFIED rather than byte-compared (bd-2oh15,
+    # orchestrator decision on c9818). A real doctor fix + undo changed exactly
+    # these two outside .doctor/:
+    # - `ee.db-shm` is excluded: a transient SQLite shared-memory index derived
+    #   from the WAL and rewritten by readers. It holds no source of truth.
+    # - `ee.write.lock` is excluded from the BYTES but checked by its semantics
+    #   (doctor_fixture_assert_write_lock_monotonic): a monotonic epoch counter
+    #   that no honest undo can restore.
+    # Everything else, including ee.db, ee.db-wal and .doctor.lock, stays
+    # byte-compared.
     find "$target" -type f \
         -not -path '*/.doctor/*' \
         -not -path '*/.fixture_baseline/*' \
         -not -path '*/.ee/doctor-fixtures/*' \
+        -not -path '*/.ee/ee.db-shm' \
+        -not -path '*/.ee/ee.write.lock' \
         -not -name '.assert.stdout' \
         -not -name '.assert.stderr' \
         -not -name '._*' \
         -exec shasum -a 256 -- {} + | LC_ALL=C sort | shasum -a 256
+}
+
+# Print the flock-gate epoch stored in an ee.write.lock file, or fail. Format
+# (src/db/mod.rs read_flock_gate_epoch): exactly 21 bytes, 20 ASCII digits,
+# then a newline; a zero-padded decimal u64. Anything else is unreadable.
+doctor_fixture_write_lock_epoch() {
+    local lock="${1:?lock path required}"
+    [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+    [ "$(wc -c < "$lock" | tr -d ' ')" = "21" ] || return 1
+    local digits
+    digits="$(head -c 20 "$lock")"
+    [[ "$digits" =~ ^[0-9]{20}$ ]] || return 1
+    # The 21st byte must be the newline (command substitution strips it).
+    [ -z "$(tail -c 1 "$lock")" ] || return 1
+    printf '%s\n' "$digits"
+}
+
+doctor_fixture_record_write_lock() {
+    local target="${1:?target required}"
+    local lock="$target/.ee/ee.write.lock"
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+        if ! doctor_fixture_write_lock_epoch "$lock" > "$target/.fixture_baseline/write-lock.before"; then
+            printf 'fixture corrupt: baseline ee.write.lock is unreadable: %s\n' "$lock" >&2
+            return 1
+        fi
+    else
+        printf 'absent\n' > "$target/.fixture_baseline/write-lock.before"
+    fi
+}
+
+# ee.write.lock is a monotonic epoch: after undo it must still exist and its
+# epoch must be >= the baseline. The fixed-width 20-digit encoding makes a string
+# comparison exact. A lock absent at the baseline must stay absent: a created
+# lock is a new path the byte digest no longer sees.
+doctor_fixture_assert_write_lock_monotonic() {
+    local fm_id="${1:?fm id required}"
+    local target="${2:?target required}"
+    local lock="$target/.ee/ee.write.lock"
+    local before after
+    before="$(cat "$target/.fixture_baseline/write-lock.before")"
+    if [ "$before" = "absent" ]; then
+        if [ -e "$lock" ] || [ -L "$lock" ]; then
+            printf 'fixture assert: ee.write.lock was absent at the baseline but exists after undo for %s\n' \
+                "$fm_id" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if ! after="$(doctor_fixture_write_lock_epoch "$lock")"; then
+        printf 'fixture assert: ee.write.lock is missing or unreadable after undo for %s\n' "$fm_id" >&2
+        return 1
+    fi
+    if [[ "$after" < "$before" ]]; then
+        printf 'fixture assert: ee.write.lock epoch went backwards (%s -> %s) for %s\n' \
+            "$before" "$after" "$fm_id" >&2
+        return 1
+    fi
 }
 
 doctor_fixture_corrupt() {
@@ -42,6 +112,7 @@ doctor_fixture_corrupt() {
     # Hash each regular file's bytes AND its pathname, then hash the sorted
     # manifest. A same-name content change must not survive undo unnoticed.
     doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/before.sha256"
+    doctor_fixture_record_write_lock "$target"
     printf '{"schema":"ee.doctor_fixture_marker.v1","fmId":"%s","severity":"%s","subsystem":"%s","state":"corrupt"}\n' \
         "$fm_id" "$severity" "$subsystem" > "$marker_dir/$fm_id.json"
     printf 'corrupt fixture prepared: %s\n' "$fm_id" >&2
@@ -156,6 +227,7 @@ doctor_fixture_assert() {
             printf 'fixture assert: undo contents differ from the baseline for %s\n' "$fm_id" >&2
             return 1
         fi
+        doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target"
     fi
 
     printf 'assert fixture ready: %s %s %s\n' "$fm_id" "$severity" "$subsystem" >&2

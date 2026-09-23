@@ -55,4 +55,5 @@ jq -es '
 ' "$target/.fixture_baseline/doctor-undo-again.json" >/dev/null
 doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/after-second-undo.sha256"
 cmp "$target/.fixture_baseline/before.sha256" "$target/.fixture_baseline/after-second-undo.sha256"
+doctor_fixture_assert_write_lock_monotonic "fm-search_indexes-index_missing" "$target"
 printf 'real repair roundtrip confirmed: EE-E300 -> healthy -> EE-E300; exact source baseline and idempotent undo\n' >&2

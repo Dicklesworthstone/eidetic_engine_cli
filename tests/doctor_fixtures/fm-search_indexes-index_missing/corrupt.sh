@@ -22,7 +22,10 @@ command -v "$ee_bin" >/dev/null
 mkdir -p "$target/.fixture_baseline"
 "$ee_bin" --workspace "$target" init --skip-boilerplate --json \
     > "$target/.fixture_baseline/init.json"
-"$ee_bin" remember "Preserve this source memory when the derived search index is missing." \
+# The explicit anchors make memory_anchors / memory_anchor_index non-empty, so a
+# repair that rewrote them (as the pre-A writing rebuild did) would change
+# ee.db / ee.db-wal bytes and red the round trip. An anchor-free memory hides it.
+"$ee_bin" remember "Preserve this source memory when the derived search index is missing: anchor:path:src/core/index.rs anchor:symbol:rebuild_index_with_cx" \
     --workspace "$target" --level procedural --kind rule --json \
     > "$target/.fixture_baseline/remember.json"
 "$ee_bin" index rebuild --workspace "$target" --json \
