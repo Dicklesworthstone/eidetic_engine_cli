@@ -45601,11 +45601,14 @@ where
         .database
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    // --shards-dir wins, then EE_SHARDS_DIR (as doctor, status and backup
+    // resolve it), then the XDG default (bd-qxc0b).
+    let shards_dir = args
+        .shards_dir
+        .clone()
+        .or_else(|| read_os(EnvVar::ShardsDir).map(PathBuf::from));
 
-    let plan = match plan_shard_fanout_migration_from_database(
-        database_path.clone(),
-        args.shards_dir.clone(),
-    ) {
+    let plan = match plan_shard_fanout_migration_from_database(database_path.clone(), shards_dir) {
         Ok(plan) => plan,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };

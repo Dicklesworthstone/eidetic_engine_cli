@@ -6,6 +6,9 @@ use ee::db::shard::{
     shard_file_path,
 };
 
+use crate::isolated_ee;
+use std::path::{Path, PathBuf};
+
 type TestResult = Result<(), String>;
 
 fn temp_root(label: &str) -> Result<tempfile::TempDir, String> {
@@ -197,5 +200,161 @@ fn migration_required_status_uses_structured_recovery_action() -> TestResult {
     ensure(
         action.command == "ee migrate shard-fanout --workspace . --dry-run --json",
         "recovery command should be the dry-run shard fanout migration",
+    )
+}
+
+/// Run `ee` with its HOME/XDG dirs under `root` and no inherited shard root.
+fn run_ee(root: &Path, args: &[&str], env: &[(&str, &Path)]) -> Result<serde_json::Value, String> {
+    let mut command = isolated_ee::isolated_ee_command(root)?;
+    command
+        .env_remove("EE_SHARDS_DIR")
+        .env_remove("EE_SHARD_FANOUT_ENABLED");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
+        .args(args)
+        .output()
+        .map_err(|error| format!("spawn ee {args:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ee {args:?} exited {:?}: stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ee {args:?} stdout is not JSON: {error}"))
+}
+
+/// A fresh isolated root with one initialized workspace holding one memory.
+/// Canonicalized because shard roots reject symlinked components.
+fn seeded_shard_world(label: &str) -> Result<(tempfile::TempDir, PathBuf, PathBuf), String> {
+    let temp = temp_root(label)?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let ws = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    run_ee(
+        &root,
+        &["--workspace", ws, "init", "--skip-boilerplate", "--json"],
+        &[],
+    )?;
+    run_ee(
+        &root,
+        &[
+            "remember",
+            "shard root probe",
+            "--workspace",
+            ws,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+        &[],
+    )?;
+    Ok((temp, root, workspace))
+}
+
+fn shard_db_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "db"))
+            .count()
+    })
+}
+
+fn applied_shard_root(report: &serde_json::Value) -> String {
+    report["data"]["apply"]["shardRoot"]
+        .as_str()
+        .unwrap_or("<missing>")
+        .to_owned()
+}
+
+/// bd-qxc0b: without `--shards-dir`, `migrate shard-fanout` must resolve the
+/// shard root from `EE_SHARDS_DIR`, as its help text says and as doctor, status
+/// and backup already do, not fall back to the XDG default.
+#[test]
+fn migrate_shard_fanout_honours_exported_ee_shards_dir() -> TestResult {
+    let (_temp, root, workspace) = seeded_shard_world("ee-shard-env-root")?;
+    let env_dir = root.join("custom/shards");
+    let default_dir = root.join("xdg-data/ee/shards");
+    let ws = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    let report = run_ee(
+        &root,
+        &["migrate", "shard-fanout", "--workspace", ws, "--json"],
+        &[
+            ("EE_SHARD_FANOUT_ENABLED", Path::new("1")),
+            ("EE_SHARDS_DIR", &env_dir),
+        ],
+    )?;
+    let shard_root = applied_shard_root(&report);
+    ensure(
+        shard_root == env_dir.display().to_string(),
+        format!(
+            "shardRoot {shard_root}, expected EE_SHARDS_DIR {}",
+            env_dir.display()
+        ),
+    )?;
+    ensure(
+        shard_db_count(&env_dir) > 0,
+        format!("no shard database written under {}", env_dir.display()),
+    )?;
+    ensure(
+        shard_db_count(&default_dir) == 0,
+        format!(
+            "shard databases written to the XDG default {}",
+            default_dir.display()
+        ),
+    )
+}
+
+/// bd-qxc0b control: an explicit `--shards-dir` still takes precedence over an
+/// exported `EE_SHARDS_DIR`.
+#[test]
+fn migrate_shard_fanout_flag_overrides_exported_ee_shards_dir() -> TestResult {
+    let (_temp, root, workspace) = seeded_shard_world("ee-shard-flag-root")?;
+    let env_dir = root.join("env/shards");
+    let flag_dir = root.join("flag/shards");
+    let ws = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    let flag = flag_dir.to_str().ok_or("flag path is not UTF-8")?;
+    let report = run_ee(
+        &root,
+        &[
+            "migrate",
+            "shard-fanout",
+            "--workspace",
+            ws,
+            "--shards-dir",
+            flag,
+            "--json",
+        ],
+        &[
+            ("EE_SHARD_FANOUT_ENABLED", Path::new("1")),
+            ("EE_SHARDS_DIR", &env_dir),
+        ],
+    )?;
+    let shard_root = applied_shard_root(&report);
+    ensure(
+        shard_root == flag,
+        format!("shardRoot {shard_root}, expected --shards-dir {flag}"),
+    )?;
+    ensure(
+        shard_db_count(&flag_dir) > 0,
+        format!("no shard database written under {flag}"),
+    )?;
+    ensure(
+        shard_db_count(&env_dir) == 0,
+        format!(
+            "shard databases written to EE_SHARDS_DIR {} despite the flag",
+            env_dir.display()
+        ),
     )
 }
