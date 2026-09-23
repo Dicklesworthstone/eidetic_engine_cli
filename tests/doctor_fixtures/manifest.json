@@ -63,7 +63,7 @@
       "id": "fm-schema_migrations-pending-migrations-detected",
       "severity": "P1",
       "subsystem": "schema_migrations",
-      "label": "UNCLASSIFIED",
+      "label": "GUIDANCE-ONLY",
       "spec": "docs/doctor/repair-specs/schema_migrations.md"
     },
     {
@@ -91,7 +91,7 @@
       "id": "fm-search_indexes-index_stale",
       "severity": "P1",
       "subsystem": "search_indexes",
-      "label": "UNCLASSIFIED",
+      "label": "REPAIR",
       "spec": "docs/doctor/repair-specs/search_indexes.md"
     },
     {
@@ -126,7 +126,7 @@
       "id": "fm-workspace_config-config-toml-malformed",
       "severity": "P1",
       "subsystem": "workspace_config",
-      "label": "UNCLASSIFIED",
+      "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/workspace_config.md"
     },
     {

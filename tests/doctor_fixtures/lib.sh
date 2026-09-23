@@ -438,7 +438,7 @@ doctor_fixture_label() {
 # directions: more untested fixtures than the pin fails (a new fixture must
 # arrive classified), and fewer also fails until the pin is lowered in the same
 # commit that classified the fixture, so the pin can only move down.
-DOCTOR_FIXTURE_PIN_UNCLASSIFIED=11
+DOCTOR_FIXTURE_PIN_UNCLASSIFIED=8
 DOCTOR_FIXTURE_PIN_UNRESOLVED=1
 # OUT-OF-SCOPE fixtures are pinned by EXACT id (bd-2oh15 ruling on c9985), so
 # relabelling a fixture OUT-OF-SCOPE can never be used to satisfy the pins

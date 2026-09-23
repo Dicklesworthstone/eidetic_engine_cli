@@ -107,17 +107,29 @@ class AssertionContract(unittest.TestCase):
                         EE_DOCTOR_FIXTURE_RUN_EE="1", EE_DOCTOR_FIXTURE_BINARY=str(double),
                         DOCTOR_ASSERTION_SCENARIO=str(self.root / "scenario.json"),
                         DOCTOR_ASSERTION_CALLS=str(self.root / "calls.jsonl"))
+        # The oracle under test is lib.sh, driven through a marker-only fixture
+        # pair. Write that pair here (the exact marker-only template, sourcing
+        # the real lib.sh) rather than borrowing a manifest fixture, which stops
+        # being marker-only the day it is built for real (bd-2oh15).
+        self.fixture_dir = self.root / "fixture"
+        self.fixture_dir.mkdir()
+        for name, helper in (("corrupt.sh", "doctor_fixture_corrupt"),
+                             ("assert.sh", "doctor_fixture_assert")):
+            (self.fixture_dir / name).write_text(
+                "#!/usr/bin/env bash\nset -euo pipefail\n"
+                f". {shlex.quote(str(HERE / 'lib.sh'))}\n"
+                f'{helper} "{FM}" "P1" "workspace_config"\n')
         prepared = self.run_script("corrupt.sh")
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
 
     def run_script(self, name):
         # Negative controls intentionally return nonzero. Retain and assert
         # that status below; never interpolate the command into a shell string.
-        result = subprocess.run(["bash", str(HERE / FM / name)], env=self.env,
+        result = subprocess.run(["bash", str(self.fixture_dir / name)], env=self.env,
                                 capture_output=True, text=True, timeout=30,
                                 shell=False, check=False)
         (self.root / (name + ".receipt.json")).write_text(json.dumps({
-            "command": ["bash", str(HERE / FM / name)], "exit": result.returncode,
+            "command": ["bash", str(self.fixture_dir / name)], "exit": result.returncode,
             "stdout": result.stdout, "stderr": result.stderr}, indent=2) + "\n")
         return result
 

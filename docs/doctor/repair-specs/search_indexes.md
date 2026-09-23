@@ -18,15 +18,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-search_indexes-index_stale
 
-- **Label:** UNCLASSIFIED
+- **Label:** REPAIR
 - **Severity:** P1. Scored P1 as `pop-index-stale`.
-- **Detector:** Not measured by this fixture. The inventory shows `search_index` reports EE-E301, which `doctor --fix` dispatches to `fix_search_index_stale`.
-- **Real trigger:** Not yet built.
-- **Repair:** Not classified.
-- **Undo:** Not classified.
-- **Oracle:** None yet. `assert.sh` checks only the marker.
-- **Negative control:** None yet.
-- **Pinned sha:** None. Marker-only; no binary measured.
+- **Detector:** `search_index` reports EE-E301: the store's `workspace_generations.generation` is ahead of the generation recorded in `.ee/index/meta.json`.
+- **Real trigger:** A real indexed store whose workspace generation is advanced by one past the index's (what writes after the last rebuild leave behind). `corrupt.sh` requires the two generations equal before the edit and the store ahead after it. Doctor's lock is provisioned by a healthy no-op `--fix` first.
+- **Repair:** `fix_search_index_stale` dispatches the `run_index_rebuild` operation; `fixerResults` records finding `search_index_stale` with outcome `applied`, and doctor is healthy afterwards.
+- **Undo:** `doctor --undo <runId>` restores the exact stale baseline (the index's generation is the old one again and EE-E301 returns); a second undo reports 0 actions.
+- **Oracle:** `doctor_fixture_assert` round trip (fix, health, undo, content digest equal to the corrupted baseline, monotonic write lock), plus `completed_ok` with no guidance-only fixers, the applied `run_index_rebuild`, EE-E301 after undo, and an idempotent second undo.
+- **Negative control:** `doctor_fixture_healthy_store` asserts the store is healthy with equal generations before the edit.
+- **Pinned sha:** 02524267e, measured on its stamped release build on hz3.
 
 ## fm-search_indexes-index_corrupt
 
