@@ -133,13 +133,17 @@ done
 shopt -u nullglob
 
 echo "verify-concurrency: exercised $EXERCISED COVERAGE fixtures; failed=$FAIL" >&2
+# Every verdict below is reported; none hides another behind an early exit.
+status=0
 if [ "$EXERCISED" -eq 0 ]; then
     echo "verify-concurrency: exercised 0 fixtures -- FAIL (a run that tests nothing is not a pass)" >&2
-    exit 1
+    status=1
 fi
+doctor_fixture_untested_ratchet verify-concurrency "$FIXTURES_SRC" || status=1
 if [ "$FAIL" -gt 0 ]; then
     echo "verify-concurrency: failed:$FAILED_FMS" >&2
-    exit 1
+    status=1
 fi
-echo "verify-concurrency: PASS (typed lock refusal on $EXERCISED fixtures, bytes unchanged)" >&2
-exit 0
+[ "$status" -eq 0 ] &&
+    echo "verify-concurrency: PASS (typed lock refusal on $EXERCISED fixtures, bytes unchanged)" >&2
+exit "$status"
