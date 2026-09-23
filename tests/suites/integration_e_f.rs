@@ -190,6 +190,8 @@ mod e2e_typed_fields_decide_script;
 mod e2e_why;
 #[path = "../ee_core_api_no_adapter_logic.rs"]
 mod ee_core_api_no_adapter_logic;
+#[path = "../ee_spawn_isolation_contract.rs"]
+mod ee_spawn_isolation_contract;
 #[path = "../effect_contracts.rs"]
 mod effect_contracts;
 #[path = "../embed_dedup_e2e.rs"]
