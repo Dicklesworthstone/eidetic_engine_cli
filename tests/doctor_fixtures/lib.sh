@@ -141,9 +141,8 @@ doctor_fixture_assert_health_report() {
 }
 
 # Guidance-only failure modes (bd-2oh15, orchestrator decision C): doctor's
-# repair for these writes state that cannot pass through
-# doctor_runtime::mutate() or be undone (for example, an index rebuild writes
-# SQLite rows), so doctor records guidance instead of repairing. The contract is
+# repair for these is not implemented or cannot safely run on the damaged
+# source, so doctor records guidance instead of repairing. The contract is
 # honesty, not repair: --fix must report the finding as guidance_recorded and
 # never as applied, the finding must still be reported afterwards, and the path
 # the real repair would create must still be absent.
@@ -162,10 +161,20 @@ doctor_fixture_assert_guidance_only() {
         return 2
     fi
     local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
-    "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json"
-    if ! jq -es --arg code "$finding_code" '
+    local fix_exit=0
+    "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json" || fix_exit=$?
+    if [ "$fix_exit" -ne 6 ]; then
+        printf 'fixture assert: %s unresolved core guidance must exit 6, got %s\n' "$fm_id" "$fix_exit" >&2
+        if [ "$fix_exit" -eq 0 ]; then return 1; fi
+        return "$fix_exit"
+    fi
+    if ! jq -es --arg code "$finding_code" --arg check "$check_name" --arg error "$error_code" '
         length == 1 and (.[0] |
             .schema == "ee.response.v2" and .success == true and
+            .data.status == "completed_partial" and .data.fixerDispatchPending == true and
+            (.data.unresolvedCoreCheckCount | type == "number" and . >= 1) and
+            (.data.unresolvedCoreChecks | type == "array" and
+                any(.[]; .name == $check and .errorCode == $error)) and
             (.data.guidanceOnlyFixerCount | type == "number" and . >= 1) and
             (.data.fixerResults | type == "array") and
             any(.data.fixerResults[]; .findingCode == $code and .outcome == "guidance_recorded") and
@@ -393,4 +402,89 @@ doctor_fixture_assert_report_only() {
     fi
     printf 'report-only fixture confirmed: %s (%s %s reported, --fix 0 actions, still reported)\n' \
         "$fm_id" "$check_name" "$error_code" >&2
+}
+
+# The harness bucket of a fixture, from its manifest label (bd-2oh15 strand 4,
+# ruling c9954). Prints one of:
+#   coverage  REPAIR, GUIDANCE-ONLY: must pass.
+#   gap       NOT-DETECTED, PINNED-DEFECT: must still reproduce its pinned gap.
+#   untested  UNCLASSIFIED, UNRESOLVED: marker-only; never a pass, never a failure.
+#   out_of_scope  OUT-OF-SCOPE: not a doctor failure mode (manifest scopeReason);
+#             never run, never a pass, pinned by exact id in the ratchet.
+#   unknown:<label>  anything else, including a fixture missing from the manifest.
+doctor_fixture_bucket() {
+    local fm_id="${1:?fm id required}"
+    local manifest="${2:?manifest path required}"
+    local label
+    label="$(jq -r --arg id "$fm_id" '[.fixtures[] | select(.id == $id) | .label] | first // ""' "$manifest")"
+    case "$label" in
+        REPAIR | GUIDANCE-ONLY) printf 'coverage\n' ;;
+        NOT-DETECTED | PINNED-DEFECT) printf 'gap\n' ;;
+        UNCLASSIFIED | UNRESOLVED) printf 'untested\n' ;;
+        OUT-OF-SCOPE) printf 'out_of_scope\n' ;;
+        *) printf 'unknown:%s\n' "$label" ;;
+    esac
+}
+
+# The manifest label of a fixture ("" when absent).
+doctor_fixture_label() {
+    local fm_id="${1:?fm id required}"
+    local manifest="${2:?manifest path required}"
+    jq -r --arg id "$fm_id" '[.fixtures[] | select(.id == $id) | .label] | first // ""' "$manifest"
+}
+
+# THE shared UNTESTED ratchet pin (bd-2oh15 rulings c9954 and the follow-up):
+# one pin for every sub-harness that counts fixtures. It is exact in both
+# directions: more untested fixtures than the pin fails (a new fixture must
+# arrive classified), and fewer also fails until the pin is lowered in the same
+# commit that classified the fixture, so the pin can only move down.
+DOCTOR_FIXTURE_PIN_UNCLASSIFIED=12
+DOCTOR_FIXTURE_PIN_UNRESOLVED=1
+# OUT-OF-SCOPE fixtures are pinned by EXACT id (bd-2oh15 ruling on c9985), so
+# relabelling a fixture OUT-OF-SCOPE can never be used to satisfy the pins
+# above. Sorted, space separated. Each carries a manifest scopeReason.
+DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS="fm-policy_safety-redaction-class-coverage-gap fm-policy_safety-trauma-guard-policy-denied-exit-7"
+
+# Counts the UNCLASSIFIED and UNRESOLVED fixture directories under
+# <fixtures_src>, prints the counts for <harness>, and fails unless both equal
+# their pins. Also prints the OUT-OF-SCOPE set on its own line and fails
+# unless it equals DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS exactly.
+doctor_fixture_untested_ratchet() {
+    local harness="${1:?harness name required}"
+    local src="${2:?fixtures source required}"
+    local manifest="$src/manifest.json"
+    local unclassified=0 unresolved=0 out_of_scope="" fm_dir fm_id label
+    for fm_dir in "$src"/fm-*; do
+        [ -d "$fm_dir" ] || continue
+        fm_id="$(basename "$fm_dir")"
+        label="$(doctor_fixture_label "$fm_id" "$manifest")"
+        case "$label" in
+            UNCLASSIFIED) unclassified=$((unclassified + 1)) ;;
+            UNRESOLVED) unresolved=$((unresolved + 1)) ;;
+            OUT-OF-SCOPE) out_of_scope="$out_of_scope $fm_id" ;;
+        esac
+    done
+    out_of_scope="$(printf '%s\n' $out_of_scope | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')"
+    printf '%s: %s UNCLASSIFIED (not tested, pin %s); %s UNRESOLVED (not tested, pin %s)\n' \
+        "$harness" "$unclassified" "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" \
+        "$unresolved" "$DOCTOR_FIXTURE_PIN_UNRESOLVED" >&2
+    printf '%s: %s OUT-OF-SCOPE (not doctor failure modes; never run, never a pass): %s\n' \
+        "$harness" "$(printf '%s\n' $out_of_scope | grep -c .)" "${out_of_scope:-none}" >&2
+    if [ "$out_of_scope" != "$DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS" ]; then
+        printf '%s: OUT-OF-SCOPE set changed; it is pinned by exact id (expected: %s)\n' \
+            "$harness" "$DOCTOR_FIXTURE_OUT_OF_SCOPE_IDS" >&2
+        return 1
+    fi
+    if [ "$unclassified" -gt "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" ] ||
+        [ "$unresolved" -gt "$DOCTOR_FIXTURE_PIN_UNRESOLVED" ]; then
+        printf '%s: UNTESTED ratchet exceeded; classify the new fixture instead of raising the pin\n' \
+            "$harness" >&2
+        return 1
+    fi
+    if [ "$unclassified" -lt "$DOCTOR_FIXTURE_PIN_UNCLASSIFIED" ] ||
+        [ "$unresolved" -lt "$DOCTOR_FIXTURE_PIN_UNRESOLVED" ]; then
+        printf '%s: UNTESTED ratchet pin is stale; lower DOCTOR_FIXTURE_PIN_* in tests/doctor_fixtures/lib.sh to %s/%s\n' \
+            "$harness" "$unclassified" "$unresolved" >&2
+        return 1
+    fi
 }

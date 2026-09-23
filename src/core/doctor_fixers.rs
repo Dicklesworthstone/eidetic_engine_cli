@@ -1,5 +1,6 @@
-//! 13 auto-fixable fixers wired through the `doctor_runtime::mutate()`
-//! chokepoint (bd-tu4s8 Pass-2; bd-pbyay added `search_index_missing`). Each
+//! 15 fixers wired through the `doctor_runtime::mutate()` chokepoint: 13
+//! auto-fixable ones (bd-tu4s8 Pass-2; bd-pbyay added `search_index_missing`)
+//! and 2 guidance-only database fixers (bd-xa6ud / bd-wswg0). Each
 //! fixer maps a specific repair-spec finding code to the `Op` that the doctor
 //! should call `mutate()` with.
 //!
@@ -14,7 +15,7 @@
 //! setup. Index repair builds from a read-only canonical source snapshot and
 //! journals each real mutation with hash-checked backups and inverse actions.
 //!
-//! The 13 fixers cover the eight docs/doctor/repair-specs/ subsystems
+//! The 13 auto-fixable fixers cover the eight docs/doctor/repair-specs/ subsystems
 //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
 //! schema_migrations, search_indexes, state_files, workspace_config) plus
 //! WAL checkpoint and snapshot-backup as cross-cutting Ops. Each fixer
@@ -58,8 +59,8 @@ impl FixerDispatch {
     }
 }
 
-/// FM-SI-01: search index manifest is stale relative to the underlying
-/// memories table. The runtime stages a validated generation and journals
+/// FM-SI-01: the search index generation is stale relative to the source
+/// corpus. The runtime stages a validated generation and journals
 /// every live-file change so the repair can be undone without source writes.
 #[must_use]
 pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
@@ -68,11 +69,7 @@ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
         severity: "warning",
         path: search_index_dir(workspace_root),
         op: Op::RunIndexRebuild {
-            steps: vec![
-                "ee index rebuild --workspace .".to_string(),
-                "Confirm `manifest.last_built_at` advances past the latest memories.updated_at."
-                    .to_string(),
-            ],
+            steps: search_index_repair_steps(workspace_root),
         },
     }
 }
@@ -87,10 +84,7 @@ pub fn fix_search_index_missing(workspace_root: &Path) -> FixerDispatch {
         severity: "warning",
         path: search_index_dir(workspace_root),
         op: Op::RunIndexRebuild {
-            steps: vec![
-                "ee index rebuild --workspace .".to_string(),
-                "Confirm `ee doctor --json` no longer reports search_index EE-E300.".to_string(),
-            ],
+            steps: search_index_repair_steps(workspace_root),
         },
     }
 }
@@ -134,6 +128,15 @@ pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
 /// database or index override, so the workspace default (`.ee/index`).
 fn search_index_dir(workspace_root: &Path) -> PathBuf {
     crate::config::workspace::resolve_store_index_dir(workspace_root, None, None)
+}
+
+fn search_index_repair_steps(workspace_root: &Path) -> Vec<String> {
+    let workspace = shell_quote_arg(&workspace_root.to_string_lossy());
+    vec![
+        format!("ee index rebuild --workspace {workspace} --json"),
+        format!("ee index status --workspace {workspace} --json"),
+        "Confirm the index is ready and its source and index generations agree.".to_owned(),
+    ]
 }
 
 /// FM-GS-01: graph snapshot is stale relative to memory_links activity.
@@ -356,10 +359,13 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
     }
 }
 
-/// The closed set of fixer codes this module exposes. Contract tests
-/// assert that every entry has a matching `fix_*` function above. bd-tu4s8
-/// delivered 12; bd-pbyay split `search_index_missing` out of
-/// `search_index_stale`, because a missing index was being repaired as stale.
+/// The closed set of fixer codes this module exposes. bd-tu4s8 delivered 12;
+/// bd-pbyay split `search_index_missing` out of `search_index_stale`, because a
+/// missing index was being repaired as stale; bd-xa6ud / bd-wswg0 added the
+/// guidance-only `database_empty` and `database_corrupted`. A contract test
+/// derives the codes from every fixer above and from the `ee doctor --fix`
+/// dispatch ([`fix_dispatch_for_finding`], [`FIX_DISPATCHED_FINDINGS`] and
+/// `doctor_fix_json`), so this list cannot drift from either (bd-ynfuu).
 pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_stale",
     "search_index_missing",
@@ -495,9 +501,149 @@ pub fn fix_mode_for_check(
     }
 }
 
+/// A required core check that this run cannot repair. Keep this separate from
+/// fixer receipts: an undispatched check has no mutation, action sequence or
+/// undo operation. Only static diagnostic metadata is exposed, never the
+/// check's potentially private message or source content.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedCoreCheck {
+    pub name: &'static str,
+    pub severity: &'static str,
+    pub error_code: Option<&'static str>,
+    pub repair: Option<&'static str>,
+    pub fix_mode: &'static str,
+    pub fix_finding: Option<&'static str>,
+}
+
+/// Report all unhealthy core checks that receive only guidance or no dispatch.
+/// Use the same dispatch and tier contracts as `--fix-plan` and the top-line
+/// health verdict. In particular, missing optional CASS tooling is advisory,
+/// while a damaged database or unavailable required capability remains pending.
+#[must_use]
+pub fn unresolved_core_checks(checks: &[super::doctor::CheckResult]) -> Vec<UnresolvedCoreCheck> {
+    let unreadable = store_unreadable(
+        checks
+            .iter()
+            .map(|check| (check.name, check.error_code.map(|code| code.id))),
+    );
+    checks
+        .iter()
+        .filter(|check| !check.is_topline_healthy())
+        .filter_map(|check| {
+            let error_code = check.error_code.map(|code| code.id);
+            let (mode, finding) = fix_mode_for_check(error_code, check.name, unreadable);
+            if mode == FixMode::AutoRepair {
+                return None;
+            }
+            Some(UnresolvedCoreCheck {
+                name: check.name,
+                severity: check.severity.as_str(),
+                error_code,
+                repair: check.repair,
+                fix_mode: mode.as_str(),
+                fix_finding: finding,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_core_checks_retain_undispatched_and_guidance_failures_only() {
+        use crate::core::doctor::{CheckResult, CheckSeverity};
+        use crate::models::error_codes::{CASS_DEGRADED, INDEX_NOT_FOUND, MIGRATION_REQUIRED};
+
+        let mut uncoded = CheckResult::ok("runtime", "PRIVATE-CHECK-MESSAGE");
+        uncoded.severity = CheckSeverity::Error;
+        let checks = [
+            CheckResult::ok("configuration", "ready"),
+            CheckResult::warning("search_index", "rebuildable", INDEX_NOT_FOUND),
+            CheckResult::warning("cass", "optional", CASS_DEGRADED).advisory(),
+            CheckResult::error("database", "PRIVATE-MIGRATION-MESSAGE", MIGRATION_REQUIRED),
+            uncoded,
+        ];
+        let pending = unresolved_core_checks(&checks);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].name, "database");
+        assert_eq!(pending[0].fix_mode, "auto_guidance");
+        assert_eq!(pending[0].fix_finding, Some("schema_migration_pending"));
+        assert_eq!(pending[1].name, "runtime");
+        assert_eq!(pending[1].fix_mode, "manual");
+        assert_eq!(pending[1].error_code, None);
+        assert_eq!(pending[1].repair, None);
+        let json = serde_json::to_string(&pending).expect("serializable pending checks");
+        assert!(!json.contains("PRIVATE"));
+        assert_eq!(pending, unresolved_core_checks(&checks));
+    }
+
+    #[test]
+    fn unresolved_core_checks_keep_suppressed_repairs_without_dispatching_them() {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::{DATABASE_CORRUPTED, INDEX_NOT_FOUND, MIGRATION_REQUIRED};
+
+        let pending = unresolved_core_checks(&[
+            CheckResult::error("database", "damaged store", DATABASE_CORRUPTED),
+            CheckResult::warning("search_index", "no safe source", INDEX_NOT_FOUND),
+            CheckResult::error("migration", "no safe source", MIGRATION_REQUIRED),
+        ]);
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending[0].fix_finding, Some("database_corrupted"));
+        for check in &pending[1..] {
+            assert_eq!(check.fix_mode, "manual");
+            assert_eq!(check.fix_finding, None);
+        }
+    }
+
+    #[test]
+    fn unresolved_core_checks_follow_health_tiers_not_severity_alone() {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::RUNTIME_UNAVAILABLE;
+
+        let core = CheckResult::warning("runtime", "required", RUNTIME_UNAVAILABLE);
+        assert_eq!(unresolved_core_checks(&[core]).len(), 1);
+        let advisory = CheckResult::error("runtime", "optional", RUNTIME_UNAVAILABLE).advisory();
+        assert!(unresolved_core_checks(&[advisory]).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_index_repair_commands_preserve_the_selected_workspace_as_one_argument() {
+        for workspace in [
+            "/tmp/doctor workspace",
+            "/tmp/agent's store",
+            "/tmp/$(exit 99); literal",
+        ] {
+            for dispatch in [
+                fix_search_index_missing(Path::new(workspace)),
+                fix_search_index_stale(Path::new(workspace)),
+            ] {
+                let Op::RunIndexRebuild { steps } = dispatch.op else {
+                    panic!("expected a real index rebuild");
+                };
+                for (step, verb) in [(&steps[0], "rebuild"), (&steps[1], "status")] {
+                    // Parse the quoted command with the real shell without
+                    // executing ee or any interpolated workspace content.
+                    let output = std::process::Command::new("sh")
+                        .args(["-c", &format!("set -- {step}; printf '%s\\0' \"$@\"")])
+                        .output()
+                        .expect("shell argument probe");
+                    assert!(output.status.success());
+                    let args: Vec<_> = output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|arg| !arg.is_empty())
+                        .collect();
+                    let expected = ["ee", "index", verb, "--workspace", workspace, "--json"];
+                    assert_eq!(args, expected.map(str::as_bytes));
+                }
+                assert!(!steps.join(" ").contains("manifest.last_built_at"));
+            }
+        }
+    }
 
     #[test]
     fn every_fix_finding_constructs_a_dispatch_with_that_code() {
@@ -629,9 +775,12 @@ mod tests {
         PathBuf::from("/tmp/doctor-fixers-test")
     }
 
+    // The registered set itself is pinned by
+    // `fixer_codes_match_every_fixer_and_every_dispatch`, which derives it from
+    // the source; a hard-coded count here is what let two fixers go
+    // unregistered (bd-ynfuu).
     #[test]
-    fn thirteen_fixer_codes_are_registered() {
-        assert_eq!(FIXER_FINDING_CODES.len(), 13);
+    fn fixer_codes_are_unique() {
         let mut sorted = FIXER_FINDING_CODES.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -649,7 +798,10 @@ mod tests {
         let Op::RunIndexRebuild { steps } = &dispatch.op else {
             panic!("expected RunIndexRebuild");
         };
-        assert_eq!(steps[0], "ee index rebuild --workspace .");
+        assert_eq!(
+            steps[0],
+            "ee index rebuild --workspace '/tmp/doctor-fixers-test' --json"
+        );
         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
         assert!(!dispatch.op.is_advisory());
         assert!(dispatch.op.is_writing());
@@ -677,8 +829,14 @@ mod tests {
         let Op::RunIndexRebuild { steps } = &dispatch.op else {
             panic!("expected RunIndexRebuild");
         };
-        assert_eq!(steps[0], "ee index rebuild --workspace .");
-        assert!(steps[1].contains("EE-E300"), "{steps:?}");
+        assert_eq!(
+            steps[0],
+            "ee index rebuild --workspace '/tmp/doctor-fixers-test' --json"
+        );
+        assert_eq!(
+            steps[1],
+            "ee index status --workspace '/tmp/doctor-fixers-test' --json"
+        );
         assert!(!dispatch.op.is_advisory());
         assert!(dispatch.op.is_writing());
     }
@@ -827,6 +985,8 @@ mod tests {
         let dispatches: Vec<&'static str> = vec![
             fix_search_index_stale(&workspace).finding_code,
             fix_search_index_missing(&workspace).finding_code,
+            fix_database_empty(&workspace).finding_code,
+            fix_database_corrupted(&workspace).finding_code,
             fix_graph_snapshot_stale(&workspace).finding_code,
             fix_wal_checkpoint_pending(&workspace).finding_code,
             fix_schema_migration_pending(&workspace, "V001").finding_code,
@@ -844,5 +1004,206 @@ mod tests {
         let mut expected = FIXER_FINDING_CODES.to_vec();
         expected.sort();
         assert_eq!(sorted, expected);
+    }
+
+    /// Every `pub fn fix_*` in the non-test part of a fixer module's source,
+    /// mapped to the finding code it emits: the `finding_code: "..."` field,
+    /// or the first argument of `FixerDispatch::manual(`. A `fix_*` function
+    /// that builds no dispatch itself (the dispatch-table helpers) maps to
+    /// `None`. A line belongs to the most recent function definition only.
+    fn fixer_codes_in_source(source: &str) -> std::collections::BTreeMap<String, Option<String>> {
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let mut codes = std::collections::BTreeMap::new();
+        let mut current: Option<String> = None;
+        let mut awaiting_manual_code = false;
+        for line in production.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("pub fn fix_") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let name = format!("fix_{name}");
+                codes.insert(name.clone(), None);
+                current = Some(name);
+                awaiting_manual_code = false;
+                continue;
+            }
+            if trimmed.starts_with("fn ")
+                || (trimmed.starts_with("pub") && trimmed.contains(" fn "))
+            {
+                current = None;
+                continue;
+            }
+            let Some(name) = current.clone() else {
+                continue;
+            };
+            if codes.get(&name).is_some_and(Option::is_some) {
+                continue;
+            }
+            let literal = |text: &str| text.split('"').nth(1).map(str::to_owned);
+            if let Some(rest) = trimmed.strip_prefix("finding_code: ") {
+                if let Some(code) = literal(rest) {
+                    codes.insert(name, Some(code));
+                }
+            } else if trimmed.starts_with("FixerDispatch::manual(") {
+                awaiting_manual_code = true;
+            } else if awaiting_manual_code && trimmed.starts_with('"') {
+                if let Some(code) = literal(trimmed) {
+                    codes.insert(name, Some(code));
+                }
+                awaiting_manual_code = false;
+            }
+        }
+        codes
+    }
+
+    /// Every `fix_*` function called in the body of the top-level function
+    /// whose definition line starts with `header` (up to its closing `}` in
+    /// column 0).
+    fn dispatched_fixers(source: &str, header: &str) -> std::collections::BTreeSet<String> {
+        let Some(start) = source.find(&format!("\n{header}")) else {
+            return std::collections::BTreeSet::new();
+        };
+        let body = &source[start + 1 + header.len()..];
+        let body = body.find("\n}").map_or(body, |end| &body[..end]);
+        let mut called = std::collections::BTreeSet::new();
+        let mut rest = body;
+        while let Some(at) = rest.find("fix_") {
+            let preceded_by_ident = rest[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            let tail = &rest[at..];
+            let name: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !preceded_by_ident && tail[name.len()..].starts_with('(') {
+                called.insert(name.clone());
+            }
+            rest = &tail[name.len().max(1)..];
+        }
+        called
+    }
+
+    #[test]
+    fn fixer_source_scanners_see_planted_fixers_and_dispatches() {
+        let module = r#"
+pub fn fix_planted_field(root: &Path) -> FixerDispatch {
+    FixerDispatch {
+        finding_code: "planted_field",
+    }
+}
+pub fn fix_planted_manual(root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "planted_manual",
+        "error",
+    )
+}
+pub fn fix_planted_table(root: &Path, finding: &str) -> Option<FixerDispatch> {
+    match finding {
+        "planted_field" => Some(fix_planted_field(root)),
+        _ => None,
+    }
+}
+pub fn not_a_fixer() -> FixerDispatch {
+    FixerDispatch {
+        finding_code: "stray",
+    }
+}
+#[cfg(test)]
+pub fn fix_test_only() -> FixerDispatch { finding_code: "test_only" }
+"#;
+        let codes = fixer_codes_in_source(module);
+        let code = |name: &str| codes.get(name).cloned();
+        assert_eq!(
+            code("fix_planted_field"),
+            Some(Some("planted_field".to_owned()))
+        );
+        assert_eq!(
+            code("fix_planted_manual"),
+            Some(Some("planted_manual".to_owned()))
+        );
+        // A table helper is a fix_* function with no code of its own, and the
+        // next function's code is not attributed to it.
+        assert_eq!(code("fix_planted_table"), Some(None), "{codes:?}");
+        assert!(!codes.contains_key("not_a_fixer"), "{codes:?}");
+        assert!(!codes.contains_key("fix_test_only"), "{codes:?}");
+        let table = dispatched_fixers(module, "pub fn fix_planted_table(");
+        assert_eq!(
+            table.into_iter().collect::<Vec<_>>(),
+            vec!["fix_planted_field".to_owned()]
+        );
+        let cli = "\nfn other() { fix_elsewhere(x) }\nfn doctor_fix_json(w: &Path) {\n    Some(fix_planted_field(w));\n    prefix_fix_not_a_call(w);\n}\nfn after() { fix_after(x) }\n";
+        let called = dispatched_fixers(cli, "fn doctor_fix_json(");
+        assert_eq!(
+            called.into_iter().collect::<Vec<_>>(),
+            vec!["fix_planted_field".to_owned()]
+        );
+        assert!(dispatched_fixers(cli, "fn absent(").is_empty());
+    }
+
+    #[test]
+    fn fixer_codes_match_every_fixer_and_every_dispatch() {
+        let module = include_str!("doctor_fixers.rs");
+        let fixers = fixer_codes_in_source(module);
+        let derived: std::collections::BTreeSet<&str> =
+            fixers.values().flatten().map(String::as_str).collect();
+        let registered: std::collections::BTreeSet<&str> =
+            FIXER_FINDING_CODES.iter().copied().collect();
+        assert_eq!(
+            derived, registered,
+            "FIXER_FINDING_CODES must equal the codes the fix_* functions emit"
+        );
+        let dispatched_unregistered: Vec<&str> = FIX_DISPATCHED_FINDINGS
+            .iter()
+            .copied()
+            .filter(|finding| !registered.contains(finding))
+            .collect();
+        assert!(
+            dispatched_unregistered.is_empty(),
+            "findings --fix dispatches that are not in FIXER_FINDING_CODES: {dispatched_unregistered:?}"
+        );
+
+        // The --fix dispatch table (bd-223vl M3): every fixer it calls emits a
+        // registered code.
+        let table = dispatched_fixers(module, "pub fn fix_dispatch_for_finding(");
+        assert!(
+            !table.is_empty(),
+            "fix_dispatch_for_finding must be found and dispatch at least one fixer"
+        );
+        let table_violations: Vec<(&String, Option<&Option<String>>)> = table
+            .iter()
+            .map(|name| (name, fixers.get(name)))
+            .filter(
+                |(_, code)| !matches!(code, Some(Some(code)) if registered.contains(code.as_str())),
+            )
+            .collect();
+        assert!(
+            table_violations.is_empty(),
+            "fix_dispatch_for_finding calls fixers with no registered code: {table_violations:?}"
+        );
+
+        // doctor_fix_json dispatches through that table, and any fixer it
+        // calls directly also emits a registered code.
+        let cli = dispatched_fixers(include_str!("../cli/mod.rs"), "fn doctor_fix_json(");
+        assert!(
+            cli.contains("fix_dispatch_for_finding"),
+            "doctor_fix_json must dispatch through fix_dispatch_for_finding; it calls {cli:?}"
+        );
+        let cli_violations: Vec<(&String, Option<&Option<String>>)> = cli
+            .iter()
+            .map(|name| (name, fixers.get(name)))
+            .filter(|(_, code)| match code {
+                None => true,
+                Some(None) => false,
+                Some(Some(code)) => !registered.contains(code.as_str()),
+            })
+            .collect();
+        assert!(
+            cli_violations.is_empty(),
+            "doctor_fix_json calls fix_* functions that are unknown here or unregistered: {cli_violations:?}"
+        );
     }
 }

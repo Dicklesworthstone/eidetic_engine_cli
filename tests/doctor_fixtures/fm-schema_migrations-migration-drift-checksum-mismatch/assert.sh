@@ -28,7 +28,7 @@ doctor_fixture_assert_guidance_only "$FM" "database_corrupted" "database" "EE-E2
     ".ee/index-rebuild-request.json"
 jq -es '
     length == 1 and (.[0] |
-        .data.status == "completed_ok" and
+        .data.status == "completed_partial" and .data.fixerDispatchPending == true and
         all(.data.fixerResults[]; .operation == "manual" and .outcome == "guidance_recorded"))
 ' "$base/doctor-fix.json" >/dev/null
 jq -e '.data.posture == "blocked"' "$base/doctor-after.json" >/dev/null

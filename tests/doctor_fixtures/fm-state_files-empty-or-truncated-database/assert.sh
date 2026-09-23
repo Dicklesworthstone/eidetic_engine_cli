@@ -16,7 +16,7 @@ test -f "$(doctor_fixture_marker_dir "$target")/$FM.json"
 # GUIDANCE-ONLY (bd-xa6ud / bd-wswg0, fixed at 9ed78b70d; oracle measured on a
 # stamped 466ee56ee build, bd-2oh15 c9944). A truncated store is reported and
 # never touched: database and search_index both report EE-E202 and posture is
-# blocked before and after --fix; --fix exits 0 and records only manual
+# blocked before and after --fix; --fix exits 6 and records only manual
 # guidance (database_corrupted); every workspace byte is unchanged.
 "$ee_bin" doctor --workspace "$target" --json > "$base/guidance-before.json"
 jq -es '
@@ -32,7 +32,7 @@ doctor_fixture_assert_guidance_only "$FM" "database_corrupted" "database" "EE-E2
     ".ee/index-rebuild-request.json"
 jq -es '
     length == 1 and (.[0] |
-        .data.status == "completed_ok" and
+        .data.status == "completed_partial" and .data.fixerDispatchPending == true and
         .data.guidanceOnlyFixerCount == (.data.fixerResults | length) and
         all(.data.fixerResults[]; .operation == "manual" and .outcome == "guidance_recorded"))
 ' "$base/doctor-fix.json" >/dev/null
@@ -46,4 +46,4 @@ if ! cmp -s "$base/guidance-before-fix.sha256" "$base/guidance-after-fix.sha256"
     printf 'fixture assert: %s guidance-only --fix changed workspace bytes\n' "$FM" >&2
     exit 1
 fi
-printf 'guidance-only confirmed: %s (EE-E202 blocked before and after; --fix exit 0, manual guidance only; bytes unchanged)\n' "$FM" >&2
+printf 'guidance-only confirmed: %s (EE-E202 blocked before and after; --fix exit 6, manual guidance only; bytes unchanged)\n' "$FM" >&2

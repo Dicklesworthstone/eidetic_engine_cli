@@ -20,13 +20,14 @@ const SPEC_FIELDS: [&str; 9] = [
     "Pinned sha",
 ];
 
-const LABELS: [&str; 6] = [
+const LABELS: [&str; 7] = [
     "REPAIR",
     "GUIDANCE-ONLY",
     "NOT-DETECTED",
     "PINNED-DEFECT",
     "UNRESOLVED",
     "UNCLASSIFIED",
+    "OUT-OF-SCOPE",
 ];
 
 /// Labels whose fixture proves doctor handles the failure.
@@ -35,8 +36,9 @@ const COVERAGE_LABELS: [&str; 2] = ["REPAIR", "GUIDANCE-ONLY"];
 /// Labels whose fixture pins a gap: passing means the gap is still there.
 const GAP_LABELS: [&str; 2] = ["NOT-DETECTED", "PINNED-DEFECT"];
 
-/// Labels allowed only on marker-only fixtures (no real trigger yet).
-const MARKER_ONLY_LABELS: [&str; 2] = ["UNRESOLVED", "UNCLASSIFIED"];
+/// Labels allowed only on marker-only fixtures (no real trigger, either not
+/// built yet or, for OUT-OF-SCOPE, not a doctor failure mode at all).
+const MARKER_ONLY_LABELS: [&str; 3] = ["UNRESOLVED", "UNCLASSIFIED", "OUT-OF-SCOPE"];
 
 const FAILURE_CLASSES: [&str; 10] = [
     "missing",
@@ -257,17 +259,69 @@ fn doctor_fixtures_scored_population_is_well_formed_and_maps_to_manifest() {
         }
     }
 
-    // Only marker-only fixtures may sit outside the scored doctor surface.
+    // Only unbuilt or out-of-scope fixtures may sit outside the scored doctor
+    // surface.
     let mapped = scored_row_by_fixture();
     for id in &ids {
         let label = str_field(&fixtures[id], "label", id);
         if !mapped.contains_key(id) {
-            assert_eq!(
-                label, "UNCLASSIFIED",
+            assert!(
+                matches!(label, "UNCLASSIFIED" | "OUT-OF-SCOPE"),
                 "{id} is labelled {label} but no scored row names it"
             );
         }
     }
+}
+
+/// An OUT-OF-SCOPE fixture is an absence or category claim from a code
+/// survey, so it must carry its evidence: a category, the enumerated search,
+/// and citations that resolve to a real line of a real file (bd-2oh15 ruling
+/// on c9985).
+#[test]
+fn doctor_fixtures_out_of_scope_entries_carry_their_evidence() {
+    let mut out_of_scope = 0;
+    for fixture in manifest_fixtures() {
+        let id = str_field(&fixture, "id", "manifest");
+        let reason = &fixture["scopeReason"];
+        if str_field(&fixture, "label", id) != "OUT-OF-SCOPE" {
+            assert!(
+                reason.is_null(),
+                "{id}: only OUT-OF-SCOPE fixtures carry a scopeReason"
+            );
+            continue;
+        }
+        out_of_scope += 1;
+        for key in ["category", "search"] {
+            assert!(
+                reason[key]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "{id}: scopeReason.{key} must be a non-empty string"
+            );
+        }
+        let citations = reason["citations"]
+            .as_array()
+            .filter(|list| !list.is_empty())
+            .unwrap_or_else(|| panic!("{id}: scopeReason.citations must be a non-empty array"));
+        for citation in citations {
+            let citation = citation.as_str().expect("citation string");
+            let (path, line) = citation
+                .rsplit_once(':')
+                .unwrap_or_else(|| panic!("{id}: citation {citation} is not path:line"));
+            let line: usize = line
+                .parse()
+                .unwrap_or_else(|_| panic!("{id}: citation {citation} has no line number"));
+            let lines = read(&repo_root().join(path)).lines().count();
+            assert!(
+                line >= 1 && line <= lines,
+                "{id}: citation {citation} points past the end of {path} ({lines} lines)"
+            );
+        }
+    }
+    assert!(
+        out_of_scope > 0,
+        "no OUT-OF-SCOPE fixture found: the scan read nothing"
+    );
 }
 
 #[test]

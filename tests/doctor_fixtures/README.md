@@ -61,8 +61,9 @@ digest excludes `ee.db-shm` and checks `ee.write.lock` by its semantics
 can only describe (the truncated-database fixture uses it). Nine more fixtures
 build their named corruption for real (labels REPAIR, GUIDANCE-ONLY and
 NOT-DETECTED; NOT-DETECTED and PINNED-DEFECT pin a gap and are not coverage).
-The remaining 14 UNCLASSIFIED fixtures and the UNRESOLVED WAL/SHM fixture still
-write markers only. Also,
+The remaining UNCLASSIFIED fixtures (count pinned in `lib.sh`), the UNRESOLVED
+WAL/SHM fixture and the two OUT-OF-SCOPE fixtures still write markers only.
+Also,
 `doctor --only` is currently advisory, so the after-report does not establish
 per-FM detector coverage. The helper's health check follows the doctor's core
 health contract; it does not certify optional advisory subsystems as repaired.
