@@ -872,39 +872,21 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
 /// The workspace path itself is already scrubbed to [WORKSPACE], but the DIGEST
 /// of it is not a substring of it, so no path replacement can catch this. It
 /// needs its own rule.
+///
+/// bd-47x3l: that rule is the ONE shared normaliser,
+/// `ee::obs::normalize_workspace_daemon_socket_paths`, which the golden
+/// harnesses use too; this harness keeps only its `[DAEMON_SOCKET]` label. The
+/// private rule it replaced required an `/ee-<uid>/` parent, so the
+/// `${XDG_RUNTIME_DIR}/ee/d-<hex>.sock` form passed through unscrubbed.
 fn scrub_daemon_socket_path(text: &str) -> String {
-    let mut scrubbed = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("/ee-") {
-        let Some(sock) = rest[start..].find(".sock") else {
-            break;
-        };
-        let candidate = &rest[start..start + sock + ".sock".len()];
-        // Only a per-uid daemon socket: /ee-<digits>/d-<hex>.sock
-        let looks_like_socket = candidate
-            .strip_prefix("/ee-")
-            .and_then(|tail| tail.split_once('/'))
-            .is_some_and(|(uid, file)| {
-                !uid.is_empty()
-                    && uid.bytes().all(|b| b.is_ascii_digit())
-                    && file.starts_with("d-")
-                    && file.ends_with(".sock")
-            });
-        if !looks_like_socket {
-            scrubbed.push_str(&rest[..start + 4]);
-            rest = &rest[start + 4..];
-            continue;
-        }
-        // Walk back over the parent directory so the whole path is replaced.
-        let dir_start = rest[..start]
-            .rfind(char::is_whitespace)
-            .map_or(0, |i| i + 1);
-        scrubbed.push_str(&rest[..dir_start]);
-        scrubbed.push_str("[DAEMON_SOCKET]");
-        rest = &rest[start + sock + ".sock".len()..];
+    let (normalized, replaced) = ee::obs::normalize_workspace_daemon_socket_paths(text);
+    if replaced == 0 {
+        return normalized;
     }
-    scrubbed.push_str(rest);
-    scrubbed
+    normalized.replace(
+        ee::obs::WORKSPACE_DAEMON_SOCKET_PLACEHOLDER,
+        "[DAEMON_SOCKET]",
+    )
 }
 
 #[test]
@@ -917,6 +899,7 @@ fn pack_id_scrubbing_distinguishes_ids_from_degraded_codes() {
 /// one that only ever fires is indistinguishable from one that eats real values.
 /// The two positive cases are the exact strings two regenerations produced
 /// minutes apart; the digest differs between them, which is the whole point.
+/// The third is the XDG-parent form an RCH worker reports (bd-47x3l).
 #[test]
 fn daemon_socket_scrubbing_replaces_the_volatile_path_and_nothing_else() {
     // Built from one template so the ONLY difference is the socket path.
@@ -949,14 +932,25 @@ fn daemon_socket_scrubbing_replaces_the_volatile_path_and_nothing_else() {
         "two runs differing only in socket path must scrub identically"
     );
 
-    // NEGATIVE ARMS. None of these is a per-uid daemon socket and none may be
-    // touched -- a scrubber that widens is worse than one that is missing,
-    // because it silently deletes evidence from every future snapshot.
+    // bd-47x3l: the XDG form, as `ee doctor` printed it on RCH worker
+    // vmi1227854. The parent is `${XDG_RUNTIME_DIR}/ee/`, not `/tmp/ee-<uid>/`;
+    // the private rule this harness used to carry left it in the snapshot.
+    let xdg = message("/run/user/1000/ee/d-3f005d529dc893aa9eb9a073.sock");
+    assert_eq!(
+        scrub_daemon_socket_path(&xdg),
+        scrubbed_first,
+        "the XDG runtime-dir socket must scrub like the /tmp fallback"
+    );
+
+    // NEGATIVE ARMS. None of these is a per-workspace daemon socket and none
+    // may be touched -- a scrubber that widens is worse than one that is
+    // missing, because it silently deletes evidence from every future snapshot.
     for untouched in [
         "index at [WORKSPACE]/.ee/index is ready",
         "no socket here at all",
-        "/tmp/ee-notanumber/d-abc.sock is not a uid path",
-        "/var/run/other/d-abc.sock lives outside the ee- parent",
+        "/tmp/ee-notanumber/d-abc.sock is not a hashed name",
+        "/run/user/1000/ee/daemon.sock is the default socket",
+        "/tmp/ee-1000/d-b5752ef363443d504fed354.sock has 23 hex digits",
     ] {
         assert_eq!(
             scrub_daemon_socket_path(untouched),

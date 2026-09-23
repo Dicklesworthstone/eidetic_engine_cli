@@ -39,7 +39,7 @@ mv "$target/.ee/index/$rel" "$base/index-original/$rel"
 head -c "$(wc -c < "$base/index-original/$rel" | tr -d ' ')" /dev/urandom > "$target/.ee/index/$rel"
 printf '%s\n' "$rel" > "$base/corrupted-index-file"
 
-doctor_fixture_corrupt "$FM" "P0" "search_indexes"
+doctor_fixture_corrupt "$FM" "P1" "search_indexes"
 "$ee_bin" doctor --workspace "$target" --json > "$base/doctor-corrupt.json"
 if ! jq -e '
     .schema == "ee.response.v2" and .success == true and .data.healthy == false and

@@ -23,7 +23,7 @@ printf '%s\n' '#!/bin/sh' \
     > "$base/fakebin/rch"
 chmod +x "$base/fakebin/rch"
 
-doctor_fixture_corrupt "$FM" "P0" "agent_coordination"
+doctor_fixture_corrupt "$FM" "P1" "agent_coordination"
 PATH="$base/fakebin:$PATH" "$ee_bin" doctor --workspace "$target" --full --json > "$base/doctor-corrupt.json"
 if ! jq -e '.data.rchWorkerPressure.status == "healthy_but_pressure_blocked" and .data.rchWorkerPressure.usableWorkerCount == 0' \
     "$base/doctor-corrupt.json" >/dev/null; then

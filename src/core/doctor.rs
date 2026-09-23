@@ -402,18 +402,32 @@ impl DoctorReport {
         &self,
         agent_inventory: &AgentInventoryReport,
     ) -> FixPlan {
+        let store_unreadable = super::doctor_fixers::store_unreadable(
+            self.checks
+                .iter()
+                .map(|check| (check.name, check.error_code.map(|code| code.id))),
+        );
         let steps: Vec<FixStep> = self
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .enumerate()
-            .map(|(idx, check)| FixStep {
-                order: idx + 1,
-                subsystem: check.name,
-                severity: check.severity,
-                issue: check.message.clone(),
-                error_code: check.error_code,
-                command: check.repair.unwrap_or_default(),
+            .map(|(idx, check)| {
+                let (fix_mode, fix_finding) = super::doctor_fixers::fix_mode_for_check(
+                    check.error_code.map(|code| code.id),
+                    check.name,
+                    store_unreadable,
+                );
+                FixStep {
+                    order: idx + 1,
+                    subsystem: check.name,
+                    severity: check.severity,
+                    issue: check.message.clone(),
+                    error_code: check.error_code,
+                    command: check.repair.unwrap_or_default(),
+                    fix_mode,
+                    fix_finding,
+                }
             })
             .collect();
 
@@ -422,7 +436,12 @@ impl DoctorReport {
             .iter()
             .filter(|c| !c.severity.is_healthy())
             .count();
-        let fixable_issues = steps.len();
+        // Fixable means `ee doctor --fix` repairs it, not that the check has
+        // repair text: a step with only a hint is manual (bd-223vl M3).
+        let fixable_issues = steps
+            .iter()
+            .filter(|step| step.fix_mode == super::doctor_fixers::FixMode::AutoRepair)
+            .count();
 
         FixPlan {
             version: self.version,
@@ -1565,6 +1584,10 @@ pub struct FixStep {
     pub issue: String,
     pub error_code: Option<ErrorCode>,
     pub command: &'static str,
+    /// What `ee doctor --fix` does for this step.
+    pub fix_mode: super::doctor_fixers::FixMode,
+    /// The finding `ee doctor --fix` dispatches for this step, if any.
+    pub fix_finding: Option<&'static str>,
 }
 
 /// CASS import guidance status derived from agent detection.
@@ -2791,6 +2814,20 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::DATABASE_NOT_FOUND,
         );
     }
+    // bd-wswg0 / bd-xa6ud: a zero-byte file opens as a valid empty database and
+    // would read as pending migrations, but it is a store whose data is gone; a
+    // truncated file fails the open below only after touching its sidecars.
+    // Judge both from the header, before any open, so this never writes to them.
+    if let Some((code, reason)) = database_unreadable(workspace_path) {
+        let message = if code.id == error_codes::DATABASE_EMPTY.id {
+            empty_database_message(workspace_path, &database_path)
+        } else {
+            format!(
+                "Database readiness check failed: {reason}. Keep the file, recover from a backup (ee backup list --workspace .) or move it aside and re-initialize."
+            )
+        };
+        return CheckResult::error("database", message, code);
+    }
 
     match DbConnection::open_file(&database_path) {
         Ok(connection) => {
@@ -2857,6 +2894,110 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::DATABASE_CORRUPTED,
         ),
     }
+}
+
+/// What an empty store's workspace still holds that shows it once had data
+/// (bd-wswg0): a populated search index or backup directory. An empty list
+/// means ee cannot tell, not that the store never held data.
+fn prior_data_evidence(workspace_path: &Path) -> Vec<&'static str> {
+    let has_entries =
+        |path: PathBuf| std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some());
+    let mut evidence = Vec::new();
+    if has_entries(crate::config::workspace::resolve_store_index_dir(
+        workspace_path,
+        None,
+        None,
+    )) {
+        evidence.push("search index");
+    }
+    if has_entries(workspace_path.join(".ee").join("backups")) {
+        evidence.push("backups");
+    }
+    evidence
+}
+
+fn empty_database_message(workspace_path: &Path, database_path: &Path) -> String {
+    let evidence = prior_data_evidence(workspace_path);
+    let history = if evidence.is_empty() {
+        "ee cannot tell from a 0-byte file whether it ever held data".to_owned()
+    } else {
+        format!(
+            "this workspace previously held data (its {} still exist)",
+            evidence.join(" and ")
+        )
+    };
+    format!(
+        "Database file {} is empty (0 bytes): {history}. Do not run ee init or a migration over it; recover from a backup (ee backup list --workspace .) or move it aside and re-initialize.",
+        database_path.display()
+    )
+}
+
+/// Whether the workspace database is empty or visibly damaged, judged from its
+/// length and 100-byte SQLite header with plain reads (bd-xa6ud, bd-wswg0).
+/// Opening it, even read-only, writes its sidecars (`-wal`, `-shm`,
+/// `-fsqlite-ns-use`) and can initialise a 0-byte file, so every check that
+/// would open the store must consult this first and stay away when it answers.
+/// A missing database is not reported here; its own checks handle it. Damage
+/// the header cannot show is left to the normal open path.
+pub(crate) fn database_unreadable(workspace_path: &Path) -> Option<(ErrorCode, String)> {
+    use std::io::Read as _;
+
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    let metadata = std::fs::metadata(&database_path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let len = metadata.len();
+    if len == 0 {
+        return Some((
+            error_codes::DATABASE_EMPTY,
+            "the database is empty (0 bytes)".to_owned(),
+        ));
+    }
+    if len < 100 {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            format!("the database is {len} bytes, shorter than its 100-byte header"),
+        ));
+    }
+    let mut header = [0_u8; 100];
+    std::fs::File::open(&database_path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .ok()?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            "the database does not start with the SQLite file header".to_owned(),
+        ));
+    }
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536_u64,
+        size => u64::from(size),
+    };
+    let word = |at: usize| {
+        u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    let (change_counter, header_pages, valid_for) = (word(24), word(28), word(92));
+    if valid_for == change_counter && u64::from(header_pages) * page_size > len {
+        return Some((
+            error_codes::DATABASE_CORRUPTED,
+            format!(
+                "the database is truncated: its header records {header_pages} pages of {page_size} bytes, but the file holds {len} bytes"
+            ),
+        ));
+    }
+    None
+}
+
+/// The search index cannot be judged while the database is empty or unreadable.
+/// Report the database as the blocker instead of a missing index.
+fn search_index_blocked_by_database(workspace_path: &Path) -> Option<CheckResult> {
+    let (code, reason) = database_unreadable(workspace_path)?;
+    Some(CheckResult::warning(
+        "search_index",
+        format!("Search index not inspected: {reason}; see the database check."),
+        code,
+    ))
 }
 
 /// Presence-only scan of the foreign embedding-config env vars (never reads a
@@ -2955,6 +3096,27 @@ fn embedding_posture_check_result(
     check.advisory()
 }
 
+/// bd-h1xbv: a present bundled model whose `.verified` receipt is missing or
+/// stale is re-hashed by every process that loads it. Say so on the embedding
+/// check, advisory only (results are unaffected), and point at the re-mint.
+fn with_model_receipt_stale_advisory(mut check: CheckResult, receipt_stale: bool) -> CheckResult {
+    if !receipt_stale {
+        return check;
+    }
+    check.message.push_str(&format!(
+        " Advisory code: {}. {}",
+        super::status::EMBED_MODEL_RECEIPT_STALE_CODE,
+        super::status::EMBED_MODEL_RECEIPT_STALE_MESSAGE
+    ));
+    if matches!(check.severity, CheckSeverity::Ok) {
+        check.severity = CheckSeverity::Warning;
+    }
+    if check.repair.is_none() {
+        check.repair = Some(super::status::EMBED_MODEL_RECEIPT_STALE_REPAIR);
+    }
+    check.advisory()
+}
+
 /// Advisory result for when the active retrieval mode cannot be determined
 /// (no workspace, or the index status read failed). Still `Ok`/advisory and
 /// still discloses the env trap; points to the canonical inspection surfaces.
@@ -2979,6 +3141,15 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
         return embedding_posture_unavailable_check(&trap_present, "no workspace path");
     };
+    // bd-xa6ud / bd-wswg0: get_index_status opens the store read-write; this
+    // check runs before check_database, so on an empty or unreadable store it
+    // would write to it first. Report the posture as unavailable instead.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return embedding_posture_unavailable_check(
+            &trap_present,
+            &format!("{reason}; see the database check"),
+        );
+    }
     let options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
@@ -2986,13 +3157,16 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     };
     match get_index_status(&options) {
         Ok(report) => match &report.embedding {
-            Some(posture) => embedding_posture_check_result(
-                posture.semantic,
-                posture.mode,
-                &posture.fast_model_id,
-                posture.fast_dimension,
-                posture.deterministic,
-                &trap_present,
+            Some(posture) => with_model_receipt_stale_advisory(
+                embedding_posture_check_result(
+                    posture.semantic,
+                    posture.mode,
+                    &posture.fast_model_id,
+                    posture.fast_dimension,
+                    posture.deterministic,
+                    &trap_present,
+                ),
+                !super::index::stale_receipt_potion_model_dirs().is_empty(),
             ),
             None => embedding_posture_unavailable_check(
                 &trap_present,
@@ -3174,6 +3348,14 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
     if !database_path.is_file() {
         return reranker_posture_check_result(None, Some("workspace database not found"));
     }
+    // bd-xa6ud / bd-wswg0: even a read-only open writes the store's sidecars and
+    // can initialise a 0-byte file; this runs before check_database.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return reranker_posture_check_result(
+            None,
+            Some(&format!("{reason}; see the database check")),
+        );
+    }
 
     let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
@@ -3230,7 +3412,12 @@ fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     let enabled =
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
     let workspace_root = workspace_path.map(Path::to_path_buf);
-    let workspace_id = workspace_path.map(crate::core::workspace::bound_workspace_id_from_path);
+    // bd-xa6ud / bd-wswg0: resolving the bound workspace id opens the store,
+    // and even a read-only open writes its namespace-use sidecar. Leave an
+    // empty or damaged store alone.
+    let workspace_id = workspace_path
+        .filter(|path| database_unreadable(path).is_none())
+        .map(crate::core::workspace::bound_workspace_id_from_path);
     let report = resolve_shard_fanout_status(ShardFanoutResolverInput {
         enabled,
         workspace_id,
@@ -3319,6 +3506,9 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::INDEX_NOT_FOUND,
         );
     };
+    if let Some(blocked) = search_index_blocked_by_database(workspace_path) {
+        return blocked;
+    }
     let options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
@@ -3369,6 +3559,14 @@ fn check_wal_pressure(workspace_path: Option<&Path>) -> CheckResult {
             "WAL pressure was not inspected without a workspace path.",
         );
     };
+    // bd-xa6ud / bd-wswg0: gathering WAL status opens the store; leave an
+    // empty or damaged one untouched. The database check reports the damage.
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return CheckResult::ok(
+            "wal_pressure",
+            format!("WAL pressure not inspected: {reason}; see the database check."),
+        );
+    }
     let wal = crate::core::status::WalStatusReport::gather(Some(workspace_path));
     if !wal.exceeds_database_size() {
         return CheckResult::ok(
@@ -5298,15 +5496,111 @@ mod tests {
             .count();
         ensure(plan.total_issues, unhealthy_count, "total_issues matches")?;
 
-        let fixable_count = report
+        let step_count = report
             .checks
             .iter()
             .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
             .count();
-        ensure(plan.fixable_issues, fixable_count, "fixable_issues matches")?;
-        ensure(plan.steps.len(), fixable_count, "steps count matches")?;
+        ensure(plan.steps.len(), step_count, "steps count matches")?;
+        let auto_repair_count = plan
+            .steps
+            .iter()
+            .filter(|step| step.fix_mode == crate::core::doctor_fixers::FixMode::AutoRepair)
+            .count();
+        ensure(
+            plan.fixable_issues,
+            auto_repair_count,
+            "fixable_issues matches",
+        )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn fix_plan_counts_only_what_fix_repairs_as_fixable() -> TestResult {
+        use crate::core::doctor_fixers::FixMode;
+
+        fn plan_for(checks: Vec<CheckResult>) -> FixPlan {
+            let mut report = DoctorReport::gather_with_workspace(None);
+            report.checks = checks;
+            report.to_fix_plan()
+        }
+        fn modes(plan: &FixPlan) -> Vec<(&'static str, FixMode, Option<&'static str>)> {
+            plan.steps
+                .iter()
+                .map(|step| (step.subsystem, step.fix_mode, step.fix_finding))
+                .collect()
+        }
+
+        // Readable store: a repair, a guidance-only dispatch, and a step with
+        // only a hint.
+        let plan = plan_for(vec![
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+            CheckResult::warning(
+                "cass",
+                "CASS capabilities limited.",
+                error_codes::CASS_DEGRADED,
+            ),
+            CheckResult::warning(
+                "shard_fanout",
+                "Shard fan-out configuration is unsafe.",
+                error_codes::CONFIG_INVALID_VALUE,
+            ),
+            CheckResult::ok("runtime", "ok"),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "search_index",
+                    FixMode::AutoRepair,
+                    Some("search_index_missing"),
+                ),
+                (
+                    "cass",
+                    FixMode::AutoGuidance,
+                    Some("cass_integration_drift"),
+                ),
+                ("shard_fanout", FixMode::Manual, None),
+            ],
+            "readable store: per-step fix modes",
+        )?;
+        ensure(plan.total_issues, 3, "readable store: total issues")?;
+        // Only the index repair is fixable. Before bd-223vl M3 this counted 3.
+        ensure(plan.fixable_issues, 1, "readable store: fixable issues")?;
+
+        // Unopenable store (bd-xa6ud): the database gets guidance and the
+        // index rebuild that would read it is not dispatched, so nothing here
+        // is fixable even though the index step has a repair hint.
+        let plan = plan_for(vec![
+            CheckResult::error(
+                "database",
+                "Database readiness check failed.",
+                error_codes::DATABASE_CORRUPTED,
+            ),
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+        ]);
+        ensure(
+            modes(&plan),
+            vec![
+                (
+                    "database",
+                    FixMode::AutoGuidance,
+                    Some("database_corrupted"),
+                ),
+                ("search_index", FixMode::Manual, None),
+            ],
+            "unreadable store: per-step fix modes",
+        )?;
+        ensure(plan.fixable_issues, 0, "unreadable store: fixable issues")
     }
 
     #[test]
@@ -6207,6 +6501,41 @@ mod tests {
         assert!(check.message.contains("potion-multilingual-128M"));
         assert!(check.message.contains("256d"));
         assert!(check.message.contains("ee model status"));
+    }
+
+    #[test]
+    fn stale_model_receipt_is_an_advisory_warning_with_the_fetch_repair() {
+        let ready = || {
+            embedding_posture_check_result(
+                true,
+                "neural_local",
+                "potion-multilingual-128M",
+                256,
+                true,
+                &[],
+            )
+        };
+        let untouched = with_model_receipt_stale_advisory(ready(), false);
+        assert_eq!(untouched.severity, CheckSeverity::Ok);
+        assert_eq!(untouched.message, ready().message);
+        assert_eq!(untouched.repair, None);
+
+        let check = with_model_receipt_stale_advisory(ready(), true);
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("ready"));
+        assert!(
+            check
+                .message
+                .contains("Advisory code: embed_model_receipt_stale.")
+        );
+        assert_eq!(
+            check.repair,
+            Some(
+                "Run `ee model fetch embedding-default` to re-verify the model and re-mint its receipt."
+            )
+        );
     }
 
     #[test]

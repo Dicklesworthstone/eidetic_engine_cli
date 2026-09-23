@@ -4,11 +4,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/doctor_fixtures/lib.sh
 . "$SCRIPT_DIR/../lib.sh"
 
-# REPORT-ONLY (bd-2oh15 c9853): the stored checksum of the first applied
-# migration is changed with SQL. doctor's database check reports EE-E202 with an
-# EE-E040 migration_drift message (posture blocked); EE-E202 has no dispatch, so
-# --fix does nothing. A byte copy of the pre-drift database is kept in the
-# baseline.
+# GUIDANCE-ONLY (bd-2oh15 c9853; guidance since 9ed78b70d): the stored checksum
+# of the first applied migration is changed with SQL. doctor's database check
+# reports EE-E202 with an EE-E040 migration_drift message (posture blocked);
+# --fix records manual guidance only. A byte copy of the pre-drift database is
+# kept in the baseline.
 FM="fm-schema_migrations-migration-drift-checksum-mismatch"
 target="$(doctor_fixture_target)"
 ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
@@ -18,6 +18,14 @@ export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 doctor_fixture_prepare_target "$target"
 doctor_fixture_healthy_store "$FM" "$target" "$ee_bin"
 base="$target/.fixture_baseline"
+# Provision doctor's persistent lock through a healthy no-op run BEFORE the
+# drift, so the guidance-only --fix can be held to "workspace bytes identical"
+# without the lock's first creation counting as a change (measured at
+# a2c2f950f: that creation was the only byte change --fix made).
+"$ee_bin" doctor --workspace "$target" --fix --json > "$base/doctor-initialize-lock.json"
+jq -e '.schema == "ee.response.v2" and .success == true and .data.actionCount == 0' \
+    "$base/doctor-initialize-lock.json" >/dev/null
+test -f "$target/.ee/.doctor.lock"
 
 cp -p "$target/.ee/ee.db" "$base/ee.db.pre-drift"
 sqlite3 "$target/.ee/ee.db" \
