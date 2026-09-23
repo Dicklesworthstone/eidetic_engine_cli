@@ -363,8 +363,9 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
 /// bd-pbyay split `search_index_missing` out of `search_index_stale`, because a
 /// missing index was being repaired as stale; bd-xa6ud / bd-wswg0 added the
 /// guidance-only `database_empty` and `database_corrupted`. A contract test
-/// derives the codes from every `fix_*` function above and from the
-/// `ee doctor --fix` dispatch, so this list cannot drift from either (bd-ynfuu).
+/// derives the codes from every fixer above and from the `ee doctor --fix`
+/// dispatch ([`fix_dispatch_for_finding`] and `doctor_fix_json`), so this list
+/// cannot drift from either (bd-ynfuu).
 pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_stale",
     "search_index_missing",
@@ -1007,10 +1008,12 @@ mod tests {
         assert_eq!(sorted, expected);
     }
 
-    /// `fix_*` function name -> the finding code it emits, read from the
-    /// non-test part of a fixer module's source: the `finding_code: "..."`
-    /// field, or the first argument of `FixerDispatch::manual(`.
-    fn fixer_codes_in_source(source: &str) -> std::collections::BTreeMap<String, String> {
+    /// Every `pub fn fix_*` in the non-test part of a fixer module's source,
+    /// mapped to the finding code it emits: the `finding_code: "..."` field,
+    /// or the first argument of `FixerDispatch::manual(`. A `fix_*` function
+    /// that builds no dispatch itself (the dispatch-table helpers) maps to
+    /// `None`. A line belongs to the most recent function definition only.
+    fn fixer_codes_in_source(source: &str) -> std::collections::BTreeMap<String, Option<String>> {
         let production = source.split("#[cfg(test)]").next().unwrap_or(source);
         let mut codes = std::collections::BTreeMap::new();
         let mut current: Option<String> = None;
@@ -1022,26 +1025,34 @@ mod tests {
                     .chars()
                     .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                     .collect();
-                current = Some(format!("fix_{name}"));
+                let name = format!("fix_{name}");
+                codes.insert(name.clone(), None);
+                current = Some(name);
                 awaiting_manual_code = false;
+                continue;
+            }
+            if trimmed.starts_with("fn ")
+                || (trimmed.starts_with("pub") && trimmed.contains(" fn "))
+            {
+                current = None;
                 continue;
             }
             let Some(name) = current.clone() else {
                 continue;
             };
-            if codes.contains_key(&name) {
+            if codes.get(&name).is_some_and(Option::is_some) {
                 continue;
             }
             let literal = |text: &str| text.split('"').nth(1).map(str::to_owned);
             if let Some(rest) = trimmed.strip_prefix("finding_code: ") {
                 if let Some(code) = literal(rest) {
-                    codes.insert(name, code);
+                    codes.insert(name, Some(code));
                 }
             } else if trimmed.starts_with("FixerDispatch::manual(") {
                 awaiting_manual_code = true;
             } else if awaiting_manual_code && trimmed.starts_with('"') {
                 if let Some(code) = literal(trimmed) {
-                    codes.insert(name, code);
+                    codes.insert(name, Some(code));
                 }
                 awaiting_manual_code = false;
             }
@@ -1049,13 +1060,15 @@ mod tests {
         codes
     }
 
-    /// Every `fix_*` function the body of `fn doctor_fix_json` calls.
-    fn dispatched_fixers(cli_source: &str) -> std::collections::BTreeSet<String> {
-        let Some(start) = cli_source.find("\nfn doctor_fix_json(") else {
+    /// Every `fix_*` function called in the body of the top-level function
+    /// whose definition line starts with `header` (up to its closing `}` in
+    /// column 0).
+    fn dispatched_fixers(source: &str, header: &str) -> std::collections::BTreeSet<String> {
+        let Some(start) = source.find(&format!("\n{header}")) else {
             return std::collections::BTreeSet::new();
         };
-        let body = &cli_source[start + 1..];
-        let body = body.find("\nfn ").map_or(body, |end| &body[..end]);
+        let body = &source[start + 1 + header.len()..];
+        let body = body.find("\n}").map_or(body, |end| &body[..end]);
         let mut called = std::collections::BTreeSet::new();
         let mut rest = body;
         while let Some(at) = rest.find("fix_") {
@@ -1090,64 +1103,100 @@ pub fn fix_planted_manual(root: &Path) -> FixerDispatch {
         "error",
     )
 }
+pub fn fix_planted_table(root: &Path, finding: &str) -> Option<FixerDispatch> {
+    match finding {
+        "planted_field" => Some(fix_planted_field(root)),
+        _ => None,
+    }
+}
+pub fn not_a_fixer() -> FixerDispatch {
+    FixerDispatch {
+        finding_code: "stray",
+    }
+}
 #[cfg(test)]
 pub fn fix_test_only() -> FixerDispatch { finding_code: "test_only" }
 "#;
         let codes = fixer_codes_in_source(module);
+        let code = |name: &str| codes.get(name).cloned();
         assert_eq!(
-            codes.get("fix_planted_field").map(String::as_str),
-            Some("planted_field")
+            code("fix_planted_field"),
+            Some(Some("planted_field".to_owned()))
         );
         assert_eq!(
-            codes.get("fix_planted_manual").map(String::as_str),
-            Some("planted_manual")
+            code("fix_planted_manual"),
+            Some(Some("planted_manual".to_owned()))
         );
+        // A table helper is a fix_* function with no code of its own, and the
+        // next function's code is not attributed to it.
+        assert_eq!(code("fix_planted_table"), Some(None), "{codes:?}");
+        assert!(!codes.contains_key("not_a_fixer"), "{codes:?}");
         assert!(!codes.contains_key("fix_test_only"), "{codes:?}");
+        let table = dispatched_fixers(module, "pub fn fix_planted_table(");
+        assert_eq!(
+            table.into_iter().collect::<Vec<_>>(),
+            vec!["fix_planted_field".to_owned()]
+        );
         let cli = "\nfn other() { fix_elsewhere(x) }\nfn doctor_fix_json(w: &Path) {\n    Some(fix_planted_field(w));\n    prefix_fix_not_a_call(w);\n}\nfn after() { fix_after(x) }\n";
-        let called = dispatched_fixers(cli);
+        let called = dispatched_fixers(cli, "fn doctor_fix_json(");
         assert_eq!(
             called.into_iter().collect::<Vec<_>>(),
             vec!["fix_planted_field".to_owned()]
         );
+        assert!(dispatched_fixers(cli, "fn absent(").is_empty());
     }
 
     #[test]
     fn fixer_codes_match_every_fixer_and_every_dispatch() {
-        let fixers = fixer_codes_in_source(include_str!("doctor_fixers.rs"));
+        let module = include_str!("doctor_fixers.rs");
+        let fixers = fixer_codes_in_source(module);
         let derived: std::collections::BTreeSet<&str> =
-            fixers.values().map(String::as_str).collect();
+            fixers.values().flatten().map(String::as_str).collect();
         let registered: std::collections::BTreeSet<&str> =
             FIXER_FINDING_CODES.iter().copied().collect();
-        assert!(
-            fixers.len() >= FIXER_FINDING_CODES.len(),
-            "every registered code needs a fix_* function; found {fixers:?}"
-        );
         assert_eq!(
             derived, registered,
             "FIXER_FINDING_CODES must equal the codes the fix_* functions emit"
         );
 
-        let dispatched = dispatched_fixers(include_str!("../cli/mod.rs"));
+        // The --fix dispatch table (bd-223vl M3): every fixer it calls emits a
+        // registered code.
+        let table = dispatched_fixers(module, "pub fn fix_dispatch_for_finding(");
         assert!(
-            !dispatched.is_empty(),
-            "doctor_fix_json must be found and dispatch at least one fixer"
+            !table.is_empty(),
+            "fix_dispatch_for_finding must be found and dispatch at least one fixer"
         );
-        let unknown: Vec<&String> = dispatched
+        let table_violations: Vec<(&String, Option<&Option<String>>)> = table
             .iter()
-            .filter(|name| !fixers.contains_key(*name))
+            .map(|name| (name, fixers.get(name)))
+            .filter(
+                |(_, code)| !matches!(code, Some(Some(code)) if registered.contains(code.as_str())),
+            )
             .collect();
         assert!(
-            unknown.is_empty(),
-            "doctor_fix_json calls functions that are not fixers here: {unknown:?}"
+            table_violations.is_empty(),
+            "fix_dispatch_for_finding calls fixers with no registered code: {table_violations:?}"
         );
-        let unregistered: Vec<(&String, &String)> = dispatched
+
+        // doctor_fix_json dispatches through that table, and any fixer it
+        // calls directly also emits a registered code.
+        let cli = dispatched_fixers(include_str!("../cli/mod.rs"), "fn doctor_fix_json(");
+        assert!(
+            cli.contains("fix_dispatch_for_finding"),
+            "doctor_fix_json must dispatch through fix_dispatch_for_finding; it calls {cli:?}"
+        );
+        let cli_violations: Vec<(&String, Option<&Option<String>>)> = cli
             .iter()
-            .filter_map(|name| fixers.get(name).map(|code| (name, code)))
-            .filter(|(_, code)| !registered.contains(code.as_str()))
+            .map(|name| (name, fixers.get(name)))
+            .filter(|(_, code)| match code {
+                None => true,
+                Some(None) => false,
+                Some(Some(code)) => !registered.contains(code.as_str()),
+            })
             .collect();
         assert!(
-            unregistered.is_empty(),
-            "dispatched fixers whose code is not in FIXER_FINDING_CODES: {unregistered:?}"
+            cli_violations.is_empty(),
+            "doctor_fix_json calls fix_* functions that are unknown here or unregistered: {cli_violations:?}"
         );
     }
 }
