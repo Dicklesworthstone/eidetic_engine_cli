@@ -3139,7 +3139,7 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
             ensure_json_pointer(
                 &result.parsed,
                 "/data/report/schema",
-                json!("ee.eval.report.v1"),
+                json!("ee.eval.report.v2"),
                 &format!("{command} report schema"),
             )?;
             ensure_json_pointer(

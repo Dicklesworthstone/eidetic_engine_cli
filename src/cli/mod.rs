@@ -17767,12 +17767,14 @@ fn run_eval_retrieval_queries(
                 repair: error.repair_hint().map(str::to_owned),
             }),
         })?;
-        per_query.push(crate::eval::runner::compute_search_query_metrics(
+        let mut metrics = crate::eval::runner::compute_search_query_metrics(
             &query,
             &expected_ids,
             &report,
             &workspace_path,
-        ));
+        );
+        metrics.verbatim = Some(crate::eval::query_appears_verbatim(&query, &memories));
+        per_query.push(metrics);
     }
 
     Ok(per_query)

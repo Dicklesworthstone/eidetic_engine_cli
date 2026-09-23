@@ -49,7 +49,7 @@
     },
     "reports": [
       {
-        "schema": "ee.eval.report.v1",
+        "schema": "ee.eval.report.v2",
         "fixture_id": "fx.release_failure.v1",
         "fixture_family": "release_failure",
         "status": "failed",
@@ -62,6 +62,10 @@
           "mean_recall_at_5": 1.0,
           "mean_ndcg_at_5": 0.7785578521428744,
           "mean_mrr": 0.7,
+          "verbatim_queries": 1,
+          "verbatim_share": 0.2,
+          "paraphrase_queries": 4,
+          "paraphrase_mean_precision_at_1": 0.25,
           "per_query": [
             {
               "query": "clippy before release",
@@ -78,7 +82,8 @@
               "recall_at_5": 1.0,
               "ndcg_at_5": 0.6309297535714575,
               "mrr": 0.5,
-              "first_relevant_rank": 2
+              "first_relevant_rank": 2,
+              "verbatim": false
             },
             {
               "query": "failing release workflow",
@@ -95,7 +100,8 @@
               "recall_at_5": 1.0,
               "ndcg_at_5": 0.6309297535714575,
               "mrr": 0.5,
-              "first_relevant_rank": 2
+              "first_relevant_rank": 2,
+              "verbatim": false
             },
             {
               "query": "prepare release",
@@ -113,7 +119,8 @@
               "recall_at_5": 1.0,
               "ndcg_at_5": 1.0,
               "mrr": 1.0,
-              "first_relevant_rank": 1
+              "first_relevant_rank": 1,
+              "verbatim": false
             },
             {
               "query": "release failure",
@@ -130,7 +137,8 @@
               "recall_at_5": 1.0,
               "ndcg_at_5": 0.6309297535714575,
               "mrr": 0.5,
-              "first_relevant_rank": 2
+              "first_relevant_rank": 2,
+              "verbatim": false
             },
             {
               "query": "unused import",
@@ -146,7 +154,8 @@
               "recall_at_5": 1.0,
               "ndcg_at_5": 1.0,
               "mrr": 1.0,
-              "first_relevant_rank": 1
+              "first_relevant_rank": 1,
+              "verbatim": true
             }
           ]
         },

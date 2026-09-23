@@ -320,7 +320,7 @@ fn normalized_report_for_golden(value: &Value) -> Result<String, String> {
 
     ensure_equal(
         &string_field(&report, "/schema")?,
-        &"ee.eval.report.v1",
+        &"ee.eval.report.v2",
         "report schema",
     )?;
 

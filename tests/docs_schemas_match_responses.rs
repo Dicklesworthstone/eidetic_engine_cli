@@ -2721,8 +2721,8 @@ fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult
         ),
         MachineSurfaceConformanceCase::new(
             "eval",
-            "ee.eval.report.v1",
-            "ee.eval.report.v1.json",
+            "ee.eval.report.v2",
+            "ee.eval.report.v2.json",
             eval_report_conformance_sample()?,
         ),
         MachineSurfaceConformanceCase::new(
@@ -2941,7 +2941,7 @@ fn proof_check_conformance_sample() -> Value {
 fn eval_report_conformance_sample() -> Result<Value, String> {
     // The eval-report golden uses the string sentinel `"[duration_ms]"` for
     // duration_ms because production duration is wall-clock and the golden
-    // would otherwise drift every run. The ee.eval.report.v1 schema requires
+    // would otherwise drift every run. The ee.eval.report.v2 schema requires
     // duration_ms to be a number (production emits a JSON number via
     // EvalRunReport::duration_ms: f64), so substitute a representative
     // numeric value before validating shape conformance. The other

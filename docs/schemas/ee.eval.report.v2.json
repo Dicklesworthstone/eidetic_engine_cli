@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.eval.report.v2.json",
+  "title": "ee.eval.report.v2",
+  "description": "Retrieval evaluation report emitted by eval fixtures. v2 adds the verbatim/paraphrase split: a query whose text appears verbatim in a memory it must retrieve cannot fail on lexical retrieval, so it is counted separately from paraphrase-only queries.",
+  "type": "object",
+  "required": [
+    "schema",
+    "fixture_id",
+    "fixture_family",
+    "status",
+    "metrics",
+    "duration_ms",
+    "data_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.eval.report.v2" },
+    "fixture_id": { "type": "string" },
+    "fixture_family": { "type": "string" },
+    "status": { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "fixture_id",
+        "queries_evaluated",
+        "mean_precision_at_1",
+        "mean_precision_at_3",
+        "mean_precision_at_5",
+        "mean_recall_at_5",
+        "mean_ndcg_at_5",
+        "mean_mrr",
+        "verbatim_queries",
+        "verbatim_share",
+        "paraphrase_queries",
+        "paraphrase_mean_precision_at_1",
+        "per_query"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fixture_id": { "type": "string" },
+        "queries_evaluated": { "type": "integer", "minimum": 0 },
+        "mean_precision_at_1": { "type": "number", "minimum": 0 },
+        "mean_precision_at_3": { "type": "number", "minimum": 0 },
+        "mean_precision_at_5": { "type": "number", "minimum": 0 },
+        "mean_recall_at_5": { "type": "number", "minimum": 0 },
+        "mean_ndcg_at_5": { "type": "number", "minimum": 0 },
+        "mean_mrr": { "type": "number", "minimum": 0 },
+        "verbatim_queries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Executed queries whose text is a case-insensitive substring of a memory that lists them in expected_query_match."
+        },
+        "verbatim_share": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "verbatim_queries / queries_evaluated. null when no query executed or any executed query is unclassified."
+        },
+        "paraphrase_queries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Executed queries classified as not verbatim."
+        },
+        "paraphrase_mean_precision_at_1": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Mean precision@1 over paraphrase-only queries. null (never 0.0) when there are none or any executed query is unclassified."
+        },
+        "per_query": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/queryMetrics" }
+        }
+      }
+    },
+    "duration_ms": { "type": "number", "minimum": 0 },
+    "data_hash": { "type": "string" }
+  },
+  "field_presets": {
+    "minimal": ["schema", "fixture_id", "status"],
+    "summary": ["schema", "fixture_id", "fixture_family", "status", "metrics"],
+    "standard": [
+      "schema",
+      "fixture_id",
+      "fixture_family",
+      "status",
+      "metrics",
+      "duration_ms",
+      "data_hash"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "queryMetrics": {
+      "type": "object",
+      "required": [
+        "query",
+        "expected_ids",
+        "retrieved_ids",
+        "precision_at_1",
+        "precision_at_3",
+        "precision_at_5",
+        "recall_at_5",
+        "ndcg_at_5",
+        "mrr",
+        "first_relevant_rank",
+        "verbatim"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "query": { "type": "string" },
+        "expected_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "retrieved_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "precision_at_1": { "type": "number", "minimum": 0 },
+        "precision_at_3": { "type": "number", "minimum": 0 },
+        "precision_at_5": { "type": "number", "minimum": 0 },
+        "recall_at_5": { "type": "number", "minimum": 0 },
+        "ndcg_at_5": { "type": "number", "minimum": 0 },
+        "mrr": { "type": "number", "minimum": 0 },
+        "first_relevant_rank": { "type": ["integer", "null"], "minimum": 1 },
+        "verbatim": {
+          "type": ["boolean", "null"],
+          "description": "true when the query text appears verbatim in a memory it must retrieve; null when unclassified."
+        }
+      }
+    }
+  }
+}
