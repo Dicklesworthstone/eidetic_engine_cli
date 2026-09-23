@@ -40,6 +40,20 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+/// Assert a command succeeded, and on failure say why: the exit code and both
+/// streams (under `--json` the error envelope is on stdout). bd-z8mst.
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: got exit {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -351,13 +365,7 @@ fn why_returns_stable_envelope_for_existing_memory() -> TestResult {
         "memory",
         &memory_id,
     ])?;
-    ensure(
-        attest.status.success(),
-        format!(
-            "ee attest memory must exit zero; stderr: {}",
-            String::from_utf8_lossy(&attest.stderr)
-        ),
-    )?;
+    ensure_command_success(&attest, "ee attest memory")?;
     let attest_json: Value = serde_json::from_slice(&attest.stdout)
         .map_err(|error| format!("attest stdout must be JSON: {error}"))?;
     ensure(
@@ -383,13 +391,7 @@ fn why_returns_stable_envelope_for_existing_memory() -> TestResult {
     )?;
 
     let (again, reparsed) = run_why_json(&workspace_arg, &memory_id, &[])?;
-    ensure(
-        again.status.success(),
-        format!(
-            "second ee why must exit zero; stderr: {}",
-            String::from_utf8_lossy(&again.stderr)
-        ),
-    )?;
+    ensure_command_success(&again, "second ee why")?;
     ensure(
         reparsed
             .pointer("/data/attestationBundle/bundleHash")

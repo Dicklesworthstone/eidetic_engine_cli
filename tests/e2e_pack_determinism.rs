@@ -82,6 +82,20 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+/// Assert a command succeeded, and on failure say why: the exit code and both
+/// streams (under `--json` the error envelope is on stdout). bd-z8mst.
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: got exit {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )
+}
+
 fn stdout_string(output: &Output) -> Result<String, String> {
     String::from_utf8(output.stdout.clone())
         .map_err(|error| format!("stdout was not UTF-8: {error}"))
@@ -669,10 +683,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         "pack",
         &first_pack_id,
     ])?;
-    ensure(
-        attest.status.code() == Some(EXIT_SUCCESS),
-        format!("attest pack failed: {:?}", attest.status.code()),
-    )?;
+    ensure_command_success(&attest, "attest pack")?;
     ensure_stderr_empty(&attest, "attest pack")?;
     let attest_json = stdout_json(&attest)?;
     ensure(
@@ -698,13 +709,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         "replay",
         &first_pack_id,
     ])?;
-    ensure(
-        replay_again.status.code() == Some(EXIT_SUCCESS),
-        format!(
-            "second pack replay failed: {:?}",
-            replay_again.status.code()
-        ),
-    )?;
+    ensure_command_success(&replay_again, "second pack replay")?;
     let replay_again_json = stdout_json(&replay_again)?;
     ensure(
         replay_again_json.pointer("/data/attestationBundle/bundleHash")
