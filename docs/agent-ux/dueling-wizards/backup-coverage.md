@@ -94,38 +94,63 @@ The contract also checks the row counts for migration allocations, owner beads,
 coverage surfaces, and privacy-forbidden fields.
 
 `coverageStatus=full_surface_set_declared` means the asset declares all six
-backup surfaces from the checklist. `roundTripEvidenceStatus` is currently
-`planned_contract_only` for every row, because no asset's `roundTripEvidence`
-names a runtime proof yet. `privacyStatus=privacy_contract_enforced` applies to
-`memory_anchors`; assets without a privacy contract use `not_applicable`.
+backup surfaces from the checklist. `roundTripEvidenceStatus` mirrors the
+asset's `roundTripEvidence`: `planned_contract_only` while it says `planned`,
+`runtime_evidence_declared` once it names runtime tests.
+`privacyStatus=privacy_contract_enforced` applies to `memory_anchors`; assets
+without a privacy contract use `not_applicable`.
 
-`complianceStatus` takes one of two values, and the gate ties each to the
+### Must-clauses
+
+The fixture's `mustClauseList` names the nine obligations every asset carries:
+the six coverage surfaces (`backup_create`, `backup_inspect`, `backup_verify`,
+`backup_restore`, `manifest_rehash`, `roundtrip_e2e`) plus the three the
+policy declares (`hash_blake3`, `missing_asset_degraded`,
+`side_path_restore`). Each row's `mustClauses` is the list's length, 9. No
+clause is added to fit a number: a tenth needs a repo spec that requires it.
+The conformance floor stays `scoreMilli` 950, which with nine clauses admits
+only 9 of 9 (8 of 9 scores 888).
+
+`mustClauseAnchors` gives each clause the source tokens that show a test
+reaches it, for example `inspect_backup(` for `backup_inspect`. A row's
+`evidenceTests` cite `#[test]` fns in `src/core/backup.rs` and the clauses each
+one covers. The gate checks that every cited test exists and that the test's
+body contains one of the clause's anchor groups. That is necessary, not
+sufficient: it proves the test reaches the clause, not how strongly it asserts
+on it. What it rules out is crediting a clause to a test that never touches it.
+`coveredClauses` must equal the union of the cited clauses.
+
+### Compliance status
+
+`complianceStatus` takes one of three values, and the gate ties each to the
 row's evidence:
 
 - `declared_conformant` requires
-  `roundTripEvidenceStatus=runtime_evidence_declared`, `mustClauses=10`,
-  `tested=10`, `passing=10`, `divergent=0` and `scoreMilli` at or above 950.
-  Conformance can never rest on planned-only evidence.
+  `roundTripEvidenceStatus=runtime_evidence_declared` and cited tests covering
+  all nine clauses, with `tested=9`, `passing=9`, `divergent=0` and
+  `scoreMilli` at or above 950. Conformance can never rest on planned-only
+  evidence.
+- `not_conformant_runtime_partial` requires runtime evidence covering some
+  clauses but not all. `tested` and `passing` equal the covered count,
+  `divergent=0`, and `evidencePendingOn` names the bead that owns the rest.
 - `not_conformant_evidence_pending` is legal only while
-  `roundTripEvidenceStatus=planned_contract_only`, and the row must name the
-  bead its evidence is pending on in `evidencePendingOn`. Its counters must be
-  internally consistent (`tested` at most `mustClauses`, `passing` at most
-  `tested`, `scoreMilli` computed from `passing`) but are not forced to full
-  coverage, so a row that has not been round-tripped can say so.
+  `roundTripEvidenceStatus=planned_contract_only`. The row cites no tests and
+  must name the bead its evidence is pending on in `evidencePendingOn`. Its
+  counters must be internally consistent but are not forced to full coverage.
 
-Every row is currently `not_conformant_evidence_pending` with
-`tested=0`, `passing=0`, `divergent=0` and `scoreMilli=0`: none has declared
-runtime round-trip evidence, so none counts a clause as tested. Until
-bd-nwyir, all eleven claimed `declared_conformant` with full counters on that
-same planned-only evidence, and the field had no second value that could say
-otherwise.
+Until bd-nwyir, all eleven rows claimed `declared_conformant` with full
+counters on planned-only evidence. The current state:
 
-- `pack_candidate_impressions`, `derived_outcome_evidence` and
-  `error_fingerprints` are pending on `bd-vxrcu`. Their producers exist, and
-  `src/core/backup.rs` holds inline backup/restore tests that touch them. What
-  is missing is the accounting: nobody has mapped the ten must-clauses to those
-  tests' assertions or cited the tests here.
-- The other eight kinds are pending on `bd-1n0np.23.2`.
+- `pack_candidate_impressions` is `not_conformant_runtime_partial` at 6 of 9;
+  `derived_outcome_evidence` and `error_fingerprints` are at 5 of 9. Their
+  round-trip and tamper tests in `src/core/backup.rs` pass. No cited test calls
+  `inspect_backup`, none checks `manifest_hash_mismatch`, and none contains the
+  `hash_blake3` anchors, so `backup_inspect`, `manifest_rehash` and
+  `hash_blake3` are uncovered for all three. Only the pack round trip calls
+  `verify_backup`, so `backup_verify` is uncovered for the other two. The
+  remaining clauses are owned by `bd-vxrcu`.
+- The other eight kinds are `not_conformant_evidence_pending` on
+  `bd-1n0np.23.2`.
 
 ## Failure Scenarios
 

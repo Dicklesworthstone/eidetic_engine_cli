@@ -45,7 +45,25 @@ const REQUIRED_FAILURE_SCENARIOS: &[&str] = &[
     "raw_anchor_value_present",
 ];
 
-const REQUIRED_ASSET_MUST_CLAUSES: u64 = 10;
+/// The named per-asset must-clauses (bd-vxrcu): the six coverage surfaces plus
+/// the three obligations the manifest's policy declares for every asset
+/// (blake3 hashing, missing assets degrade instead of vanishing, side-path
+/// restore). The fixture's `mustClauseList` must equal this list, and the
+/// required count is its length. No clause is added to fit a number: a new one
+/// needs a repo spec that requires it, cited beside it.
+const MUST_CLAUSE_LIST: &[&str] = &[
+    "backup_create",
+    "backup_inspect",
+    "backup_verify",
+    "backup_restore",
+    "manifest_rehash",
+    "roundtrip_e2e",
+    "hash_blake3",
+    "missing_asset_degraded",
+    "side_path_restore",
+];
+const REQUIRED_ASSET_MUST_CLAUSES: u64 = MUST_CLAUSE_LIST.len() as u64;
+/// With nine clauses this floor admits only 9 of 9: 8 of 9 scores 888.
 const MIN_MUST_COVERAGE_MILLI: u64 = 950;
 
 fn repo_root() -> PathBuf {
@@ -368,6 +386,8 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
         ));
     }
 
+    let gate = EvidenceGate::from_manifest(&manifest)?;
+    let mut compliance_errors = Vec::new();
     let mut matrix_kinds = BTreeSet::new();
     for (index, row) in array_field(&manifest, "/assetCoverageMatrix", MANIFEST_REL)?
         .iter()
@@ -459,7 +479,10 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
             ));
         }
 
-        row_compliance_error(row, &context)?;
+        // Collected, not returned: one bad row must not hide the next one.
+        if let Err(error) = row_compliance_error(row, &context, &gate) {
+            compliance_errors.push(format!("{asset_kind}: {error}"));
+        }
     }
 
     if matrix_kinds != expected_kinds {
@@ -469,32 +492,209 @@ fn asset_coverage_matrix_accounts_for_every_backup_asset_kind() -> TestResult {
             matrix_kinds.difference(&expected_kinds).collect::<Vec<_>>()
         ));
     }
+    if !compliance_errors.is_empty() {
+        return Err(format!(
+            "assetCoverageMatrix compliance claims disagree with their evidence:\n{}",
+            compliance_errors.join("\n")
+        ));
+    }
     Ok(())
 }
 
-/// The two values `complianceStatus` may hold (bd-nwyir). Until this pair
-/// existed the field had ONE legal value, so "11 of 11 conformant" restated the
-/// row count instead of measuring anything: no row could record the truth.
+/// The values `complianceStatus` may hold. bd-nwyir added the pending value:
+/// until then the field had ONE legal value, so "11 of 11 conformant" restated
+/// the row count instead of measuring anything. bd-vxrcu added the partial
+/// value, for a row whose runtime evidence covers some named clauses but not
+/// all of them; without it such a row had no legal state.
 const DECLARED_CONFORMANT: &str = "declared_conformant";
+const NOT_CONFORMANT_RUNTIME_PARTIAL: &str = "not_conformant_runtime_partial";
 const NOT_CONFORMANT_EVIDENCE_PENDING: &str = "not_conformant_evidence_pending";
 
-/// Check one matrix row's compliance claim against its own counters and its
-/// round-trip evidence status.
+/// What a row's cited evidence is checked against: each named clause's source
+/// anchors, and the runtime backup source that must hold every cited test.
 ///
-/// `declared_conformant` keeps every full-conformance check and also requires
-/// declared runtime round-trip evidence: full counters over planned-only
-/// evidence are the claim bd-nwyir corrected. The pending value is legal only
-/// while round-trip evidence is planned, must name the bead the evidence is
-/// pending on, and its counters need only be internally consistent: a row that
-/// has not been round-tripped must not be forced to report full coverage.
-fn row_compliance_error(row: &Value, context: &str) -> TestResult {
+/// A clause counts as exercised by a test when every token of at least one of
+/// its anchor groups appears in that test's body. That is a necessary
+/// condition, not a sufficient one: it proves the test reaches the clause's
+/// entry point, not how strongly it asserts on it. It does make one claim
+/// impossible, which is the point: a row cannot credit a clause to a test that
+/// never touches it.
+struct EvidenceGate {
+    anchors: BTreeMap<String, Vec<Vec<String>>>,
+    source: String,
+}
+
+impl EvidenceGate {
+    fn from_manifest(manifest: &Value) -> Result<Self, String> {
+        let names = array_field(manifest, "/mustClauseList", MANIFEST_REL)?
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        if names != MUST_CLAUSE_LIST {
+            return Err(format!(
+                "mustClauseList must name exactly {MUST_CLAUSE_LIST:?}, got {names:?}"
+            ));
+        }
+        let declared = manifest
+            .pointer("/mustClauseAnchors")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "mustClauseAnchors missing or not an object".to_owned())?;
+        let mut anchors = BTreeMap::new();
+        for (clause, groups) in declared {
+            let context = format!("mustClauseAnchors.{clause}");
+            let groups = groups
+                .as_array()
+                .filter(|groups| !groups.is_empty())
+                .ok_or_else(|| format!("{context} must be a non-empty array of groups"))?;
+            let mut parsed = Vec::new();
+            for (index, group) in groups.iter().enumerate() {
+                let tokens = group
+                    .as_array()
+                    .filter(|tokens| !tokens.is_empty())
+                    .ok_or_else(|| format!("{context}[{index}] must be a non-empty array"))?;
+                parsed.push(
+                    string_set(tokens, &format!("{context}[{index}]"))?
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            anchors.insert(clause.clone(), parsed);
+        }
+        let anchored = anchors.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        if anchored != MUST_CLAUSE_LIST.iter().copied().collect::<BTreeSet<_>>() {
+            return Err(format!(
+                "mustClauseAnchors must anchor exactly the named clauses, got {anchored:?}"
+            ));
+        }
+        Ok(Self {
+            anchors,
+            source: read_text(BACKUP_SOURCE_REL)?,
+        })
+    }
+
+    /// The body of `#[test] fn {name}(`, up to the next item at module indent.
+    fn test_body(&self, name: &str) -> Result<&str, String> {
+        let start = self
+            .source
+            .find(&format!("fn {name}("))
+            .ok_or_else(|| format!("cited test {name} does not exist in {BACKUP_SOURCE_REL}"))?;
+        if !self.source[..start].trim_end().ends_with("#[test]") {
+            return Err(format!("cited test {name} is not a #[test] fn"));
+        }
+        let rest = &self.source[start..];
+        let end = ["\n    #[", "\n    fn ", "\n}"]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        Ok(&rest[..end])
+    }
+
+    fn exercises(&self, body: &str, clause: &str) -> bool {
+        self.anchors.get(clause).is_some_and(|groups| {
+            groups
+                .iter()
+                .any(|group| group.iter().all(|token| body.contains(token.as_str())))
+        })
+    }
+}
+
+/// The clauses a row's `evidenceTests` actually cover. Every cited test must
+/// exist as a `#[test]` fn and must exercise every clause credited to it, and
+/// `coveredClauses` must equal the union. A row that cites nothing covers
+/// nothing.
+fn cited_coverage(
+    row: &Value,
+    context: &str,
+    gate: &EvidenceGate,
+) -> Result<BTreeSet<String>, String> {
+    let Some(tests) = row.pointer("/evidenceTests") else {
+        if row.pointer("/coveredClauses").is_some() {
+            return Err(format!(
+                "{context}: coveredClauses is declared without any evidenceTests"
+            ));
+        }
+        return Ok(BTreeSet::new());
+    };
+    let tests = tests
+        .as_array()
+        .ok_or_else(|| format!("{context}: evidenceTests must be an array"))?;
+    let mut covered = BTreeSet::new();
+    for (index, entry) in tests.iter().enumerate() {
+        let entry_context = format!("{context}.evidenceTests[{index}]");
+        let name = string_field(entry, "/test", &entry_context)?;
+        let body = gate
+            .test_body(name)
+            .map_err(|error| format!("{entry_context}: {error}"))?;
+        let clauses = string_set(
+            array_field(entry, "/clauses", &entry_context)?,
+            &format!("{entry_context}.clauses"),
+        )?;
+        if clauses.is_empty() {
+            return Err(format!(
+                "{entry_context}: a cited test must credit a clause"
+            ));
+        }
+        for clause in clauses {
+            if !MUST_CLAUSE_LIST.contains(&clause.as_str()) {
+                return Err(format!(
+                    "{entry_context}: {clause} is not a named must-clause"
+                ));
+            }
+            if !gate.exercises(body, &clause) {
+                return Err(format!(
+                    "{entry_context}: {name} does not exercise {clause}: none of its \
+                     anchor groups appears in the test body"
+                ));
+            }
+            covered.insert(clause);
+        }
+    }
+    let declared = string_set(
+        array_field(row, "/coveredClauses", context)?,
+        &format!("{context}.coveredClauses"),
+    )?;
+    if declared != covered {
+        return Err(format!(
+            "{context}: coveredClauses must equal the clauses its evidenceTests cover: \
+             declared {declared:?}, cited {covered:?}"
+        ));
+    }
+    Ok(covered)
+}
+
+fn require_pending_bead(row: &Value, context: &str, status: &str) -> TestResult {
+    let pending_on = row
+        .pointer("/evidencePendingOn")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !pending_on.starts_with("bd-") {
+        return Err(format!(
+            "{context}: {status} must name the bead its missing evidence is pending on in \
+             evidencePendingOn, got {pending_on:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Check one matrix row's compliance claim against its counters, its
+/// round-trip evidence status, and the tests it cites.
+///
+/// `declared_conformant` needs runtime evidence whose cited tests cover every
+/// named clause, with full counters. `not_conformant_runtime_partial` needs
+/// runtime evidence covering some clauses but not all, with `tested` equal to
+/// the covered count and a bead owning the rest. `not_conformant_evidence_pending`
+/// is legal only while evidence is planned, cites no tests, and names a bead;
+/// its counters need only be internally consistent.
+fn row_compliance_error(row: &Value, context: &str, gate: &EvidenceGate) -> TestResult {
     let must_clauses = u64_field(row, "/mustClauses", context)?;
     let tested = u64_field(row, "/tested", context)?;
     let passing = u64_field(row, "/passing", context)?;
     let divergent = u64_field(row, "/divergent", context)?;
     if must_clauses != REQUIRED_ASSET_MUST_CLAUSES {
         return Err(format!(
-            "{context}: mustClauses must stay {REQUIRED_ASSET_MUST_CLAUSES}"
+            "{context}: mustClauses must be {REQUIRED_ASSET_MUST_CLAUSES}, the length of the named \
+             clause list"
         ));
     }
 
@@ -506,14 +706,21 @@ fn row_compliance_error(row: &Value, context: &str) -> TestResult {
         ));
     }
 
+    let runtime_evidence =
+        string_field(row, "/roundTripEvidenceStatus", context)? == "runtime_evidence_declared";
+    let covered = cited_coverage(row, context, gate)?.len() as u64;
     match string_field(row, "/complianceStatus", context)? {
         DECLARED_CONFORMANT => {
-            if string_field(row, "/roundTripEvidenceStatus", context)?
-                != "runtime_evidence_declared"
-            {
+            if !runtime_evidence {
                 return Err(format!(
                     "{context}: {DECLARED_CONFORMANT} requires roundTripEvidenceStatus \
                      runtime_evidence_declared; conformance cannot rest on planned-only evidence"
+                ));
+            }
+            if covered != must_clauses {
+                return Err(format!(
+                    "{context}: {DECLARED_CONFORMANT} needs every named clause covered by a \
+                     cited test; covered {covered} of {must_clauses}"
                 ));
             }
             if tested != must_clauses || passing != tested || divergent != 0 {
@@ -527,21 +734,38 @@ fn row_compliance_error(row: &Value, context: &str) -> TestResult {
                 ));
             }
         }
+        NOT_CONFORMANT_RUNTIME_PARTIAL => {
+            if !runtime_evidence {
+                return Err(format!(
+                    "{context}: {NOT_CONFORMANT_RUNTIME_PARTIAL} is only legal with \
+                     roundTripEvidenceStatus runtime_evidence_declared"
+                ));
+            }
+            require_pending_bead(row, context, NOT_CONFORMANT_RUNTIME_PARTIAL)?;
+            if covered == 0 || covered >= must_clauses {
+                return Err(format!(
+                    "{context}: {NOT_CONFORMANT_RUNTIME_PARTIAL} needs covered clauses strictly \
+                     between 0 and {must_clauses}, got {covered}"
+                ));
+            }
+            if tested != covered || passing != tested || divergent != 0 {
+                return Err(format!(
+                    "{context}: tested and passing must equal the {covered} covered clauses, \
+                     with divergent 0"
+                ));
+            }
+        }
         NOT_CONFORMANT_EVIDENCE_PENDING => {
-            if string_field(row, "/roundTripEvidenceStatus", context)? != "planned_contract_only" {
+            if runtime_evidence {
                 return Err(format!(
                     "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} is only legal while \
                      roundTripEvidenceStatus is planned_contract_only"
                 ));
             }
-            let pending_on = row
-                .pointer("/evidencePendingOn")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !pending_on.starts_with("bd-") {
+            require_pending_bead(row, context, NOT_CONFORMANT_EVIDENCE_PENDING)?;
+            if covered != 0 {
                 return Err(format!(
-                    "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} must name the bead its \
-                     evidence is pending on in evidencePendingOn, got {pending_on:?}"
+                    "{context}: {NOT_CONFORMANT_EVIDENCE_PENDING} cannot cite evidenceTests"
                 ));
             }
             if tested > must_clauses || passing > tested || divergent > tested {
@@ -552,126 +776,202 @@ fn row_compliance_error(row: &Value, context: &str) -> TestResult {
         }
         other => {
             return Err(format!(
-                "{context}: complianceStatus must be {DECLARED_CONFORMANT} or \
-                 {NOT_CONFORMANT_EVIDENCE_PENDING}, got {other}"
+                "{context}: complianceStatus must be one of {DECLARED_CONFORMANT}, \
+                 {NOT_CONFORMANT_RUNTIME_PARTIAL} or {NOT_CONFORMANT_EVIDENCE_PENDING}, got {other}"
             ));
         }
     }
     Ok(())
 }
 
-#[test]
-fn compliance_status_can_record_non_conformance_but_only_on_planned_evidence() -> TestResult {
-    let row = |compliance: &str, evidence: &str, tested: u64, passing: u64, divergent: u64| {
-        serde_json::json!({
-            "complianceStatus": compliance,
-            "roundTripEvidenceStatus": evidence,
-            "mustClauses": REQUIRED_ASSET_MUST_CLAUSES,
-            "tested": tested,
-            "passing": passing,
-            "divergent": divergent,
-            "scoreMilli": passing * 1000 / REQUIRED_ASSET_MUST_CLAUSES,
-            "evidencePendingOn": "bd-example",
-        })
-    };
-    let full = REQUIRED_ASSET_MUST_CLAUSES;
+/// A gate over a synthetic source: every clause anchored by `anchor_<clause>`,
+/// one test that calls them all, one that calls only `backup_create`'s, and a
+/// helper that is not a test.
+fn unit_gate() -> EvidenceGate {
+    let anchors = MUST_CLAUSE_LIST
+        .iter()
+        .map(|clause| (clause.to_string(), vec![vec![format!("anchor_{clause}(")]]))
+        .collect();
+    let all_calls = MUST_CLAUSE_LIST
+        .iter()
+        .map(|clause| format!("        anchor_{clause}();\n"))
+        .collect::<String>();
+    let source = format!(
+        "    #[test]\n    fn exercises_everything() {{\n{all_calls}    }}\n\n    \
+         #[test]\n    fn exercises_create_only() {{\n        anchor_backup_create();\n    }}\n\n    \
+         fn not_a_test() {{\n{all_calls}    }}\n}}\n"
+    );
+    EvidenceGate { anchors, source }
+}
 
-    // A: a conformant row with runtime evidence and full counters stays legal.
-    row_compliance_error(
-        &row(
-            DECLARED_CONFORMANT,
-            "runtime_evidence_declared",
-            full,
-            full,
-            0,
-        ),
+/// A row whose counters agree with `tested`, citing `cited` as (test, clauses).
+fn unit_row(compliance: &str, evidence: &str, cited: &[(&str, &[&str])], tested: u64) -> Value {
+    let mut row = serde_json::json!({
+        "complianceStatus": compliance,
+        "roundTripEvidenceStatus": evidence,
+        "mustClauses": REQUIRED_ASSET_MUST_CLAUSES,
+        "tested": tested,
+        "passing": tested,
+        "divergent": 0,
+        "scoreMilli": tested * 1000 / REQUIRED_ASSET_MUST_CLAUSES,
+        "evidencePendingOn": "bd-example",
+    });
+    if !cited.is_empty() {
+        row["evidenceTests"] = cited
+            .iter()
+            .map(|(test, clauses)| serde_json::json!({"test": test, "clauses": clauses}))
+            .collect();
+        row["coveredClauses"] = serde_json::json!(
+            cited
+                .iter()
+                .flat_map(|(_, clauses)| clauses.iter().copied())
+                .collect::<BTreeSet<_>>()
+        );
+    }
+    row
+}
+
+fn expect_rejected(result: TestResult, arm: &str, needle: &str) -> TestResult {
+    if result.as_ref().is_err_and(|error| error.contains(needle)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{arm} must be rejected with {needle:?}, got {result:?}"
+        ))
+    }
+}
+
+#[test]
+fn compliance_status_is_tied_to_counters_and_cited_evidence() -> TestResult {
+    let gate = unit_gate();
+    let full = REQUIRED_ASSET_MUST_CLAUSES;
+    let runtime = "runtime_evidence_declared";
+    let planned = "planned_contract_only";
+    let everything: &[(&str, &[&str])] = &[("exercises_everything", MUST_CLAUSE_LIST)];
+    let create_only: &[(&str, &[&str])] = &[("exercises_create_only", &["backup_create"])];
+    let check = |row: &Value, arm: &str| row_compliance_error(row, arm, &gate);
+
+    // A: conformant, runtime evidence covering every named clause, full counters.
+    check(
+        &unit_row(DECLARED_CONFORMANT, runtime, everything, full),
         "arm A",
     )?;
-    // B: the state no row could express before bd-nwyir -- not conformant,
-    // evidence pending, nothing tested.
-    row_compliance_error(
-        &row(
-            NOT_CONFORMANT_EVIDENCE_PENDING,
-            "planned_contract_only",
-            0,
-            0,
-            0,
-        ),
+    // B: pending over planned evidence, nothing cited, nothing tested.
+    check(
+        &unit_row(NOT_CONFORMANT_EVIDENCE_PENDING, planned, &[], 0),
         "arm B",
     )?;
+    // H: partial, runtime evidence covering one clause.
+    check(
+        &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, create_only, 1),
+        "arm H",
+    )?;
+
     // C: pending cannot be claimed over declared runtime evidence.
-    let c = row_compliance_error(
-        &row(
-            NOT_CONFORMANT_EVIDENCE_PENDING,
-            "runtime_evidence_declared",
-            0,
-            0,
-            0,
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_EVIDENCE_PENDING, runtime, &[], 0),
+            "arm C",
         ),
         "arm C",
-    );
-    if !c.as_ref().is_err_and(|e| e.contains("only legal while")) {
-        return Err(format!(
-            "arm C must be rejected for its evidence status, got {c:?}"
-        ));
-    }
-    // D: no third value.
-    let d = row_compliance_error(&row("bogus", "planned_contract_only", 0, 0, 0), "arm D");
-    if !d
-        .as_ref()
-        .is_err_and(|e| e.contains("must be declared_conformant or"))
-    {
-        return Err(format!(
-            "arm D must be rejected as an unknown value, got {d:?}"
-        ));
-    }
-    // E: widening the domain did not loosen the conformant branch.
-    let e = row_compliance_error(
-        &row(
-            DECLARED_CONFORMANT,
-            "runtime_evidence_declared",
-            full,
-            full - 1,
-            0,
-        ),
-        "arm E",
-    );
-    if !e.as_ref().is_err_and(|e| e.contains("full conformance")) {
-        return Err(format!(
-            "arm E must keep the full-conformance check, got {e:?}"
-        ));
-    }
-    // F: the bd-nwyir defect itself -- full counters declared conformant while
-    // the evidence field says nothing was round-tripped.
-    let f = row_compliance_error(
-        &row(DECLARED_CONFORMANT, "planned_contract_only", full, full, 0),
+        "only legal while",
+    )?;
+    // D: no fourth value.
+    expect_rejected(
+        check(&unit_row("bogus", planned, &[], 0), "arm D"),
+        "arm D",
+        "complianceStatus must be one of",
+    )?;
+    // E: full coverage cited but one clause not passing.
+    let mut e = unit_row(DECLARED_CONFORMANT, runtime, everything, full);
+    e["passing"] = serde_json::json!(full - 1);
+    e["scoreMilli"] = serde_json::json!((full - 1) * 1000 / full);
+    expect_rejected(check(&e, "arm E"), "arm E", "full conformance")?;
+    // F: the bd-nwyir defect -- conformant on planned-only evidence.
+    expect_rejected(
+        check(&unit_row(DECLARED_CONFORMANT, planned, &[], full), "arm F"),
         "arm F",
-    );
-    if !f
-        .as_ref()
-        .is_err_and(|e| e.contains("cannot rest on planned-only evidence"))
-    {
-        return Err(format!(
-            "arm F must be rejected for its planned-only evidence, got {f:?}"
-        ));
-    }
+        "cannot rest on planned-only evidence",
+    )?;
     // G: a pending row must say what it is pending on.
-    let mut unowned = row(
-        NOT_CONFORMANT_EVIDENCE_PENDING,
-        "planned_contract_only",
-        0,
-        0,
-        0,
-    );
-    if let Some(fields) = unowned.as_object_mut() {
+    let mut g = unit_row(NOT_CONFORMANT_EVIDENCE_PENDING, planned, &[], 0);
+    if let Some(fields) = g.as_object_mut() {
         fields.remove("evidencePendingOn");
     }
-    let g = row_compliance_error(&unowned, "arm G");
-    if !g.as_ref().is_err_and(|e| e.contains("evidencePendingOn")) {
-        return Err(format!(
-            "arm G must be rejected for naming no pending bead, got {g:?}"
-        ));
-    }
+    expect_rejected(check(&g, "arm G"), "arm G", "evidencePendingOn")?;
+    // I: a partial row crediting a clause its cited test never exercises.
+    let overclaimed: &[(&str, &[&str])] = &[(
+        "exercises_create_only",
+        &["backup_create", "backup_inspect"],
+    )];
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, overclaimed, 2),
+            "arm I",
+        ),
+        "arm I",
+        "does not exercise backup_inspect",
+    )?;
+    // J: conformant with partial coverage, counters inflated to full.
+    expect_rejected(
+        check(
+            &unit_row(DECLARED_CONFORMANT, runtime, create_only, full),
+            "arm J",
+        ),
+        "arm J",
+        "covered 1 of",
+    )?;
+    // K: a cited test that does not exist.
+    let missing: &[(&str, &[&str])] = &[("no_such_test", &["backup_create"])];
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, missing, 1),
+            "arm K",
+        ),
+        "arm K",
+        "does not exist",
+    )?;
+    // L: a cited fn that is not a #[test].
+    let helper: &[(&str, &[&str])] = &[("not_a_test", &["backup_create"])];
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, helper, 1),
+            "arm L",
+        ),
+        "arm L",
+        "is not a #[test] fn",
+    )?;
+    // M: partial counters that disagree with the covered set.
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, create_only, 2),
+            "arm M",
+        ),
+        "arm M",
+        "must equal the 1 covered clauses",
+    )?;
+    // N: partial is not a place to park full coverage.
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, everything, full),
+            "arm N",
+        ),
+        "arm N",
+        "strictly between",
+    )?;
+    // O: pending cannot cite tests.
+    expect_rejected(
+        check(
+            &unit_row(NOT_CONFORMANT_EVIDENCE_PENDING, planned, create_only, 1),
+            "arm O",
+        ),
+        "arm O",
+        "cannot cite evidenceTests",
+    )?;
+    // P: coveredClauses must be the union the citations prove, not a wish.
+    let mut p = unit_row(NOT_CONFORMANT_RUNTIME_PARTIAL, runtime, create_only, 1);
+    p["coveredClauses"] = serde_json::json!(["backup_verify"]);
+    expect_rejected(check(&p, "arm P"), "arm P", "coveredClauses must equal")?;
     Ok(())
 }
 
@@ -921,7 +1221,11 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
         "privacy_contract_enforced",
         "declared_conformant",
         "not_conformant_evidence_pending",
+        "not_conformant_runtime_partial",
         "evidencePendingOn",
+        "mustClauseList",
+        "mustClauseAnchors",
+        "evidenceTests",
         "failureScenarios",
         "missing_derived_asset",
         "corrupt_derived_asset_hash",
