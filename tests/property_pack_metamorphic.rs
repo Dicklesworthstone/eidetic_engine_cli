@@ -667,6 +667,71 @@ fn pack_item_contents(value: &JsonValue) -> Vec<String> {
 // envelope field (degraded[], packDna, provenance footer, tokenSavings,
 // …) that the hash-only check silently tolerates.
 
+/// bd-j1upc INSTRUMENT (never landed): name every JSON path that differs
+/// between two normalized envelopes, and say whether pack.hash is equal.
+fn envelope_diff_report(left: &str, right: &str) -> String {
+    let (Ok(a), Ok(b)) = (
+        serde_json::from_str::<JsonValue>(left),
+        serde_json::from_str::<JsonValue>(right),
+    ) else {
+        return "\n  (envelopes are not JSON)".to_owned();
+    };
+    let mut paths = Vec::new();
+    diff_json("", &a, &b, &mut paths);
+    let hash = |value: &JsonValue| value.pointer("/data/pack/hash").cloned();
+    format!(
+        "\n  J1UPC pack.hash equal: {} ({:?})\n  J1UPC differing paths ({}):\n{}",
+        hash(&a) == hash(&b),
+        hash(&a),
+        paths.len(),
+        paths.join("\n")
+    )
+}
+
+fn diff_json(path: &str, a: &JsonValue, b: &JsonValue, out: &mut Vec<String>) {
+    match (a, b) {
+        (JsonValue::Object(x), JsonValue::Object(y)) => {
+            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for key in keys {
+                match (x.get(key), y.get(key)) {
+                    (Some(l), Some(r)) => diff_json(&format!("{path}/{key}"), l, r, out),
+                    (l, r) => out.push(format!("    J1UPC {path}/{key}: {} | {}", show(l), show(r))),
+                }
+            }
+        }
+        (JsonValue::Array(x), JsonValue::Array(y)) => {
+            for index in 0..x.len().max(y.len()) {
+                match (x.get(index), y.get(index)) {
+                    (Some(l), Some(r)) => diff_json(&format!("{path}/{index}"), l, r, out),
+                    (l, r) => out.push(format!("    J1UPC {path}/{index}: {} | {}", show(l), show(r))),
+                }
+            }
+        }
+        (JsonValue::String(x), JsonValue::String(y)) if x != y => {
+            let at = x
+                .chars()
+                .zip(y.chars())
+                .position(|(l, r)| l != r)
+                .unwrap_or_else(|| x.chars().count().min(y.chars().count()));
+            let window = |s: &str| s.chars().skip(at.saturating_sub(60)).take(200).collect::<String>();
+            out.push(format!(
+                "    J1UPC {path}: string differs at char {at}\n      L: {:?}\n      R: {:?}",
+                window(x),
+                window(y)
+            ));
+        }
+        _ if a != b => out.push(format!("    J1UPC {path}: {} | {}", show(Some(a)), show(Some(b)))),
+        _ => {}
+    }
+}
+
+fn show(value: Option<&JsonValue>) -> String {
+    value.map_or_else(
+        || "<absent>".to_owned(),
+        |value| value.to_string().chars().take(240).collect(),
+    )
+}
+
 #[test]
 fn pack_envelope_byte_identical_under_repeated_max_tokens_invocation() -> TestResult {
     let workspace = unique_workspace("mr3-idempotent")?;
@@ -677,7 +742,7 @@ fn pack_envelope_byte_identical_under_repeated_max_tokens_invocation() -> TestRe
 
     if run1 != run2 {
         return Err(format!(
-            "MR3 broken — repeated `--max-tokens 1000` invocations diverged:\n  run1.len={}, run2.len={}\n  first-diff offset: {}",
+            "MR3 broken — repeated `--max-tokens 1000` invocations diverged:\n  run1.len={}, run2.len={}\n  first-diff offset: {}{}",
             run1.len(),
             run2.len(),
             run1.bytes()
@@ -687,6 +752,7 @@ fn pack_envelope_byte_identical_under_repeated_max_tokens_invocation() -> TestRe
                     || "(prefix equal; tails differ)".to_string(),
                     |offset| offset.to_string()
                 ),
+            envelope_diff_report(&run1, &run2),
         ));
     }
     Ok(())
@@ -714,16 +780,18 @@ fn pack_envelope_byte_identical_across_three_cold_process_invocations() -> TestR
 
     if run1 != run2 {
         return Err(format!(
-            "MR4 broken — run1 != run2: lens={}/{}",
+            "MR4 broken — run1 != run2: lens={}/{}{}",
             run1.len(),
             run2.len(),
+            envelope_diff_report(&run1, &run2),
         ));
     }
     if run2 != run3 {
         return Err(format!(
-            "MR4 broken — run2 != run3: lens={}/{}",
+            "MR4 broken — run2 != run3: lens={}/{}{}",
             run2.len(),
             run3.len(),
+            envelope_diff_report(&run2, &run3),
         ));
     }
     Ok(())
@@ -760,9 +828,10 @@ fn pack_envelope_byte_identical_under_graph_ppr_alpha_zero() -> TestResult {
 
     if run1 != run2 {
         return Err(format!(
-            "MR5 broken — graph.ppr.alpha=0 envelope drifted between invocations:\n  run1.len={}, run2.len={}",
+            "MR5 broken — graph.ppr.alpha=0 envelope drifted between invocations:\n  run1.len={}, run2.len={}{}",
             run1.len(),
             run2.len(),
+            envelope_diff_report(&run1, &run2),
         ));
     }
 
