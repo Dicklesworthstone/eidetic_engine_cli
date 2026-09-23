@@ -3505,9 +3505,10 @@ fn manifest_candidate_binary_matches_verify_sh_resolution() {
          target_subpath={target_subpath:?} resolver={resolver:?}. If this table \
          moved, this test measures nothing until it is found again."
     );
-    let binary_name = binary_name.unwrap();
-    let target_subpath = target_subpath.unwrap();
-    let resolver = resolver.unwrap();
+    let binary_name = binary_name.expect("binary_name is Some: asserted by the guard above");
+    let target_subpath =
+        target_subpath.expect("target_subpath is Some: asserted by the guard above");
+    let resolver = resolver.expect("resolver is Some: asserted by the guard above");
 
     // The declared subpath must be what verify.sh actually appends to the cargo
     // target dir when it resolves CURRENT_SOURCE_EE_BINARY.
@@ -3574,8 +3575,8 @@ fn binary_identity_stage_runs_after_the_last_rebuild() {
          ordering test measures nothing until it is pointed at the new names."
     );
 
-    let rebuild = rebuild.unwrap();
-    let identity = identity.unwrap();
+    let rebuild = rebuild.expect("rebuild is Some: asserted by the guard above");
+    let identity = identity.expect("identity is Some: asserted by the guard above");
     assert!(
         identity > rebuild,
         "`Candidate Binary Identity Stable` is at line {} but the rebuild is at \
@@ -3629,8 +3630,8 @@ fn declared_completeness_enforcer_exists() {
         predicate.as_deref().map(|p| &p[..p.len().min(40)]),
         enforced_by
     );
-    let predicate = predicate.unwrap();
-    let enforced_by = enforced_by.unwrap();
+    let predicate = predicate.expect("predicate is Some: asserted by the guard above");
+    let enforced_by = enforced_by.expect("enforced_by is Some: asserted by the guard above");
 
     assert!(
         predicate.len() >= 40,
@@ -3698,7 +3699,7 @@ fn declared_test_inventory_matches_the_tree() {
          enforcer={enforcer:?} target_source={target_source:?}"
     );
     let declared_shards: usize = shard_count
-        .unwrap()
+        .expect("shard_count is Some: asserted by the guard above")
         .parse()
         .expect("shard_count is a number");
 
@@ -3726,7 +3727,7 @@ fn declared_test_inventory_matches_the_tree() {
     );
 
     // 2. The named enforcer must be real.
-    let enforcer = enforcer.unwrap();
+    let enforcer = enforcer.expect("enforcer is Some: asserted by the guard above");
     let (file, func) = enforcer.split_once("::").unwrap_or_else(|| {
         panic!("exactly_once_enforced_by must be `<file>::<fn>`, got {enforcer:?}")
     });
@@ -3821,8 +3822,8 @@ fn declared_evidence_contract_holds_in_verify_sh() {
             .1
             .to_owned()
     };
-    let recorder = fn_name(&recorded_by.unwrap());
-    let printer = fn_name(&printed_by.unwrap());
+    let recorder = fn_name(&recorded_by.expect("recorded_by is Some: asserted by the guard above"));
+    let printer = fn_name(&printed_by.expect("printed_by is Some: asserted by the guard above"));
 
     for func in [&recorder, &printer] {
         assert!(

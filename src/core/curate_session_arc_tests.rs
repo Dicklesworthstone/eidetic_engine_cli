@@ -894,7 +894,7 @@ fn multiple_inline_episodes_keep_distinct_reciprocal_ids_and_exact_sources() {
         .collect();
     assert_eq!(ids.len(), 4, "one episode must not overwrite another");
     for candidate in &candidates {
-        assert_eq!(candidate.source_ids, [span.id.clone()]);
+        assert_eq!(candidate.source_ids, std::slice::from_ref(&span.id));
         let arc = candidate.session_arc.as_ref().unwrap();
         for source in [&arc.failure_span, &arc.resolution_span] {
             assert_eq!(source.evidence_span_id, span.id);
