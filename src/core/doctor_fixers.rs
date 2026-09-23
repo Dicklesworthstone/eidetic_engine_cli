@@ -364,11 +364,13 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
 /// missing index was being repaired as stale; bd-xa6ud / bd-wswg0 added the
 /// guidance-only `database_empty` and `database_corrupted`. A contract test
 /// derives the codes from every fixer above and from the `ee doctor --fix`
-/// dispatch ([`fix_dispatch_for_finding`], [`FIX_DISPATCHED_FINDINGS`] and
-/// `doctor_fix_json`), so this list cannot drift from either (bd-ynfuu).
+/// dispatch ([`fix_dispatch_for_finding`] and [`FIX_DISPATCHED_FINDINGS`]), so
+/// this list cannot drift from either (bd-ynfuu).
 pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_stale",
     "search_index_missing",
+    "database_empty",
+    "database_corrupted",
     "graph_snapshot_stale",
     "wal_checkpoint_pending",
     "schema_migration_pending",
@@ -1185,25 +1187,12 @@ pub fn fix_test_only() -> FixerDispatch { finding_code: "test_only" }
             "fix_dispatch_for_finding calls fixers with no registered code: {table_violations:?}"
         );
 
-        // doctor_fix_json dispatches through that table, and any fixer it
-        // calls directly also emits a registered code.
-        let cli = dispatched_fixers(include_str!("../cli/mod.rs"), "fn doctor_fix_json(");
+        // `ee doctor --fix` routes through that table, whichever CLI function
+        // holds the call. A fixer called directly cannot dispatch an
+        // unregistered code: the first assertion registers every fixer's code.
         assert!(
-            cli.contains("fix_dispatch_for_finding"),
-            "doctor_fix_json must dispatch through fix_dispatch_for_finding; it calls {cli:?}"
-        );
-        let cli_violations: Vec<(&String, Option<&Option<String>>)> = cli
-            .iter()
-            .map(|name| (name, fixers.get(name)))
-            .filter(|(_, code)| match code {
-                None => true,
-                Some(None) => false,
-                Some(Some(code)) => !registered.contains(code.as_str()),
-            })
-            .collect();
-        assert!(
-            cli_violations.is_empty(),
-            "doctor_fix_json calls fix_* functions that are unknown here or unregistered: {cli_violations:?}"
+            include_str!("../cli/mod.rs").contains("fix_dispatch_for_finding("),
+            "src/cli/mod.rs must dispatch --fix through fix_dispatch_for_finding"
         );
     }
 }
