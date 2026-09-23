@@ -17,8 +17,9 @@ pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
 /// Schema version for eval source memory files.
 pub const EVAL_SOURCE_MEMORY_SCHEMA_V1: &str = "ee.eval_source_memory.v1";
 
-/// Schema version for eval run report.
-pub const EVAL_REPORT_SCHEMA_V1: &str = "ee.eval.report.v1";
+/// Schema version for eval run report. v2 adds the verbatim/paraphrase split
+/// (bead bd-reality-core-convergence-1azkt.11.1).
+pub const EVAL_REPORT_SCHEMA_V2: &str = "ee.eval.report.v2";
 
 /// Schema version for pack-quality expectations embedded in eval fixtures.
 pub const PACK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.pack_quality_expectations.v1";
@@ -624,6 +625,10 @@ pub struct QueryMetrics {
     pub ndcg_at_5: f64,
     pub mrr: f64,
     pub first_relevant_rank: Option<u32>,
+    /// Whether the query text appears verbatim in a memory it must retrieve
+    /// ([`query_appears_verbatim`]). `None` when no corpus was available to
+    /// classify it; an unclassified query is never counted as a paraphrase.
+    pub verbatim: Option<bool>,
     /// Search execution diagnostics travel with their query until the CLI
     /// renders the existing response envelope's `degraded` array. They are
     /// not quality metrics and do not alter the v1 metric payload or its hash.
@@ -642,6 +647,19 @@ pub struct FixtureMetrics {
     pub mean_recall_at_5: f64,
     pub mean_ndcg_at_5: f64,
     pub mean_mrr: f64,
+    /// Executed queries whose text appears verbatim in a memory they must
+    /// retrieve. Such a query cannot fail on lexical retrieval, so it inflates
+    /// the means above without measuring recall.
+    pub verbatim_queries: u32,
+    /// `verbatim_queries / queries_evaluated`; `None` when no query executed
+    /// or any executed query is unclassified.
+    pub verbatim_share: Option<f64>,
+    /// Executed queries classified as not verbatim.
+    pub paraphrase_queries: u32,
+    /// Mean precision@1 over paraphrase-only queries; `None` when there are
+    /// none (not 0.0, which would read as "all wrong") or any executed query
+    /// is unclassified.
+    pub paraphrase_mean_precision_at_1: Option<f64>,
     pub per_query: Vec<QueryMetrics>,
 }
 
@@ -664,7 +682,7 @@ pub struct EvalRunReport {
 impl EvalRunReport {
     pub fn new(fixture_id: String, fixture_family: String) -> Self {
         Self {
-            schema: EVAL_REPORT_SCHEMA_V1,
+            schema: EVAL_REPORT_SCHEMA_V2,
             fixture_id,
             fixture_family,
             status: EvalRunStatus::Pending,
@@ -2196,8 +2214,29 @@ pub fn compute_query_metrics(
         ndcg_at_5: ndcg_at_k(retrieved_ids, &relevant, 5),
         mrr: mrr(retrieved_ids, &relevant),
         first_relevant_rank: first_relevant_rank(retrieved_ids, &relevant),
+        verbatim: None,
         retrieval_degradations: Vec::new(),
     }
+}
+
+/// Whether `query` appears verbatim in a memory it must retrieve: some memory
+/// lists `query` in `expected_query_match` and contains it as a
+/// case-insensitive substring (bead bd-reality-core-convergence-1azkt.11.1).
+///
+/// The same predicate as the declared-query census in
+/// tests/eval_run_happy_path.rs. Substring is the weakest reading, so this is a
+/// floor on lexical contamination. Pass MATERIALIZED memories: generated tiers
+/// carry no `content` until materialized.
+#[must_use]
+pub fn query_appears_verbatim(query: &str, memories: &[SourceMemory]) -> bool {
+    let needle = query.to_lowercase();
+    memories.iter().any(|memory| {
+        memory
+            .expected_query_match
+            .iter()
+            .any(|expected| expected == query)
+            && memory.content.to_lowercase().contains(&needle)
+    })
 }
 
 /// Preserve the search outcome as well as its ranked IDs (bd-j09rg).
@@ -2299,6 +2338,22 @@ pub fn compute_fixture_metrics(
 
     let n_f64 = n as f64;
 
+    let verbatim_queries = per_query
+        .iter()
+        .filter(|query| query.verbatim == Some(true))
+        .count();
+    let paraphrase_p1: Vec<f64> = per_query
+        .iter()
+        .filter(|query| query.verbatim == Some(false))
+        .map(|query| query.precision_at_1)
+        .collect();
+    // An unclassified query is neither verbatim nor paraphrase, so both
+    // derived figures are withheld rather than computed over a subset.
+    let all_classified = per_query.iter().all(|query| query.verbatim.is_some());
+    let verbatim_share = all_classified.then(|| verbatim_queries as f64 / n_f64);
+    let paraphrase_mean_precision_at_1 = (all_classified && !paraphrase_p1.is_empty())
+        .then(|| paraphrase_p1.iter().sum::<f64>() / paraphrase_p1.len() as f64);
+
     FixtureMetrics {
         fixture_id: fixture_id.to_string(),
         queries_evaluated: n as u32,
@@ -2308,6 +2363,10 @@ pub fn compute_fixture_metrics(
         mean_recall_at_5: sum_r5 / n_f64,
         mean_ndcg_at_5: sum_ndcg / n_f64,
         mean_mrr: sum_mrr / n_f64,
+        verbatim_queries: verbatim_queries as u32,
+        verbatim_share,
+        paraphrase_queries: paraphrase_p1.len() as u32,
+        paraphrase_mean_precision_at_1,
         per_query,
     }
 }
@@ -3718,6 +3777,122 @@ mod tests {
         ensure_close(metrics.mean_mrr, 0.75, 1e-9, "mean mrr")
     }
 
+    // Bead bd-reality-core-convergence-1azkt.11.1, part 2. The expected numbers
+    // were computed by hand from the fixture and its committed golden, and
+    // pre-registered on the bead before any of this ran.
+
+    fn classified(query: &str, verbatim: bool, precision_at_1: f64) -> QueryMetrics {
+        QueryMetrics {
+            query: query.into(),
+            precision_at_1,
+            verbatim: Some(verbatim),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn verbatim_split_matches_the_hand_computed_dangerous_cleanup_answer() -> TestResult {
+        let metrics = compute_fixture_metrics(
+            "fx.dangerous_cleanup.v1",
+            vec![
+                classified("explicit written permission", true, 1.0),
+                classified("before deleting", true, 1.0),
+                classified("safe cleanup plan", true, 1.0),
+                classified("dry-run", true, 1.0),
+                classified("preserve unknown files", true, 1.0),
+                classified("clean up generated build artifacts safely", false, 0.0),
+                classified("dangerous cleanup", false, 0.0),
+                classified("untracked fixtures", false, 1.0),
+                classified("cleanup failure", false, 0.0),
+            ],
+        );
+        ensure(metrics.verbatim_queries, 5, "verbatim queries")?;
+        ensure(metrics.paraphrase_queries, 4, "paraphrase queries")?;
+        ensure_close(
+            metrics.verbatim_share.ok_or("verbatim share missing")?,
+            5.0 / 9.0,
+            1e-12,
+            "verbatim share",
+        )?;
+        ensure_close(
+            metrics
+                .paraphrase_mean_precision_at_1
+                .ok_or("paraphrase p@1 missing")?,
+            0.25,
+            1e-12,
+            "paraphrase-only p@1",
+        )?;
+        ensure_close(metrics.mean_precision_at_1, 6.0 / 9.0, 1e-12, "overall p@1")
+    }
+
+    #[test]
+    fn verbatim_split_withholds_what_it_cannot_measure() -> TestResult {
+        let all_verbatim = compute_fixture_metrics(
+            "all",
+            vec![classified("a", true, 1.0), classified("b", true, 0.0)],
+        );
+        ensure(all_verbatim.verbatim_share, Some(1.0), "all-verbatim share")?;
+        ensure(
+            all_verbatim.paraphrase_mean_precision_at_1,
+            None,
+            "no paraphrase queries means no paraphrase p@1, not 0.0",
+        )?;
+
+        let unclassified = QueryMetrics {
+            query: "u".into(),
+            precision_at_1: 1.0,
+            ..Default::default()
+        };
+        let partial =
+            compute_fixture_metrics("partial", vec![classified("a", false, 0.0), unclassified]);
+        ensure(
+            partial.verbatim_share,
+            None,
+            "unclassified query withholds share",
+        )?;
+        ensure(
+            partial.paraphrase_mean_precision_at_1,
+            None,
+            "unclassified query withholds paraphrase p@1",
+        )?;
+
+        let empty = compute_fixture_metrics("empty", Vec::new());
+        ensure(empty.verbatim_share, None, "empty fixture share")?;
+        ensure(
+            empty.paraphrase_mean_precision_at_1,
+            None,
+            "empty fixture p@1",
+        )
+    }
+
+    #[test]
+    fn query_appears_verbatim_reproduces_the_hand_count_on_the_real_fixture() -> TestResult {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/eval/dangerous_cleanup/source_memory.json");
+        let source = load_source_memories(&path).map_err(|error| error.to_string())?;
+        let memories = materialize_source_memories(&source).map_err(|error| error.to_string())?;
+        let queries: BTreeSet<&str> = memories
+            .iter()
+            .flat_map(|memory| memory.expected_query_match.iter().map(String::as_str))
+            .collect();
+        ensure(queries.len(), 9, "declared queries")?;
+        let verbatim: BTreeSet<&str> = queries
+            .iter()
+            .copied()
+            .filter(|query| query_appears_verbatim(query, &memories))
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "before deleting",
+            "dry-run",
+            "explicit written permission",
+            "preserve unknown files",
+            "safe cleanup plan",
+        ]
+        .into_iter()
+        .collect();
+        ensure(verbatim, expected, "verbatim queries")
+    }
+
     #[test]
     fn semantic_recall_expectations_measure_neural_gain() -> TestResult {
         let expectations = SemanticRecallExpectations {
@@ -3802,7 +3977,7 @@ mod tests {
             "ee.eval_source_memory.v1",
             "source schema",
         )?;
-        ensure(EVAL_REPORT_SCHEMA_V1, "ee.eval.report.v1", "report schema")?;
+        ensure(EVAL_REPORT_SCHEMA_V2, "ee.eval.report.v2", "report schema")?;
         ensure(
             SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1,
             "ee.eval.semantic_recall_expectations.v1",

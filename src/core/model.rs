@@ -38,6 +38,7 @@ use crate::models::model_registry::{
 use frankensearch::Model2VecEmbedder;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, ModelDownloader, ModelLifecycle, ModelManifest,
+    is_verification_cached, verify_dir_and_record,
 };
 
 /// Convert a DbError to DomainError, preserving MigrationDrift as a distinct error code.
@@ -2797,6 +2798,25 @@ fn fetch_bundled_embedding_model(
         "https://huggingface.co/{}/tree/{}",
         manifest.repo, manifest.revision
     ));
+    // bd-vlkfk: a present model whose `.verified` receipt went stale (a chmod
+    // or chown bumps ctime) is hashed in full by every process that loads it,
+    // and nothing on the load path re-mints: Frankensearch's cached verify
+    // never writes, and ee keeps only a process-local proof (e20a87bc1).
+    // `model fetch` already declares writes to the model store, so it
+    // refreshes the receipt here through Frankensearch's own minting API: one
+    // full SHA-256 pass, refused if the files change meanwhile. A failure
+    // (corrupt bytes, a read-only directory) leaves fetch on its usual path.
+    if stored_path.is_dir() && !is_verification_cached(&manifest, &stored_path) {
+        if let Err(error) = verify_dir_and_record(&manifest, &stored_path) {
+            tracing::warn!(
+                target: "ee::model",
+                model = POTION_MODEL_NAME,
+                path = %stored_path.display(),
+                %error,
+                "could not refresh the model verification receipt"
+            );
+        }
+    }
     let was_cached = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).is_ok();
 
     if !was_cached {

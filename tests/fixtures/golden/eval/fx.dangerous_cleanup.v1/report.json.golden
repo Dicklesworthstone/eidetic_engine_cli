@@ -1,5 +1,5 @@
 {
-  "schema": "ee.eval.report.v1",
+  "schema": "ee.eval.report.v2",
   "fixture_id": "fx.dangerous_cleanup.v1",
   "fixture_family": "dangerous_cleanup",
   "status": "passed",
@@ -12,6 +12,10 @@
     "mean_recall_at_5": 1.0,
     "mean_ndcg_at_5": 0.8624288341269906,
     "mean_mrr": 0.8148148148148148,
+    "verbatim_queries": 5,
+    "verbatim_share": 0.5555555555555556,
+    "paraphrase_queries": 4,
+    "paraphrase_mean_precision_at_1": 0.25,
     "per_query": [
       {
         "query": "before deleting",
@@ -28,7 +32,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": true
       },
       {
         "query": "clean up generated build artifacts safely",
@@ -46,7 +51,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 0.6309297535714575,
         "mrr": 0.5,
-        "first_relevant_rank": 2
+        "first_relevant_rank": 2,
+        "verbatim": false
       },
       {
         "query": "cleanup failure",
@@ -64,7 +70,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 0.5,
         "mrr": 0.3333333333333333,
-        "first_relevant_rank": 3
+        "first_relevant_rank": 3,
+        "verbatim": false
       },
       {
         "query": "dangerous cleanup",
@@ -82,7 +89,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 0.6309297535714575,
         "mrr": 0.5,
-        "first_relevant_rank": 2
+        "first_relevant_rank": 2,
+        "verbatim": false
       },
       {
         "query": "dry-run",
@@ -98,7 +106,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": true
       },
       {
         "query": "explicit written permission",
@@ -115,7 +124,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": true
       },
       {
         "query": "preserve unknown files",
@@ -133,7 +143,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": true
       },
       {
         "query": "safe cleanup plan",
@@ -151,7 +162,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": true
       },
       {
         "query": "untracked fixtures",
@@ -168,7 +180,8 @@
         "recall_at_5": 1.0,
         "ndcg_at_5": 1.0,
         "mrr": 1.0,
-        "first_relevant_rank": 1
+        "first_relevant_rank": 1,
+        "verbatim": false
       }
     ]
   },

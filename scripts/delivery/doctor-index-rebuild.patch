@@ -1,0 +1,187 @@
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -55,6 +55,10 @@
+     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
+ };
+ use sqlmodel_core::Value as SqlValue;
++
++#[cfg(unix)]
++#[path = "index_doctor_repair.rs"]
++pub(crate) mod doctor_repair;
+ 
+ #[path = "index_storage.rs"]
+ mod storage;
+--- a/src/core/doctor_runtime.rs
++++ b/src/core/doctor_runtime.rs
+@@ -59,6 +59,10 @@
+ ))]
+ use fs4::FileExt as Fs4FileExt;
+ use serde::{Deserialize, Serialize};
++
++#[cfg(unix)]
++#[path = "doctor_index_repair.rs"]
++mod index_repair;
+ 
+ /// Public schema string for the doctor capabilities report. Bump only on a
+ /// breaking contract change; additive changes keep `v1`.
+@@ -394,10 +398,9 @@
+     /// blast-radius check would otherwise refuse.
+     EmitDiagnostic { code: String, severity: String },
+ 
+-    /// Run the search-index rebuild pipeline. Phase-1 (bd-tu4s8): records
+-    /// the planned rebuild as actions.jsonl evidence with manual operator
+-    /// steps until the subsystem actor handle lands; the doctor never
+-    /// directly performs the rebuild from this Op today.
++    /// Rebuild the derived index from a read-only source snapshot. Unix repair
++    /// and undo use the ordinary generation lease and journal every primitive
++    /// mutation. Dry runs record guidance only; unsupported platforms refuse.
+     RunIndexRebuild { steps: Vec<String> },
+ 
+     /// Refresh the graph snapshot subsystem. Phase-1 (bd-tu4s8): records
+@@ -446,6 +449,7 @@
+                 | Self::Chmod { .. }
+                 | Self::QuarantineByRename { .. }
+                 | Self::CreateDirAll { .. }
++                | Self::RunIndexRebuild { .. }
+         )
+     }
+ 
+@@ -456,7 +460,6 @@
+             self,
+             Self::Manual { .. }
+                 | Self::EmitDiagnostic { .. }
+-                | Self::RunIndexRebuild { .. }
+                 | Self::RunGraphRefresh { .. }
+                 | Self::RunWalCheckpoint { .. }
+                 | Self::RunMigration { .. }
+@@ -862,6 +865,17 @@
+         return Err(DoctorRuntimeError::BlastRadiusExceeded {
+             path: path.to_path_buf(),
+             allowed_roots: ctx.blast_radius_roots.clone(),
++        });
++    }
++
++    if matches!(&op, Op::RunIndexRebuild { .. }) && !ctx.dry_run {
++        #[cfg(unix)]
++        return index_repair::rebuild(ctx, path);
++        #[cfg(not(unix))]
++        return Err(DoctorRuntimeError::Io {
++            context: "rebuild index with audited doctor undo".to_owned(),
++            source: io::Error::new(io::ErrorKind::Unsupported,
++                "audited index repair requires Unix generation leases; use ee index rebuild explicitly"),
+         });
+     }
+ 
+@@ -1316,6 +1330,8 @@
+     }
+     let observed_action_count =
+         validate_undo_action_ledger(&run_dir, &state, &recorded_roots, &allowed_roots, &lines)?;
++    #[cfg(unix)]
++    let _index_lease = index_repair::undo_lease(&workspace, &lines)?;
+     // Read existing undo_log to skip already-undone actions.
+     //
+     // Only a SUCCESSFUL entry retires an action. Failure entries carry the
+--- a/src/core/doctor_fixers.rs
++++ b/src/core/doctor_fixers.rs
+@@ -3,17 +3,16 @@
+ //! fixer maps a specific repair-spec finding code to the `Op` that the doctor
+ //! should call `mutate()` with.
+ //!
+-//! Only `Op::is_writing` Ops change the filesystem. Advisory Ops (every `RunX`
+-//! below) record guidance, and `ee doctor --fix` reports them as
++//! Only `Op::is_writing` Ops change the filesystem. Index rebuild executes
++//! through reversible primitives. Other unwired subsystem operations record
++//! guidance, and `ee doctor --fix` reports them as
+ //! `guidance_recorded`, never `applied`.
+ //!
+-//! Phase-1 scope: the fixers are pure dispatchers — they return the
++//! The fixers are pure dispatchers — they return the
+ //! `(path, Op)` pair the caller will hand to `mutate()`. They do NOT call
+ //! `mutate()` themselves so the test surface stays free of `RunContext`
+-//! setup. Subsystem-actor wiring for the `RunX` family of variants lands
+-//! in the bd-3boan CLI-wiring slice and follow-up actor beads; until those
+-//! land, `RunX` Ops record their planned-mutation evidence through the same
+-//! `actions.jsonl` channel as `Manual{steps}`.
++//! setup. Index repair builds from a read-only canonical source snapshot and
++//! journals each real mutation with hash-checked backups and inverse actions.
+ //!
+ //! The 13 fixers cover the eight repair_specs/ subsystems
+ //! (agent_coordination, cass_integration, graph_subsystem, policy_safety,
+@@ -60,8 +59,8 @@
+ }
+ 
+ /// FM-SI-01: search index manifest is stale relative to the underlying
+-/// memories table. Auto-fix dispatches an index rebuild plan; the actor
+-/// handle materialises the rebuild in a follow-up subsystem-wiring bead.
++/// memories table. The runtime stages a validated generation and journals
++/// every live-file change so the repair can be undone without source writes.
+ #[must_use]
+ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
+     FixerDispatch {
+@@ -372,8 +371,8 @@
+         };
+         assert_eq!(steps[0], "ee index rebuild --workspace .");
+         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
+-        assert!(dispatch.op.is_advisory());
+-        assert!(!dispatch.op.is_writing());
++        assert!(!dispatch.op.is_advisory());
++        assert!(dispatch.op.is_writing());
+     }
+ 
+     #[test]
+@@ -401,7 +400,8 @@
+         };
+         assert_eq!(steps[0], "ee index rebuild --workspace .");
+         assert!(steps[1].contains("EE-E300"), "{steps:?}");
+-        assert!(dispatch.op.is_advisory());
++        assert!(!dispatch.op.is_advisory());
++        assert!(dispatch.op.is_writing());
+     }
+ 
+     #[test]
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -86830,7 +86830,7 @@
+ 
+     #[test]
+     fn doctor_fix_reports_advisory_ops_as_guidance_not_applied() -> TestResult {
+-        use crate::core::doctor_fixers::{FixerDispatch, fix_search_index_missing};
++        use crate::core::doctor_fixers::{FixerDispatch, fix_graph_snapshot_stale};
+         use crate::core::doctor_runtime::Op;
+ 
+         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+@@ -86840,7 +86840,7 @@
+         fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+         let created = workspace.join(".ee").join("doctor-guidance-probe");
+         let dispatches = vec![
+-            fix_search_index_missing(&workspace),
++            fix_graph_snapshot_stale(&workspace),
+             FixerDispatch {
+                 finding_code: "test_real_write",
+                 severity: "warning",
+@@ -86869,12 +86869,12 @@
+                 )
+             })
+             .collect::<Vec<_>>();
+-        // The index rebuild is advisory: it records steps and changes nothing,
++        // The graph refresh is advisory: it records steps and changes nothing,
+         // so it must not claim "applied". The write really happened, so it must.
+         ensure_equal(
+             &outcomes,
+             &vec![
+-                ("search_index_missing", "guidance_recorded"),
++                ("graph_snapshot_stale", "guidance_recorded"),
+                 ("test_real_write", "applied"),
+             ],
+             "per-fixer outcomes",
+@@ -86883,8 +86883,8 @@
+         )?;
+         ensure(created.is_dir(), "the writing op must have created its dir")?;
+         ensure(
+-            !workspace.join(".ee").join("index").exists(),
+-            "the advisory index op must not have built an index",
++            !workspace.join(".ee").join("graph").exists(),
++            "the advisory graph op must not have built a graph",
+         )?;
+         ensure_equal(
+             &data["attemptedFixerCount"],

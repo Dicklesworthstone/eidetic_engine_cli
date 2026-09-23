@@ -60,6 +60,10 @@ use chrono::Utc;
 use fs4::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[path = "doctor_index_repair.rs"]
+mod index_repair;
+
 /// Public schema string for the doctor capabilities report. Bump only on a
 /// breaking contract change; additive changes keep `v1`.
 pub const CAPABILITIES_SCHEMA_V1: &str = "ee.doctor.capabilities.v1";
@@ -394,10 +398,9 @@ pub enum Op {
     /// blast-radius check would otherwise refuse.
     EmitDiagnostic { code: String, severity: String },
 
-    /// Run the search-index rebuild pipeline. Phase-1 (bd-tu4s8): records
-    /// the planned rebuild as actions.jsonl evidence with manual operator
-    /// steps until the subsystem actor handle lands; the doctor never
-    /// directly performs the rebuild from this Op today.
+    /// Rebuild the derived index from a read-only source snapshot. Unix repair
+    /// and undo use the ordinary generation lease and journal every primitive
+    /// mutation. Dry runs record guidance only; unsupported platforms refuse.
     RunIndexRebuild { steps: Vec<String> },
 
     /// Refresh the graph snapshot subsystem. Phase-1 (bd-tu4s8): records
@@ -446,6 +449,7 @@ impl Op {
                 | Self::Chmod { .. }
                 | Self::QuarantineByRename { .. }
                 | Self::CreateDirAll { .. }
+                | Self::RunIndexRebuild { .. }
         )
     }
 
@@ -456,7 +460,6 @@ impl Op {
             self,
             Self::Manual { .. }
                 | Self::EmitDiagnostic { .. }
-                | Self::RunIndexRebuild { .. }
                 | Self::RunGraphRefresh { .. }
                 | Self::RunWalCheckpoint { .. }
                 | Self::RunMigration { .. }
@@ -862,6 +865,19 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         return Err(DoctorRuntimeError::BlastRadiusExceeded {
             path: path.to_path_buf(),
             allowed_roots: ctx.blast_radius_roots.clone(),
+        });
+    }
+
+    if matches!(&op, Op::RunIndexRebuild { .. }) && !ctx.dry_run {
+        #[cfg(unix)]
+        return index_repair::rebuild(ctx, path);
+        #[cfg(not(unix))]
+        return Err(DoctorRuntimeError::Io {
+            context: "rebuild index with audited doctor undo".to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "audited index repair requires Unix generation leases; use ee index rebuild explicitly",
+            ),
         });
     }
 
@@ -1316,6 +1332,8 @@ pub fn replay_undo_with_authorized_roots(
     }
     let observed_action_count =
         validate_undo_action_ledger(&run_dir, &state, &recorded_roots, &allowed_roots, &lines)?;
+    #[cfg(unix)]
+    let _index_lease = index_repair::undo_lease(&workspace, &lines)?;
     // Read existing undo_log to skip already-undone actions.
     //
     // Only a SUCCESSFUL entry retires an action. Failure entries carry the
@@ -2092,10 +2110,26 @@ pub struct CapabilitiesReport {
     pub tool_version: String,
     pub run_artifact_schema: String,
     pub blast_radius: Vec<String>,
+    /// Every `Op` kind `mutate()` accepts. This is the chokepoint's
+    /// vocabulary, not what `ee doctor --fix` does: see `fix_dispatch`.
     pub op_kinds: Vec<&'static str>,
+    /// What `ee doctor --fix` actually dispatches: one entry per finding in
+    /// its dispatch table, with the op kind and whether it repairs anything
+    /// (bd-223vl M5).
+    pub fix_dispatch: Vec<FixDispatchEntry>,
     pub exit_codes: Vec<ExitCodeEntry>,
     pub env_vars: Vec<EnvVarEntry>,
     pub action_line_schema: String,
+}
+
+/// One finding `ee doctor --fix` can dispatch.
+#[derive(Clone, Debug, Serialize)]
+pub struct FixDispatchEntry {
+    pub finding: &'static str,
+    pub op_kind: &'static str,
+    /// `repair` for a writing op; `guidance` for an advisory op, which only
+    /// records steps (outcome `guidance_recorded`) and leaves the finding.
+    pub effect: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2142,6 +2176,21 @@ impl CapabilitiesReport {
                 "atomic_rewrite_toml",
                 "snapshot_backup",
             ],
+            fix_dispatch: super::doctor_fixers::FIX_DISPATCHED_FINDINGS
+                .iter()
+                .filter_map(|finding| {
+                    super::doctor_fixers::fix_dispatch_for_finding(workspace, finding)
+                })
+                .map(|dispatch| FixDispatchEntry {
+                    finding: dispatch.finding_code,
+                    op_kind: dispatch.op.kind_str(),
+                    effect: if dispatch.op.is_advisory() {
+                        "guidance"
+                    } else {
+                        "repair"
+                    },
+                })
+                .collect(),
             exit_codes: vec![
                 ExitCodeEntry {
                     code: 0,

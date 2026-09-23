@@ -1,0 +1,10 @@
+--- a/src/core/doctor_fixers.rs
++++ b/src/core/doctor_fixers.rs
+@@ -505,6 +505,7 @@
+         let workspace = root();
+         let dispatches: Vec<&'static str> = vec![
+             fix_search_index_stale(&workspace).finding_code,
++            fix_search_index_missing(&workspace).finding_code,
+             fix_graph_snapshot_stale(&workspace).finding_code,
+             fix_wal_checkpoint_pending(&workspace).finding_code,
+             fix_schema_migration_pending(&workspace, "V001").finding_code,

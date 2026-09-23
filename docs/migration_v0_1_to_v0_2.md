@@ -655,6 +655,7 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 | `ee.memory_sentinel.check.v1` | `ee.memory_sentinel.check.v2` | polarity on result rows plus `byPolarity` aggregates |
 | `ee.memory_sentinel.why.v1` | `ee.memory_sentinel.why.v2` | polarity on `.spec.v2` rows plus `byPolarity` aggregates |
 | `ee.memory_sentinel.spec.v1` (inside why sentinel data) | `ee.memory_sentinel.spec.v2` | explicit `polarity` |
+| `ee.eval.report.v1` (inside eval run data.report) | `ee.eval.report.v2` | verbatim/paraphrase split: `metrics.verbatim_queries`, `verbatim_share`, `paraphrase_queries`, `paraphrase_mean_precision_at_1`, and `per_query[].verbatim` (1azkt.11.1) |
 | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` (unchanged) | — |
 
 ---

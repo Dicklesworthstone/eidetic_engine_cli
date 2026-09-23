@@ -172,6 +172,104 @@ fn daemon_supervised_job_recovery_after_kill_restart() {
     eprintln!("daemon kill/restart recovery E2E is Unix-only");
 }
 
+// bd-15k8 clause 2, through the CLI binary: after one foreground run,
+// `ee --json daemon status` must report the durable recent outcome and the
+// write-owner identity. The empty status taken first is the control that the
+// outcome comes from the run, not from fixture state.
+#[test]
+fn daemon_status_cli_reports_durable_outcomes_and_write_owner_after_foreground_run() -> TestResult {
+    let artifact_dir = unique_artifact_dir("status-cli")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+
+    let before = run_ee_json(&workspace, ["daemon", "status"], "daemon status before run")?;
+    assert_success(&before, "daemon status before run")?;
+    ensure_equal(
+        &before
+            .json
+            .pointer("/data/steward/durable/recentOutcomeCount"),
+        &Some(&Value::from(0)),
+        "recent outcomes before any foreground run",
+    )?;
+    ensure_equal(
+        &before.json.pointer("/data/steward/durable/rowCount"),
+        &Some(&Value::from(0)),
+        "durable rows before any foreground run",
+    )?;
+
+    let run = run_ee_json(
+        &workspace,
+        [
+            "daemon",
+            "--foreground",
+            "--once",
+            "--interval-ms",
+            "1",
+            "--job",
+            JOB_KIND,
+        ],
+        "daemon foreground once",
+    )?;
+    assert_success(&run, "daemon foreground once")?;
+
+    let after = run_ee_json(&workspace, ["daemon", "status"], "daemon status after run")?;
+    assert_success(&after, "daemon status after run")?;
+    eprintln!("daemon status after foreground run: {}", after.stdout);
+    ensure_equal(
+        &after.json.pointer("/data/steward/writeOwner/identity"),
+        &Some(&Value::String("ee-daemon-single-write-owner".to_owned())),
+        "status write-owner identity",
+    )?;
+    ensure_equal(
+        &after.json.pointer("/data/steward/writeOwner/mode"),
+        &Some(&Value::String("single_process_foreground".to_owned())),
+        "status write-owner mode",
+    )?;
+    ensure_equal(
+        &after
+            .json
+            .pointer("/data/steward/writeOwner/spool/backpressureCode"),
+        &Some(&Value::String("write_spool_backpressure".to_owned())),
+        "status write-owner spool backpressure code",
+    )?;
+    ensure_equal(
+        &after.json.pointer("/data/steward/durable/openJobCount"),
+        &Some(&Value::from(0)),
+        "open durable jobs after the run",
+    )?;
+    ensure(
+        after
+            .json
+            .pointer("/data/steward/durable/recentOutcomeCount")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 1),
+        format!(
+            "status must count a recent durable outcome: {}",
+            after.stdout
+        ),
+    )?;
+    ensure(
+        after
+            .json
+            .pointer("/data/steward/durable/rowCount")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 1),
+        format!("status must count durable rows: {}", after.stdout),
+    )?;
+    ensure_equal(
+        &after.json.pointer("/data/steward/recentOutcomes/0/status"),
+        &Some(&Value::String("success".to_owned())),
+        "most recent durable outcome status",
+    )
+}
+
 #[test]
 fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
     let trace = test_tracing::init_test_tracing(

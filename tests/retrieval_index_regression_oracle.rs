@@ -672,7 +672,7 @@ impl CandidateIdentity {
                 let value = fields.get(name).map_or("<absent>", String::as_str);
                 if value == "<absent>" || value == "unknown" || value == "null" {
                     return Err(Verdict::InfraError(format!(
-                        "candidate is unattested: {name}={value}. ORACLE_REQUIRE_ATTESTATION=1 demands an exact-source candidate. The build learns its own provenance only if the harness hands it over, so forward it: RCH_ENV_ALLOWLIST=VERGEN_GIT_SHA,VERGEN_GIT_DIRTY,ORACLE_REQUIRE_ATTESTATION VERGEN_GIT_SHA=<sha> VERGEN_GIT_DIRTY=false ORACLE_REQUIRE_ATTESTATION=1 rch exec --base <sha> --clean-overlay --no-overlay -- cargo test --test integration_n_r -- <this test> --exact --ignored --test-threads=1 --nocapture. VERGEN_GIT_DIRTY=false is honest ONLY under --no-overlay, because an overlaid tree is not the commit it is stamped with. Note --base and --clean-overlay belong to `rch exec`; scripts/rch_verify.sh rejects them (exit 2) and spells the same thing --treeish <sha> --committed-tree, and it sets no VERGEN_* of its own, so the forwarding above is still required there."
+                        "candidate is unattested: {name}={value}. ORACLE_REQUIRE_ATTESTATION=1 demands an exact-source candidate. The build learns its own provenance only if the harness hands it over, so forward it: RCH_ENV_ALLOWLIST=VERGEN_GIT_SHA,VERGEN_GIT_DIRTY,ORACLE_REQUIRE_ATTESTATION,ORACLE_EXPECTED_COMMIT VERGEN_GIT_SHA=<sha> VERGEN_GIT_DIRTY=false ORACLE_REQUIRE_ATTESTATION=1 ORACLE_EXPECTED_COMMIT=<sha> rch exec --base <sha> --clean-overlay --no-overlay -- cargo test --test integration_n_r -- <this test> --exact --ignored --test-threads=1 --nocapture. VERGEN_GIT_DIRTY=false is honest ONLY under --no-overlay, because an overlaid tree is not the commit it is stamped with. Note --base and --clean-overlay belong to `rch exec`; scripts/rch_verify.sh rejects them (exit 2) and spells the same thing --treeish <sha> --committed-tree, and it sets no VERGEN_* of its own, so the forwarding above is still required there."
                     )));
                 }
             }
@@ -710,6 +710,117 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         hex.push_str(&format!("{byte:02x}"));
     }
     Ok(hex)
+}
+
+/// Cargo config spellings that can redirect a dependency without touching
+/// `Cargo.lock` (bd-reality-core-convergence-1azkt.10, ruling 2026-09-23 15:03Z).
+///
+/// The substitute lane, `rch exec --clean-overlay --no-overlay --base <sha>`,
+/// runs only cargo, so it cannot scan the worker before building. The scan
+/// therefore runs here: in the same `cargo test` process that built the
+/// candidate, over the same config files and environment the build read. It
+/// refuses the VERDICT, not the build; a file written between the build and
+/// this scan would escape it.
+const CARGO_CONFIG_MARKERS: [&str; 4] = ["[patch", "[replace", "replace-with", "[source"];
+
+/// Environment keys that redirect resolution or wrap the compiler.
+const BUILD_ENV_PATTERNS: [&str; 7] = [
+    "CARGO_SOURCE_*",
+    "CARGO_PATCH*",
+    "CARGO_REGISTRIES_*_INDEX",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+];
+
+fn env_key_redirects_resolution(key: &str) -> bool {
+    key.starts_with("CARGO_SOURCE_")
+        || key.starts_with("CARGO_PATCH")
+        || (key.starts_with("CARGO_REGISTRIES_") && key.ends_with("_INDEX"))
+        || matches!(
+            key,
+            "RUSTC_WRAPPER"
+                | "RUSTC_WORKSPACE_WRAPPER"
+                | "CARGO_BUILD_RUSTC_WRAPPER"
+                | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+        )
+}
+
+/// The redirecting markers a cargo config contains, ignoring comment lines.
+/// `paths` is matched as a key (`paths = ...`), the rest as substrings.
+fn config_text_redirects_resolution(text: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        for marker in CARGO_CONFIG_MARKERS {
+            if line.contains(marker) && !found.contains(&marker) {
+                found.push(marker);
+            }
+        }
+        if line
+            .strip_prefix("paths")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+            && !found.contains(&"paths =")
+        {
+            found.push("paths =");
+        }
+    }
+    found
+}
+
+#[derive(Debug, Default)]
+struct BuildEnvironmentScan {
+    /// Config locations probed, whether or not a file existed there.
+    locations_probed: usize,
+    /// Config files that existed and were read: (redaction-safe label, path).
+    files_read: Vec<(String, PathBuf)>,
+    /// Findings as `<label>: <marker>` or `env <KEY>`; never file contents.
+    hits: Vec<String>,
+}
+
+/// Probe `CARGO_HOME/config[.toml]` and every ancestor `.cargo/config[.toml]`
+/// from `manifest_dir` up to `/`, plus the given environment.
+fn scan_build_environment(
+    manifest_dir: &Path,
+    cargo_home: Option<&Path>,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> BuildEnvironmentScan {
+    let mut locations: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(home) = cargo_home {
+        for name in ["config", "config.toml"] {
+            locations.push((format!("<CARGO_HOME>/{name}"), home.join(name)));
+        }
+    }
+    for (depth, dir) in manifest_dir.ancestors().enumerate() {
+        for name in ["config", "config.toml"] {
+            locations.push((
+                format!("<manifest-ancestor-{depth}>/.cargo/{name}"),
+                dir.join(".cargo").join(name),
+            ));
+        }
+    }
+    let mut scan = BuildEnvironmentScan {
+        locations_probed: locations.len(),
+        ..BuildEnvironmentScan::default()
+    };
+    for (label, path) in locations {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for marker in config_text_redirects_resolution(&text) {
+            scan.hits.push(format!("{label}: {marker}"));
+        }
+        scan.files_read.push((label, path));
+    }
+    for (key, value) in env {
+        if env_key_redirects_resolution(&key) && !value.is_empty() {
+            scan.hits.push(format!("env {key}"));
+        }
+    }
+    scan
 }
 
 fn digest_tree(root: &Path) -> Result<BTreeMap<String, String>, String> {
@@ -955,16 +1066,22 @@ fn collect_probes(
 /// observed the same thing land on the same path.
 fn write_content_addressed_evidence(dir: &Path, events: &[Value]) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    let mut body = String::new();
-    for event in events {
-        body.push_str(&event.to_string());
-        body.push('\n');
-    }
+    let body = evidence_body(events);
     let digest = blake3::hash(body.as_bytes()).to_hex().to_string();
     let path = dir.join(format!("{digest}.ee-test-event.jsonl"));
     std::fs::write(&path, body.as_bytes())
         .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(path)
+}
+
+/// The exact bytes `write_content_addressed_evidence` stores and names.
+fn evidence_body(events: &[Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str(&event.to_string());
+        body.push('\n');
+    }
+    body
 }
 
 fn event(phase: &str, status: &str, details: Value) -> Value {
@@ -985,11 +1102,15 @@ fn event(phase: &str, status: &str, details: Value) -> Value {
 /// Invocation (see the bead; ScarletMill runs this on the attested RCH lane):
 ///
 /// ```text
-/// ORACLE_REQUIRE_ATTESTATION=1 ORACLE_PROOF_DIR=<dir> \
+/// ORACLE_REQUIRE_ATTESTATION=1 ORACLE_EXPECTED_COMMIT=<sha> ORACLE_PROOF_DIR=<dir> \
 ///   cargo test --locked --test integration_n_r -- \
 ///   --ignored --exact --nocapture --test-threads=1 \
 ///   retrieval_index_regression_oracle::concurrent_retrieval_over_one_generation_is_classified
 /// ```
+///
+/// Under attestation the candidate's `gitCommit` must equal
+/// `ORACLE_EXPECTED_COMMIT` (the `rch exec --base` sha), and the build
+/// environment must carry no resolution redirect (`scan_build_environment`).
 ///
 /// The filter follows `--` so it reaches the test harness, not Cargo.
 ///
@@ -1049,10 +1170,96 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         } else {
             "pass"
         },
-        serde_json::json!({ "identity": &identity.fields }),
+        // Ruling 9964 (ii): the full `ee version --json` is kept, not only the
+        // projected identity fields. It carries no host paths.
+        serde_json::json!({ "identity": &identity.fields, "versionJson": &version }),
     ));
     if let Some(verdict) = unattested {
         return finish(&verdict, &proof_dir, &mut events);
+    }
+
+    // ── Build environment and expected commit (ruling 2026-09-23 15:03Z) ────
+    // The candidate is the binary THIS cargo invocation built. Its raw path is
+    // printed to the log only; the evidence keeps the path digest (bullet 6).
+    let binary_sha = identity
+        .fields
+        .get("binarySha256")
+        .map_or("<absent>", String::as_str);
+    eprintln!(
+        "oracle candidate: path={} sha256={binary_sha}",
+        binary.display()
+    );
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    let scan = scan_build_environment(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        cargo_home.as_deref(),
+        std::env::vars(),
+    );
+    for (label, path) in &scan.files_read {
+        eprintln!(
+            "oracle build environment: read {label} = {}",
+            path.display()
+        );
+    }
+    eprintln!(
+        "oracle build environment: probed {} config locations, read {} files, checked env {:?}, hits {:?}",
+        scan.locations_probed,
+        scan.files_read.len(),
+        BUILD_ENV_PATTERNS,
+        scan.hits
+    );
+    let expected_commit = std::env::var("ORACLE_EXPECTED_COMMIT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let observed_commit = identity
+        .fields
+        .get("gitCommit")
+        .map_or("<absent>", String::as_str)
+        .to_owned();
+    events.push(event(
+        "build_environment",
+        if scan.hits.is_empty() {
+            "pass"
+        } else {
+            "refused"
+        },
+        serde_json::json!({
+            "configLocationsProbed": scan.locations_probed,
+            "configFilesReadCount": scan.files_read.len(),
+            "configFilesRead": scan.files_read.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+            "envPatternsChecked": BUILD_ENV_PATTERNS,
+            "hits": &scan.hits,
+            "expectedCommit": &expected_commit,
+            "observedCommit": &observed_commit,
+            "cargoLockSha256": sha256_file(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"))
+                .unwrap_or_else(|error| format!("<unreadable: {error}>")),
+        }),
+    ));
+    if require_attestation() {
+        if !scan.hits.is_empty() {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "the build environment can redirect dependency resolution: {:?}",
+                    scan.hits
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+        let refusal = match expected_commit.as_deref() {
+            None => Some(
+                "ORACLE_REQUIRE_ATTESTATION=1 needs ORACLE_EXPECTED_COMMIT=<the rch --base sha> to check the candidate's gitCommit against".to_owned(),
+            ),
+            Some(expected) if expected != observed_commit => Some(format!(
+                "candidate gitCommit {observed_commit} is not the requested base {expected}"
+            )),
+            Some(_) => None,
+        };
+        if let Some(reason) = refusal {
+            return finish(&Verdict::InfraError(reason), &proof_dir, &mut events);
+        }
     }
 
     // ── Realistic isolated workspace ────────────────────────────────────────
@@ -1285,6 +1492,16 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
 fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestResult {
     let proof = write_content_addressed_evidence(proof_dir, events)
         .unwrap_or_else(|error| PathBuf::from(format!("<evidence unwritable: {error}>")));
+    // Ruling 9964 (ii): a proof file on an RCH worker does not outlive the
+    // job, so the body is echoed as well. Its BLAKE3 equals the file name,
+    // which is how a copy retained elsewhere proves it is the same evidence.
+    let body = evidence_body(events);
+    eprintln!(
+        "oracle evidence body blake3={} begin",
+        blake3::hash(body.as_bytes()).to_hex()
+    );
+    eprint!("{body}");
+    eprintln!("oracle evidence body end");
     if verdict.is_product_pass() {
         // bd-0v23w: a pass used to compute this path and discard it. The
         // artifact was always written — it was simply never named, so no green
@@ -1586,6 +1803,119 @@ mod classifier {
                 verdict.class()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod build_environment {
+    //! bd-reality-core-convergence-1azkt.10, ruling 2026-09-23 15:03Z: the
+    //! substitute lane must refuse a verdict when cargo config or the
+    //! environment could redirect dependency resolution. Every arm pairs a
+    //! planted redirect with a clean twin, so a scanner that flags everything
+    //! fails as surely as one that flags nothing.
+
+    use super::{
+        config_text_redirects_resolution, env_key_redirects_resolution, scan_build_environment,
+    };
+
+    #[test]
+    fn config_markers_are_found_and_comments_and_clean_keys_are_not() {
+        assert_eq!(
+            config_text_redirects_resolution("[patch.crates-io]\nfoo = { path = \"x\" }"),
+            vec!["[patch"]
+        );
+        assert_eq!(
+            config_text_redirects_resolution("[source.crates-io]\nreplace-with = \"m\""),
+            vec!["[source", "replace-with"]
+        );
+        assert_eq!(
+            config_text_redirects_resolution("paths = [\"/x\"]"),
+            vec!["paths ="]
+        );
+        assert_eq!(
+            config_text_redirects_resolution("[replace]"),
+            vec!["[replace"]
+        );
+        assert!(config_text_redirects_resolution("# [patch.crates-io]\n# paths = []").is_empty());
+        assert!(
+            config_text_redirects_resolution("[net]\ngit-fetch-with-cli = true\ntarget-paths = 1")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn redirecting_env_keys_are_flagged_and_neighbours_are_not() {
+        for key in [
+            "CARGO_SOURCE_CRATES_IO_REPLACE_WITH",
+            "CARGO_PATCH_CRATES_IO_FOO",
+            "CARGO_REGISTRIES_MIRROR_INDEX",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+        ] {
+            assert!(env_key_redirects_resolution(key), "{key} must be flagged");
+        }
+        for key in [
+            "CARGO_REGISTRIES_MIRROR_TOKEN",
+            "CARGO_HOME",
+            "RUSTFLAGS",
+            "CARGO_TARGET_DIR",
+        ] {
+            assert!(
+                !env_key_redirects_resolution(key),
+                "{key} must not be flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_reads_ancestor_configs_and_env_and_counts_what_it_probed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let manifest = root.path().join("a").join("b");
+        std::fs::create_dir_all(&manifest).expect("manifest dir");
+        std::fs::create_dir_all(root.path().join("a").join(".cargo")).expect(".cargo");
+        std::fs::write(
+            root.path().join("a").join(".cargo").join("config.toml"),
+            "[patch.crates-io]\n",
+        )
+        .expect("planted config");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("config.toml"), "[net]\nretry = 2\n").expect("clean home config");
+
+        let scan = scan_build_environment(
+            &manifest,
+            Some(&home),
+            [
+                ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
+                ("RUSTC_WORKSPACE_WRAPPER".to_owned(), String::new()),
+                ("CARGO_HOME".to_owned(), "/x".to_owned()),
+            ],
+        );
+        let ancestors = manifest.ancestors().count();
+        assert_eq!(scan.locations_probed, 2 + 2 * ancestors);
+        assert!(
+            scan.files_read
+                .iter()
+                .any(|(label, _)| label == "<CARGO_HOME>/config.toml"),
+            "the clean CARGO_HOME config was read: {:?}",
+            scan.files_read
+        );
+        assert!(
+            scan.hits
+                .contains(&"<manifest-ancestor-1>/.cargo/config.toml: [patch".to_owned()),
+            "the planted ancestor patch is a hit: {:?}",
+            scan.hits
+        );
+        assert!(scan.hits.contains(&"env RUSTC_WRAPPER".to_owned()));
+        assert!(
+            !scan
+                .hits
+                .iter()
+                .any(|hit| hit.contains("CARGO_HOME") || hit.contains("RUSTC_WORKSPACE_WRAPPER")),
+            "a clean config and an empty wrapper are not hits: {:?}",
+            scan.hits
+        );
     }
 }
 

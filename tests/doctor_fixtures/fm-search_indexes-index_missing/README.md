@@ -5,37 +5,51 @@
 | Failure-mode id | `fm-search_indexes-index_missing` |
 | Severity | P1 |
 | Subsystem | search_indexes |
-| Repair spec | [`doctor_workspace/analysis/repair_specs/search_indexes.md`](../../../doctor_workspace/analysis/repair_specs/search_indexes.md) |
+| Repair spec | [`docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_missing`](../../../docs/doctor/repair-specs/search_indexes.md#fm-search_indexes-index_missing) |
 
-## Round-trip contract
+## Repair round-trip contract (bd-2oh15, option A)
+
+`doctor --fix` rebuilds a missing index from a read-only source snapshot and
+journals every live-index change through `doctor_runtime::mutate()`, so
+`doctor --undo` reverses it (7b2af4685, cd79e4ea7, 1f3cda72f, 33e5008f3).
 
 1. Provide an empty target directory and a real, prebuilt `ee` through
    `EE_DOCTOR_FIXTURE_BINARY`. `corrupt.sh` refuses nonempty or symlink targets.
-2. It runs `ee init --skip-boilerplate --json`, remembers a real source memory,
-   and rebuilds the index, requiring at least one memory indexed. It requires
-   the shared health assertion to pass before altering anything. The database
-   and populated search index must exist; an empty corpus or uninitialized
-   directory is not a substitute.
-3. It moves `.ee/index` into `.fixture_baseline/healthy-index`, preserving every
-   byte, then captures the corrupted pre-fix content digest. No file is deleted.
-4. Real doctor output must identify `search_index` warning `EE-E300`, with
-   degraded core health and every other core check still `ok`. Both the healthy
-   and corrupted reports are retained under `.fixture_baseline/`.
-5. With `EE_DOCTOR_FIXTURE_RUN_EE=1`, `assert.sh` runs `doctor --fix`, the
-   read-only health assertion, then `doctor --undo <runId>` and the content
-   comparison. Without the flag it refuses; marker-only success is forbidden.
+2. It runs `ee init --skip-boilerplate --json`, remembers a real source memory
+   that carries explicit path and symbol anchors, and rebuilds the index,
+   requiring at least one memory indexed and a healthy baseline. The anchors
+   make `memory_anchors` / `memory_anchor_index` non-empty, so a repair that
+   rewrote them would change source bytes.
+3. A healthy no-op `doctor --fix` provisions the persistent `.ee/.doctor.lock`
+   before the baseline, so that lock is byte-compared like any other file.
+4. It moves `.ee/index` into `.fixture_baseline/healthy-index`, preserving every
+   byte, then records the content digest and the `ee.write.lock` epoch. No file
+   is deleted. Real doctor output must identify `search_index` `EE-E300`.
+5. With `EE_DOCTOR_FIXTURE_RUN_EE=1`, `assert.sh` asserts: fix `applied` for
+   `search_index_missing` (never guidance); post-fix core health ok; undo
+   `undone` with the index absent again and `EE-E300` reported again; a second
+   undo is a no-op; and the content digest equals the baseline after both
+   undos. Without the flag it refuses; marker-only success is forbidden.
+
+How the digest treats runtime files (orchestrator decision on bd-2oh15 c9818,
+"classify, do not ignore"). A real fix + undo changed exactly two files outside
+`.doctor/`:
+- `ee.db-shm` is excluded: a transient SQLite shared-memory index derived from
+  the WAL.
+- `ee.write.lock` is excluded from the bytes but checked by its semantics. It
+  must still exist after undo, and its epoch (20 digits + LF) must be >= the
+  baseline. It is a monotonic counter no honest undo can restore.
+Everything else, including `ee.db`, `ee.db-wal` and `.doctor.lock`, is
+byte-compared.
+
+Verified on real binaries: an A binary built at 33e5008f3 passes (fix
+applied, undo undone with 15 actions, write-lock epoch 84 -> 100). The C-era
+binary built at 369c63544 fails at "post-fix health not established".
 
 ## Wiring status
 
 `scripts/verify-undo.sh` runs this fixture through the existing safety harness.
-The CLI forbids combining `--fix` with `--only`; they are separate calls in the
-shared helper, and `--only` is currently advisory.
-
-The index rebuild repair is `ee index rebuild --workspace <target> --json`.
-Currently `doctor --fix` selects `RunIndexRebuild`, whose runtime implementation
-only records manual guidance. Thus a successfully induced missing index is
-expected to keep the full doctor round trip **red** until that production path
-actually rebuilds it and supports undo. Do not substitute the explicit rebuild
-into `assert.sh` or change its baseline to make that round trip pass. An explicit
-rebuild can independently establish restored health, but cannot prove doctor
-repair or undo. The cited independent repair spec remains absent (bd-2oh15).
+`tests/doctor_fixtures/assertion_contract.py` pins the digest classification:
+shm noise is ignored, a WAL change is rejected, and a write lock that goes
+missing, becomes unreadable, goes backwards, or appears when it was absent is
+rejected. The cited independent repair spec remains absent (bd-2oh15).

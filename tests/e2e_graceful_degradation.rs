@@ -1497,41 +1497,96 @@ fn status_memory_subsystem(status_json: &Value, context: &str) -> Result<Value, 
         .ok_or_else(|| format!("{context}: status has no memory subsystem"))
 }
 
+/// Run ee with no semantic model reachable: downloads off and an empty model
+/// directory. This pins the deterministic-hash fallback instead of depending on
+/// whatever model a host happens to have cached.
+fn run_ee_json_no_model<I, S>(
+    workspace: &Path,
+    model_dir: &Path,
+    args: I,
+    context: &str,
+) -> Result<EeOutput, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--json")
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env("NO_COLOR", "1")
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_EMBED_MODEL_DIR", model_dir)
+        .output()
+        .map_err(|error| format!("failed to run ee: {error}"))?;
+    parse_ee_output(output, context)
+}
+
 /// bd-jmlzs. A fresh store of rules a human stated with `ee remember` (trust
 /// class `human_explicit`, no `--source`) used to make `status` report memory
 /// `degraded_recoverable` (`memory_health_degraded`, repaired by nothing),
 /// while `doctor` said ok and `health` said healthy. The provenance component
 /// was 0, and the health score is the minimum of its components.
 ///
-/// SCOPE: this pins agreement on MEMORY health. It does not assert
-/// `status.posture.overall == ok`. Without a semantic model, `status` also
-/// reports search `lexical_only` (and pack degraded because of it) while
-/// `doctor` says ok. That is a separate disagreement with a separate cause,
-/// and it is printed here, not asserted.
+/// bd-rzfov. With no semantic model, `status` also degraded its core `search`
+/// row (and `pack` through it) for the deterministic-hash fallback, while
+/// `doctor` (embedding_posture, advisory tier) and `health` said ok. ADR 0081
+/// D1 says an honest hash fallback must not degrade the top-line, so the three
+/// surfaces now agree on `overall`. The fallback stays visible in `degraded[]`
+/// with a repair that fetches the model, which this test asserts, so the
+/// hash-fallback path is shown to be the one exercised.
 ///
 /// The second arm is the control that keeps the first honest: the same
-/// explicit rules with a tombstoned majority must still degrade memory health.
+/// explicit rules with a tombstoned majority must still degrade memory health,
+/// and with it status's overall posture.
 #[test]
 fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResult {
     let artifact_dir = unique_artifact_dir("fresh-explicit-posture")?;
     let workspace = artifact_dir.join("workspace");
     fs::create_dir_all(&workspace)
         .map_err(|error| format!("failed to create workspace: {error}"))?;
-    let init = run_ee_json(&workspace, ["init"], "explicit init")?;
+    let model_dir = artifact_dir.join("empty-model-cache");
+    fs::create_dir_all(&model_dir)
+        .map_err(|error| format!("failed to create model dir: {error}"))?;
+    let init = run_ee_json_no_model(&workspace, &model_dir, ["init"], "explicit init")?;
     assert_success(&init, "explicit init")?;
     let mut memory_ids = Vec::new();
     for index in 0..8 {
-        memory_ids.push(remember(
+        let content = format!("explicitposture rule {index}: run the formatter before committing");
+        let remembered = run_ee_json_no_model(
             &workspace,
-            &format!("explicitposture rule {index}: run the formatter before committing"),
-        )?);
+            &model_dir,
+            [
+                "remember",
+                content.as_str(),
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+            ],
+            "explicit remember",
+        )?;
+        assert_success(&remembered, "explicit remember")?;
+        memory_ids.push(
+            remembered
+                .json
+                .pointer("/data/memory_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("remember output missing memory id: {}", remembered.stdout)
+                })?,
+        );
     }
 
-    let status = run_ee_json(&workspace, ["status"], "explicit status")?;
+    let status = run_ee_json_no_model(&workspace, &model_dir, ["status"], "explicit status")?;
     assert_success(&status, "explicit status")?;
-    let doctor = run_ee_json(&workspace, ["doctor"], "explicit doctor")?;
+    let doctor = run_ee_json_no_model(&workspace, &model_dir, ["doctor"], "explicit doctor")?;
     assert_success(&doctor, "explicit doctor")?;
-    let health = run_ee_json(&workspace, ["health"], "explicit health")?;
+    let health = run_ee_json_no_model(&workspace, &model_dir, ["health"], "explicit health")?;
     assert_success(&health, "explicit health")?;
     eprintln!(
         "fresh explicit store: status overall={:?}, non-ok subsystems={:?}",
@@ -1570,12 +1625,51 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
         &Some("healthy"),
         "health verdict on the same store",
     )?;
+    // The overall agreement bd-jmlzs requires (bd-rzfov).
+    ensure_equal(
+        &status
+            .json
+            .pointer("/data/posture/overall")
+            .and_then(Value::as_str),
+        &Some("ok"),
+        "status overall on a fresh explicit store with no model",
+    )?;
+    ensure_equal(
+        &doctor.json.pointer("/data/posture").and_then(Value::as_str),
+        &Some("ok"),
+        "doctor posture on the same store",
+    )?;
+    // The cause beside the label: the hash fallback really is active, and
+    // it is still reported, with a repair that fetches the model.
+    let lexical = status
+        .json
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("code").and_then(Value::as_str) == Some("search_lexical_only")
+            })
+        })
+        .ok_or_else(|| {
+            format!(
+                "status must still report search_lexical_only under the hash fallback: {}",
+                status.stdout
+            )
+        })?;
+    ensure(
+        lexical
+            .get("repair")
+            .and_then(Value::as_str)
+            .is_some_and(|repair| repair.contains("ee model fetch")),
+        format!("hash-fallback repair must fetch the model: {lexical}"),
+    )?;
 
     // Control: tombstone 6 of the 8. Live rows are still attested, but the
     // active ratio and tombstone penalty must still degrade memory health.
     for memory_id in &memory_ids[..6] {
-        let tombstone = run_ee_json(
+        let tombstone = run_ee_json_no_model(
             &workspace,
+            &model_dir,
             [
                 "curate",
                 "tombstone",
@@ -1610,7 +1704,7 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
             "tombstone persisted",
         )?;
     }
-    let degraded = run_ee_json(&workspace, ["status"], "tombstoned status")?;
+    let degraded = run_ee_json_no_model(&workspace, &model_dir, ["status"], "tombstoned status")?;
     assert_success(&degraded, "tombstoned status")?;
     let memory = status_memory_subsystem(&degraded.json, "tombstoned status")?;
     ensure_equal(
@@ -1622,5 +1716,13 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
         &memory.get("reason").and_then(Value::as_str),
         &Some("memory_health_degraded"),
         "tombstoned majority reason",
+    )?;
+    ensure_equal(
+        &degraded
+            .json
+            .pointer("/data/posture/overall")
+            .and_then(Value::as_str),
+        &Some("degraded_recoverable"),
+        "status overall with a tombstoned majority",
     )
 }
