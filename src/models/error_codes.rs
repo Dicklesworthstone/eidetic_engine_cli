@@ -177,6 +177,12 @@ pub const WAL_EXCEEDS_DATABASE: ErrorCode = ErrorCode {
     description: "WAL sidecar is larger than the database, so every connection open replays it",
     default_repair: Some("ee maintenance wal-checkpoint --mode truncate --workspace ."),
 };
+pub const DATABASE_EMPTY: ErrorCode = ErrorCode {
+    id: "EE-E206",
+    category: ErrorCategory::Storage,
+    description: "Database file is empty (0 bytes), so the workspace's data is not present",
+    default_repair: Some("ee backup list --workspace ."),
+};
 
 // Search index errors (EE-E300 - EE-E399)
 pub const INDEX_NOT_FOUND: ErrorCode = ErrorCode {
@@ -351,6 +357,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     WRITE_FAILED,
     WORKSPACE_ROW_MISSING,
     WAL_EXCEEDS_DATABASE,
+    DATABASE_EMPTY,
     // Search index
     INDEX_NOT_FOUND,
     INDEX_STALE,

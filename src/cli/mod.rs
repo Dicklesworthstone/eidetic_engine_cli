@@ -23308,13 +23308,43 @@ fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
     use crate::core::doctor_fixers::*;
 
     let report = DoctorReport::gather_for_workspace(workspace);
+    // bd-xa6ud / bd-wswg0: an empty or unreadable store cannot feed an index
+    // rebuild or a migration; running them crashes or builds over lost data.
+    // Record guidance for the database and skip the repairs that read it.
+    let store_unreadable = report.checks.iter().any(|check| {
+        check.name == "database"
+            && matches!(
+                check.error_code.map(|error_code| error_code.id),
+                Some("EE-E206" | "EE-E202")
+            )
+    });
     let mut dispatches = Vec::new();
     for check in report.checks {
         if check.severity.is_healthy() {
             continue;
         }
+        let code = check.error_code.map(|error_code| error_code.id);
+        if check.name == "database" {
+            match code {
+                Some("EE-E206") => {
+                    dispatches.push(fix_database_empty(workspace));
+                    continue;
+                }
+                Some("EE-E202") => {
+                    dispatches.push(fix_database_corrupted(workspace));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if store_unreadable
+            && (check.name == "search_index"
+                || matches!(code, Some("EE-E300" | "EE-E301" | "EE-E700")))
+        {
+            continue;
+        }
 
-        let dispatch = match check.error_code.map(|error_code| error_code.id) {
+        let dispatch = match code {
             Some("EE-E300") => Some(fix_search_index_missing(workspace)),
             Some("EE-E301") => Some(fix_search_index_stale(workspace)),
             Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),

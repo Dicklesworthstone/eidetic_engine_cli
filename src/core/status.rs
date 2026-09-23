@@ -3503,6 +3503,15 @@ pub fn gather_rch_verify_ledger_status_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
+        // bd-xa6ud / bd-wswg0: even a read-only open writes the store's
+        // sidecars; leave an empty or damaged store untouched.
+        if super::doctor::database_unreadable(workspace_path).is_some() {
+            return RchVerifyLedgerStatusReport::unavailable(
+                "unavailable",
+                "ee doctor --workspace . --json",
+                "The RCH verifier ledger database could not be opened.",
+            );
+        }
         match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
