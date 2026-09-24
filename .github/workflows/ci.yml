@@ -473,6 +473,7 @@ jobs:
               run_test "cargo test --lib steward::" cargo test --workspace --lib --jobs 1 steward:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib testing::" cargo test --workspace --lib --jobs 1 testing:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib util::" cargo test --workspace --lib --jobs 1 util:: -- --test-threads=1 --nocapture
+              run_test "cargo test --lib workspace_rebind::" cargo test --workspace --lib --jobs 1 workspace_rebind:: -- --test-threads=1 --nocapture
               ;;
             targets)
               run_test "cargo test targets" cargo test --workspace --bins --tests --examples --jobs 1 -- --test-threads=1 --nocapture
