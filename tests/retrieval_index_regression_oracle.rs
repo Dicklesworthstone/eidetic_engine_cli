@@ -200,6 +200,33 @@ fn index_invisible_error_code(exit_success: bool, stdout: &str) -> Option<String
         .then(|| code.to_owned())
 }
 
+/// `code=<c> message=<m> cancelKind=<k> cancelClass=<c>` from an `ee.error.v2`
+/// envelope on a probe's stdout, or `None` when stdout is not one. ee puts a
+/// cancellation's cause on stdout, not stderr, with the kind and class under
+/// `error.details` (src/cli/mod.rs, the cancelled envelope). It is only used
+/// to name the cause of a resource signal; it never turns a failure into a
+/// finding.
+fn error_envelope_summary(stdout: &str) -> Option<String> {
+    let envelope = serde_json::from_str::<Value>(stdout.trim()).ok()?;
+    if envelope.pointer("/schema").and_then(Value::as_str) != Some("ee.error.v2") {
+        return None;
+    }
+    let field = |pointer: &str| {
+        envelope
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or("<absent>")
+            .to_owned()
+    };
+    Some(format!(
+        "code={} message={} cancelKind={} cancelClass={}",
+        field("/error/code"),
+        field("/error/message"),
+        field("/error/details/cancelKind"),
+        field("/error/details/cancelClass")
+    ))
+}
+
 /// Which fields must be present and non-empty in the serial baseline before any
 /// comparison is meaningful. A missing one is `InfraError`, never a pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,6 +589,9 @@ fn pack_record(value: &Value) -> Record {
             "pack.sourceModeApplied",
             "/data/queryPlan/sourceModeApplied",
         ),
+        // Per-probe model evidence (1azkt.10 ruling 10064 A1): in a model cell
+        // every probe must report neural_local.
+        ("embed_backend", "/data/embed_backend"),
     ] {
         if let Some(found) = pointer_string(value, pointer) {
             record.insert(name.to_owned(), found);
@@ -1210,6 +1240,408 @@ fn plant_quotes(
     })
 }
 
+// ── Model cells (1azkt.10 item 4, rulings 10064) ───────────────────────────
+
+/// The advisory that makes a cell COLD: `ee status` lists it when the model's
+/// `.verified` receipt no longer matches the files (status.rs).
+const RECEIPT_STALE_CODE: &str = "embed_model_receipt_stale";
+
+/// The one admissible backend in a model cell (ruling 10064 A1).
+const NEURAL_LOCAL: &str = "neural_local";
+
+/// Ruling 10064 Q1: a model run needs at least 20 GB free on the job's own
+/// temp disk (the fetch alone writes ~531 MB, and the build shares the disk).
+const Q1_TEMP_DISK_FLOOR_BYTES: u64 = 20_000_000_000;
+
+/// Free bytes for an unprivileged writer on the filesystem holding `path`
+/// (ruling 10064 Q1: recorded before and after the job).
+fn free_bytes(path: &Path) -> Result<u64, String> {
+    let stats = rustix::fs::statvfs(path).map_err(|error| error.to_string())?;
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
+}
+
+/// A process's exit code, stdout (as JSON when it parses) and the tail of its
+/// stderr, for the evidence. Download progress goes to stderr, so only the
+/// last 4000 characters are kept.
+fn captured_output(output: &std::io::Result<std::process::Output>) -> Value {
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr
+                .chars()
+                .rev()
+                .take(4000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            serde_json::json!({
+                "exitCode": output.status.code(),
+                "stdout": serde_json::from_str::<Value>(stdout.trim())
+                    .unwrap_or_else(|_| Value::String(stdout.into_owned())),
+                "stderrTail": tail,
+            })
+        }
+        Err(error) => serde_json::json!({ "spawnError": error.to_string() }),
+    }
+}
+
+/// `ee model fetch embedding-default` into the fixture's own data_home: ONE
+/// download per job (ruling 10064 Q1). It runs first under the fixture's
+/// `EE_EMBED_DOWNLOAD=off`, to record which way fetch behaves there
+/// (docs/env_vars.md:34 says `off` "disables only the network step", :77 that
+/// it "forbids network access"). Only if that is refused does it run again
+/// with the variable unset, for the fetch alone (Q2); every probe keeps "off".
+/// No network is INFRA_ERROR, told apart by ee's own message: fetch has no
+/// dedicated error code (model.rs, exit 2, code "configuration").
+/// Returns the evidence, and the verdict to stop on if the model is not here.
+fn fetch_default_model(fixture: &Fixture) -> (Value, Option<Verdict>) {
+    let args = ["model", "fetch", "embedding-default", "--json"];
+    let under_off = ee_command(fixture, &args).output();
+    if under_off
+        .as_ref()
+        .is_ok_and(|output| output.status.success())
+    {
+        let evidence = captured_output(&under_off);
+        let downloaded = evidence
+            .pointer("/stdout/data/copied")
+            .and_then(Value::as_bool);
+        return (
+            serde_json::json!({
+                "underOff": evidence,
+                "succeededUnderOff": true,
+                // A download while EE_EMBED_DOWNLOAD=off is the contradiction
+                // with docs/env_vars.md:77 that ruling 10064 Q2 asks to record.
+                "downloadedUnderOff": downloaded,
+            }),
+            None,
+        );
+    }
+    let mut lifted = ee_command(fixture, &args);
+    lifted.env_remove("EE_EMBED_DOWNLOAD");
+    let lifted = lifted.output();
+    let evidence = serde_json::json!({
+        "underOff": captured_output(&under_off),
+        "succeededUnderOff": false,
+        "withDownloadUnset": captured_output(&lifted),
+    });
+    let verdict = match &lifted {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if text.contains("Failed to download bundled embedding model")
+                || text.contains("time limit")
+            {
+                Some(Verdict::InfraError(
+                    "no network for the model fetch (ee: \"Failed to download bundled embedding model\")"
+                        .to_owned(),
+                ))
+            } else {
+                Some(Verdict::InfraError(format!(
+                    "model setup failed: ee model fetch exited {:?}",
+                    output.status.code()
+                )))
+            }
+        }
+        Err(error) => Some(Verdict::InfraError(format!(
+            "could not spawn ee model fetch: {error}"
+        ))),
+    };
+    (evidence, verdict)
+}
+
+/// The fetched `model.safetensors` under the fixture's data_home. Exactly one
+/// is required: none means the fetch left no model, two mean the cell would
+/// not know which file its flip staled.
+fn fetched_model_file(fixture: &Fixture) -> Result<PathBuf, String> {
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path.is_dir() {
+                walk(&path, found)?;
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "model.safetensors")
+            {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut found = Vec::new();
+    walk(&fixture.data_home, &mut found)?;
+    match found.as_slice() {
+        [one] => Ok(one.clone()),
+        _ => Err(format!(
+            "expected exactly one model.safetensors under the fixture's data_home, found {}",
+            found.len()
+        )),
+    }
+}
+
+/// The cold flip (ruling 10064 Q1 and A4): chmod 0444, then back to the
+/// starting mode. Both calls change the file's ctime, which stales the
+/// `.verified` receipt. The mode must end at the STARTING mode recorded before
+/// the flip, whatever it is (ruling 13:30Z: the fetched file was 0664 on the
+/// worker; "0644" had stood in for "where it started").
+fn flip_model_ctime(path: &Path) -> Result<Value, String> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let before = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let mode_before = before.mode() & 0o7777;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444))
+        .map_err(|error| error.to_string())?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode_before))
+        .map_err(|error| error.to_string())?;
+    let after = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let mode_after = after.mode() & 0o7777;
+    let ctime =
+        |metadata: &std::fs::Metadata| format!("{}.{:09}", metadata.ctime(), metadata.ctime_nsec());
+    Ok(serde_json::json!({
+        "modeBefore": format!("{mode_before:o}"),
+        "modeAfter": format!("{mode_after:o}"),
+        "modeEndsAtStart": mode_after == mode_before,
+        "ctimeBefore": ctime(&before),
+        "ctimeAfter": ctime(&after),
+        "ctimeChanged": ctime(&before) != ctime(&after),
+    }))
+}
+
+/// Whether `ee status --json` lists the stale-receipt advisory, with where it
+/// appears (ruling 10064 A4: absent in WARM, present in COLD).
+fn receipt_stale_listed(fixture: &Fixture) -> Result<(bool, Value), String> {
+    let status = run_ee(fixture, &["status", "--json"])?;
+    let mut hits = Vec::new();
+    strings_containing(&status, RECEIPT_STALE_CODE, "", &mut hits);
+    Ok((!hits.is_empty(), Value::Array(hits)))
+}
+
+/// The value of `key` in one `ee` tracing line. ee prints either JSON
+/// (`{"fields":{"source":"registered",...}}`, what item-4 run N3 saw) or plain
+/// `key=value` fields, possibly quoted and possibly with ANSI colour.
+fn tracing_field(line: &str, key: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+        return value
+            .pointer(&format!("/fields/{key}"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    let needle = format!("{key}=");
+    plain.split_whitespace().find_map(|token| {
+        token
+            .strip_prefix(&needle)
+            .map(|value| value.trim_matches('"').to_owned())
+    })
+}
+
+/// The resolver's own source token (ruling 10064 A2). It is in no JSON
+/// output, only in the `ee::index::embedder` tracing line
+/// "embedding backend resolution completed" (index.rs), so one extra search
+/// runs with that target enabled. `ee model status --json` is recorded
+/// beside it.
+fn resolver_evidence(fixture: &Fixture, search_args: &[&str]) -> Value {
+    let mut command = ee_command(fixture, search_args);
+    command.env("RUST_LOG", "ee::index::embedder=info");
+    let output = command.output();
+    let lines: Vec<String> = output
+        .as_ref()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.contains("embedding backend resolution completed"))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let field = |key: &str| lines.last().and_then(|line| tracing_field(line, key));
+    let model_status = run_ee(fixture, &["model", "status", "--json"]);
+    serde_json::json!({
+        "resolverLines": &lines,
+        "source": field("source"),
+        "backend": field("backend"),
+        "outcome": field("outcome"),
+        "modelStatusActive": model_status
+            .as_ref()
+            .map_or(Value::Null, |value| value.pointer("/data/active").cloned().unwrap_or(Value::Null)),
+        "modelStatusError": model_status.err(),
+    })
+}
+
+/// Enter the COLD cell (ruling 10064 Q1, A2, A4): flip the model file's
+/// ctime, require `ee status` to list the stale-receipt advisory, record the
+/// resolver's source again, and take the COLD serial baselines. Each step is
+/// recorded in `events` as it happens. A cell that could not be established
+/// is INFRA_ERROR. Returns the cold (search, pack) serial records.
+fn cold_cell_setup(
+    fixture: &Fixture,
+    model_file: Option<&Path>,
+    search_args: &[&str],
+    pack_args: &[&str],
+    events: &mut Vec<Value>,
+) -> Result<(Record, Record), Verdict> {
+    let path = model_file
+        .ok_or_else(|| Verdict::InfraError("cold flip: no fetched model file".to_owned()))?;
+    let flip = flip_model_ctime(path)
+        .map_err(|error| Verdict::InfraError(format!("cold flip failed: {error}")))?;
+    let flipped =
+        flip["modeEndsAtStart"] == Value::Bool(true) && flip["ctimeChanged"] == Value::Bool(true);
+    events.push(event(
+        "model_flip",
+        if flipped { "pass" } else { "fail" },
+        flip.clone(),
+    ));
+    if !flipped {
+        return Err(Verdict::InfraError(format!(
+            "cold flip did not change the ctime and end at its starting mode: {flip}"
+        )));
+    }
+    match receipt_stale_listed(fixture) {
+        Ok((true, hits)) => events.push(event(
+            "model_receipt",
+            "pass",
+            serde_json::json!({ "cell": "cold", "staleListed": true, "where": hits }),
+        )),
+        Ok((false, _)) => {
+            events.push(event(
+                "model_receipt",
+                "fail",
+                serde_json::json!({ "cell": "cold", "staleListed": false }),
+            ));
+            return Err(Verdict::InfraError(format!(
+                "cold not established: ee status does not list {RECEIPT_STALE_CODE} after the flip"
+            )));
+        }
+        Err(error) => {
+            return Err(Verdict::InfraError(format!(
+                "cold receipt check failed: {error}"
+            )));
+        }
+    }
+    events.push(event(
+        "model_resolver",
+        "info",
+        serde_json::json!({ "cell": "cold", "resolver": resolver_evidence(fixture, search_args) }),
+    ));
+    let search = run_ee(fixture, search_args)
+        .map(|value| search_record(&value))
+        .map_err(|error| Verdict::InfraError(format!("cold serial search failed: {error}")))?;
+    let pack = run_ee(fixture, pack_args)
+        .map(|value| pack_record(&value))
+        .map_err(|error| Verdict::InfraError(format!("cold serial pack failed: {error}")))?;
+    events.push(event(
+        "cold_serial_baseline",
+        "info",
+        serde_json::json!({ "search": &search, "pack": &pack }),
+    ));
+    Ok((search, pack))
+}
+
+/// The code `ee pack` reports when no index generation is visible (bd-tjxvl:
+/// SlateOtter measured it in every plant cell, PL4's included).
+const PACK_FALLBACK_CODE: &str = "context_lexical_fallback";
+
+/// Pack's own signal about a missing index (1azkt.10 ruling 13:30Z).
+/// `compare_probe` skips every `degraded.*` field, which is why PL4's packs
+/// looked silent, so this reads the codes explicitly:
+/// - with the index planted aside, every completed pack probe must report
+///   `PACK_FALLBACK_CODE`;
+/// - with a healthy index, none may.
+/// Probes that did not complete carry no codes and are judged elsewhere.
+fn pack_fallback_findings(planted: bool, outcomes: &[ProbeOutcome]) -> Vec<String> {
+    outcomes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, outcome)| {
+            let ProbeOutcome::Completed(record) = outcome else {
+                return None;
+            };
+            let codes = record.get("degraded.codes").map_or("", String::as_str);
+            let carries = codes.split(',').any(|code| code == PACK_FALLBACK_CODE);
+            match (planted, carries) {
+                (true, false) => Some(format!(
+                    "pack probe #{index} did not report {PACK_FALLBACK_CODE} while no index generation was visible (degraded: \"{codes}\")"
+                )),
+                (false, true) => Some(format!(
+                    "pack probe #{index} reported {PACK_FALLBACK_CODE} on a healthy index (degraded: \"{codes}\")"
+                )),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Each probe's `degraded.codes`, in probe order (null for a probe that did
+/// not complete), so the evidence records what every probe reported: the
+/// comparison against the baseline skips these fields (ruling 13:30Z).
+fn probe_degraded_codes(outcomes: &[ProbeOutcome]) -> Vec<Value> {
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            ProbeOutcome::Completed(record) => record
+                .get("degraded.codes")
+                .map_or(Value::Null, |codes| Value::String(codes.clone())),
+            ProbeOutcome::DidNotComplete(_) | ProbeOutcome::IndexInvisible(_) => Value::Null,
+        })
+        .collect()
+}
+
+/// `record` with `code` taken out of its `degraded.codes` list: the one field
+/// a WARM and a COLD baseline may legitimately differ on is the stale-receipt
+/// advisory the flip itself created.
+fn without_code(record: &Record, code: &str) -> Record {
+    let mut record = record.clone();
+    if let Some(codes) = record.get_mut("degraded.codes") {
+        *codes = codes
+            .split(',')
+            .filter(|entry| !entry.is_empty() && *entry != code)
+            .collect::<Vec<_>>()
+            .join(",");
+    }
+    record
+}
+
+/// Split a model cell's probes (ruling 10064 A1). A completed probe that did
+/// not report `embed_backend=neural_local` is MODEL-NOT-EXERCISED: it is
+/// counted and named, and removed from the verdict, never pooled into it. A
+/// probe that did not complete, or refused with an invisible index (P1),
+/// stays in: those are the resource and semantic signals they are.
+/// Returns (the outcomes the verdict may use, the not-exercised backends).
+fn model_exercised(outcomes: Vec<ProbeOutcome>) -> (Vec<ProbeOutcome>, Vec<String>) {
+    let mut kept = Vec::with_capacity(outcomes.len());
+    let mut not_exercised = Vec::new();
+    for outcome in outcomes {
+        match &outcome {
+            ProbeOutcome::Completed(record) => {
+                match record.get("embed_backend").map(String::as_str) {
+                    Some(NEURAL_LOCAL) => kept.push(outcome),
+                    other => not_exercised.push(other.unwrap_or("<absent>").to_owned()),
+                }
+            }
+            ProbeOutcome::DidNotComplete(_) | ProbeOutcome::IndexInvisible(_) => {
+                kept.push(outcome);
+            }
+        }
+    }
+    (kept, not_exercised)
+}
+
 // ── Harness knobs ──────────────────────────────────────────────────────────
 //
 // Deliberately NOT `EE_*`-prefixed: these configure the test harness, not `ee`
@@ -1239,6 +1671,13 @@ struct Fixture {
 /// one of them off-topic, then an index rebuild.
 fn build_realistic_workspace(fixture: &Fixture) -> Result<(), String> {
     run_ee(fixture, &["init", "--json"])?;
+    populate_realistic_workspace(fixture)
+}
+
+/// The eight rules and the index rebuild, on an initialized workspace. Split
+/// from `build_realistic_workspace` so a model cell can fetch the model
+/// between `init` and the rebuild, and the index is built with its vectors.
+fn populate_realistic_workspace(fixture: &Fixture) -> Result<(), String> {
     let rules = [
         "Run cargo fmt --check before every release tag.",
         "Release verification must go through the remote RCH lane, never local cargo.",
@@ -1623,7 +2062,7 @@ fn spawn_probes(
     count: usize,
     round: usize,
     tag: &str,
-) -> Result<Vec<(Child, PathBuf, PathBuf)>, String> {
+) -> Result<Vec<(Child, PathBuf, PathBuf, Instant)>, String> {
     let mut children = Vec::with_capacity(count);
     for index in 0..count {
         let out_path = fixture
@@ -1634,14 +2073,24 @@ fn spawn_probes(
             .map_err(|error| format!("create {}: {error}", out_path.display()))?;
         let err = File::create(&err_path)
             .map_err(|error| format!("create {}: {error}", err_path.display()))?;
+        let spawned = Instant::now();
         let child = ee_command(fixture, args)
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
             .spawn()
             .map_err(|error| format!("spawn probe {index}: {error}"))?;
-        children.push((child, out_path, err_path));
+        children.push((child, out_path, err_path, spawned));
     }
     Ok(children)
+}
+
+/// How a probe's wait ended. `Exited` / `TimedOut` / `Failed` rather than an
+/// `Option<ExitStatus>`: a wait that errors is its own resource signal and
+/// must not be laundered into a synthetic exit status.
+enum Wait {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    Failed(String),
 }
 
 /// Collect probes under a deadline, converting a hang into a *resource* signal.
@@ -1649,90 +2098,129 @@ fn spawn_probes(
 /// A timed-out probe is killed and recorded as `DidNotComplete`. It never
 /// becomes a divergence — a hung process has no opinion about ranking.
 fn collect_probes(
-    children: Vec<(Child, PathBuf, PathBuf)>,
+    children: Vec<(Child, PathBuf, PathBuf, Instant)>,
     timeout: Duration,
     extract: fn(&Value) -> Record,
 ) -> Vec<ProbeOutcome> {
+    collect_probes_timed(children, timeout, extract)
+        .into_iter()
+        .map(|(outcome, _)| outcome)
+        .collect()
+}
+
+/// `collect_probes`, plus each probe's elapsed milliseconds from its own spawn
+/// to its exit (1azkt.10 ruling 10064 Q3: a `DidNotComplete` is read against
+/// the budget). Every live probe is polled in turn, so an early exit is stamped
+/// when it happens, not when a sequential wait reaches it.
+fn collect_probes_timed(
+    children: Vec<(Child, PathBuf, PathBuf, Instant)>,
+    timeout: Duration,
+    extract: fn(&Value) -> Record,
+) -> Vec<(ProbeOutcome, u128)> {
     let deadline = Instant::now() + timeout;
-    let mut outcomes = Vec::with_capacity(children.len());
-    for (mut child, out_path, err_path) in children {
-        // `Waited` / `TimedOut` / `WaitFailed` rather than an `Option<ExitStatus>`:
-        // a wait that errors is its own resource signal and must not be
-        // laundered into a synthetic exit status.
-        enum Wait {
-            Exited(std::process::ExitStatus),
-            TimedOut,
-            Failed(String),
-        }
-        let waited = loop {
+    let mut children = children;
+    let mut waits: Vec<Option<(Wait, Instant)>> = children.iter().map(|_| None).collect();
+    loop {
+        let mut pending = false;
+        for (slot, (child, _, _, _)) in waits.iter_mut().zip(children.iter_mut()) {
+            if slot.is_some() {
+                continue;
+            }
             match child.try_wait() {
-                Ok(Some(status)) => break Wait::Exited(status),
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break Wait::TimedOut;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
+                Ok(Some(status)) => *slot = Some((Wait::Exited(status), Instant::now())),
+                Ok(None) => pending = true,
+                Err(error) => *slot = Some((Wait::Failed(error.to_string()), Instant::now())),
+            }
+        }
+        if !pending {
+            break;
+        }
+        if Instant::now() >= deadline {
+            for (slot, (child, _, _, _)) in waits.iter_mut().zip(children.iter_mut()) {
+                if slot.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    *slot = Some((Wait::TimedOut, Instant::now()));
                 }
-                Err(error) => break Wait::Failed(error.to_string()),
             }
-        };
-        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
-        let status = match waited {
-            Wait::Exited(status) => status,
-            Wait::TimedOut => {
-                outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                    "timed out after {timeout:?} and was killed; stderr: {}",
-                    stderr.trim()
-                )));
-                continue;
-            }
-            Wait::Failed(error) => {
-                outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                    "could not wait for the probe: {error}; stderr: {}",
-                    stderr.trim()
-                )));
-                continue;
-            }
-        };
-        if !status.success() {
-            // A refusal that names an invisible index is an answer; every
-            // other nonzero exit stays a resource signal (ruling 03:30Z, P1).
-            let body = std::fs::read_to_string(&out_path).unwrap_or_default();
-            outcomes.push(match index_invisible_error_code(false, &body) {
-                Some(code) => ProbeOutcome::IndexInvisible(code),
-                None => ProbeOutcome::DidNotComplete(format!(
-                    "exited {:?}; stderr: {}",
-                    status.code(),
-                    stderr.trim()
-                )),
-            });
-            continue;
+            break;
         }
-        let body = match std::fs::read_to_string(&out_path) {
-            Ok(body) => body,
-            Err(error) => {
-                outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                    "could not read probe stdout: {error}"
-                )));
-                continue;
-            }
-        };
-        match serde_json::from_str::<Value>(body.trim()) {
-            Ok(value) if value.pointer("/success") == Some(&Value::Bool(true)) => {
-                outcomes.push(ProbeOutcome::Completed(extract(&value)));
-            }
-            Ok(value) => outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                "envelope did not report success: {value}"
-            ))),
-            Err(error) => outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                "stdout was not JSON: {error}; stderr: {}",
-                stderr.trim()
-            ))),
-        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    outcomes
+    children
+        .into_iter()
+        .zip(waits)
+        .map(|((_, out_path, err_path, spawned), waited)| {
+            let (waited, ended) =
+                waited.unwrap_or_else(|| (Wait::Failed("never polled".to_owned()), Instant::now()));
+            let elapsed_ms = ended.duration_since(spawned).as_millis();
+            (
+                probe_outcome(waited, &out_path, &err_path, timeout, extract),
+                elapsed_ms,
+            )
+        })
+        .collect()
+}
+
+/// One probe's outcome from how its wait ended and what it wrote.
+fn probe_outcome(
+    waited: Wait,
+    out_path: &Path,
+    err_path: &Path,
+    timeout: Duration,
+    extract: fn(&Value) -> Record,
+) -> ProbeOutcome {
+    let stderr = std::fs::read_to_string(err_path).unwrap_or_default();
+    let status = match waited {
+        Wait::Exited(status) => status,
+        Wait::TimedOut => {
+            return ProbeOutcome::DidNotComplete(format!(
+                "timed out after {timeout:?} and was killed; stderr: {}",
+                stderr.trim()
+            ));
+        }
+        Wait::Failed(error) => {
+            return ProbeOutcome::DidNotComplete(format!(
+                "could not wait for the probe: {error}; stderr: {}",
+                stderr.trim()
+            ));
+        }
+    };
+    if !status.success() {
+        // A refusal that names an invisible index is an answer; every other
+        // nonzero exit stays a resource signal (ruling 03:30Z, P1).
+        let body = std::fs::read_to_string(out_path).unwrap_or_default();
+        return match index_invisible_error_code(false, &body) {
+            Some(code) => ProbeOutcome::IndexInvisible(code),
+            // Still a resource signal, but it names its own cause when ee
+            // printed one (item-4 run N3c: 24 cold packs exited 130 with an
+            // empty stderr, so why they cancelled was not recorded).
+            None => ProbeOutcome::DidNotComplete(format!(
+                "exited {:?}; envelope: {}; stderr: {}",
+                status.code(),
+                error_envelope_summary(&body).unwrap_or_else(|| "<none>".to_owned()),
+                stderr.trim()
+            )),
+        };
+    }
+    let body = match std::fs::read_to_string(out_path) {
+        Ok(body) => body,
+        Err(error) => {
+            return ProbeOutcome::DidNotComplete(format!("could not read probe stdout: {error}"));
+        }
+    };
+    match serde_json::from_str::<Value>(body.trim()) {
+        Ok(value) if value.pointer("/success") == Some(&Value::Bool(true)) => {
+            ProbeOutcome::Completed(extract(&value))
+        }
+        Ok(value) => {
+            ProbeOutcome::DidNotComplete(format!("envelope did not report success: {value}"))
+        }
+        Err(error) => ProbeOutcome::DidNotComplete(format!(
+            "stdout was not JSON: {error}; stderr: {}",
+            stderr.trim()
+        )),
+    }
 }
 
 // ── Evidence ───────────────────────────────────────────────────────────────
@@ -1824,7 +2312,16 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
     let probes = knob("ORACLE_PROBES", 8);
     let rounds = knob("ORACLE_ROUNDS", 3);
     let quorum = knob("ORACLE_QUORUM", probes.saturating_sub(1).max(1));
-    let timeout = Duration::from_secs(knob("ORACLE_TIMEOUT_SECS", 120) as u64);
+    // ORACLE_MODEL=1 (1azkt.10 item 4, rulings 10064): fetch the default model
+    // into this job's own data_home, then a WARM cell of rounds (valid
+    // receipt), the ctime flip, and a COLD cell (stale receipt, every probe
+    // re-hashes) against the same fetched model. Both model cells get 600 s
+    // (Q3); the no-model run keeps 120 s, a separate cell.
+    let model_cells = std::env::var("ORACLE_MODEL").is_ok_and(|value| value == "1");
+    let timeout = Duration::from_secs(knob(
+        "ORACLE_TIMEOUT_SECS",
+        if model_cells { 600 } else { 120 },
+    ) as u64);
 
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let fixture = Fixture {
@@ -1953,13 +2450,89 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }
     }
 
+    // ── Model cells: registered combinations only (ruling 10064 Q4) ─────────
+    if model_cells {
+        let crossed: Vec<&str> = [
+            (
+                "ORACLE_PLANT",
+                std::env::var("ORACLE_PLANT").is_ok_and(|value| !value.is_empty()),
+            ),
+            (
+                "ORACLE_COLD_CONCURRENT",
+                std::env::var("ORACLE_COLD_CONCURRENT").is_ok_and(|value| value == "1"),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect();
+        if !crossed.is_empty() {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "ORACLE_MODEL=1 is not crossed with {crossed:?} (ruling 10064 Q4: one default-order run per model cell)"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+        // Q1's floor, enforced by the run itself (item-4 run N3 went ahead on
+        // 17.9 GB because the worker was picked from rch's disk figure, which
+        // measures a different filesystem than the job's temp dir).
+        let free = free_bytes(tempdir.path());
+        let below_floor = !matches!(free, Ok(bytes) if bytes >= Q1_TEMP_DISK_FLOOR_BYTES);
+        events.push(event(
+            "worker_disk",
+            if below_floor { "fail" } else { "info" },
+            serde_json::json!({
+                "when": "start",
+                "freeBytes": &free,
+                "floorBytes": Q1_TEMP_DISK_FLOOR_BYTES,
+            }),
+        ));
+        if below_floor {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "the job's temp disk is below the Q1 floor of {Q1_TEMP_DISK_FLOOR_BYTES} bytes: {free:?}"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    }
+
     // ── Realistic isolated workspace ────────────────────────────────────────
-    if let Err(error) = build_realistic_workspace(&fixture) {
+    // A model cell fetches the model between `init` and the rebuild, so the
+    // index is built with its vectors.
+    let built = if model_cells {
+        run_ee(&fixture, &["init", "--json"]).map(|_| ())
+    } else {
+        build_realistic_workspace(&fixture)
+    };
+    if let Err(error) = built {
         return finish(
             &Verdict::InfraError(format!("fixture setup failed: {error}")),
             &proof_dir,
             &mut events,
         );
+    }
+    if model_cells {
+        let (fetched, stop) = fetch_default_model(&fixture);
+        events.push(event(
+            "model_fetch",
+            if stop.is_none() { "pass" } else { "fail" },
+            fetched,
+        ));
+        if let Some(verdict) = stop {
+            return finish(&verdict, &proof_dir, &mut events);
+        }
+        if let Err(error) = populate_realistic_workspace(&fixture) {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "fixture setup failed after the model fetch: {error}"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
     }
 
     // ── Is there a valid, current generation to be invisible? ───────────────
@@ -2016,6 +2589,86 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         "--json",
     ];
     let status_args = ["index", "status", "--json"];
+
+    // ── Model cell preconditions (ruling 10064 A2, A3, A4) ───────────────────
+    // A3: the index really carries vectors under this model; a hybrid search
+    // over a lexical-only index would make warm vs cold meaningless.
+    // A2: the resolver's own source token for the WARM cell.
+    // A4: WARM must NOT list the stale-receipt advisory (COLD must, below).
+    // Any of these failing is INFRA_ERROR: the cell was not established, which
+    // says nothing about the product.
+    let mut model_file = None;
+    if model_cells {
+        let embedding = status
+            .pointer("/data/embedding")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let vectors = embedding
+            .pointer("/vector_coverage/embedded")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let index_has_vectors = embedding.pointer("/mode").and_then(Value::as_str)
+            == Some(NEURAL_LOCAL)
+            && embedding.pointer("/semantic").and_then(Value::as_bool) == Some(true)
+            && vectors > 0;
+        events.push(event(
+            "model_index",
+            if index_has_vectors { "pass" } else { "fail" },
+            serde_json::json!({ "embedding": &embedding, "vectorsEmbedded": vectors }),
+        ));
+        if !index_has_vectors {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "the index was not built with vectors under the model: {embedding}"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+        events.push(event(
+            "model_resolver",
+            "info",
+            serde_json::json!({ "cell": "warm", "resolver": resolver_evidence(&fixture, &search_args) }),
+        ));
+        match receipt_stale_listed(&fixture) {
+            Ok((false, _)) => events.push(event(
+                "model_receipt",
+                "pass",
+                serde_json::json!({ "cell": "warm", "staleListed": false }),
+            )),
+            Ok((true, hits)) => {
+                events.push(event(
+                    "model_receipt",
+                    "fail",
+                    serde_json::json!({ "cell": "warm", "staleListed": true, "where": hits }),
+                ));
+                return finish(
+                    &Verdict::InfraError(format!(
+                        "warm not established: ee status lists {RECEIPT_STALE_CODE} before any flip"
+                    )),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+            Err(error) => {
+                return finish(
+                    &Verdict::InfraError(format!("warm receipt check failed: {error}")),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+        }
+        match fetched_model_file(&fixture) {
+            Ok(path) => model_file = Some(path),
+            Err(error) => {
+                return finish(
+                    &Verdict::InfraError(format!("model setup failed: {error}")),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+        }
+    }
 
     // ── Durable state before the probe window (rulings 17:12Z item 1, 20:40Z) ─
     // Every command from here to the end of the window is one of these three.
@@ -2169,6 +2822,24 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
             "serialIsFirstTouch": !cold_concurrent,
         }),
     ));
+    if model_cells {
+        let backends = [
+            ("search", warm.get("embed_backend")),
+            ("pack", pack_baseline.get("embed_backend")),
+        ];
+        if backends
+            .iter()
+            .any(|(_, backend)| backend.map(String::as_str) != Some(NEURAL_LOCAL))
+        {
+            return finish(
+                &Verdict::InfraError(format!(
+                    "warm not established: the serial baselines' embed_backend is {backends:?}, not {NEURAL_LOCAL}"
+                )),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    }
 
     let mut round_verdicts = Vec::new();
     for (kind, outcomes) in cold_rounds {
@@ -2205,9 +2876,17 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                     ProbeOutcome::IndexInvisible(code) => Some(code.clone()),
                     ProbeOutcome::Completed(_) | ProbeOutcome::DidNotComplete(_) => None,
                 }).collect::<Vec<_>>(),
+                "probeDegraded": probe_degraded_codes(&outcomes),
             }),
         ));
         round_verdicts.push(verdict);
+        // These rounds run before any plant, on a healthy index (ruling 13:30Z).
+        if kind == ProbeKind::Pack {
+            let fallback = pack_fallback_findings(false, &outcomes);
+            if !fallback.is_empty() {
+                round_verdicts.push(Verdict::RaceReproduced(fallback));
+            }
+        }
     }
 
     // ── Planted control: invisible index (ruling 17:12Z item 5; the corrected
@@ -2313,65 +2992,188 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         ));
     }
 
-    // ── Concurrent rounds ───────────────────────────────────────────────────
-    for round in 0..rounds {
-        for (kind, args, baseline, extract) in [
-            (
-                ProbeKind::Search,
-                search_args.as_slice(),
-                &warm,
-                search_record as fn(&Value) -> Record,
-            ),
-            (
-                ProbeKind::Pack,
-                pack_args.as_slice(),
-                &window_pack_baseline,
-                pack_record as fn(&Value) -> Record,
-            ),
-        ] {
-            let children = match spawn_probes(&fixture, args, probes, round, kind.label()) {
-                Ok(children) => children,
-                Err(error) => {
-                    return finish(
-                        &Verdict::InfraError(format!("could not spawn probes: {error}")),
-                        &proof_dir,
-                        &mut events,
-                    );
+    // ── Concurrent rounds, per cell ─────────────────────────────────────────
+    // Without ORACLE_MODEL there is one cell, "none". With it, WARM then COLD
+    // run in this job against the same fetched model (ruling 10064 Q1). A
+    // model run never plants (Q4), so its window baseline is the serial one.
+    let cells: &[&str] = if model_cells {
+        &["warm", "cold"]
+    } else {
+        &["none"]
+    };
+    let mut search_base = warm.clone();
+    let mut pack_base = window_pack_baseline.clone();
+    for cell in cells {
+        if *cell == "cold" {
+            match cold_cell_setup(
+                &fixture,
+                model_file.as_deref(),
+                &search_args,
+                &pack_args,
+                &mut events,
+            ) {
+                Ok((cold_search, cold_pack)) => {
+                    let warm_vs_cold = [
+                        ("search", &warm, &cold_search),
+                        ("pack", &pack_baseline, &cold_pack),
+                    ]
+                    .into_iter()
+                    .filter(|(_, warm_record, cold_record)| {
+                        without_code(warm_record, RECEIPT_STALE_CODE)
+                            != without_code(cold_record, RECEIPT_STALE_CODE)
+                    })
+                    .map(|(kind, warm_record, cold_record)| {
+                        format!(
+                            "the {kind} serial baseline changed between the WARM and COLD cells of one model: warm={warm_record:?} cold={cold_record:?}"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                    if !warm_vs_cold.is_empty() {
+                        round_verdicts.push(Verdict::RaceReproduced(warm_vs_cold));
+                    }
+                    search_base = cold_search;
+                    pack_base = cold_pack;
                 }
-            };
-            let outcomes = collect_probes(children, timeout, extract);
-            let verdict = classify_round(
-                kind,
-                baseline,
-                &outcomes,
-                quorum,
-                window_generation.as_deref(),
-            );
-            events.push(event(
-                "concurrent_round",
-                match &verdict {
-                    Verdict::RaceAbsent => "pass",
-                    _ => "fail",
-                },
-                serde_json::json!({
-                    "round": round,
-                    "kind": kind.label(),
-                    "probes": probes,
-                    "quorum": quorum,
-                    "verdict": verdict.class(),
-                    "detail": verdict.detail(),
-                    "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
-                    "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
-                        ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
-                        ProbeOutcome::Completed(_) | ProbeOutcome::IndexInvisible(_) => None,
-                    }).collect::<Vec<_>>(),
-                    "indexInvisible": outcomes.iter().filter_map(|outcome| match outcome {
-                        ProbeOutcome::IndexInvisible(code) => Some(code.clone()),
-                        ProbeOutcome::Completed(_) | ProbeOutcome::DidNotComplete(_) => None,
-                    }).collect::<Vec<_>>(),
-                }),
-            ));
-            round_verdicts.push(verdict);
+                Err(verdict) => {
+                    round_verdicts.push(verdict);
+                    break;
+                }
+            }
+        }
+        let mut exercised = 0usize;
+        for round in 0..rounds {
+            for (kind, args, baseline, extract) in [
+                (
+                    ProbeKind::Search,
+                    search_args.as_slice(),
+                    &search_base,
+                    search_record as fn(&Value) -> Record,
+                ),
+                (
+                    ProbeKind::Pack,
+                    pack_args.as_slice(),
+                    &pack_base,
+                    pack_record as fn(&Value) -> Record,
+                ),
+            ] {
+                let tag = if model_cells {
+                    format!("{cell}-{}", kind.label())
+                } else {
+                    kind.label().to_owned()
+                };
+                let children = match spawn_probes(&fixture, args, probes, round, &tag) {
+                    Ok(children) => children,
+                    Err(error) => {
+                        return finish(
+                            &Verdict::InfraError(format!("could not spawn probes: {error}")),
+                            &proof_dir,
+                            &mut events,
+                        );
+                    }
+                };
+                let timed = collect_probes_timed(children, timeout, extract);
+                let elapsed_ms: Vec<u128> = timed.iter().map(|(_, elapsed)| *elapsed).collect();
+                let probe_backends: Vec<Value> = timed
+                    .iter()
+                    .map(|(outcome, _)| match outcome {
+                        ProbeOutcome::Completed(record) => serde_json::json!({
+                            "embed_backend": record.get("embed_backend"),
+                            "sourceModeApplied": record
+                                .get("sourceModeApplied")
+                                .or_else(|| record.get("pack.sourceModeApplied")),
+                        }),
+                        ProbeOutcome::DidNotComplete(_) | ProbeOutcome::IndexInvisible(_) => {
+                            Value::Null
+                        }
+                    })
+                    .collect();
+                let outcomes: Vec<ProbeOutcome> =
+                    timed.into_iter().map(|(outcome, _)| outcome).collect();
+                let (outcomes, not_exercised) = if model_cells {
+                    model_exercised(outcomes)
+                } else {
+                    (outcomes, Vec::new())
+                };
+                exercised += outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_)))
+                    .count();
+                let verdict = classify_round(
+                    kind,
+                    baseline,
+                    &outcomes,
+                    quorum,
+                    window_generation.as_deref(),
+                );
+                events.push(event(
+                    "concurrent_round",
+                    match &verdict {
+                        Verdict::RaceAbsent => "pass",
+                        _ => "fail",
+                    },
+                    serde_json::json!({
+                        "cell": cell,
+                        "round": round,
+                        "kind": kind.label(),
+                        "probes": probes,
+                        "quorum": quorum,
+                        "timeoutMs": timeout.as_millis(),
+                        "verdict": verdict.class(),
+                        "detail": verdict.detail(),
+                        "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
+                        "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
+                            ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
+                            ProbeOutcome::Completed(_) | ProbeOutcome::IndexInvisible(_) => None,
+                        }).collect::<Vec<_>>(),
+                        "indexInvisible": outcomes.iter().filter_map(|outcome| match outcome {
+                            ProbeOutcome::IndexInvisible(code) => Some(code.clone()),
+                            ProbeOutcome::Completed(_) | ProbeOutcome::DidNotComplete(_) => None,
+                        }).collect::<Vec<_>>(),
+                        "elapsedMs": elapsed_ms,
+                        "probeBackends": probe_backends,
+                        "modelNotExercised": not_exercised,
+                        "probeDegraded": probe_degraded_codes(&outcomes),
+                    }),
+                ));
+                round_verdicts.push(verdict);
+                // Pack's own missing-index signal (ruling 13:30Z): present in
+                // every pack probe under the plant, absent on a healthy index.
+                if kind == ProbeKind::Pack {
+                    let fallback = pack_fallback_findings(plant.is_some(), &outcomes);
+                    if !fallback.is_empty() {
+                        round_verdicts.push(Verdict::RaceReproduced(fallback));
+                    }
+                }
+            }
+        }
+        if model_cells {
+            if exercised == 0 {
+                round_verdicts.push(Verdict::InfraError(format!(
+                    "the model dimension is vacuous in the {cell} cell: no probe reported {NEURAL_LOCAL}"
+                )));
+            }
+            if *cell == "cold" {
+                // The control must still hold at the END of the cold cell.
+                let held = receipt_stale_listed(&fixture);
+                events.push(event(
+                    "model_receipt",
+                    if matches!(held, Ok((true, _))) {
+                        "pass"
+                    } else {
+                        "fail"
+                    },
+                    serde_json::json!({
+                        "cell": "cold-end",
+                        "staleListed": held.as_ref().ok().map(|(listed, _)| *listed),
+                        "error": held.as_ref().err(),
+                    }),
+                ));
+                if !matches!(held, Ok((true, _))) {
+                    round_verdicts.push(Verdict::InfraError(format!(
+                        "cold did not hold through the cell: {RECEIPT_STALE_CODE} is no longer listed"
+                    )));
+                }
+            }
         }
     }
 
@@ -2476,6 +3278,13 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         ))),
     }
 
+    if model_cells {
+        events.push(event(
+            "worker_disk",
+            "info",
+            serde_json::json!({ "when": "end", "freeBytes": free_bytes(tempdir.path()) }),
+        ));
+    }
     let verdict = fold_rounds(&round_verdicts);
     events.push(event(
         "verdict",
@@ -2856,9 +3665,69 @@ fn sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace
 #[cfg(test)]
 mod classifier {
     use super::{
-        ProbeKind, ProbeOutcome, Record, Verdict, classify_round, fold_rounds,
-        index_invisible_error_code,
+        ProbeKind, ProbeOutcome, Record, Verdict, classify_round, error_envelope_summary,
+        fold_rounds, index_invisible_error_code, pack_fallback_findings,
     };
+
+    #[test]
+    fn a_nonzero_exit_names_its_error_envelope_when_there_is_one() {
+        // Byte for byte the deadline envelope GraniteKite's release probe
+        // captured (rc-20260924/probe-v0.15.2-v3/capture/parallel_pack_1.json).
+        assert_eq!(
+            error_envelope_summary(
+                r#"{"schema":"ee.error.v2","error":{"code":"cancelled","message":"Deadline exceeded.","severity":"low","details":{"cancelKind":"deadline","cancelClass":"budget_exhausted"}}}"#
+            )
+            .as_deref(),
+            Some(
+                "code=cancelled message=Deadline exceeded. cancelKind=deadline cancelClass=budget_exhausted"
+            )
+        );
+        // Another cause keeps its own words, with absent fields marked.
+        assert_eq!(
+            error_envelope_summary(
+                r#"{"schema":"ee.error.v2","error":{"code":"storage","message":"database is locked"}}"#
+            )
+            .as_deref(),
+            Some("code=storage message=database is locked cancelKind=<absent> cancelClass=<absent>")
+        );
+        // Not an envelope: nothing to name, never a guess.
+        assert_eq!(error_envelope_summary(""), None);
+        assert_eq!(error_envelope_summary("killed"), None);
+        assert_eq!(
+            error_envelope_summary(r#"{"schema":"ee.pack.v1","data":{}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn pack_must_report_the_lexical_fallback_exactly_when_the_index_is_planted() {
+        // Ruling 13:30Z: the comparison skips degraded.*, so this is read
+        // explicitly. The two code sets are the ones measured in J4 (planted,
+        // evidence a9d2e390) and the pre-plant baseline.
+        let pack = |codes: &str| {
+            let mut record = Record::new();
+            record.insert("degraded.codes".to_owned(), codes.to_owned());
+            ProbeOutcome::Completed(record)
+        };
+        let with_fallback = pack("context_lexical_fallback,pack_assembly_elapsed_over_budget");
+        let healthy = pack("embed_model_unavailable,pack_assembly_elapsed_over_budget");
+        // Planted and the pack says so: nothing to report.
+        assert!(pack_fallback_findings(true, std::slice::from_ref(&with_fallback)).is_empty());
+        // Planted and the pack is silent: the bd-tjxvl class, red.
+        assert_eq!(
+            pack_fallback_findings(true, std::slice::from_ref(&healthy)).len(),
+            1
+        );
+        // Healthy index and no fallback code: nothing to report.
+        assert!(pack_fallback_findings(false, &[healthy]).is_empty());
+        // Healthy index but the pack claims a fallback: red.
+        assert_eq!(pack_fallback_findings(false, &[with_fallback]).len(), 1);
+        // A probe that did not complete carries no codes and is judged elsewhere.
+        assert!(
+            pack_fallback_findings(true, &[ProbeOutcome::DidNotComplete("timeout".to_owned())])
+                .is_empty()
+        );
+    }
 
     /// The envelope `ee search` printed in PL4 (evidence 8da0c30d), trimmed.
     const SEARCH_INDEX_ENVELOPE: &str = r#"{"schema":"ee.error.v2","error":{"code":"search_index","message":"Search index not found","severity":"medium","repair":"ee index rebuild --workspace ."}}"#;
@@ -3492,6 +4361,123 @@ mod durable_mutation_controls {
                 .is_some_and(|reason| reason.contains("is not the requested base"))
         );
         assert_eq!(expected_commit_refusal(Some(sha), sha), None);
+    }
+}
+
+#[cfg(test)]
+mod model_cell_controls {
+    //! bd-reality-core-convergence-1azkt.10 item 4 (rulings 10064): each model
+    //! cell helper, seen both ways.
+
+    use super::{
+        ProbeOutcome, RECEIPT_STALE_CODE, Record, flip_model_ctime, model_exercised, tracing_field,
+        without_code,
+    };
+
+    fn completed(backend: Option<&str>) -> ProbeOutcome {
+        let mut record = Record::new();
+        if let Some(backend) = backend {
+            record.insert("embed_backend".to_owned(), backend.to_owned());
+        }
+        ProbeOutcome::Completed(record)
+    }
+
+    #[test]
+    fn only_neural_local_probes_reach_the_verdict() {
+        let (kept, not_exercised) = model_exercised(vec![
+            completed(Some("neural_local")),
+            completed(Some("hash_fallback")),
+            completed(None),
+            ProbeOutcome::DidNotComplete("timed out".to_owned()),
+            ProbeOutcome::IndexInvisible("search_index".to_owned()),
+        ]);
+        assert_eq!(
+            kept.len(),
+            3,
+            "neural_local, the DidNotComplete and the refusal stay"
+        );
+        assert!(matches!(&kept[1], ProbeOutcome::DidNotComplete(_)));
+        assert!(matches!(&kept[2], ProbeOutcome::IndexInvisible(_)));
+        assert_eq!(not_exercised, vec!["hash_fallback", "<absent>"]);
+        let (all_fallback, _) = model_exercised(vec![completed(Some("hash_fallback"))]);
+        assert!(
+            all_fallback.is_empty(),
+            "every probe fell back: nothing to judge"
+        );
+    }
+
+    #[test]
+    fn the_resolver_source_is_read_from_its_tracing_line() {
+        let plain = "INFO ee::index::embedder: embedding backend resolution completed backend=\"neural_local\" source=\"registered\" outcome=\"loaded\"";
+        assert_eq!(
+            tracing_field(plain, "source").as_deref(),
+            Some("registered")
+        );
+        assert_eq!(
+            tracing_field(plain, "backend").as_deref(),
+            Some("neural_local")
+        );
+        let coloured = "\u{1b}[32m INFO\u{1b}[0m embedding backend resolution completed \u{1b}[3msource\u{1b}[0m=cache";
+        assert_eq!(tracing_field(coloured, "source").as_deref(), Some("cache"));
+        assert_eq!(tracing_field(plain, "absent_key"), None);
+        // The JSON form ee printed in item-4 run N3 (evidence 8c1f4391).
+        let json = r#"{"timestamp":"2026-09-24T07:13:30.847034Z","level":"INFO","fields":{"message":"embedding backend resolution completed","backend":"neural_local","source":"registered","outcome":"ready"},"target":"ee::index::embedder"}"#;
+        assert_eq!(tracing_field(json, "source").as_deref(), Some("registered"));
+        assert_eq!(tracing_field(json, "outcome").as_deref(), Some("ready"));
+        assert_eq!(tracing_field(json, "absent_key"), None);
+    }
+
+    #[test]
+    fn only_the_stale_receipt_advisory_is_ignored_between_warm_and_cold() {
+        let record = |codes: &str| {
+            let mut record = Record::new();
+            record.insert("degraded.codes".to_owned(), codes.to_owned());
+            record.insert("results.order".to_owned(), "a|b".to_owned());
+            record
+        };
+        let warm = record("");
+        let cold = record(RECEIPT_STALE_CODE);
+        assert_eq!(
+            without_code(&warm, RECEIPT_STALE_CODE),
+            without_code(&cold, RECEIPT_STALE_CODE)
+        );
+        // Any other difference survives the normalization.
+        let other = record(&format!("{RECEIPT_STALE_CODE},index_missing"));
+        assert_ne!(
+            without_code(&warm, RECEIPT_STALE_CODE),
+            without_code(&other, RECEIPT_STALE_CODE)
+        );
+        let mut reordered = cold.clone();
+        reordered.insert("results.order".to_owned(), "b|a".to_owned());
+        assert_ne!(
+            without_code(&warm, RECEIPT_STALE_CODE),
+            without_code(&reordered, RECEIPT_STALE_CODE)
+        );
+    }
+
+    #[test]
+    fn the_cold_flip_changes_ctime_and_ends_at_the_starting_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("model.safetensors");
+        std::fs::write(&file, b"weights").expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        // Let the clock move past the file's creation ctime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let flip = flip_model_ctime(&file).expect("flip");
+        assert_eq!(flip["modeBefore"], "644", "{flip}");
+        assert_eq!(flip["modeAfter"], "644", "{flip}");
+        assert_eq!(flip["modeEndsAtStart"], true, "{flip}");
+        assert_eq!(flip["ctimeChanged"], true, "{flip}");
+        // The mode the fetched model actually had on a worker (item-4 run N3):
+        // the flip ends at 0664, where it started, not at 0644.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let flip = flip_model_ctime(&file).expect("flip");
+        assert_eq!(flip["modeBefore"], "664", "{flip}");
+        assert_eq!(flip["modeAfter"], "664", "{flip}");
+        assert_eq!(flip["modeEndsAtStart"], true, "{flip}");
+        assert_eq!(flip["ctimeChanged"], true, "{flip}");
     }
 }
 
