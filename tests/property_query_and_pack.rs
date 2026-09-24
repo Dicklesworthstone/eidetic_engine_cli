@@ -128,29 +128,85 @@ fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
-fn run_ee_checked(workspace: &Path, args: &[String], context: &str) -> Result<String, String> {
-    let output = run_ee(workspace, args)?;
-    if !output.status.success() {
-        return Err(format!(
-            "{context} failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("{context}: stdout not UTF-8: {error}"))
+/// Why an `ee` spawn did not yield output (bd-gjj6t).
+///
+/// A command cancelled by its own wall-clock deadline did not complete: it says
+/// nothing about the property under test, so it must never count as a pass or
+/// as a determinism failure. Every other failure stays an ordinary failure.
+#[derive(Debug)]
+enum EeFailure {
+    DidNotComplete(String),
+    Failed(String),
 }
 
-fn init_cli_workspace(workspace: &Path) -> Result<(), String> {
+impl From<String> for EeFailure {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+/// The one admissible "did not complete" state: a non-zero exit code AND an
+/// `ee.error.v2` envelope on stdout AND `error.code == "cancelled"` AND
+/// `error.details.cancelKind == "deadline"`. The message text is never read.
+/// A zero exit, a signal (no exit code), any other code or cancel kind, or
+/// unparseable output is not it.
+fn is_deadline_cancellation(exit_code: Option<i32>, stdout: &str) -> bool {
+    if !exit_code.is_some_and(|code| code != 0) {
+        return false;
+    }
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return false;
+    };
+    envelope.get("schema").and_then(serde_json::Value::as_str) == Some("ee.error.v2")
+        && envelope
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("cancelled")
+        && envelope
+            .pointer("/error/details/cancelKind")
+            .and_then(serde_json::Value::as_str)
+            == Some("deadline")
+}
+
+/// Run `ee` and classify a failure. `site` names setup vs measured calls.
+fn run_ee_checked(
+    workspace: &Path,
+    args: &[String],
+    context: &str,
+    site: &str,
+) -> Result<String, EeFailure> {
+    let started = std::time::Instant::now();
+    let output = run_ee(workspace, args)?;
+    let elapsed_ms = started.elapsed().as_millis();
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let report = format!(
+            "{site} call `{context}` exit={:?} elapsed_ms={elapsed_ms} stdout={} stderr={}",
+            output.status.code(),
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(if is_deadline_cancellation(output.status.code(), &stdout) {
+            EeFailure::DidNotComplete(report)
+        } else {
+            EeFailure::Failed(format!("{context} failed: {report}"))
+        });
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| EeFailure::Failed(format!("{context}: stdout not UTF-8: {error}")))
+}
+
+fn init_cli_workspace(workspace: &Path) -> Result<(), EeFailure> {
     run_ee_checked(
         workspace,
         &["init".to_string(), "--json".to_string()],
         "ee init",
+        "setup",
     )
     .map(|_| ())
 }
 
-fn remember_cli_memory(workspace: &Path, content: &str) -> Result<(), String> {
+fn remember_cli_memory(workspace: &Path, content: &str) -> Result<(), EeFailure> {
     run_ee_checked(
         workspace,
         &[
@@ -163,6 +219,7 @@ fn remember_cli_memory(workspace: &Path, content: &str) -> Result<(), String> {
             "--json".to_string(),
         ],
         "ee remember",
+        "setup",
     )
     .map(|_| ())
 }
@@ -195,7 +252,7 @@ fn setup_context_tuple_workspace(
     memory_shapes: &[u8],
     read_pool_size: u64,
     pin_snapshot: bool,
-) -> Result<(), String> {
+) -> Result<(), EeFailure> {
     init_cli_workspace(workspace)?;
     write_context_config(workspace, read_pool_size, pin_snapshot)?;
     for (index, content_shape) in memory_shapes.iter().enumerate() {
@@ -323,8 +380,8 @@ fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec<u8>, String> {
-    let stdout = run_ee_checked(workspace, args, "ee context")?;
+fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec<u8>, EeFailure> {
+    let stdout = run_ee_checked(workspace, args, "ee context", "measured")?;
     let mut value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("context stdout not JSON: {error}"))?;
     strip_volatile_fields(&mut value);
@@ -337,12 +394,12 @@ fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec
     // already normalized by strip_volatile_fields above.
     let timing = ee::obs::normalize_pack_envelope_timing(&mut value)?;
     if timing.timing_entries_dropped != usize::from(timing.timing_entries_present) {
-        return Err(format!(
+        return Err(EeFailure::Failed(format!(
             "context envelope must carry at most one timing entry and drop exactly it: {timing:?}"
-        ));
+        )));
     }
     let value = canonicalize_json(value);
-    serde_json::to_vec(&value).map_err(|error| error.to_string())
+    serde_json::to_vec(&value).map_err(|error| EeFailure::Failed(error.to_string()))
 }
 
 fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
@@ -2652,52 +2709,213 @@ proptest! {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(16))]
+/// bd-gjj6t: map one classified `ee` failure onto proptest. A deadline
+/// cancellation did not complete: it is counted, printed with its site,
+/// elapsed time and raw output, and REJECTED, so proptest neither shrinks it
+/// nor counts it as a pass. Any other failure fails the case.
+fn replay_case_error(
+    case: usize,
+    did_not_complete: &std::sync::atomic::AtomicUsize,
+    failure: EeFailure,
+) -> TestCaseError {
+    match failure {
+        EeFailure::DidNotComplete(report) => {
+            did_not_complete.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("F5 DID-NOT-COMPLETE case {case}: {report}");
+            TestCaseError::reject(format!("did not complete (deadline): {report}"))
+        }
+        EeFailure::Failed(message) => TestCaseError::fail(message),
+    }
+}
 
-    #[test]
-    fn context_pack_json_replays_across_copied_store_tuple(
-        memory_shapes in prop::collection::vec(0_u8..=7, 1..=6),
-        query_raw in any::<u8>(),
-        profile_raw in any::<u8>(),
-        max_tokens in 64_u32..=512,
-        candidate_pool in 1_u32..=16,
-        read_pool_size in 1_u64..=2,
-        pin_snapshot in any::<bool>(),
-        no_coverage_fill in any::<bool>(),
-        no_rendered_text in any::<bool>(),
-        no_skipped in any::<bool>(),
-        no_meta in any::<bool>(),
-    ) {
-        let source = tempfile::tempdir()
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let clone = tempfile::tempdir()
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        setup_context_tuple_workspace(source.path(), &memory_shapes, read_pool_size, pin_snapshot)
-            .map_err(TestCaseError::fail)?;
-        copy_dir_all(&source.path().join(".ee"), &clone.path().join(".ee"))
-            .map_err(TestCaseError::fail)?;
+#[test]
+fn context_pack_json_replays_across_copied_store_tuple() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let query = context_query_for(query_raw);
-        let profile = profile_for(profile_raw);
-        let args = context_cli_args(
-            query,
-            profile,
+    let mut config = ProptestConfig::with_cases(16);
+    // bd-gjj6t: at most 3 did-not-complete cases. A host that cannot finish a
+    // pack inside ee's 60 s runtime budget then ends fast, with proptest's
+    // distinct "Too many global rejects", never with a determinism verdict.
+    config.max_global_rejects = 3;
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::context_pack_json_replays_across_copied_store_tuple"
+    ));
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let cases = AtomicUsize::new(0);
+    let did_not_complete = AtomicUsize::new(0);
+    let strategy = (
+        prop::collection::vec(0_u8..=7, 1..=6),
+        any::<u8>(),
+        any::<u8>(),
+        64_u32..=512,
+        1_u32..=16,
+        1_u64..=2,
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+    );
+    let result = runner.run(
+        &strategy,
+        |(
+            memory_shapes,
+            query_raw,
+            profile_raw,
             max_tokens,
             candidate_pool,
+            read_pool_size,
+            pin_snapshot,
             no_coverage_fill,
             no_rendered_text,
             no_skipped,
             no_meta,
-        );
+        )| {
+            let case = cases.fetch_add(1, Ordering::SeqCst) + 1;
+            let source =
+                tempfile::tempdir().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let clone =
+                tempfile::tempdir().map_err(|error| TestCaseError::fail(error.to_string()))?;
+            setup_context_tuple_workspace(
+                source.path(),
+                &memory_shapes,
+                read_pool_size,
+                pin_snapshot,
+            )
+            .map_err(|failure| replay_case_error(case, &did_not_complete, failure))?;
+            copy_dir_all(&source.path().join(".ee"), &clone.path().join(".ee"))
+                .map_err(TestCaseError::fail)?;
 
-        let copied_args = args_with_copied_store(&args, clone.path());
-        let source_bytes = context_canonical_json_bytes(source.path(), &args)
-            .map_err(TestCaseError::fail)?;
-        let clone_bytes = context_canonical_json_bytes(source.path(), &copied_args)
-            .map_err(TestCaseError::fail)?;
+            let query = context_query_for(query_raw);
+            let profile = profile_for(profile_raw);
+            let args = context_cli_args(
+                query,
+                profile,
+                max_tokens,
+                candidate_pool,
+                no_coverage_fill,
+                no_rendered_text,
+                no_skipped,
+                no_meta,
+            );
 
-        prop_assert_eq!(hash_bytes(&source_bytes), hash_bytes(&clone_bytes));
-        prop_assert_eq!(source_bytes, clone_bytes);
+            let copied_args = args_with_copied_store(&args, clone.path());
+            let source_bytes = context_canonical_json_bytes(source.path(), &args)
+                .map_err(|failure| replay_case_error(case, &did_not_complete, failure))?;
+            let clone_bytes = context_canonical_json_bytes(source.path(), &copied_args)
+                .map_err(|failure| replay_case_error(case, &did_not_complete, failure))?;
+
+            prop_assert_eq!(hash_bytes(&source_bytes), hash_bytes(&clone_bytes));
+            prop_assert_eq!(source_bytes, clone_bytes);
+            Ok(())
+        },
+    );
+    eprintln!(
+        "F5 cases run: {}, did-not-complete (deadline) rejections: {}",
+        cases.load(Ordering::SeqCst),
+        did_not_complete.load(Ordering::SeqCst)
+    );
+    if let Err(error) = result {
+        panic!("{error}");
     }
+}
+
+/// bd-gjj6t control inputs: (name, exit code, stdout, expected DID-NOT-COMPLETE).
+const DEADLINE_CANCEL_JSON: &str = r#"{"schema":"ee.error.v2","error":{"code":"cancelled","message":"Deadline exceeded.","severity":"low","details":{"cancelKind":"deadline","cancelClass":"budget_exhausted"}}}"#;
+
+fn classifier_samples() -> Vec<(&'static str, Option<i32>, String, bool)> {
+    vec![
+        (
+            "deadline cancellation",
+            Some(1),
+            DEADLINE_CANCEL_JSON.to_owned(),
+            true,
+        ),
+        (
+            "user cancellation",
+            Some(1),
+            DEADLINE_CANCEL_JSON.replace(r#""cancelKind":"deadline""#, r#""cancelKind":"user""#),
+            false,
+        ),
+        (
+            "storage error",
+            Some(3),
+            r#"{"schema":"ee.error.v2","error":{"code":"storage","message":"database query returned malformed row"}}"#
+                .to_owned(),
+            false,
+        ),
+        (
+            "budget_exhausted code without a cancel",
+            Some(1),
+            r#"{"schema":"ee.error.v2","error":{"code":"budget_exhausted","details":{"cancelKind":"deadline"}}}"#
+                .to_owned(),
+            false,
+        ),
+        (
+            "unparseable output",
+            Some(1),
+            "Deadline exceeded.".to_owned(),
+            false,
+        ),
+        (
+            "zero exit with the same JSON",
+            Some(0),
+            DEADLINE_CANCEL_JSON.to_owned(),
+            false,
+        ),
+        (
+            "killed by a signal (no exit code) with the same JSON",
+            None,
+            DEADLINE_CANCEL_JSON.to_owned(),
+            false,
+        ),
+    ]
+}
+
+/// Every sample the classifier gets wrong, by name.
+fn classifier_mismatches(classifier: fn(Option<i32>, &str) -> bool) -> Vec<&'static str> {
+    classifier_samples()
+        .into_iter()
+        .filter(|(_, code, stdout, expected)| classifier(*code, stdout) != *expected)
+        .map(|(name, ..)| name)
+        .collect()
+}
+
+fn stub_never_did_not_complete(_code: Option<i32>, _stdout: &str) -> bool {
+    false
+}
+
+fn stub_always_did_not_complete(_code: Option<i32>, _stdout: &str) -> bool {
+    true
+}
+
+/// bd-gjj6t controls, seen red BY BEHAVIOUR: a stub that never answers
+/// DID-NOT-COMPLETE must get the deadline case wrong; a stub that always does
+/// must get every negative wrong; the real classifier must get none wrong.
+#[test]
+fn deadline_classifier_controls_red_with_stubs_green_with_real() {
+    let never = classifier_mismatches(stub_never_did_not_complete);
+    eprintln!("RED control (stub: never DID-NOT-COMPLETE) mismatches: {never:?}");
+    assert_eq!(never, ["deadline cancellation"], "stub-never red control");
+
+    let always = classifier_mismatches(stub_always_did_not_complete);
+    eprintln!("RED control (stub: always DID-NOT-COMPLETE) mismatches: {always:?}");
+    assert_eq!(
+        always,
+        [
+            "user cancellation",
+            "storage error",
+            "budget_exhausted code without a cancel",
+            "unparseable output",
+            "zero exit with the same JSON",
+            "killed by a signal (no exit code) with the same JSON",
+        ],
+        "stub-always red control"
+    );
+
+    let real = classifier_mismatches(is_deadline_cancellation);
+    eprintln!("GREEN (real classifier) mismatches: {real:?}");
+    assert!(real.is_empty(), "real classifier mismatches: {real:?}");
 }
