@@ -12,104 +12,25 @@ permissions:
 
 jobs:
   source:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: write
-    env:
-      RUSTUP_TOOLCHAIN: nightly-2026-08-31
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_TERM_COLOR: never
-      EE_EMBED_DOWNLOAD: 'off'
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
-        with:
-          toolchain: nightly-2026-08-31
-          components: rustfmt, clippy
-      - name: Prepare exact reviewed retrieval sources without changing any branch
-        id: prepared
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Export committed source only
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, pathlib, subprocess
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'retrieval-source'
-          root.mkdir()
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          base = git('rev-parse', 'HEAD')
-          assert base == os.environ['GITHUB_SHA']
-          subprocess.run(['git', 'diff', '--exit-code'], check=True)
-          expected = {
-              'src/core/search.rs': '2d15a0ed2ae7b05abd5453d514b60a1469dd7baf',
-              'src/core/search_runtime_fallback.rs': '4a021b4d8930a5d09b3e7efff0f74f2377ce4af9',
-              '.github/workflows/core-memory-regressions.yml': 'a5955305db887951675dc91c3406c1d376fd2956',
-          }
-          for path, sha in expected.items():
-              assert git('rev-parse', 'HEAD:' + path) == sha, 'Concurrent source change: ' + path
-          endpoint = 'repos/Dicklesworthstone/eidetic_engine_cli/git/blobs'
-          blob = json.loads(subprocess.check_output(['gh', 'api', endpoint + '/ddb199efa9fdf2c43a2a1da7f01fbbe17e78930f']))
-          compressed = base64.b64decode(blob['content'])
-          assert hashlib.sha256(compressed).hexdigest() == '490d9bdf3c939b4d0e283cce01591ee94963f38956b9d589a24cbc41d47b519a'
-          patch = root / 'reviewed.patch'
-          patch.write_bytes(lzma.decompress(compressed))
-          touched = {line.split('\t', 2)[2] for line in git('apply', '--numstat', str(patch)).splitlines()}
-          assert touched == set(expected)
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
-          subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', 'src/core/search.rs', 'src/core/search_runtime_fallback.rs'], check=True)
-          subprocess.run(['git', 'diff', '--check'], check=True)
-          manifest = {'baseCommit': base, 'files': []}
-          for path, original in expected.items():
-              data = pathlib.Path(path).read_bytes()
-              request = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode()
-              created = json.loads(subprocess.check_output(['gh', 'api', endpoint, '--input', '-'], input=request))
-              assert created['sha'] == git('hash-object', path)
-              manifest['files'].append({'path': path, 'baseBlob': original, 'sha': created['sha']})
-              output = root / path
-              output.parent.mkdir(parents=True, exist_ok=True)
-              output.write_bytes(data)
-          (root / 'source.json').write_text(json.dumps(manifest, indent=2))
-          (root / 'formatted.patch').write_text(subprocess.check_output(['git', 'diff', '--', *expected], text=True))
-          print(json.dumps(manifest, indent=2))
-          PY
+          mkdir -p "$RUNNER_TEMP/core-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/core-source/source-sha.txt"
+          test "$(cat "$RUNNER_TEMP/core-source/source-sha.txt")" = "$GITHUB_SHA"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/core-source/source-blobs.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/core-source/source.tar.gz" HEAD
+          (cd "$RUNNER_TEMP/core-source" && sha256sum source.tar.gz) | tee "$RUNNER_TEMP/core-source/source.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: retrieval-prepared-${{ github.sha }}
-          path: ${{ runner.temp }}/retrieval-source/
-          retention-days: 7
+          name: core-source-${{ github.sha }}
+          path: ${{ runner.temp }}/core-source/
+          retention-days: 1
           if-no-files-found: error
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: retrieval-producer-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
-            cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Check and exercise producer refusal and outage recovery
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/retrieval-checks"
-          cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/retrieval-checks/check.log"
-          cargo test --locked --lib core::search::runtime_fallback::tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/retrieval-checks/tests.log"
-          grep -Fq 'test result: ok. 17 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/retrieval-checks/tests.log"
-          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/retrieval-checks/clippy.log"
-          cargo fmt --all --check 2>&1 | tee "$RUNNER_TEMP/retrieval-checks/fmt.log"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: retrieval-checks-${{ github.sha }}
-          path: ${{ runner.temp }}/retrieval-checks/
-          retention-days: 7

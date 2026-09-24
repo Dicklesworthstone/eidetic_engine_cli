@@ -63,9 +63,71 @@ fn recoverable(error: &frankensearch::SearchError) -> bool {
     )
 }
 
+/// A bounded, redaction-safe record of an error the backend may suppress.
+/// Never retain the backend's arbitrary model, path, query or error text.
+/// The original error still goes to the searcher unchanged; this record is
+/// only used if the searcher subsequently claims success or availability loss.
+#[derive(Clone, Copy)]
+enum ProducerRejection {
+    Dimension { expected: usize, found: usize },
+    FastIdentity,
+    QualityIdentity,
+    UnverifiableIdentity,
+    Other,
+}
+
+impl ProducerRejection {
+    fn from_error(error: &frankensearch::SearchError) -> Self {
+        use frankensearch::SearchError as BackendError;
+        match error {
+            BackendError::DimensionMismatch { expected, found } => Self::Dimension {
+                expected: *expected,
+                found: *found,
+            },
+            BackendError::InvalidConfig { field, .. }
+                if field == "search_activation.fast.producer_revision" =>
+            {
+                Self::FastIdentity
+            }
+            BackendError::InvalidConfig { field, .. }
+                if field == "search_activation.quality.producer_revision" =>
+            {
+                Self::QualityIdentity
+            }
+            BackendError::UnverifiableRemoteSpace { .. } => Self::UnverifiableIdentity,
+            _ => Self::Other,
+        }
+    }
+
+    fn error(self) -> frankensearch::SearchError {
+        use frankensearch::SearchError as BackendError;
+        match self {
+            Self::Dimension { expected, found } => {
+                BackendError::DimensionMismatch { expected, found }
+            }
+            Self::UnverifiableIdentity => BackendError::UnverifiableRemoteSpace {
+                producer: "selected embedding producer".to_owned(),
+                reason: "producer identity could not be verified".to_owned(),
+            },
+            kind => BackendError::InvalidConfig {
+                field: match kind {
+                    Self::FastIdentity => "search_activation.fast.producer_revision",
+                    Self::QualityIdentity => "search_activation.quality.producer_revision",
+                    _ => "search.embedding_producer",
+                }
+                .to_owned(),
+                value: "rejected".to_owned(),
+                reason: "the embedding producer returned a non-recoverable error; its results were withheld".to_owned(),
+            },
+        }
+    }
+}
+
 pub(super) struct ObservedEmbedder {
     inner: Arc<dyn Embedder>,
     failed: OnceLock<()>,
+    rejected: OnceLock<ProducerRejection>,
+    cancelled: OnceLock<()>,
 }
 
 impl ObservedEmbedder {
@@ -73,21 +135,54 @@ impl ObservedEmbedder {
         Self {
             inner,
             failed: OnceLock::new(),
+            rejected: OnceLock::new(),
+            cancelled: OnceLock::new(),
         }
     }
 
     fn observe<T>(&self, result: SearchResult<T>) -> SearchResult<T> {
-        if result.as_ref().is_err_and(recoverable) {
-            let _ = self.failed.set(());
+        if let Err(error) = &result {
+            if matches!(error, frankensearch::SearchError::Cancelled { .. }) {
+                let _ = self.cancelled.set(());
+            } else if recoverable(error) {
+                let _ = self.failed.set(());
+            } else {
+                let _ = self.rejected.set(ProducerRejection::from_error(error));
+            }
         }
         result
     }
 
     pub(super) fn needs_recovery<T>(&self, result: &SearchResult<T>) -> bool {
+        if self.cancelled.get().is_some() || self.rejected.get().is_some() {
+            return false;
+        }
         match result {
             Ok(_) => self.failed.get().is_some(),
             Err(error) => recoverable(error),
         }
+    }
+
+    /// Validate the complete search outcome before fallback, reranking or
+    /// publication. Some backend paths keep lexical results after ANY producer
+    /// error. That behavior cannot turn failed identity/dimension validation
+    /// or cancellation into a successful ee search (even an empty one).
+    pub(super) fn admit_result<T>(&self, result: SearchResult<T>) -> SearchResult<T> {
+        if self.cancelled.get().is_some() {
+            return Err(frankensearch::SearchError::Cancelled {
+                phase: "embedding admission".to_owned(),
+                reason: "the embedding producer cancelled this request".to_owned(),
+            });
+        }
+        // A direct integrity/query/I/O failure stays the original failure.
+        // Earlier inference trouble never hides a later index failure.
+        if result.as_ref().is_err_and(|error| !recoverable(error)) {
+            return result;
+        }
+        if let Some(rejected) = self.rejected.get() {
+            return Err(rejected.error());
+        }
+        result
     }
 }
 
@@ -121,7 +216,7 @@ impl Embedder for ObservedEmbedder {
     }
 
     fn identity(&self) -> SearchResult<&EmbeddingIdentityBundleV1> {
-        self.inner.identity()
+        self.observe(self.inner.identity())
     }
 
     fn dimension(&self) -> usize {
@@ -157,7 +252,7 @@ impl Embedder for ObservedEmbedder {
     }
 
     fn truncate_embedding(&self, embedding: &[f32], target_dim: usize) -> SearchResult<Vec<f32>> {
-        self.inner.truncate_embedding(embedding, target_dim)
+        self.observe(self.inner.truncate_embedding(embedding, target_dim))
     }
 }
 
@@ -219,6 +314,7 @@ mod tests {
     struct SwitchableEmbedder {
         hash: crate::search::HashEmbedder,
         failed: std::sync::atomic::AtomicBool,
+        rejection: Option<RejectionKind>,
     }
 
     #[cfg(feature = "lexical-bm25")]
@@ -230,7 +326,7 @@ mod tests {
         ) -> SearchFuture<'a, Vec<f32>> {
             Box::pin(async move {
                 if self.failed.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(inference_error())
+                    Err(self.rejection.map_or_else(inference_error, rejection_error))
                 } else {
                     self.hash.embed(cx, text).await
                 }
@@ -259,7 +355,10 @@ mod tests {
     }
 
     #[cfg(feature = "lexical-bm25")]
-    fn exercise_runtime_recovery(lexical_available: bool) -> Result<(), String> {
+    fn exercise_runtime_recovery(
+        lexical_available: bool,
+        rejection: Option<RejectionKind>,
+    ) -> Result<(), String> {
         use super::super::{
             SearchFusionWeights, SearchPerformanceTrace, SearchRerankRuntime,
             search_sync_with_performance,
@@ -275,6 +374,7 @@ mod tests {
         let embedder = Arc::new(SwitchableEmbedder {
             hash: crate::search::HashEmbedder::default_256(),
             failed: std::sync::atomic::AtomicBool::new(false),
+            rejection,
         });
         crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
             let docs = vec![
@@ -301,7 +401,11 @@ mod tests {
             embedder
                 .failed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            for source in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
+            for source in [
+                SearchSourceMode::LexicalOnly,
+                SearchSourceMode::SemanticOnly,
+                SearchSourceMode::Hybrid,
+            ] {
                 for query in ["quasarneedle", "absentzyxneedle"] {
                     let mut trace = SearchPerformanceTrace::default();
                     let result = search_sync_with_performance(
@@ -319,6 +423,31 @@ mod tests {
                         &mut trace,
                     )
                     .await;
+                    if source == SearchSourceMode::LexicalOnly {
+                        if lexical_available {
+                            let actual = result.map_err(|error| error.to_string())?;
+                            assert_eq!(actual.applied, SearchSourceMode::LexicalOnly);
+                            assert!(actual.degraded.is_empty());
+                            assert_eq!(actual.hits.len(), usize::from(query == "quasarneedle"));
+                            if let Some(hit) = actual.hits.first() {
+                                assert_eq!(hit.doc_id, "mem_51000000000000000000000001");
+                            }
+                        } else {
+                            assert!(result.is_err());
+                        }
+                        continue;
+                    }
+                    if let Some(rejection) = rejection {
+                        let error = result.err().ok_or_else(|| {
+                            format!("{rejection:?} became successful {source:?} retrieval")
+                        })?;
+                        if matches!(rejection, RejectionKind::Cancelled) {
+                            assert!(matches!(error, SearchError::Cancelled(_)), "{error}");
+                        } else {
+                            assert!(!matches!(error, SearchError::SourceModeUnavailable { .. }));
+                        }
+                        continue;
+                    }
                     if !lexical_available {
                         assert!(matches!(
                             result,
@@ -364,13 +493,13 @@ mod tests {
     #[test]
     fn real_search_recovers_positive_and_negative_queries_after_inference_failure()
     -> Result<(), String> {
-        exercise_runtime_recovery(true)
+        exercise_runtime_recovery(true, None)
     }
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn missing_lexical_index_is_not_reported_as_successful_empty_recovery() -> Result<(), String> {
-        exercise_runtime_recovery(false)
+        exercise_runtime_recovery(false, None)
     }
 
     #[test]
@@ -464,6 +593,318 @@ mod tests {
                 .map_err(|e| e.to_string())?
         );
         Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RejectionKind {
+        Dimension,
+        FastIdentity,
+        QualityIdentity,
+        UnverifiableIdentity,
+        MalformedResponse,
+        Cancelled,
+    }
+
+    const REJECTIONS: [RejectionKind; 6] = [
+        RejectionKind::Dimension,
+        RejectionKind::FastIdentity,
+        RejectionKind::QualityIdentity,
+        RejectionKind::UnverifiableIdentity,
+        RejectionKind::MalformedResponse,
+        RejectionKind::Cancelled,
+    ];
+
+    fn rejection_error(kind: RejectionKind) -> BackendError {
+        match kind {
+            RejectionKind::Dimension => BackendError::DimensionMismatch {
+                expected: 256,
+                found: 128,
+            },
+            RejectionKind::UnverifiableIdentity => BackendError::UnverifiableRemoteSpace {
+                producer: "private-producer-canary".to_owned(),
+                reason: "private-identity-canary".to_owned(),
+            },
+            RejectionKind::Cancelled => BackendError::Cancelled {
+                phase: "private-phase-canary".to_owned(),
+                reason: "private-cancellation-canary".to_owned(),
+            },
+            kind => BackendError::InvalidConfig {
+                field: match kind {
+                    RejectionKind::FastIdentity => "search_activation.fast.producer_revision",
+                    RejectionKind::QualityIdentity => "search_activation.quality.producer_revision",
+                    _ => "remote_embedding.response",
+                }
+                .to_owned(),
+                value: "private-response-canary".to_owned(),
+                reason: "private-validation-canary".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn swallowed_producer_rejections_cannot_become_success_or_lexical_recovery() {
+        for kind in REJECTIONS {
+            let observed = observer();
+            let original = rejection_error(kind);
+            let before = original.to_string();
+            let forwarded = observed.observe::<()>(Err(original)).unwrap_err();
+            assert_eq!(
+                forwarded.to_string(),
+                before,
+                "producer errors pass through"
+            );
+            for response in [Ok(vec![1]), Ok(Vec::new()), Err(inference_error())] {
+                assert!(!observed.needs_recovery(&response));
+                let error = observed.admit_result(response).unwrap_err();
+                assert!(!recoverable(&error), "{kind:?}");
+                let diagnostic = format!("{error:?}");
+                assert!(!diagnostic.contains("private-"), "{kind:?}: {diagnostic}");
+            }
+            assert!(
+                observer().admit_result(Ok(17)).is_ok(),
+                "request-local state"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_failure_wins_over_inference_failure_in_either_order() {
+        for kind in REJECTIONS {
+            for permanent_first in [false, true] {
+                let observed = observer();
+                let failures = if permanent_first {
+                    [rejection_error(kind), inference_error()]
+                } else {
+                    [inference_error(), rejection_error(kind)]
+                };
+                for error in failures {
+                    assert!(observed.observe::<()>(Err(error)).is_err());
+                }
+                assert!(!observed.needs_recovery(&Ok(())));
+                assert!(observed.admit_result(Ok(())).is_err());
+                assert!(observed.admit_result::<()>(Err(inference_error())).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_dominates_other_observed_errors_without_exporting_its_reason() {
+        for cancel_first in [false, true] {
+            let observed = observer();
+            let kinds = if cancel_first {
+                [RejectionKind::Cancelled, RejectionKind::Dimension]
+            } else {
+                [RejectionKind::Dimension, RejectionKind::Cancelled]
+            };
+            for kind in kinds {
+                let _ = observed.observe::<()>(Err(rejection_error(kind)));
+            }
+            let result = observed.admit_result::<()>(Err(inference_error()));
+            assert!(matches!(result, Err(BackendError::Cancelled { .. })));
+            assert!(!format!("{result:?}").contains("private-"));
+        }
+    }
+
+    #[test]
+    fn suppressed_dimension_and_identity_errors_keep_their_typed_repair_paths() {
+        for kind in REJECTIONS {
+            let observed = observer();
+            let _ = observed.observe::<()>(Err(rejection_error(kind)));
+            let error = observed.admit_result(Ok(())).unwrap_err();
+            match kind {
+                RejectionKind::Dimension => assert!(matches!(
+                    error,
+                    BackendError::DimensionMismatch {
+                        expected: 256,
+                        found: 128
+                    }
+                )),
+                RejectionKind::FastIdentity | RejectionKind::QualityIdentity => {
+                    let BackendError::InvalidConfig { field, .. } = error else {
+                        panic!("lost identity repair class");
+                    };
+                    assert_eq!(
+                        field,
+                        match kind {
+                            RejectionKind::FastIdentity =>
+                                "search_activation.fast.producer_revision",
+                            _ => "search_activation.quality.producer_revision",
+                        }
+                    );
+                }
+                RejectionKind::UnverifiableIdentity => assert!(matches!(
+                    error,
+                    BackendError::UnverifiableRemoteSpace { .. }
+                )),
+                RejectionKind::Cancelled => {
+                    assert!(matches!(error, BackendError::Cancelled { .. }))
+                }
+                RejectionKind::MalformedResponse => assert!(!recoverable(&error)),
+            }
+        }
+    }
+
+    #[test]
+    fn unclassified_producer_failures_also_fail_closed() {
+        for error in [
+            BackendError::Io(std::io::Error::other("private-io-canary")),
+            BackendError::IndexCorrupted {
+                path: "private-path".into(),
+                detail: "private-body".into(),
+            },
+            BackendError::QueryParseError {
+                query: "private-query".into(),
+                detail: "private-body".into(),
+            },
+            BackendError::SearchTimeout {
+                elapsed_ms: 30,
+                budget_ms: 20,
+            },
+        ] {
+            let observed = observer();
+            let _ = observed.observe::<()>(Err(error));
+            let refused = observed.admit_result(Ok(())).unwrap_err();
+            assert!(!recoverable(&refused));
+            assert!(!format!("{refused:?}").contains("private-"));
+        }
+    }
+
+    #[test]
+    fn unsuppressed_terminal_errors_and_healthy_results_are_unchanged() {
+        let observed = observer();
+        let _ = observed.observe::<()>(Err(inference_error()));
+        for kind in REJECTIONS {
+            let error = rejection_error(kind);
+            let before = error.to_string();
+            assert_eq!(
+                observed
+                    .admit_result::<()>(Err(error))
+                    .unwrap_err()
+                    .to_string(),
+                before
+            );
+        }
+        let healthy = observer();
+        assert_eq!(healthy.admit_result(Ok(vec![3, 2, 1])).unwrap(), [3, 2, 1]);
+        assert!(
+            healthy
+                .admit_result(Ok(Vec::<u8>::new()))
+                .unwrap()
+                .is_empty()
+        );
+        let outage = observed.admit_result(Ok(()));
+        assert!(outage.is_ok() && observed.needs_recovery(&outage));
+    }
+
+    #[test]
+    fn concurrent_producer_errors_cannot_clear_the_request_refusal() {
+        let observed = observer();
+        std::thread::scope(|scope| {
+            for kind in REJECTIONS {
+                let observed = &observed;
+                scope.spawn(move || {
+                    let _ = observed.observe::<()>(Err(rejection_error(kind)));
+                    let _ = observed.observe::<()>(Err(inference_error()));
+                    let _ = observed.observe(Ok(()));
+                });
+            }
+        });
+        assert!(!observed.needs_recovery(&Ok(())));
+        assert!(matches!(
+            observed.admit_result(Ok(())),
+            Err(BackendError::Cancelled { .. })
+        ));
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn real_search_never_publishes_hits_after_a_producer_rejection() -> Result<(), String> {
+        for kind in REJECTIONS {
+            for lexical in [false, true] {
+                exercise_runtime_recovery(lexical, Some(kind))?;
+            }
+        }
+        Ok(())
+    }
+
+    struct RejectedProducer(crate::search::HashEmbedder);
+
+    impl Embedder for RejectedProducer {
+        fn embed<'a>(
+            &'a self,
+            _cx: &'a asupersync::Cx,
+            _text: &'a str,
+        ) -> SearchFuture<'a, Vec<f32>> {
+            Box::pin(async { Err(rejection_error(RejectionKind::Dimension)) })
+        }
+
+        fn identity(&self) -> SearchResult<&EmbeddingIdentityBundleV1> {
+            Err(rejection_error(RejectionKind::UnverifiableIdentity))
+        }
+
+        fn truncate_embedding(
+            &self,
+            _embedding: &[f32],
+            _target_dim: usize,
+        ) -> SearchResult<Vec<f32>> {
+            Err(rejection_error(RejectionKind::MalformedResponse))
+        }
+
+        fn dimension(&self) -> usize {
+            self.0.dimension()
+        }
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn model_name(&self) -> &str {
+            self.0.model_name()
+        }
+        fn is_semantic(&self) -> bool {
+            true
+        }
+        fn category(&self) -> ModelCategory {
+            self.0.category()
+        }
+    }
+
+    fn rejected_producer() -> ObservedEmbedder {
+        ObservedEmbedder::new(Arc::new(RejectedProducer(
+            crate::search::HashEmbedder::default_256(),
+        )))
+    }
+
+    #[test]
+    fn raw_and_bound_embedding_entrypoints_record_rejections() -> Result<(), String> {
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(10), |cx| async move {
+            for entrypoint in 0..4 {
+                let observed = rejected_producer();
+                let texts = ["first", "second"];
+                let result = match entrypoint {
+                    0 => observed.embed(&cx, texts[0]).await.map(|_| ()),
+                    1 => observed.embed_batch(&cx, &texts).await.map(|_| ()),
+                    2 => observed.embed_bound(&cx, texts[0]).await.map(|_| ()),
+                    _ => observed.embed_batch_bound(&cx, &texts).await.map(|_| ()),
+                };
+                assert!(result.is_err(), "entrypoint {entrypoint}");
+                assert!(!observed.needs_recovery(&Ok(())));
+                assert!(observed.admit_result(Ok(())).is_err());
+            }
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn identity_and_truncation_entrypoints_cannot_bypass_observation() {
+        let identity = rejected_producer();
+        assert!(identity.identity().is_err());
+        assert!(matches!(
+            identity.admit_result(Ok(())),
+            Err(BackendError::UnverifiableRemoteSpace { .. })
+        ));
+        let truncation = rejected_producer();
+        assert!(truncation.truncate_embedding(&[1.0, 2.0], 1).is_err());
+        assert!(!truncation.needs_recovery(&Ok(())));
+        assert!(truncation.admit_result(Ok(())).is_err());
     }
 
     #[test]

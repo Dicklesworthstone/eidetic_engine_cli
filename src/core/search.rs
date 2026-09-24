@@ -12644,6 +12644,7 @@ async fn search_sync_with_performance(
                 .search_collect(&cx, &query_owned, collect_limit)
                 .await
         };
+        let search_result = observed.admit_result(search_result);
         run_after_search_collect_hook(&cx, search_result.is_ok());
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
