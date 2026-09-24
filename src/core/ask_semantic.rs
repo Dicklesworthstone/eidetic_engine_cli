@@ -86,6 +86,10 @@ fn evaluate_with_prepared_model(
         // silently lexical, even with a verified local model already selected.
         // Never replace an existing caller's cancelled context with a fresh one.
         let cx = caller_cx.unwrap_or(runtime_cx);
+        // Dependencies that consult the active context must see the same
+        // cancellation and capabilities as the explicit inference argument,
+        // never the bridge's fresh bootstrap context in place of the caller.
+        let _ambient = Cx::set_current(Some(cx.clone()));
         SemanticScores::build(&cx, &request.question, candidates, embedder).await
     });
     finish_evaluation(
@@ -297,6 +301,10 @@ mod runtime_tests {
                 let result = self.hash.embed(cx, text).await;
                 if self.cancel_after_query {
                     cx.set_cancel_reason(asupersync::CancelReason::user("private-cancel-reason"));
+                    assert!(
+                        Cx::current().is_some_and(|active| active.checkpoint().is_err()),
+                        "explicit and active contexts must share cancellation"
+                    );
                 }
                 result
             })
@@ -429,5 +437,21 @@ mod runtime_tests {
         assert_eq!(reports.len(), 4);
         assert!(reports.windows(2).all(|pair| pair[0] == pair[1]));
         assert!(model.calls.load(Ordering::SeqCst) >= 8);
+    }
+
+    #[test]
+    fn caller_context_is_active_during_inference_and_the_previous_context_is_restored() {
+        let previous = Cx::for_testing();
+        let _ambient = Cx::set_current(Some(previous.clone()));
+        let caller = Cx::for_testing();
+        let (request, rows) = fixture();
+        let model = RuntimeProbe::new(true);
+        let error = evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(caller.checkpoint().is_err());
+        assert!(previous.checkpoint().is_ok());
+        assert!(Cx::current().is_some_and(|active| active.checkpoint().is_ok()));
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
     }
 }
