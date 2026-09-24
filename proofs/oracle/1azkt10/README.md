@@ -235,3 +235,86 @@ passed. With the real code they pass. `cargo clippy --test integration_n_r
   oracle's comparison skips every `degraded.*` field.
 - **Not a model-backed run.** Every probe used hash fallback (item 4 is still
   open).
+
+## The model dimension (item 4) and named cancellations (P-a)
+
+`ORACLE_MODEL=1` adds the two model cells of ruling 17:12Z item 3 (warm and
+cold) to the same concurrent rounds. The job does the following, in order:
+
+1. It refuses (`INFRA_ERROR`) if its temp dir has less than 20,000,000,000
+   bytes free.
+2. It fetches `potion-multilingual-128M` once (`ee model fetch`, with
+   `EE_EMBED_DOWNLOAD` unset for that step only).
+3. It re-indexes with vectors.
+4. It runs the warm cell.
+5. It makes the model's `.verified` receipt stale. The fetched file gets a
+   ctime flip: a chmod to 0444, then back to the file's own starting mode. The
+   flip must end at that starting mode and must change the ctime.
+6. It runs the cold cell: serial baselines, then concurrent rounds.
+
+In each cell, every probe must report `neural_local`. The resolver's
+tracing line is quoted: source `registered`, backend `neural_local`, outcome
+`ready`. The cold cell must list `embed_model_receipt_stale`.
+
+Two more checks came in with this change:
+
+- **Pack's own missing-index signal (ruling 13:30Z).** Every round records
+  each probe's `degraded.codes` (`probeDegraded`), because the comparison
+  still skips `degraded.*`. Under `ORACLE_PLANT=index_aside`, every pack probe
+  must carry `context_lexical_fallback`. On a healthy index, none may.
+- **Named cancellations (P-a, ruling 10178).** A nonzero probe exit that is
+  not the index-invisible refusal is still a resource signal. Its reason now
+  quotes the `ee.error.v2` envelope from stdout: `code`, `message`, and
+  `error.details.cancelKind` / `cancelClass`. The envelope only names the
+  cause. It never turns a failure into a finding or a pass.
+
+Every run below used `rch exec --clean-overlay --base
+80ed63d5d5443aaa97d511566fae1a0673e47055` with the oracle file overlaid, so
+all are **unattested**. They verify the instrument. The item-4 runs used
+oracle blob `68618af6`, and the P-a runs used `ecfb9939`, the blob landed with
+this README. The two differ only in the P-a change. Each file's `b3sum`
+equals its name, and each was echoed on the worker and extracted unmodified.
+
+| File | Run | What it holds |
+| --- | --- | --- |
+| `1c5e1175403a73609fe6eb6e1ed645019562b9cc05905b8cb1bdb4e17b256af2.ee-test-event.jsonl` | T3: the healthy twin, item 4 (`68618af6`). Worker vmi1227854, 2026-09-24T15:16-15:49Z. Receipt overlay-fingerprint `424d593e…`. | `RACE_ABSENT`. In every pack round, 0 of 8 probes carried `context_lexical_fallback`. The run's unit tests passed, 34 of 34. |
+| `cc2cf0d764dc5ce5119d6bc89523d4492a3856eb71b1ede48477225b3fc07b30.ee-test-event.jsonl` | P3: the plant, item 4 (`68618af6`). vmi1227854, 15:49-16:12Z. | Search rounds red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT`, with `context_lexical_fallback` in 8 of 8 probes every round, so there was no pack-signal finding. The plant was restored. |
+| `3515682cab4cc26f3587e1d3455d8da41a0a1875fe67a29dd7f41a64ef2288c9.ee-test-event.jsonl` | N3c: the model cells, item 4 (`68618af6`). vmi1227854, 16:12-17:00Z. | Warm and cold search `RACE_ABSENT`, all `neural_local`. Cold pack `INCONCLUSIVE`: all 24 probes exited 130, and the reason was not recorded (the gap P-a closes). |
+| `fe1868b0f32b02f553fa8382912691be2e2051c492134c5598966fae4be2ccf6.ee-test-event.jsonl` | T4: the healthy twin, P-a (`ecfb9939`). vmi1227854, 17:43-18:11Z. Receipt overlay-fingerprint `3db32e61…`. | `RACE_ABSENT`, with fallback 0 of 8 in every pack round. The run's unit tests passed, 35 of 35, including the new envelope test. |
+| `017e77e7294b308091c2fe70bdadf18e4db2b86faede860e383927440b3fbfe4.ee-test-event.jsonl` | N4: the model cells, P-a (`ecfb9939`). vmi1227854, 18:11-18:55Z. | Warm `RACE_ABSENT`. Cold search `RACE_ABSENT`, 88-130 s. Cold pack `INCONCLUSIVE`: all 24 probes read "exited Some(130); envelope: code=cancelled message=Deadline exceeded. cancelKind=deadline cancelClass=budget_exhausted", at 96.2-116.7 s. |
+
+Controls seen red first, each with the real code's copy differing only in
+the stated way:
+
+- **S2**, the pack-signal assertion target removed: exactly
+  `classifier::pack_must_report_the_lexical_fallback_exactly_when_the_index_is_planted`
+  failed, 12 passed.
+- **S4**, the envelope read from `/error/cancelKind` instead of
+  `/error/details/cancelKind`: exactly
+  `classifier::a_nonzero_exit_names_its_error_envelope_when_there_is_one`
+  failed, 13 passed.
+
+`cargo clippy --test integration_n_r -D warnings` exited 0 on both blobs
+(C3, C4).
+
+**What N4 shows.** Under a stale model receipt, 8 concurrent
+`ee pack --read-only` processes cancel on pack's own deadline. That deadline
+is a fixed 60 s in debug and release (`src/core/context.rs:2246`/`:2267` at
+the base). The probes exited 36-57 s after it. The deadline takes effect only
+after the model re-hash and load return, and that path has no cancellation
+checkpoint (noted on 1azkt.16 and bd-xayfm, not fixed here). A deadline is a
+resource signal, not a race, so there is no serial-cold/concurrent-cold
+crossing (ruling lane37-m4e).
+
+**What these files are NOT:**
+
+- **Not attested verdicts.** Every run used an overlay.
+- **Not a verdict on cold concurrent pack.** No cold pack probe completed, so
+  nothing was compared.
+- **Not a release-build result for search.** The candidate is a debug build.
+  Search's budget is 300 s in debug and 60 s in release
+  (`src/core/search.rs:125`/`:127`). Cold searches completing at 88-130 s here
+  says nothing about release, where they would pass the 60 s budget.
+- **Not a statement about later commits.** In particular, f698d18
+  (search runtime fallback) landed after the base.
+- **Not a measurement of the re-hash itself.** Its duration was not isolated.
