@@ -763,6 +763,10 @@ impl CommandEffect {
     }
 
     /// Create a config-write effect entry.
+    ///
+    /// The workspace registry is a separate database file, not a table of the
+    /// workspace store, and only `workspace alias` writes it; that entry
+    /// declares it as a derived path (bd-hb5os).
     #[must_use]
     pub fn config_write(
         command_path: &'static str,
@@ -776,7 +780,7 @@ impl CommandEffect {
             dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
-                db_tables: vec!["workspace_registry", "audit_log"],
+                db_tables: vec!["audit_log"],
                 derived_paths: Vec::new(),
                 workspace_files,
             },
@@ -1038,7 +1042,9 @@ impl CommandEffect {
             dry_run_effect: None,
             idempotency: IdempotencyClass::DryRunAvailable,
             write_surfaces: WriteSurfaces {
-                db_tables: vec!["shard catalog", "workspace shard databases", "audit_log"],
+                // The shard catalog and the shard databases are files, named
+                // below; only the audit log is a table (bd-hb5os).
+                db_tables: vec!["audit_log"],
                 derived_paths: Vec::new(),
                 workspace_files: vec![
                     "<shards-dir>/catalog.db",
@@ -2528,9 +2534,21 @@ impl EffectManifest {
                 "deterministic candidate id over (file, statement text)",
                 "Import rule-like AGENTS.md statements as pending curation candidates",
             ),
+            // Measured per triggering input (bd-hb5os): pack_omissions under a
+            // tight budget, pack_baselines from the `ee pack <query>` shim when
+            // an agent name is set, pack_evidence_items from imported CASS
+            // evidence.
             CommandEffect::append_only_write(
                 "pack build",
-                vec!["context_packs", "pack_items", "audit_log"],
+                vec![
+                    "pack_records",
+                    "pack_items",
+                    "pack_candidate_impressions",
+                    "pack_omissions",
+                    "pack_evidence_items",
+                    "pack_baselines",
+                    "audit_log",
+                ],
                 "pack hash",
                 "Persist a context pack keyed by deterministic pack hash",
             ),
@@ -2793,14 +2811,17 @@ impl EffectManifest {
                 ],
                 "Distill journal entries into pending curation candidates; dry-run by default, --apply writes",
             ),
+            // No learning_experiments or evaluation_reports table exists
+            // (bd-hb5os). `learn close` lists the tables it was measured to
+            // write; `learn experiment run` was measured to write none.
             CommandEffect::durable_write(
                 "learn close",
-                vec!["learning_experiments", "audit_log"],
+                vec!["feedback_events", "learning_observations", "audit_log"],
                 "Close a learning experiment",
             ),
             CommandEffect::durable_write(
                 "learn experiment run",
-                vec!["learning_experiments", "evaluation_reports", "audit_log"],
+                vec!["audit_log"],
                 "Record a learning experiment run",
             ),
             CommandEffect::durable_write(
@@ -2843,9 +2864,23 @@ impl EffectManifest {
                 vec!["rationale_traces", "audit_log"],
                 "Attach a safe rationale trace with audit provenance",
             ),
+            // Measured per triggering input (bd-hb5os): anchors from anchorable
+            // content, sentinel specs from --sentinel/--revive-when, links from
+            // workflow and co-tag auto-linking, seals from --seal.
             CommandEffect::durable_write(
                 "remember",
-                vec!["memories", "memory_tags", "audit_log"],
+                vec![
+                    "memories",
+                    "memory_tags",
+                    "memory_anchors",
+                    "memory_anchor_index",
+                    "memory_links",
+                    "memory_sentinel_specs",
+                    "memory_seals",
+                    "search_index_jobs",
+                    "workspace_generations",
+                    "audit_log",
+                ],
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
             ),
             CommandEffect::durable_write(
@@ -2879,14 +2914,18 @@ impl EffectManifest {
                 vec!["memories", "memory_seals", "search_index_jobs", "audit_log"],
                 "Verify supplied bytes against a sealed memory's commitment; on match publish the content through the revise path, mark the seal revealed, and audit memory.reveal — a mismatch mutates nothing and audits memory.reveal_failed (bd-sealed-preregistration-memory-b67be)",
             ),
-            CommandEffect::durable_write(
+            // The promoted/demoted config is a workspace file, not a table
+            // (bd-hb5os).
+            CommandEffect::durable_write_with_workspace_files(
                 "shadow promote",
-                vec!["workspace_config", "audit_log"],
+                vec!["audit_log"],
+                vec![".ee/config.toml"],
                 "Apply the persisted promotable tuning report's [search] fusion-weight overlay to <workspace>/.ee/config.toml via toml_edit, recording the full prior config bytes in the promotion audit; refusals (missing/stale/abstained/non-promotable report) are typed exit-7 policy denials and dry-run writes nothing (ADR 0070 §5)",
             ),
-            CommandEffect::durable_write(
+            CommandEffect::durable_write_with_workspace_files(
                 "shadow demote",
-                vec!["workspace_config", "audit_log"],
+                vec!["audit_log"],
+                vec![".ee/config.toml"],
                 "Restore the pre-promotion config.toml bytes from the promotion audit (byte-identical; an absent prior restores as empty, never a deletion) and record the demotion",
             ),
             CommandEffect::durable_write(
@@ -2929,13 +2968,20 @@ impl EffectManifest {
                 vec!["memory_links", "audit_log"],
                 "Create or inspect explicit memory links with audited mutation when requested",
             ),
-            CommandEffect::durable_state_write(
-                "maintenance wal-checkpoint",
-                vec!["database_wal"],
-                "database path plus checkpoint mode",
-                "database WAL checkpoint",
-                "Checkpoint the workspace database WAL without changing logical memory records",
-            ),
+            {
+                let mut checkpoint = CommandEffect::durable_state_write(
+                    "maintenance wal-checkpoint",
+                    Vec::new(),
+                    "database path plus checkpoint mode",
+                    "database WAL checkpoint",
+                    "Checkpoint the workspace database WAL without changing logical memory records",
+                );
+                // The checkpoint rewrites database files, never a logical row:
+                // passive mode was measured to change the database file,
+                // truncate mode the WAL file (bd-hb5os).
+                checkpoint.write_surfaces.workspace_files = vec![".ee/ee.db", ".ee/ee.db-wal"];
+                checkpoint
+            },
             CommandEffect::durable_write_with_workspace_files(
                 "mesh discovery-policy",
                 vec!["audit_log"],
@@ -3274,12 +3320,19 @@ impl EffectManifest {
                 "workspace root",
                 "Initialize workspace-local ee configuration and storage",
             ),
-            CommandEffect::config_write(
-                "workspace alias",
-                vec![".ee/workspaces.toml"],
-                "alias name and workspace root",
-                "Create or update a workspace alias",
-            ),
+            {
+                let mut alias = CommandEffect::config_write(
+                    "workspace alias",
+                    vec![".ee/workspaces.toml"],
+                    "alias name and workspace root",
+                    "Create or update a workspace alias",
+                );
+                // The registry database outside the workspace: EE_WORKSPACE_REGISTRY,
+                // else $XDG_DATA_HOME/ee/workspaces.db
+                // (core::workspace::registry_database_path_override).
+                alias.write_surfaces.derived_paths = vec!["<workspace-registry-db>"];
+                alias
+            },
             CommandEffect::config_file_write(
                 "profile config apply",
                 vec![".ee/config.toml"],
@@ -4895,6 +4948,109 @@ mod tests {
             EffectClass::DurableMemoryWrite < EffectClass::WorkspaceFileWrite,
             true,
             "durable_memory_write < workspace_file_write",
+        )
+    }
+
+    /// Every declared `db_tables` name, with the command paths declaring it.
+    fn declared_db_tables(
+        manifest: &EffectManifest,
+    ) -> std::collections::BTreeMap<&'static str, Vec<&'static str>> {
+        let mut declared = std::collections::BTreeMap::new();
+        for path in manifest.command_paths() {
+            if let Some(effect) = manifest.get(path) {
+                for table in &effect.write_surfaces.db_tables {
+                    declared
+                        .entry(*table)
+                        .or_insert_with(Vec::new)
+                        .push(effect.command_path);
+                }
+            }
+        }
+        declared
+    }
+
+    /// The table set of a freshly migrated store (the same set `ee init`
+    /// creates, measured in bd-hb5os).
+    fn migrated_schema_tables() -> Result<std::collections::BTreeSet<String>, String> {
+        let connection =
+            crate::db::DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        Ok(connection
+            .list_user_tables()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect())
+    }
+
+    /// bd-hb5os: a `db_tables` name is admissible only if it is a table of
+    /// the migrated schema. An empty world is red, not a vacuous pass: no
+    /// declared name, or a schema with no table, fails.
+    fn declared_tables_missing_from_schema(
+        declared: &std::collections::BTreeMap<&'static str, Vec<&'static str>>,
+        schema: &std::collections::BTreeSet<String>,
+    ) -> TestResult {
+        if declared.is_empty() {
+            return Err("empty world: the manifest declares no db_tables name".to_owned());
+        }
+        if schema.is_empty() {
+            return Err("empty world: the migrated schema has no table".to_owned());
+        }
+        let missing: Vec<(&&str, &Vec<&str>)> = declared
+            .iter()
+            .filter(|(table, _)| !schema.contains(**table))
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "db_tables names with no table in the migrated schema (name, declared by): {missing:?}"
+            ))
+        }
+    }
+
+    #[test]
+    fn every_declared_db_table_exists_in_the_migrated_schema() -> TestResult {
+        let manifest = EffectManifest::build();
+        declared_tables_missing_from_schema(
+            &declared_db_tables(&manifest),
+            &migrated_schema_tables()?,
+        )
+    }
+
+    #[test]
+    fn declared_table_guard_is_red_on_an_empty_world_and_on_a_phantom() -> TestResult {
+        let declared = declared_db_tables(&EffectManifest::build());
+        let schema = migrated_schema_tables()?;
+        let no_names =
+            declared_tables_missing_from_schema(&std::collections::BTreeMap::new(), &schema);
+        ensure(
+            no_names
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("declares no db_tables name")),
+            true,
+            "a manifest with no declared name is red for that reason",
+        )?;
+        let no_tables =
+            declared_tables_missing_from_schema(&declared, &std::collections::BTreeSet::new());
+        ensure(
+            no_tables
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("schema has no table")),
+            true,
+            "an empty schema is red for that reason",
+        )?;
+        let mut phantom = declared.clone();
+        phantom.insert("hb5os_phantom_table", vec!["phantom control"]);
+        let with_phantom = declared_tables_missing_from_schema(&phantom, &schema);
+        ensure(
+            with_phantom
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("hb5os_phantom_table")),
+            true,
+            "a declared name outside the schema is red and named",
         )
     }
 }
