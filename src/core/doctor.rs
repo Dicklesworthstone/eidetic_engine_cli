@@ -140,7 +140,8 @@ impl CheckTier {
 /// conflated "everything is perfect" with "the operation succeeded but a
 /// fallback was taken". `healthy: bool` is kept alongside `posture` for
 /// the v0.1 → v0.2 transition window (consumers reading `healthy` can
-/// continue; new consumers should read `posture`).
+/// continue; new consumers should read
+/// `posture` instead. Bead bd-17c65.5.1 (E1).
 ///
 /// Aggregation rule (`Posture::from_checks`):
 /// - any core check `severity == Error` (critical) → [`Posture::Blocked`]
@@ -183,7 +184,8 @@ impl Posture {
     ///
     /// `transient_predicate` returns `true` for checks that are
     /// transient and should not downgrade the aggregate (e.g. stale
-    /// indexes that auto-resolve). When `None`, every warning counts.
+    /// indexes that auto-resolve on next sync).
+    /// When `None`, every warning counts.
     #[must_use]
     pub fn from_checks(
         checks: &[CheckResult],
@@ -2798,6 +2800,9 @@ fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
+#[path = "doctor_database_failure.rs"]
+mod database_failure;
+
 fn check_database(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
         return CheckResult::warning(
@@ -2848,11 +2853,7 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
     match DbConnection::open_file(&database_path) {
         Ok(connection) => {
             if let Err(error) = connection.ping() {
-                return CheckResult::error(
-                    "database",
-                    format!("Database readiness check failed: {error}"),
-                    error_codes::DATABASE_CORRUPTED,
-                );
+                return database_failure::check(&error);
             }
             match connection.needs_migration() {
                 Ok(true) => CheckResult::warning(
@@ -2891,24 +2892,12 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
                             error_codes::WORKSPACE_IDENTITY_MISMATCH,
                         )
                     }
-                    Err(error) => CheckResult::error(
-                        "database",
-                        format!("Failed to inspect workspace binding: {error}"),
-                        error_codes::DATABASE_CORRUPTED,
-                    ),
+                    Err(error) => database_failure::check(&error),
                 },
-                Err(error) => CheckResult::error(
-                    "database",
-                    format!("Database readiness check failed: {error}"),
-                    error_codes::DATABASE_CORRUPTED,
-                ),
+                Err(error) => database_failure::check(&error),
             }
         }
-        Err(error) => CheckResult::error(
-            "database",
-            format!("Database readiness check failed: {error}"),
-            error_codes::DATABASE_CORRUPTED,
-        ),
+        Err(error) => database_failure::check(&error),
     }
 }
 

@@ -188,6 +188,16 @@ pub const DATABASE_EMPTY: ErrorCode = ErrorCode {
     default_repair: Some("ee backup list --workspace ."),
 };
 
+/// A failed inspection is not evidence that a store is corrupted.
+pub const DATABASE_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E207",
+    category: ErrorCategory::Storage,
+    description: "Database inspection failed; data integrity is not established",
+    default_repair: Some(
+        "Inspect the reported access or I/O failure without replacing the database or its sidecars",
+    ),
+};
+
 // Search index errors (EE-E300 - EE-E399)
 pub const INDEX_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E300",
@@ -312,6 +322,17 @@ pub const MIGRATION_FAILED: ErrorCode = ErrorCode {
     default_repair: Some("ee init --workspace . --repair-plan --json"),
 };
 
+/// Applied migration history differs from this binary's expected checksums.
+/// This is not a pending migration and must not dispatch a migration over it.
+pub const MIGRATION_DRIFT: ErrorCode = ErrorCode {
+    id: "EE-E702",
+    category: ErrorCategory::MigrationRequired,
+    description: "Applied migration checksums differ from the expected migration history",
+    default_repair: Some(
+        "Reconcile the binary and applied migration history before changing the database",
+    ),
+};
+
 pub const RUNTIME_UNAVAILABLE: ErrorCode = ErrorCode {
     id: "EE-E505",
     category: ErrorCategory::UnsatisfiedDegradedMode,
@@ -362,6 +383,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     WORKSPACE_ROW_MISSING,
     WAL_EXCEEDS_DATABASE,
     DATABASE_EMPTY,
+    DATABASE_UNAVAILABLE,
     // Search index
     INDEX_NOT_FOUND,
     INDEX_STALE,
@@ -384,6 +406,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     // Migration
     MIGRATION_REQUIRED,
     MIGRATION_FAILED,
+    MIGRATION_DRIFT,
     // Runtime and CASS
     RUNTIME_UNAVAILABLE,
     CASS_NOT_FOUND,

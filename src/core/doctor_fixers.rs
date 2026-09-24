@@ -1,7 +1,7 @@
-//! 16 fixers wired through the `doctor_runtime::mutate()` chokepoint: 13
-//! auto-fixable ones (bd-tu4s8 Pass-2; bd-pbyay added `search_index_missing`)
-//! and 3 guidance-only database fixers (bd-xa6ud / bd-wswg0 for an empty or
-//! unopenable store, bd-rnqxs for a missing one). Each
+//! Repair and guidance dispatchers use the `doctor_runtime::mutate()` chokepoint.
+//! Database access failures, migration drift and confirmed data damage have
+//! separate guidance-only paths; inability to open a store does not establish
+//! corruption (bd-ixxzq). Each
 //! fixer maps a specific repair-spec finding code to the `Op` that the doctor
 //! should call `mutate()` with.
 //!
@@ -108,8 +108,8 @@ pub fn fix_database_empty(workspace_root: &Path) -> FixerDispatch {
     )
 }
 
-/// bd-xa6ud (EE-E202): the database cannot be opened (e.g. truncated). Index
-/// repair and migration both read it and would fail, so this records guidance.
+/// bd-xa6ud (EE-E202): the database has positive evidence of damage (e.g.
+/// a truncated header), not merely an open failure. Records guidance only.
 #[must_use]
 pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
     FixerDispatch::manual(
@@ -121,6 +121,55 @@ pub fn fix_database_corrupted(workspace_root: &Path) -> FixerDispatch {
             "Do not run `ee index rebuild` or a migration against it; both read the damaged store.",
             "List recoverable backups: `ee backup list --workspace .`, recover one into a side path with `ee backup restore`, inspect it, then move it into `.ee/`.",
             "Or accept the loss: move `.ee/ee.db` aside and run `ee init --workspace .` to start an empty store.",
+        ],
+    )
+}
+
+/// A live writer owns the store: wait or coordinate with its owner, never
+/// unlink its lock/sidecars or replace a healthy database (bd-ixxzq).
+#[must_use]
+pub fn fix_database_locked(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "database_locked",
+        "error",
+        workspace_root.join(".ee").join("ee.db"),
+        &[
+            "The database could not be inspected because a writer holds its lock; this is not evidence of data loss.",
+            "Identify the active writer and wait for it to finish. If it is stuck, coordinate an orderly stop with its owner before retrying.",
+            "Leave the lock file, database and all sidecars in place; removing a lock file can let two writers operate concurrently.",
+            "After the holder releases the lock, rerun `ee doctor --workspace . --json` before considering any repair.",
+        ],
+    )
+}
+
+/// Unclassified access/I/O failures require diagnosis, not destructive recovery.
+#[must_use]
+pub fn fix_database_unavailable(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "database_unavailable",
+        "error",
+        workspace_root.join(".ee").join("ee.db"),
+        &[
+            "Database inspection failed, so neither readiness nor corruption has been established.",
+            "Inspect the reported access, permission, storage or runtime failure and coordinate with any active writer.",
+            "Preserve the database and its sidecars together; do not replace the store or rewrite its migration ledger to clear an unknown error.",
+            "After resolving the underlying failure, rerun `ee doctor --workspace . --json` before any dependent index repair.",
+        ],
+    )
+}
+
+/// A drifted ledger is not a missing schema and must not be migrated blindly.
+#[must_use]
+pub fn fix_database_migration_drift(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch::manual(
+        "database_migration_drift",
+        "error",
+        workspace_root.join(".ee").join("ee.db"),
+        &[
+            "The applied migration checksums differ from this binary's expected history; this does not establish database-file corruption.",
+            "Preserve the database and all sidecars. Compare the binary revision and recorded migration history with the known source of this store.",
+            "Do not rewrite checksums or run a migration merely to suppress the mismatch; resolve the history discrepancy first.",
+            "After reconciling the binary and history, rerun `ee doctor --workspace . --json`; dependent repairs remain blocked until inspection succeeds.",
         ],
     )
 }
@@ -406,6 +455,9 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "search_index_missing",
     "database_empty",
     "database_corrupted",
+    "database_locked",
+    "database_unavailable",
+    "database_migration_drift",
     "graph_snapshot_stale",
     "wal_checkpoint_pending",
     "schema_migration_pending",
@@ -427,6 +479,9 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
 pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "database_empty",
     "database_corrupted",
+    "database_locked",
+    "database_unavailable",
+    "database_migration_drift",
     "database_missing",
     "search_index_missing",
     "search_index_stale",
@@ -457,13 +512,18 @@ impl FixMode {
     }
 }
 
-/// bd-xa6ud / bd-wswg0 / bd-rnqxs: the store is unreadable when the
-/// `database` check reports it empty (EE-E206), unopenable (EE-E202) or
-/// missing (EE-E200). `checks` yields each check's name and error code.
+/// A database that cannot be safely inspected cannot feed dependent repairs.
+/// Damage, absence, a held lock, unknown access failures and migration drift
+/// all block writes; only their guidance differs. Keep the legacy helper name
+/// for callers. `checks` yields each check's name and error code.
 #[must_use]
 pub fn store_unreadable<'a>(checks: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> bool {
     checks.into_iter().any(|(name, code)| {
-        name == "database" && matches!(code, Some("EE-E206" | "EE-E202" | "EE-E200"))
+        name == "database"
+            && matches!(
+                code,
+                Some("EE-E200" | "EE-E201" | "EE-E202" | "EE-E206" | "EE-E207" | "EE-E702")
+            )
     })
 }
 
@@ -487,6 +547,9 @@ pub fn fix_finding_for_check(
         match error_code {
             Some("EE-E206") => return Some("database_empty"),
             Some("EE-E202") => return Some("database_corrupted"),
+            Some("EE-E201") => return Some("database_locked"),
+            Some("EE-E207") => return Some("database_unavailable"),
+            Some("EE-E702") => return Some("database_migration_drift"),
             Some("EE-E200") => return Some("database_missing"),
             _ => {}
         }
@@ -514,6 +577,9 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
     match finding {
         "database_empty" => Some(fix_database_empty(workspace_root)),
         "database_corrupted" => Some(fix_database_corrupted(workspace_root)),
+        "database_locked" => Some(fix_database_locked(workspace_root)),
+        "database_unavailable" => Some(fix_database_unavailable(workspace_root)),
+        "database_migration_drift" => Some(fix_database_migration_drift(workspace_root)),
         "database_missing" => Some(fix_database_missing(workspace_root)),
         "search_index_missing" => Some(fix_search_index_missing(workspace_root)),
         "search_index_stale" => Some(fix_search_index_stale(workspace_root)),
@@ -697,6 +763,9 @@ mod tests {
             (Some("EE-E999"), "search_index", false),
             (Some("EE-E206"), "database", true),
             (Some("EE-E202"), "database", true),
+            (Some("EE-E201"), "database", true),
+            (Some("EE-E207"), "database", true),
+            (Some("EE-E702"), "database", true),
             (Some("EE-E200"), "database", true),
         ];
         for (code, name, unreadable) in checks {
@@ -1071,6 +1140,9 @@ mod tests {
             fix_search_index_missing(&workspace).finding_code,
             fix_database_empty(&workspace).finding_code,
             fix_database_corrupted(&workspace).finding_code,
+            fix_database_locked(&workspace).finding_code,
+            fix_database_unavailable(&workspace).finding_code,
+            fix_database_migration_drift(&workspace).finding_code,
             fix_database_missing(&workspace).finding_code,
             fix_graph_snapshot_stale(&workspace).finding_code,
             fix_wal_checkpoint_pending(&workspace).finding_code,
