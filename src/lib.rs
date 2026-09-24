@@ -34,6 +34,7 @@ pub mod search;
 pub mod shadow;
 pub mod steward;
 pub mod util;
+pub mod workspace_rebind;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;
