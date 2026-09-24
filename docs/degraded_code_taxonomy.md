@@ -483,8 +483,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
 | `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
 | `task_frame_intersect_empty` | info | bd-1idcb (G) |
-| `l2_pack_cache_corruption` | low | (TBD) |
-| `l2_pack_cache_unavailable` | low | (TBD) |
+| `l2_pack_cache_corruption` | low | bd-ndzfg.4 |
+| `l2_pack_cache_unavailable` | low | bd-ndzfg.4 |
 | `source_unparsable` | medium | (TBD) |
 | `stale_line_span` | warning | (TBD) |
 | `symbol_index_stale` | warning | (TBD) |

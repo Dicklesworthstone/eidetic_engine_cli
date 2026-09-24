@@ -7188,7 +7188,7 @@ fn context_pack_l2_try_hit(
                         match context_pack_l2_cached_search_advisory_snapshot(&hit.pack_json) {
                             Ok(snapshot) => snapshot,
                             Err(message) => {
-                                push_pack_l2_corruption(degraded, message);
+                                push_pack_l2_corruption(degraded, &l2_context.key, message);
                                 trace.record_elapsed("packL2Lookup", lookup_start);
                                 tracing::warn!(
                                     target: "ee::pack_l2",
@@ -7268,7 +7268,7 @@ fn context_pack_l2_try_hit(
                     });
                 }
                 Err(message) => {
-                    push_pack_l2_corruption(degraded, message);
+                    push_pack_l2_corruption(degraded, &l2_context.key, message);
                     tracing::warn!(
                         target: "ee::pack_l2",
                         event = "pack_l2_cache_corruption",
@@ -7280,8 +7280,9 @@ fn context_pack_l2_try_hit(
             }
         }
         Ok(PackL2CacheLookup::Miss(miss)) => {
+            // The lookup already ended in the `corruption` phase for this miss.
             if pack_l2_miss_is_corruption(&miss) {
-                push_pack_l2_corruption(
+                push_pack_l2_corruption_degradation(
                     degraded,
                     format!(
                         "L2 pack cache entry {} was rejected: {}",
@@ -8042,16 +8043,10 @@ fn context_pack_l2_hit_performance_json(
     })
 }
 
-fn pack_l2_miss_is_corruption(miss: &PackL2CacheMiss) -> bool {
-    matches!(
-        miss.reason,
-        PackL2CacheMissReason::Corrupt(_)
-            | PackL2CacheMissReason::BodyHashMismatch { .. }
-            | PackL2CacheMissReason::KeyMismatch { .. }
-            | PackL2CacheMissReason::CompressionDictionaryMissing { .. }
-            | PackL2CacheMissReason::CompressionDictionaryCorrupt { .. }
-            | PackL2CacheMissReason::CompressionDecode { .. }
-    )
+/// The lookup's `corruption` phase and this code use the same rule
+/// ([`PackL2CacheMissReason::is_corruption`]), so they cannot disagree.
+const fn pack_l2_miss_is_corruption(miss: &PackL2CacheMiss) -> bool {
+    miss.reason.is_corruption()
 }
 
 fn pack_l2_miss_reason(reason: &PackL2CacheMissReason) -> String {
@@ -8093,17 +8088,30 @@ fn pack_l2_write_outcome(outcome: &PackL2WriteOutcome) -> &'static str {
     }
 }
 
+/// A lookup or write error from the cache module. That module has already
+/// emitted the matching `unavailable` phase, so this adds only the code.
 fn push_pack_l2_cache_error(
     degraded: &mut Vec<ContextResponseDegradation>,
     error: PackL2CacheError,
 ) {
-    push_pack_l2_unavailable(
+    push_pack_l2_unavailable_degradation(
         degraded,
         format!("L2 pack cache was unavailable; assembled fresh context instead: {error}"),
     );
 }
 
+/// `l2_pack_cache_unavailable` for a failure the cache module never saw (key
+/// preparation), with its own `phase=unavailable` event (bd-ndzfg.4). The
+/// cache key is not known yet at that point, so the event's key is empty.
 fn push_pack_l2_unavailable(degraded: &mut Vec<ContextResponseDegradation>, message: String) {
+    crate::cache::pack_l2::trace_pack_l2("unavailable", "", &message);
+    push_pack_l2_unavailable_degradation(degraded, message);
+}
+
+fn push_pack_l2_unavailable_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    message: String,
+) {
     let message = if message.contains("assembled fresh context") {
         message
     } else {
@@ -8118,7 +8126,22 @@ fn push_pack_l2_unavailable(degraded: &mut Vec<ContextResponseDegradation>, mess
     );
 }
 
-fn push_pack_l2_corruption(degraded: &mut Vec<ContextResponseDegradation>, message: String) {
+/// `l2_pack_cache_corruption` for a hit this module rejects AFTER the lookup,
+/// with its own `phase=corruption` event (bd-ndzfg.4). The lookup's terminal
+/// phase was `hit`, and it stays the only terminal phase of that lookup.
+fn push_pack_l2_corruption(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    key: &str,
+    message: String,
+) {
+    crate::cache::pack_l2::trace_pack_l2("corruption", key, &message);
+    push_pack_l2_corruption_degradation(degraded, message);
+}
+
+fn push_pack_l2_corruption_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    message: String,
+) {
     let message = if message.contains("rejected") {
         message
     } else {

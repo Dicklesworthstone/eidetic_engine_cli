@@ -120,14 +120,25 @@ impl PackL2Cache {
         // Emitting the opener unconditionally is what makes a missing terminal
         // phase visible in a trace: a `lookup` with no partner means the
         // lookup neither returned nor raised, which no other field reports.
+        //
+        // The terminal phase follows the degraded code the same outcome raises
+        // in src/core/context.rs: a miss whose reason is corruption-class is
+        // the `corruption` phase (l2_pack_cache_corruption), and every error
+        // is `unavailable` (l2_pack_cache_unavailable). A corrupt entry on disk
+        // decodes to such a miss, never to an error.
         trace_pack_l2("lookup", key, "");
         let outcome = self.lookup_at_traced(key, now_epoch_seconds, allow_mutations);
         match &outcome {
             Ok(PackL2CacheLookup::Hit(_)) => trace_pack_l2("hit", key, ""),
             Ok(PackL2CacheLookup::Miss(miss)) => {
-                trace_pack_l2("miss", key, &format!("{:?}", miss.reason));
+                let phase = if miss.reason.is_corruption() {
+                    "corruption"
+                } else {
+                    "miss"
+                };
+                trace_pack_l2(phase, key, &format!("{:?}", miss.reason));
             }
-            Err(error) => trace_pack_l2(error_phase(error), key, &error.to_string()),
+            Err(error) => trace_pack_l2("unavailable", key, &error.to_string()),
         }
         outcome
     }
@@ -283,7 +294,9 @@ impl PackL2Cache {
         key: &str,
         pack_json: &JsonValue,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
-        self.put_at(key, pack_json, system_time_seconds(SystemTime::now())?)
+        let now = system_time_seconds(SystemTime::now())
+            .inspect_err(|error| trace_write_unavailable(key, error))?;
+        self.put_at(key, pack_json, now)
     }
 
     pub fn put_at(
@@ -297,6 +310,16 @@ impl PackL2Cache {
         // of having been attempted -- a write phase with no following
         // eviction or completion is the signal that something stopped here.
         trace_pack_l2("write", key, "uncompressed");
+        self.put_at_traced(key, pack_json, stored_at_epoch_seconds)
+            .inspect_err(|error| trace_write_unavailable(key, error))
+    }
+
+    fn put_at_traced(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
         let path = self.entry_path(key);
         let entry = PackL2CacheEntry {
             schema: PACK_L2_CACHE_ENTRY_SCHEMA_V1.to_owned(),
@@ -357,12 +380,9 @@ impl PackL2Cache {
         key: &str,
         pack_json: &JsonValue,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
-        self.put_compressed_with_dictionary_at(
-            key,
-            pack_json,
-            None,
-            system_time_seconds(SystemTime::now())?,
-        )
+        let now = system_time_seconds(SystemTime::now())
+            .inspect_err(|error| trace_write_unavailable(key, error))?;
+        self.put_compressed_with_dictionary_at(key, pack_json, None, now)
     }
 
     pub fn put_compressed_at(
@@ -397,6 +417,22 @@ impl PackL2Cache {
                 "compressed"
             },
         );
+        self.put_compressed_with_dictionary_at_traced(
+            key,
+            pack_json,
+            dictionary,
+            stored_at_epoch_seconds,
+        )
+        .inspect_err(|error| trace_write_unavailable(key, error))
+    }
+
+    fn put_compressed_with_dictionary_at_traced(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+        dictionary: Option<&PackL2CompressionDictionary>,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
         let path = self.entry_path(key);
         let uncompressed =
             serde_json::to_vec(pack_json).map_err(|source| PackL2CacheError::Json {
@@ -780,6 +816,26 @@ pub enum PackL2CacheMissReason {
     },
 }
 
+impl PackL2CacheMissReason {
+    /// True when the entry exists but its content cannot be trusted. This is
+    /// the one rule for both the `corruption` trace phase and the
+    /// `l2_pack_cache_corruption` degraded code (bd-ndzfg.4). Exhaustive on
+    /// purpose: a new miss reason does not compile until someone decides
+    /// which class it belongs to.
+    #[must_use]
+    pub const fn is_corruption(&self) -> bool {
+        match self {
+            Self::Corrupt(_)
+            | Self::BodyHashMismatch { .. }
+            | Self::KeyMismatch { .. }
+            | Self::CompressionDictionaryMissing { .. }
+            | Self::CompressionDictionaryCorrupt { .. }
+            | Self::CompressionDecode { .. } => true,
+            Self::NotFound | Self::Expired { .. } | Self::TooLarge { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackL2WriteReport {
     pub key: String,
@@ -980,7 +1036,14 @@ struct EvictionCandidate {
 /// `bead_id` follows the `src/core/outcome.rs` convention: overridable through
 /// `EE_TRACE_BEAD_ID` so a run can be attributed to the work that provoked it,
 /// with this bead as the default.
-fn trace_pack_l2(phase: &'static str, key: &str, detail: &str) {
+///
+/// Every response carrying `l2_pack_cache_corruption` or
+/// `l2_pack_cache_unavailable` has a matching `corruption` or `unavailable`
+/// phase. This module emits the phase for the failures it observes itself
+/// (lookup, write). `src/core/context.rs` calls this function only for
+/// failures this module never sees: key preparation, and a hit that is
+/// rejected after the lookup (whose terminal phase was already `hit`).
+pub(crate) fn trace_pack_l2(phase: &'static str, key: &str, detail: &str) {
     tracing::debug!(
         target: "ee::pack_l2",
         surface = "pack_cache_l2",
@@ -992,21 +1055,73 @@ fn trace_pack_l2(phase: &'static str, key: &str, detail: &str) {
     );
 }
 
-/// The phase an error belongs to, kept deliberately consistent with the
-/// degraded code the same failure raises in `src/core/context.rs`.
-///
-/// `push_pack_l2_cache_error` maps EVERY `PackL2CacheError` to
-/// `l2_pack_cache_unavailable`, and `l2_pack_cache_corruption` is raised
-/// separately when a cache entry fails to decode. So a decode failure is the
-/// corruption phase and everything else is unavailable -- if this function
-/// disagreed with that split, a trace would name one failure class while the
-/// response named another, which is the confusion the degraded codes exist to
-/// prevent.
-const fn error_phase(error: &PackL2CacheError) -> &'static str {
-    match error {
-        PackL2CacheError::Json { .. } => "corruption",
-        _ => "unavailable",
+/// A failed write is the `unavailable` phase: `src/core/context.rs` answers
+/// every write error with `l2_pack_cache_unavailable`.
+fn trace_write_unavailable(key: &str, error: &PackL2CacheError) {
+    trace_pack_l2("unavailable", key, &error.to_string());
+}
+
+/// Run `operation` under a capturing subscriber and return its result with
+/// the `phase` of every `surface=pack_cache_l2` event it emitted, in order.
+/// Shared by the phase tests here and in `src/core/context_test_module.rs`.
+#[cfg(test)]
+pub(crate) fn capture_pack_l2_phases<R>(operation: impl FnOnce() -> R) -> (R, Vec<String>) {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        phases: Arc<Mutex<Vec<String>>>,
     }
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            if event.metadata().target() != "ee::pack_l2" {
+                return;
+            }
+            let mut visit = Visit::default();
+            event.record(&mut visit);
+            if visit.surface == "pack_cache_l2" {
+                self.phases.lock().expect("capture lock").push(visit.phase);
+            }
+        }
+    }
+    #[derive(Default)]
+    struct Visit {
+        surface: String,
+        phase: String,
+    }
+    impl tracing::field::Visit for Visit {
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "surface" => value.clone_into(&mut self.surface),
+                "phase" => value.clone_into(&mut self.phase),
+                _ => {}
+            }
+        }
+    }
+
+    // tracing-core keeps ONE global interest per callsite. While at most one
+    // dispatcher is registered (`has_just_one`), the FIRST hit of a callsite
+    // computes that interest from the hitting thread's own default only
+    // (`Rebuilder::JustOne`), and a concurrent hit meanwhile gets `sometimes`.
+    // So a parallel test thread with no subscriber can cache `never` for
+    // `trace_pack_l2`'s callsite while this capture is live: the first event
+    // arrives and every later one is silently lost. That was observed once in
+    // a full-lib run (["write"] captured, "unavailable" dropped). A second
+    // registered dispatcher, alive for the whole capture and registered before
+    // it, keeps `has_just_one` false, so every interest computation takes the
+    // locked path over all registered dispatchers, this capture included.
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let capture = Capture::default();
+    let phases = capture.phases.clone();
+    let subscriber = tracing_subscriber::registry::Registry::default()
+        .with(capture)
+        .with(tracing_subscriber::filter::LevelFilter::TRACE);
+    let result = tracing::subscriber::with_default(subscriber, operation);
+    let phases = phases.lock().expect("capture lock").clone();
+    (result, phases)
 }
 
 fn remove_cache_entry_best_effort(path: &Path) {
@@ -1742,105 +1857,131 @@ mod tests {
     /// assertion reads the same event a subscriber would.
     #[test]
     fn phase_fields_reach_a_subscriber_on_the_real_cache_paths() -> TestResult {
-        use std::sync::{Arc, Mutex};
-        use tracing::subscriber::with_default;
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::layer::{Context, SubscriberExt};
-        use tracing_subscriber::registry::Registry;
-
-        #[derive(Default, Clone)]
-        struct Capture {
-            events: Arc<Mutex<Vec<(String, String, String)>>>,
-        }
-        impl<S: tracing::Subscriber> Layer<S> for Capture {
-            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-                let mut surface = String::new();
-                let mut phase = String::new();
-                let mut visitor = Visit {
-                    surface: &mut surface,
-                    phase: &mut phase,
-                };
-                event.record(&mut visitor);
-                self.events.lock().expect("capture lock").push((
-                    event.metadata().target().to_owned(),
-                    surface,
-                    phase,
-                ));
-            }
-        }
-        struct Visit<'a> {
-            surface: &'a mut String,
-            phase: &'a mut String,
-        }
-        impl tracing::field::Visit for Visit<'_> {
-            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                match field.name() {
-                    "surface" => *self.surface = value.to_owned(),
-                    "phase" => *self.phase = value.to_owned(),
-                    _ => {}
-                }
-            }
-        }
-
-        let capture = Capture::default();
-        let events = capture.events.clone();
-        let subscriber = Registry::default()
-            .with(capture)
-            .with(tracing_subscriber::filter::LevelFilter::TRACE);
-
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
         let pack = json!({"hash": "blake3:trace", "items": [{"id": "mem_1"}]});
-        let mut outcome: TestResult = Ok(());
-        with_default(subscriber, || {
-            outcome = (|| -> TestResult {
-                // miss, then write, then hit: one call per phase under test.
-                cache
-                    .get_at("blake3:trace-key", 100)
-                    .map_err(|error| error.to_string())?;
-                cache
-                    .put_at("blake3:trace-key", &pack, 100)
-                    .map_err(|error| error.to_string())?;
-                cache
-                    .get_at("blake3:trace-key", 120)
-                    .map_err(|error| error.to_string())?;
-                cache
-                    .evict_best_effort_at(130)
-                    .map_err(|error| error.to_string())?;
-                Ok(())
-            })();
+        let (outcome, phases) = capture_pack_l2_phases(|| -> TestResult {
+            // miss, then write, then hit: one call per phase under test.
+            cache
+                .get_at("blake3:trace-key", 100)
+                .map_err(|error| error.to_string())?;
+            cache
+                .put_at("blake3:trace-key", &pack, 100)
+                .map_err(|error| error.to_string())?;
+            cache
+                .get_at("blake3:trace-key", 120)
+                .map_err(|error| error.to_string())?;
+            cache
+                .evict_best_effort_at(130)
+                .map_err(|error| error.to_string())?;
+            Ok(())
         });
         outcome?;
 
-        let captured = events.lock().expect("capture lock").clone();
-
-        // EMPTY-WORLD GUARD. Zero captured events means the subscriber never
-        // saw anything, and every containment check below would pass
-        // vacuously by finding nothing to contradict it.
+        // EMPTY-WORLD GUARD. Zero captured phases means the subscriber never
+        // saw a surface=pack_cache_l2 event, and every containment check below
+        // would pass vacuously by finding nothing to contradict it.
         assert!(
-            !captured.is_empty(),
-            "capture layer received NO events at all; the harness is broken, \
-             not the instrumentation"
-        );
-
-        let ours: Vec<&(String, String, String)> = captured
-            .iter()
-            .filter(|(target, surface, _)| target == "ee::pack_l2" && surface == "pack_cache_l2")
-            .collect();
-        assert!(
-            !ours.is_empty(),
+            !phases.is_empty(),
             "no event carried target ee::pack_l2 with surface=pack_cache_l2; \
-             captured {} events in total",
-            captured.len()
+             the harness is broken, not the instrumentation"
         );
 
         for expected in ["lookup", "miss", "write", "hit", "evict"] {
             assert!(
-                ours.iter().any(|(_, _, phase)| phase == expected),
-                "phase {expected:?} never reached the subscriber; observed phases: {:?}",
-                ours.iter().map(|(_, _, p)| p.as_str()).collect::<Vec<_>>()
+                phases.iter().any(|phase| phase == expected),
+                "phase {expected:?} never reached the subscriber; observed phases: {phases:?}"
             );
         }
+        Ok(())
+    }
+
+    /// bd-ndzfg.4: a corrupt entry ON DISK is the `corruption` phase. The
+    /// lookup decodes such an entry to a corruption-class miss, never to an
+    /// error, so before this fix the trace said `miss` while the response
+    /// carried `l2_pack_cache_corruption`.
+    #[test]
+    fn corrupt_entry_on_disk_traces_the_corruption_phase() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let report = cache
+            .put_at(
+                "blake3:corrupt-key",
+                &json!({"hash": "blake3:corrupt"}),
+                100,
+            )
+            .map_err(|error| error.to_string())?;
+        // THE TRIGGER: the published entry's bytes no longer decode.
+        fs::write(&report.path, b"planted corrupt cache payload")
+            .map_err(|error| error.to_string())?;
+
+        let (lookup, phases) = capture_pack_l2_phases(|| cache.get_at("blake3:corrupt-key", 120));
+        // The trigger fired: the lookup saw a corruption-class miss.
+        match lookup.map_err(|error| error.to_string())? {
+            PackL2CacheLookup::Miss(miss) => assert!(
+                miss.reason.is_corruption(),
+                "planted bytes should be a corruption-class miss, got {:?}",
+                miss.reason
+            ),
+            PackL2CacheLookup::Hit(_) => return Err("a corrupt entry must not hit".to_owned()),
+        }
+        assert_eq!(
+            phases,
+            ["lookup", "corruption"],
+            "a corrupt entry must end its lookup in the corruption phase"
+        );
+        Ok(())
+    }
+
+    /// bd-ndzfg.4: an unusable cache directory is the `unavailable` phase. The
+    /// trigger is a cache root that is a regular FILE (ENOTDIR), which a root
+    /// user cannot bypass the way it bypasses a permission bit.
+    #[test]
+    fn unreadable_cache_root_traces_the_unavailable_phase() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_root = temp.path().join("not-a-directory");
+        // THE TRIGGER: the cache root is a regular file.
+        fs::write(&file_root, b"already a file").map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(file_root, PackL2CacheOptions::default());
+
+        let (lookup, phases) = capture_pack_l2_phases(|| cache.get_at("blake3:key", 100));
+        // The trigger fired: the lookup returned an IO error, not a miss.
+        match lookup {
+            Err(PackL2CacheError::Io { .. }) => {}
+            Err(other) => return Err(format!("expected an IO error, got {other}")),
+            Ok(_) => return Err("a file cache root must not answer a lookup".to_owned()),
+        }
+        assert_eq!(
+            phases,
+            ["lookup", "unavailable"],
+            "an unusable cache directory must end its lookup in the unavailable phase"
+        );
+        Ok(())
+    }
+
+    /// bd-ndzfg.4: a failed write is the `unavailable` phase, as the response
+    /// is `l2_pack_cache_unavailable`. Exercised through the compressed entry
+    /// point, which is the one `ee context` uses.
+    #[test]
+    fn failed_write_traces_the_unavailable_phase() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_root = temp.path().join("not-a-directory");
+        // THE TRIGGER: the cache root is a regular file.
+        fs::write(&file_root, b"already a file").map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(file_root, PackL2CacheOptions::default());
+
+        let (write, phases) = capture_pack_l2_phases(|| {
+            cache.put_compressed_at("blake3:key", &json!({"hash": "blake3:write"}), 100)
+        });
+        // The trigger fired: the write returned an IO error.
+        match write {
+            Err(PackL2CacheError::Io { .. }) => {}
+            Err(other) => return Err(format!("expected an IO error, got {other}")),
+            Ok(_) => return Err("a file cache root must not accept a write".to_owned()),
+        }
+        assert_eq!(
+            phases,
+            ["write", "unavailable"],
+            "a failed write must be followed by the unavailable phase"
+        );
         Ok(())
     }
 

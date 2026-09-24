@@ -6643,6 +6643,330 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    /// Everything `context_pack_l2_try_hit` needs, with the cache at
+    /// `cache_root`. bd-ndzfg.4.
+    struct L2TryHitFixture {
+        connection: DbConnection,
+        options: super::ContextPackOptions,
+        search_options: SearchOptions,
+        request: ContextRequest,
+        l2_context: super::ContextPackL2Context,
+    }
+
+    fn l2_try_hit_fixture(root: &Path, cache_root: PathBuf) -> Result<L2TryHitFixture, String> {
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let cache = crate::cache::pack_l2::PackL2Cache::new(
+            cache_root,
+            crate::cache::pack_l2::PackL2CacheOptions::default(),
+        );
+        let request =
+            ContextRequest::from_query("l2 phase invariant").map_err(|error| error.to_string())?;
+        let output_options =
+            super::ContextPackOutputOptions::default().with_cache_json_response(true);
+        let options = super::ContextPackOptions {
+            task_paths: Vec::new(),
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            query: request.query.clone(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            // Verified, not Swarm: the Swarm scope makes the mutable-state
+            // bypass depend on whether a global store exists on this host.
+            memory_scope: MemoryScope::Verified,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options,
+            persist_pack: false,
+            baseline_write: None,
+            no_lod: false,
+        };
+        let search_options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            query: request.query.clone(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Verified,
+            strict_scope: false,
+        };
+        let key_input = super::PackL2CacheKeyInput {
+            workspace_id: "wsp_l2_phase_invariant".to_owned(),
+            database_identity: database_path.as_os_str().as_encoded_bytes().to_vec(),
+            database_generation: 1,
+            index_generation: super::context_pack_l2_index_generation(&options)?,
+            graph_generation: None,
+            embed_backend: EmbedBackend::HashFallback,
+            redaction_level: options.redaction_level,
+            request: request.clone(),
+            output_options,
+            include_legacy_selection_certificate: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
+            context_feature_flags_hash: "blake3:test-features".to_owned(),
+            personalization_generation: None,
+        };
+        let l2_context = super::ContextPackL2Context {
+            cache,
+            key: super::compute_pack_l2_cache_key(&key_input),
+            key_input,
+        };
+        Ok(L2TryHitFixture {
+            connection,
+            options,
+            search_options,
+            request,
+            l2_context,
+        })
+    }
+
+    /// A stored L2 payload whose inner response says it was produced by
+    /// `embed_backend`. `hash_fallback` matches the fixture's key; anything
+    /// else is rejected by this module after the lookup has already hit.
+    fn l2_payload_from_backend(embed_backend: &str) -> serde_json::Value {
+        let response_json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": PACK_COMMAND,
+                "embed_backend": embed_backend,
+                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
+            },
+            "degraded": []
+        })
+        .to_string();
+        serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "responseJson": response_json,
+            "searchAdvisorySnapshot": super::ContextSearchAdvisorySnapshot {
+                rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+                rerank_configured_top_k: 50,
+                rerank_runtime_available: true,
+                rerank_score_count: 0,
+                degraded: Vec::new(),
+            }
+            .cache_json(),
+            "sourceMode": {
+                "requested": "hybrid",
+                "applied": "hybrid",
+                "strict": false,
+                "fallback": false
+            }
+        })
+    }
+
+    /// Run the real L2 lookup and return (hit?, degraded, phases).
+    fn l2_try_hit_capturing(
+        fixture: &L2TryHitFixture,
+    ) -> (
+        bool,
+        Vec<crate::pack::ContextResponseDegradation>,
+        Vec<String>,
+    ) {
+        let ((hit, degraded), phases) = crate::cache::pack_l2::capture_pack_l2_phases(|| {
+            let mut trace = super::ContextPerformanceTrace::default();
+            let mut degraded = Vec::new();
+            let hit = super::context_pack_l2_try_hit(
+                &fixture.l2_context,
+                PACK_COMMAND,
+                &fixture.options,
+                &fixture.search_options,
+                &fixture.connection,
+                &fixture.request,
+                std::time::Instant::now(),
+                &mut trace,
+                &mut degraded,
+            )
+            .is_some();
+            (hit, degraded)
+        });
+        (hit, degraded, phases)
+    }
+
+    /// THE INVARIANT (bd-ndzfg.4): every L2 degraded code in a response has a
+    /// matching `surface=pack_cache_l2` phase event. `expected_code` must be
+    /// present, so a fault whose trigger never fired cannot pass by emitting
+    /// nothing at all.
+    fn assert_l2_codes_have_phase_events(
+        degraded: &[crate::pack::ContextResponseDegradation],
+        phases: &[String],
+        expected_code: &str,
+    ) {
+        let codes: Vec<&str> = degraded
+            .iter()
+            .map(|entry| entry.code.as_str())
+            .filter(|code| code.starts_with("l2_pack_cache_"))
+            .collect();
+        assert!(
+            codes.contains(&expected_code),
+            "the trigger did not fire: expected {expected_code}, the response carried {codes:?}"
+        );
+        for code in codes {
+            let phase = match code {
+                "l2_pack_cache_corruption" => "corruption",
+                "l2_pack_cache_unavailable" => "unavailable",
+                other => panic!("unregistered L2 degraded code {other}"),
+            };
+            assert!(
+                phases.iter().any(|observed| observed == phase),
+                "the response carries {code} but no phase={phase} event was emitted; phases: {phases:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_corrupt_entry_on_disk_code_has_a_corruption_phase_event() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture = l2_try_hit_fixture(tempdir.path(), tempdir.path().join("pack-l2"))?;
+        let report = fixture
+            .l2_context
+            .cache
+            .put_compressed(
+                &fixture.l2_context.key,
+                &l2_payload_from_backend("hash_fallback"),
+            )
+            .map_err(|error| error.to_string())?;
+        // THE TRIGGER: the stored entry's bytes no longer decode.
+        std::fs::write(&report.path, b"planted corrupt cache payload")
+            .map_err(|error| error.to_string())?;
+
+        let (hit, degraded, phases) = l2_try_hit_capturing(&fixture);
+
+        assert!(!hit, "a corrupt entry must not be served");
+        assert_l2_codes_have_phase_events(&degraded, &phases, "l2_pack_cache_corruption");
+        assert_eq!(phases, ["lookup", "corruption"]);
+        Ok(())
+    }
+
+    #[test]
+    fn l2_hit_rejected_in_context_code_has_a_corruption_phase_event() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture = l2_try_hit_fixture(tempdir.path(), tempdir.path().join("pack-l2"))?;
+        // THE TRIGGER: an entry that decodes (the lookup hits) but whose
+        // response came from a backend the key does not name, so this module
+        // rejects it after the lookup.
+        fixture
+            .l2_context
+            .cache
+            .put_compressed(
+                &fixture.l2_context.key,
+                &l2_payload_from_backend("neural_local"),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (hit, degraded, phases) = l2_try_hit_capturing(&fixture);
+
+        assert!(!hit, "a rejected entry must not be served");
+        assert_l2_codes_have_phase_events(&degraded, &phases, "l2_pack_cache_corruption");
+        // The lookup keeps exactly one terminal phase, `hit`; the rejection is
+        // its own event after it.
+        assert_eq!(phases, ["lookup", "hit", "corruption"]);
+        Ok(())
+    }
+
+    #[test]
+    fn l2_unusable_cache_dir_lookup_code_has_an_unavailable_phase_event() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_root = tempdir.path().join("not-a-directory");
+        // THE TRIGGER: the cache root is a regular file (ENOTDIR).
+        std::fs::write(&file_root, b"already a file").map_err(|error| error.to_string())?;
+        let fixture = l2_try_hit_fixture(tempdir.path(), file_root)?;
+
+        let (hit, degraded, phases) = l2_try_hit_capturing(&fixture);
+
+        assert!(!hit);
+        assert_l2_codes_have_phase_events(&degraded, &phases, "l2_pack_cache_unavailable");
+        assert_eq!(phases, ["lookup", "unavailable"]);
+        Ok(())
+    }
+
+    #[test]
+    fn l2_failed_write_code_has_an_unavailable_phase_event() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_root = tempdir.path().join("not-a-directory");
+        // THE TRIGGER: the cache root is a regular file (ENOTDIR).
+        std::fs::write(&file_root, b"already a file").map_err(|error| error.to_string())?;
+        let mut fixture = l2_try_hit_fixture(tempdir.path(), file_root)?;
+        // Only a persisted producer writes L2.
+        fixture.options.persist_pack = true;
+        let search_report =
+            super::missing_index_search_report("l2 phase invariant", 10, test_runtime_profile());
+        let mut response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(46)))?;
+
+        let ((), phases) = crate::cache::pack_l2::capture_pack_l2_phases(|| {
+            super::context_pack_l2_store(
+                &fixture.l2_context,
+                &fixture.options,
+                &search_report,
+                &mut response,
+            );
+        });
+
+        assert_l2_codes_have_phase_events(
+            &response.data.degraded,
+            &phases,
+            "l2_pack_cache_unavailable",
+        );
+        assert_eq!(phases, ["write", "unavailable"]);
+        Ok(())
+    }
+
+    /// The five key-preparation failures in `context_pack_l2_prepare` all
+    /// report through `push_pack_l2_unavailable`; this pins that the helper
+    /// itself emits the phase. It does not trigger each of the five.
+    #[test]
+    fn l2_key_preparation_unavailable_code_has_an_unavailable_phase_event() {
+        let (degraded, phases) = crate::cache::pack_l2::capture_pack_l2_phases(|| {
+            let mut degraded = Vec::new();
+            super::push_pack_l2_unavailable(
+                &mut degraded,
+                "L2 pack cache key generation could not read graph posture: planted".to_owned(),
+            );
+            degraded
+        });
+
+        assert_l2_codes_have_phase_events(&degraded, &phases, "l2_pack_cache_unavailable");
+        assert_eq!(phases, ["unavailable"]);
+    }
+
     #[test]
     fn l2_cached_response_json_preserves_current_payload_bytes() -> Result<(), String> {
         let response_json = serde_json::json!({

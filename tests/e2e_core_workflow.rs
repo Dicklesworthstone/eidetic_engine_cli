@@ -3376,3 +3376,234 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
 
     Ok(())
 }
+
+/// A success assertion that explains a failure: exit code AND both streams.
+fn ensure_success(output: &Output, label: &str) -> TestResult {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: ee exited {:?}; stderr: {}; stdout: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end(),
+            String::from_utf8_lossy(&output.stdout).trim_end()
+        ))
+    }
+}
+
+/// JSON pointers where `after` differs from `before`: removed keys, changed
+/// scalars, and arrays whose length changed (reported as the array itself).
+fn changed_json_paths(before: &serde_json::Value, after: &serde_json::Value) -> Vec<String> {
+    fn walk(
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+        path: &str,
+        out: &mut Vec<String>,
+    ) {
+        match (before, after) {
+            (serde_json::Value::Object(old), serde_json::Value::Object(new)) => {
+                for (key, old_child) in old {
+                    let child_path = format!("{path}/{key}");
+                    match new.get(key) {
+                        Some(new_child) => walk(old_child, new_child, &child_path, out),
+                        None => out.push(child_path),
+                    }
+                }
+                for key in new.keys().filter(|key| !old.contains_key(*key)) {
+                    out.push(format!("{path}/{key}"));
+                }
+            }
+            (serde_json::Value::Array(old), serde_json::Value::Array(new))
+                if old.len() == new.len() =>
+            {
+                for (index, (old_item, new_item)) in old.iter().zip(new).enumerate() {
+                    walk(old_item, new_item, &format!("{path}/{index}"), out);
+                }
+            }
+            _ if before == after => {}
+            _ => out.push(path.to_owned()),
+        }
+    }
+    let mut out = Vec::new();
+    walk(before, after, "", &mut out);
+    out
+}
+
+/// bd-ndzfg.4 clause (e): a REAL L2 hit is byte-identical to a fresh
+/// read-only pack once the REGISTERED volatile channel is removed, and only
+/// that channel.
+///
+/// The path is real end to end: a persisted producer assembles and publishes
+/// the entry, a read-only request reads it back through the cache, and the
+/// same read-only request with the cache disabled assembles fresh. The
+/// comparison uses only the shared normalizers in src/obs/volatile_fields.rs,
+/// asserts exactly which fields they touched, and asserts pack.hash equal on
+/// the raw responses.
+#[test]
+fn context_pack_l2_hit_is_byte_identical_to_fresh_after_registered_volatile_fields() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_dir = temp.path().join("workspace");
+    let home = temp.path().join("home");
+    for dir in [&workspace_dir, &home] {
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    let workspace = workspace_dir.to_string_lossy().to_string();
+    let pack_cache_dir = temp.path().join("pack-cache");
+    // A private HOME keeps a global store on this host from bypassing L2, so
+    // whether the request hits cannot depend on the worker.
+    let run = |args: &[&str], cache_disabled: bool| -> Result<Output, String> {
+        Command::new(env!("CARGO_BIN_EXE_ee"))
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env_remove("EE_AGENT_NAME")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("EE_L2_PACK_CACHE_DIR", &pack_cache_dir)
+            .env(
+                "EE_L2_PACK_CACHE_DISABLE",
+                if cache_disabled { "true" } else { "false" },
+            )
+            .output()
+            .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    };
+
+    let init = run(&["--workspace", &workspace, "init", "--json"], false)?;
+    ensure_success(&init, "init")?;
+    // No file: provenance: file-backed evidence bypasses L2 by design.
+    for (index, content) in [
+        "Release verification runs the full checklist before tagging.",
+        "The release checklist requires a clean formatting check.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let remember = run(
+            &[
+                "--workspace",
+                &workspace,
+                "remember",
+                content,
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+                "--json",
+            ],
+            false,
+        )?;
+        ensure_success(&remember, &format!("remember {index}"))?;
+    }
+    let rebuild = run(
+        &["--workspace", &workspace, "index", "rebuild", "--json"],
+        false,
+    )?;
+    ensure_success(&rebuild, "index rebuild")?;
+
+    let as_of = chrono::Utc::now().to_rfc3339();
+    let pack_args = [
+        "--workspace",
+        workspace.as_str(),
+        "pack",
+        "release checklist verification",
+        "--source-mode",
+        "lexical-only",
+        "--as-of",
+        as_of.as_str(),
+        "--json",
+    ];
+    let producer = run(&pack_args, false)?;
+    persist_artifact("l2_identity_producer", &producer);
+    ensure_success(&producer, "persisted producer pack")?;
+
+    let mut readonly_args = pack_args.to_vec();
+    readonly_args.insert(readonly_args.len() - 1, "--read-only");
+    // The hit is observed, not assumed: the same read-only key with
+    // --explain-performance reports the cache status.
+    let mut probe_args = readonly_args.clone();
+    probe_args.insert(probe_args.len() - 1, "--explain-performance");
+    let probe = run(&probe_args, false)?;
+    persist_artifact("l2_identity_probe", &probe);
+    ensure_success(&probe, "read-only cache probe")?;
+    ensure_equal(
+        &stdout_json(&probe)?
+            .pointer("/data/cache/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("hit"),
+        "the read-only request must be served from the producer's L2 entry",
+    )?;
+
+    let hit = run(&readonly_args, false)?;
+    persist_artifact("l2_identity_hit", &hit);
+    ensure_success(&hit, "read-only L2 hit")?;
+    assert_stderr_empty(&hit, "read-only L2 hit")?;
+    let fresh = run(&readonly_args, true)?;
+    persist_artifact("l2_identity_fresh", &fresh);
+    ensure_success(&fresh, "read-only fresh pack")?;
+    assert_stderr_empty(&fresh, "read-only fresh pack")?;
+
+    let hit_json = stdout_json(&hit)?;
+    let fresh_json = stdout_json(&fresh)?;
+    let hit_hash = hit_json.pointer("/data/pack/hash").cloned();
+    ensure(hit_hash.is_some(), "the hit response must carry pack.hash")?;
+    ensure_equal(
+        &hit_hash,
+        &fresh_json.pointer("/data/pack/hash").cloned(),
+        "pack.hash of the L2 hit and of the fresh pack",
+    )?;
+
+    // Only the registered channel: the SLO timing measurements, then the
+    // wall-clock degradation and the counts derived from it.
+    let normalize = |label: &str,
+                     value: &serde_json::Value|
+     -> Result<(serde_json::Value, Vec<String>, usize), String> {
+        let mut normalized = value.clone();
+        ensure(
+            ee::obs::normalize_pack_slo_measurements(&mut normalized)?,
+            format!("{label}: the response must carry a validated pack SLO"),
+        )?;
+        let slo_paths = changed_json_paths(value, &normalized);
+        let before_timing = normalized.clone();
+        let timing_dropped = ee::obs::normalize_pack_timing_degradations(&mut normalized);
+        let timing_paths = changed_json_paths(&before_timing, &normalized);
+        ensure_equal(
+            &timing_paths.is_empty(),
+            &(timing_dropped == 0),
+            &format!("{label}: timing normalizer changes {timing_paths:?}"),
+        )?;
+        Ok((normalized, slo_paths, timing_dropped))
+    };
+    let expected_slo_paths = vec![
+        "/data/pack/slo/actuals/elapsedMs".to_owned(),
+        "/data/pack/slo/elapsedStatus".to_owned(),
+        "/data/pack/slo/status".to_owned(),
+    ];
+    let (hit_normalized, hit_slo_paths, hit_timing) = normalize("hit", &hit_json)?;
+    let (fresh_normalized, fresh_slo_paths, fresh_timing) = normalize("fresh", &fresh_json)?;
+    for (label, paths) in [("hit", &hit_slo_paths), ("fresh", &fresh_slo_paths)] {
+        let mut sorted = paths.clone();
+        sorted.sort();
+        ensure_equal(
+            &sorted,
+            &expected_slo_paths,
+            &format!("{label}: the SLO normalizer touched exactly these 3 registered fields"),
+        )?;
+    }
+    println!(
+        "l2 identity: SLO fields touched hit={} fresh={}; timing degradations dropped hit={hit_timing} fresh={fresh_timing}",
+        hit_slo_paths.len(),
+        fresh_slo_paths.len()
+    );
+
+    let hit_bytes = serde_json::to_string(&hit_normalized).map_err(|error| error.to_string())?;
+    let fresh_bytes =
+        serde_json::to_string(&fresh_normalized).map_err(|error| error.to_string())?;
+    ensure(
+        hit_bytes == fresh_bytes,
+        format!(
+            "the L2 hit and the fresh pack differ outside the registered volatile channel at {:?}",
+            changed_json_paths(&fresh_normalized, &hit_normalized)
+        ),
+    )
+}
