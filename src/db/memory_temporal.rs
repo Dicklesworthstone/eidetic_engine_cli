@@ -7,14 +7,14 @@
 //! stored value so a concurrent writer cannot be lost.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use sqlmodel_core::Value;
 
 use super::{
     DbConnection, DbError, DbOperation, Result, StoredMemory, TagCount, canonicalize_tag_filter,
-    optional_text, required_f64, required_text, stored_memory_from_row,
+    optional_text, required_text, stored_memory_from_row,
 };
 
 const MEMORY_COLUMNS: &str = "id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to";
@@ -181,16 +181,30 @@ impl Drop for ReadScope<'_> {
     }
 }
 
-/// SQL's Julian day is a coarse ordering hint ONLY. Consume a complete tied
-/// bucket before applying the caller's limit; all eligibility and final ordering
-/// use exact instants. Page size and retained candidates are bounded. A corpus
-/// with many ineligible rows or a large tied bucket cannot starve valid results
-/// merely because those rows filled the first SQL LIMIT.
+/// Read lightweight applicability metadata once, by an identity cursor, and
+/// retain only the best `limit` identities. Exact instants, not SQL's date
+/// parser or an approximate sort key, decide eligibility and final ordering.
+/// Expired/future history cannot exhaust an early candidate page. Body loading
+/// is deferred until selection is complete, in bind-safe batches inside the
+/// SAME snapshot. The all-history resume path does not repeatedly sort and skip
+/// full memory bodies through increasing OFFSETs.
 pub(super) fn recent(
     db: &DbConnection,
     workspace: &str,
     as_of: &str,
     limit: u32,
+) -> Result<Vec<StoredMemory>> {
+    recent_with_boundary(db, workspace, as_of, limit, || Ok(()))
+}
+
+// Test seam for a real second writer between selection and hydration. It does
+// not replace the database, relax admission, or run outside the owned scope.
+fn recent_with_boundary(
+    db: &DbConnection,
+    workspace: &str,
+    as_of: &str,
+    limit: u32,
+    after_selection: impl FnOnce() -> Result<()>,
 ) -> Result<Vec<StoredMemory>> {
     let at = reference(as_of)?;
     if limit == 0 {
@@ -198,40 +212,44 @@ pub(super) fn recent(
     }
     let limit = usize::try_from(limit).map_err(|_| malformed("Memory recency limit overflow"))?;
     let snapshot = ReadScope::begin(db)?;
-    let mut selected = BTreeMap::<(Reverse<DateTime<Utc>>, String), (StoredMemory, f64)>::new();
-    let mut offset = 0_u64;
-    'pages: loop {
-        let rows = db.query(
-            &format!("SELECT {MEMORY_COLUMNS}, superseded_at, julianday(created_at) AS created_day FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) IS NOT NULL ORDER BY julianday(created_at) DESC, id ASC LIMIT ?2 OFFSET ?3"),
-            &[Value::Text(workspace.to_owned()), Value::BigInt(PAGE_SIZE as i64), Value::from_u64_clamped(offset)],
-        )?;
+    let mut selected = BTreeSet::<(Reverse<DateTime<Utc>>, String)>::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        // IDs are only a traversal cursor, never a substitute for chronology.
+        // Keeping dates in SQL would both repeat a computed sort per page and
+        // let that parser silently discard instants accepted by our contract.
+        let mut sql = "SELECT id, created_at, updated_at, valid_from, valid_to, superseded_at FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL".to_owned();
+        let mut parameters = vec![
+            Value::Text(workspace.to_owned()),
+            Value::BigInt(PAGE_SIZE as i64),
+        ];
+        if let Some(after) = &cursor {
+            sql.push_str(" AND id > ?3");
+            parameters.push(Value::Text(after.clone()));
+        }
+        sql.push_str(" ORDER BY id ASC LIMIT ?2");
+        let rows = db.query(&sql, &parameters)?;
         for row in &rows {
-            let coarse = required_f64(row, 23, DbOperation::Query, "created_day")?;
-            if !coarse.is_finite() {
-                return Err(malformed("Memory creation ordering is not finite"));
+            let id = required_text(row, 0, DbOperation::Query, "id")?;
+            if cursor.as_deref().is_some_and(|previous| id <= previous) {
+                return Err(malformed("Memory recency cursor did not advance"));
             }
-            if selected.len() == limit
-                && selected
-                    .last_key_value()
-                    .is_some_and(|(_, (_, day))| coarse < *day)
-            {
-                break 'pages;
-            }
-            let memory = stored_memory_from_row(row)?;
-            let (Some(created), Some(updated)) =
-                (instant(&memory.created_at), instant(&memory.updated_at))
-            else {
+            cursor = Some(id.to_owned());
+            let (Some(created), Some(updated)) = (
+                instant(required_text(row, 1, DbOperation::Query, "created_at")?),
+                instant(required_text(row, 2, DbOperation::Query, "updated_at")?),
+            ) else {
                 continue;
             };
             if created > at
                 || updated > at
-                || !admits_bound(memory.valid_from.as_deref(), at, |start, at| start <= at)
-                || !admits_bound(memory.valid_to.as_deref(), at, |end, at| end >= at)
-                || !admits_bound(optional_text(row, 22)?, at, |end, at| end > at)
+                || !admits_bound(optional_text(row, 3)?, at, |start, at| start <= at)
+                || !admits_bound(optional_text(row, 4)?, at, |end, at| end >= at)
+                || !admits_bound(optional_text(row, 5)?, at, |end, at| end > at)
             {
                 continue;
             }
-            selected.insert((Reverse(created), memory.id.clone()), (memory, coarse));
+            selected.insert((Reverse(created), id.to_owned()));
             if selected.len() > limit {
                 selected.pop_last();
             }
@@ -239,12 +257,30 @@ pub(super) fn recent(
         if rows.len() < PAGE_SIZE {
             break;
         }
-        offset = offset
-            .checked_add(rows.len() as u64)
-            .ok_or_else(|| malformed("Memory recency page overflow"))?;
+    }
+    after_selection()?;
+    let ids: Vec<_> = selected.into_iter().map(|(_, id)| id).collect();
+    let mut memories = Vec::with_capacity(ids.len());
+    for page in ids.chunks(PAGE_SIZE) {
+        let page_ids: Vec<_> = page.iter().map(String::as_str).collect();
+        let mut loaded = db.get_memories_batch(&page_ids)?;
+        for id in page_ids {
+            let memory = loaded
+                .remove(id)
+                .ok_or_else(|| malformed("Selected memory is missing from the read snapshot"))?;
+            if memory.id != id
+                || memory.workspace_id != workspace
+                || memory.tombstoned_at.is_some()
+            {
+                return Err(malformed(
+                    "Selected memory does not belong to the read snapshot",
+                ));
+            }
+            memories.push(memory);
+        }
     }
     snapshot.finish()?;
-    Ok(selected.into_values().map(|(memory, _)| memory).collect())
+    Ok(memories)
 }
 
 #[derive(Clone, Copy)]
@@ -306,3 +342,7 @@ pub(super) fn tighten_end(
 #[cfg(test)]
 #[path = "memory_temporal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "memory_recent_scan_tests.rs"]
+mod recent_scan_tests;
