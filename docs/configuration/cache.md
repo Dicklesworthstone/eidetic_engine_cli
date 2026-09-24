@@ -57,7 +57,9 @@ alias does not inspect this directory because it bypasses L2.
 For eligible requests, the L2 key is a BLAKE3 hash of the inputs that can affect
 emitted pack content. Inputs without a supported freshness identity cause a
 bypass rather than an incomplete key.
-The canonical key schema is `ee.pack.l2_cache_key.v6`. Addressed store identity,
+The canonical key schema is `ee.pack.l2_cache_key.v7`. It moved from v6 when
+the pack hash moved to input schema `ee.pack.hash_input.v2` (ADR 0087), so an
+entry cached under the old hash misses instead of replaying it. Addressed store identity,
 logical generations, and the emitted embedding backend are separate inputs.
 At minimum, the canonical input set includes:
 

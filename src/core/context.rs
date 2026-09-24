@@ -130,7 +130,9 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V6: &str = "ee.pack.l2_cache_key.v6";
+/// v7: a cached response carries its snapshot identity, so entries written
+/// under pack-hash input v1 must miss rather than replay (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V7: &str = "ee.pack.l2_cache_key.v7";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -3898,7 +3900,7 @@ async fn run_context_pack_with_performance_inner(
         &consensus_conflicts,
         draft.items.len(),
     );
-    refresh_context_pack_hash(
+    let mut pack_hash_components = refresh_context_pack_hash(
         &request,
         &mut draft,
         &response_degraded,
@@ -4006,7 +4008,7 @@ async fn run_context_pack_with_performance_inner(
             message,
             Some(repair),
         );
-        refresh_context_pack_hash(
+        pack_hash_components = refresh_context_pack_hash(
             &request,
             &mut draft,
             &response_degraded,
@@ -4052,6 +4054,7 @@ async fn run_context_pack_with_performance_inner(
     response.data.consensus = consensus_conflicts.consensus;
     response.data.conflicts = consensus_conflicts.conflicts;
     response.data.coordination = coordination;
+    response.data.pack_hash_components = Some(pack_hash_components);
     if pagination_info.applied {
         response.data.pagination = Some(pagination_info.into_response());
     }
@@ -4089,7 +4092,9 @@ async fn run_context_pack_with_performance_inner(
         let degraded_count_before_l2_store = response.data.degraded.len();
         context_pack_l2_store(l2_context, options, &search_report, &mut response);
         if response.data.degraded.len() != degraded_count_before_l2_store {
-            refresh_context_pack_hash(
+            // `response.data.degraded` already holds the timing entry here;
+            // the v2 hash drops it by construction (ADR 0087 §5).
+            let pack_hash_components = refresh_context_pack_hash(
                 &response.data.request,
                 &mut response.data.pack,
                 &response.data.degraded,
@@ -4098,6 +4103,7 @@ async fn run_context_pack_with_performance_inner(
                 read_snapshot_generation,
                 options.task_lens.as_ref(),
             );
+            response.data.pack_hash_components = Some(pack_hash_components);
             if let Some(profile) = response.data.agent_profile.as_mut() {
                 set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
             }
@@ -8188,7 +8194,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V6.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V7.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -8441,6 +8447,9 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     components.composite_hash
 }
 
+/// Set `draft.hash` and return the component digests behind it, which the
+/// caller carries to the response's snapshot identity.
+#[must_use]
 fn refresh_context_pack_hash(
     request: &ContextRequest,
     draft: &mut crate::pack::PackDraft,
@@ -8449,8 +8458,8 @@ fn refresh_context_pack_hash(
     coordination: Option<&PackCoordinationSnapshot>,
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
-) {
-    let hash = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+) -> crate::pack::PackHashComponentDigests {
+    let components = compute_pack_hash_components(
         request,
         draft,
         degraded,
@@ -8459,18 +8468,26 @@ fn refresh_context_pack_hash(
         read_snapshot_generation,
         task_lens,
     );
-    draft.hash = Some(hash);
+    log_pack_hash_components(&components);
+    draft.hash = Some(components.composite_hash);
+    components.digests
 }
 
 #[derive(Debug)]
 struct PackHashComponents {
-    pack_request_hash: String,
-    draft_items_hash: String,
-    degraded_summary_hash: String,
-    rendered_text_hash: String,
+    digests: crate::pack::PackHashComponentDigests,
     composite_hash: String,
 }
 
+/// The v2 pack hash (ADR 0087 §4, §7, §8).
+///
+/// Each component is its own blake3 hasher, opened with the input schema tag
+/// and the component name, over labeled, length-prefixed fields only
+/// (`hash_labeled_*`), so no two field sequences can feed the same bytes. The
+/// composite hashes the schema tag and the tagged component digests, never raw
+/// fields, which is what lets a differing composite name the component that
+/// differs. `omitted` enters the composite only when skipped items are shown,
+/// and `rendered_text` only when the text is shown, as in v1.
 fn compute_pack_hash_components(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -8480,19 +8497,48 @@ fn compute_pack_hash_components(
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
 ) -> PackHashComponents {
-    use blake3::Hasher;
+    let canonical_degraded = canonical_pack_hash_degraded(degraded);
 
-    let mut request_hasher = Hasher::new();
-    request_hasher.update(request.query.as_bytes());
-    request_hasher.update(request.profile.as_str().as_bytes());
-    request_hasher.update(&request.budget.max_tokens().to_le_bytes());
-    request_hasher.update(output_options.profile.as_str().as_bytes());
-    request_hasher.update(output_options.resource_profile.as_str().as_bytes());
-    request_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
-    request_hasher.update(&[u8::from(output_options.include_rendered_text)]);
-    request_hasher.update(&[u8::from(output_options.include_skipped)]);
-    request_hasher.update(&[u8::from(output_options.include_meta)]);
-    request_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
+    let mut request_hasher = pack_hash_component_hasher("request");
+    hash_labeled_bytes(&mut request_hasher, "query", request.query.as_bytes());
+    hash_labeled_bytes(
+        &mut request_hasher,
+        "profile",
+        request.profile.as_str().as_bytes(),
+    );
+    hash_labeled_u64(
+        &mut request_hasher,
+        "budget.max_tokens",
+        u64::from(request.budget.max_tokens()),
+    );
+    hash_labeled_bytes(
+        &mut request_hasher,
+        "output.profile",
+        output_options.profile.as_str().as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut request_hasher,
+        "output.resource_profile",
+        output_options.resource_profile.as_str().as_bytes(),
+    );
+    for (label, value) in [
+        (
+            "output.include_coverage_fill",
+            output_options.include_coverage_fill,
+        ),
+        (
+            "output.include_rendered_text",
+            output_options.include_rendered_text,
+        ),
+        ("output.include_skipped", output_options.include_skipped),
+        ("output.include_meta", output_options.include_meta),
+        (
+            "output.include_verbose_meta",
+            output_options.include_verbose_meta,
+        ),
+    ] {
+        hash_labeled_bool(&mut request_hasher, label, value);
+    }
     hash_labeled_optional_u64(
         &mut request_hasher,
         "read_snapshot_generation",
@@ -8501,234 +8547,422 @@ fn compute_pack_hash_components(
     hash_context_task_lens(&mut request_hasher, task_lens);
     task_paths::hash(&mut request_hasher, &request.task_paths);
 
-    let mut draft_hasher = Hasher::new();
-    draft_hasher.update(&draft.used_tokens.to_le_bytes());
+    let mut items_hasher = pack_hash_component_hasher("items");
+    hash_labeled_u64(
+        &mut items_hasher,
+        "used_tokens",
+        u64::from(draft.used_tokens),
+    );
+    hash_labeled_count(&mut items_hasher, "item.count", draft.items.len());
+    for item in &draft.items {
+        hash_pack_hash_item(&mut items_hasher, item);
+    }
+    hash_labeled_count(
+        &mut items_hasher,
+        "evidence.count",
+        draft.evidence_items.len(),
+    );
+    for item in &draft.evidence_items {
+        hash_pack_hash_evidence_item(&mut items_hasher, item);
+    }
+
+    let mut omitted_hasher = pack_hash_component_hasher("omitted");
+    hash_labeled_count(&mut omitted_hasher, "omission.count", draft.omitted.len());
+    for omission in &draft.omitted {
+        hash_labeled_bytes(
+            &mut omitted_hasher,
+            "omission.memory_id",
+            omission.memory_id.to_string().as_bytes(),
+        );
+        hash_labeled_u64(
+            &mut omitted_hasher,
+            "omission.estimated_tokens",
+            u64::from(omission.estimated_tokens),
+        );
+        hash_labeled_bytes(
+            &mut omitted_hasher,
+            "omission.reason",
+            omission.reason.as_str().as_bytes(),
+        );
+        hash_attempt_family_multiplicity(
+            &mut omitted_hasher,
+            omission.attempt_family_multiplicity.as_ref(),
+        );
+    }
+
+    let mut degraded_hasher = pack_hash_component_hasher("degraded");
+    hash_labeled_count(
+        &mut degraded_hasher,
+        "degradation.count",
+        canonical_degraded.len(),
+    );
+    for degradation in &canonical_degraded {
+        hash_labeled_bytes(
+            &mut degraded_hasher,
+            "degradation.code",
+            degradation.code.as_bytes(),
+        );
+        hash_labeled_bytes(
+            &mut degraded_hasher,
+            "degradation.severity",
+            degradation.severity.as_str().as_bytes(),
+        );
+        hash_labeled_bytes(
+            &mut degraded_hasher,
+            "degradation.message",
+            degradation.message.as_bytes(),
+        );
+        hash_labeled_optional_bytes(
+            &mut degraded_hasher,
+            "degradation.repair",
+            degradation.repair.as_deref().map(str::as_bytes),
+        );
+    }
+
+    let mut coordination_hasher = pack_hash_component_hasher("coordination");
+    let coordination_input = coordination.map(coordination_snapshot_hash_input);
+    hash_labeled_optional_bytes(
+        &mut coordination_hasher,
+        "coordination.snapshot",
+        coordination_input.as_deref().map(str::as_bytes),
+    );
 
     let rendered_text = crate::pack::render_context_markdown_with_analysis(
         request,
         draft,
-        degraded,
+        &canonical_degraded,
         &[],
         &[],
         coordination,
     );
-    let mut rendered_text_hasher = Hasher::new();
-    rendered_text_hasher.update(rendered_text.as_bytes());
+    let mut rendered_text_hasher = pack_hash_component_hasher("rendered_text");
+    hash_labeled_bytes(&mut rendered_text_hasher, "text", rendered_text.as_bytes());
 
-    let mut composite_hasher = Hasher::new();
-    composite_hasher.update(request.query.as_bytes());
-    composite_hasher.update(request.profile.as_str().as_bytes());
-    composite_hasher.update(&request.budget.max_tokens().to_le_bytes());
-    composite_hasher.update(output_options.profile.as_str().as_bytes());
-    composite_hasher.update(output_options.resource_profile.as_str().as_bytes());
-    composite_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
-    composite_hasher.update(&[u8::from(output_options.include_rendered_text)]);
-    composite_hasher.update(&[u8::from(output_options.include_skipped)]);
-    composite_hasher.update(&[u8::from(output_options.include_meta)]);
-    composite_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
-    hash_labeled_optional_u64(
+    let digests = crate::pack::PackHashComponentDigests {
+        request: finalize_blake3(request_hasher),
+        items: finalize_blake3(items_hasher),
+        omitted: finalize_blake3(omitted_hasher),
+        degraded: finalize_blake3(degraded_hasher),
+        coordination: finalize_blake3(coordination_hasher),
+        rendered_text: finalize_blake3(rendered_text_hasher),
+    };
+
+    let mut composite_hasher = blake3::Hasher::new();
+    hash_labeled_bytes(
         &mut composite_hasher,
-        "read_snapshot_generation",
-        read_snapshot_generation,
+        "schema",
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V2.as_bytes(),
     );
-    hash_context_task_lens(&mut composite_hasher, task_lens);
-    task_paths::hash(&mut composite_hasher, &request.task_paths);
-    composite_hasher.update(&draft.used_tokens.to_le_bytes());
+    hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
+    hash_labeled_bytes(&mut composite_hasher, "items", digests.items.as_bytes());
+    if output_options.include_skipped {
+        hash_labeled_bytes(&mut composite_hasher, "omitted", digests.omitted.as_bytes());
+    }
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "degraded",
+        digests.degraded.as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "coordination",
+        digests.coordination.as_bytes(),
+    );
     if output_options.include_rendered_text {
-        composite_hasher.update(rendered_text.as_bytes());
-    }
-    if let Some(coordination) = coordination {
-        composite_hasher.update(coordination_snapshot_hash_input(coordination).as_bytes());
-    }
-
-    for item in &draft.items {
-        for hasher in [&mut draft_hasher, &mut composite_hasher] {
-            hasher.update(item.memory_id.to_string().as_bytes());
-            hasher.update(&item.rank.to_le_bytes());
-            hasher.update(item.section.as_str().as_bytes());
-            hasher.update(item.content.as_bytes());
-            hasher.update(&item.estimated_tokens.to_le_bytes());
-            hasher.update(&crate::pack::q20_12_le_bytes(item.relevance.into_inner()));
-            hasher.update(&crate::pack::q20_12_le_bytes(item.utility.into_inner()));
-            if let Some(proximity_to_seed) = item.proximity_to_seed {
-                hasher.update(&crate::pack::q20_12_le_bytes(proximity_to_seed));
-            }
-            if let Some(score_breakdown) = item.score_breakdown {
-                hasher.update(&crate::pack::q20_12_le_bytes(score_breakdown.text_score));
-                hasher.update(&crate::pack::q20_12_le_bytes(score_breakdown.ppr_score));
-                hasher.update(&crate::pack::q20_12_le_bytes(
-                    score_breakdown.combined_score,
-                ));
-            }
-            hash_attempt_family_multiplicity(hasher, item.attempt_family_multiplicity.as_ref());
-            hasher.update(item.why.as_bytes());
-            hasher.update(item.selected_in.as_str().as_bytes());
-        }
-        for provenance in &item.provenance {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(provenance.uri.to_string().as_bytes());
-                hasher.update(provenance.note.as_bytes());
-            }
-        }
-        if let Some(diversity_key) = &item.diversity_key {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(diversity_key.as_bytes());
-            }
-        }
-        for hasher in [&mut draft_hasher, &mut composite_hasher] {
-            hasher.update(item.trust.class.as_str().as_bytes());
-            if item.trust.subclass.as_deref() == Some("procedural_rule") {
-                // Bind changed authority semantics even when rendered text
-                // is omitted; old authoritative rule packs have another hash.
-                hash_labeled_bytes(hasher, "procedural_rule_posture_policy", b"advisory.v1");
-            }
-        }
-        if let Some(subclass) = &item.trust.subclass {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(subclass.as_bytes());
-            }
-        }
-        if let Some(tombstoned_at) = &item.tombstoned_at {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(tombstoned_at.as_bytes());
-            }
-        }
-        if let Some(lifecycle) = &item.lifecycle {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(lifecycle.validity_status.as_bytes());
-                hasher.update(lifecycle.validity_window_kind.as_bytes());
-            }
-            if let Some(valid_from) = &lifecycle.valid_from {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(valid_from.as_bytes());
-                }
-            }
-            if let Some(valid_to) = &lifecycle.valid_to {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(valid_to.as_bytes());
-                }
-            }
-        }
-        for redaction in &item.redactions {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(redaction.reason.as_bytes());
-                hasher.update(redaction.placeholder.as_bytes());
-            }
-        }
-        for facet in &item.freshness_facets {
-            for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                hasher.update(facet.kind.as_bytes());
-                hasher.update(facet.freshness.as_bytes());
-                hasher.update(&[u8::from(facet.stale_anchor)]);
-                hasher.update(facet.drift_status.as_bytes());
-                hasher.update(facet.severity.as_bytes());
-                hasher.update(facet.top_reason.as_bytes());
-                hasher.update(facet.revalidation_command.as_bytes());
-            }
-            if let Some(degraded_code) = &facet.degraded_code {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(degraded_code.as_bytes());
-                }
-            }
-            if let Some(captured_at_commit) = &facet.captured_at_commit {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(captured_at_commit.as_bytes());
-                }
-            }
-            if let Some(current_commit) = &facet.current_commit {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(current_commit.as_bytes());
-                }
-            }
-            if let Some(commit_distance) = facet.commit_distance {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(&commit_distance.to_le_bytes());
-                }
-            }
-            for changed_region in &facet.changed_regions {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(changed_region.as_bytes());
-                }
-            }
-            for anchor in &facet.anchors {
-                for hasher in [&mut draft_hasher, &mut composite_hasher] {
-                    hasher.update(anchor.anchor_kind.as_bytes());
-                    hasher.update(anchor.anchor_value_hash.as_bytes());
-                    hasher.update(anchor.redacted_anchor_value.as_bytes());
-                    hasher.update(anchor.captured_span_hash.as_bytes());
-                    hasher.update(anchor.freshness_state.as_bytes());
-                    hasher.update(anchor.freshness.as_bytes());
-                    hasher.update(&anchor.generation.to_le_bytes());
-                    hasher.update(&[u8::from(anchor.stale_anchor)]);
-                }
-            }
-        }
-    }
-    for item in &draft.evidence_items {
-        for hasher in [&mut draft_hasher, &mut composite_hasher] {
-            hasher.update(b"evidence_span");
-            hasher.update(item.evidence_id.as_bytes());
-            hasher.update(item.entity_revision.as_bytes());
-            hasher.update(item.session_id.as_bytes());
-            hasher.update(&item.start_line.to_le_bytes());
-            hasher.update(&item.end_line.to_le_bytes());
-            hasher.update(&item.rank.to_le_bytes());
-            hasher.update(item.section.as_str().as_bytes());
-            hasher.update(item.content.as_bytes());
-            hasher.update(&item.estimated_tokens.to_le_bytes());
-            hasher.update(&item.relevance.into_inner().to_le_bytes());
-            hasher.update(&item.utility.into_inner().to_le_bytes());
-            hasher.update(item.why.as_bytes());
-            hasher.update(item.trust.class.as_str().as_bytes());
-            if let Some(subclass) = &item.trust.subclass {
-                hasher.update(subclass.as_bytes());
-            }
-            for provenance in &item.provenance {
-                hasher.update(provenance.uri.to_string().as_bytes());
-                hasher.update(provenance.note.as_bytes());
-            }
-        }
-    }
-    for omission in &draft.omitted {
-        draft_hasher.update(omission.memory_id.to_string().as_bytes());
-        draft_hasher.update(&omission.estimated_tokens.to_le_bytes());
-        draft_hasher.update(omission.reason.as_str().as_bytes());
-        hash_attempt_family_multiplicity(
-            &mut draft_hasher,
-            omission.attempt_family_multiplicity.as_ref(),
+        hash_labeled_bytes(
+            &mut composite_hasher,
+            "rendered_text",
+            digests.rendered_text.as_bytes(),
         );
-        if output_options.include_skipped {
-            composite_hasher.update(omission.memory_id.to_string().as_bytes());
-            composite_hasher.update(&omission.estimated_tokens.to_le_bytes());
-            composite_hasher.update(omission.reason.as_str().as_bytes());
-            hash_attempt_family_multiplicity(
-                &mut composite_hasher,
-                omission.attempt_family_multiplicity.as_ref(),
-            );
-        }
-    }
-
-    let mut degraded_hasher = Hasher::new();
-    for degradation in degraded {
-        for hasher in [&mut degraded_hasher, &mut composite_hasher] {
-            hasher.update(degradation.code.as_bytes());
-            hasher.update(degradation.severity.as_str().as_bytes());
-            hasher.update(degradation.message.as_bytes());
-        }
-        if let Some(repair) = &degradation.repair {
-            for hasher in [&mut degraded_hasher, &mut composite_hasher] {
-                hasher.update(repair.as_bytes());
-            }
-        }
     }
 
     PackHashComponents {
-        pack_request_hash: finalize_blake3(request_hasher),
-        draft_items_hash: finalize_blake3(draft_hasher),
-        degraded_summary_hash: finalize_blake3(degraded_hasher),
-        rendered_text_hash: finalize_blake3(rendered_text_hasher),
-        composite_hash: finalize_blake3(composite_hasher),
+        composite_hash: finalize_pack_hash_v2(composite_hasher),
+        digests,
     }
+}
+
+/// The degraded set the v2 pack hash binds (ADR 0087 §4): non-canonical
+/// telemetry codes are dropped, the rest sorted by (code, severity, message,
+/// repair) with exact duplicates removed. Emission order and repetition are
+/// presentation, and timing is telemetry, so neither can fork `pack.hash`,
+/// whichever `refresh_context_pack_hash` call site passes them in.
+fn canonical_pack_hash_degraded(
+    degraded: &[ContextResponseDegradation],
+) -> Vec<ContextResponseDegradation> {
+    let mut canonical: Vec<ContextResponseDegradation> = degraded
+        .iter()
+        .filter(|entry| !crate::pack::is_non_canonical_telemetry_degradation_code(&entry.code))
+        .cloned()
+        .collect();
+    canonical.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then_with(|| left.severity.as_str().cmp(right.severity.as_str()))
+            .then_with(|| left.message.cmp(&right.message))
+            .then_with(|| left.repair.cmp(&right.repair))
+    });
+    canonical.dedup();
+    canonical
+}
+
+fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(
+        &mut hasher,
+        "schema",
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V2.as_bytes(),
+    );
+    hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
+    hasher
+}
+
+fn hash_labeled_count(hasher: &mut blake3::Hasher, label: &str, count: usize) {
+    hash_labeled_u64(hasher, label, u64::try_from(count).unwrap_or(u64::MAX));
+}
+
+fn hash_labeled_optional_bytes(hasher: &mut blake3::Hasher, label: &str, value: Option<&[u8]>) {
+    hash_labeled_bool(hasher, &format!("{label}.present"), value.is_some());
+    if let Some(value) = value {
+        hash_labeled_bytes(hasher, label, value);
+    }
+}
+
+fn hash_labeled_q20_12(hasher: &mut blake3::Hasher, label: &str, value: f32) {
+    hash_labeled_bytes(hasher, label, &crate::pack::q20_12_le_bytes(value));
+}
+
+fn hash_pack_hash_provenance(
+    hasher: &mut blake3::Hasher,
+    label: &str,
+    provenance: &[crate::pack::PackProvenance],
+) {
+    hash_labeled_count(hasher, &format!("{label}.count"), provenance.len());
+    for entry in provenance {
+        hash_labeled_bytes(
+            hasher,
+            &format!("{label}.uri"),
+            entry.uri.to_string().as_bytes(),
+        );
+        hash_labeled_bytes(hasher, &format!("{label}.note"), entry.note.as_bytes());
+    }
+}
+
+fn hash_pack_hash_item(hasher: &mut blake3::Hasher, item: &crate::pack::PackDraftItem) {
+    hash_labeled_bytes(
+        hasher,
+        "item.memory_id",
+        item.memory_id.to_string().as_bytes(),
+    );
+    hash_labeled_u64(hasher, "item.rank", u64::from(item.rank));
+    hash_labeled_bytes(hasher, "item.section", item.section.as_str().as_bytes());
+    hash_labeled_bytes(hasher, "item.content", item.content.as_bytes());
+    hash_labeled_u64(
+        hasher,
+        "item.estimated_tokens",
+        u64::from(item.estimated_tokens),
+    );
+    hash_labeled_q20_12(hasher, "item.relevance", item.relevance.into_inner());
+    hash_labeled_q20_12(hasher, "item.utility", item.utility.into_inner());
+    hash_labeled_bool(
+        hasher,
+        "item.proximity_to_seed.present",
+        item.proximity_to_seed.is_some(),
+    );
+    if let Some(proximity_to_seed) = item.proximity_to_seed {
+        hash_labeled_q20_12(hasher, "item.proximity_to_seed", proximity_to_seed);
+    }
+    hash_labeled_bool(
+        hasher,
+        "item.score_breakdown.present",
+        item.score_breakdown.is_some(),
+    );
+    if let Some(score_breakdown) = item.score_breakdown {
+        hash_labeled_q20_12(
+            hasher,
+            "item.score_breakdown.text_score",
+            score_breakdown.text_score,
+        );
+        hash_labeled_q20_12(
+            hasher,
+            "item.score_breakdown.ppr_score",
+            score_breakdown.ppr_score,
+        );
+        hash_labeled_q20_12(
+            hasher,
+            "item.score_breakdown.combined_score",
+            score_breakdown.combined_score,
+        );
+    }
+    hash_attempt_family_multiplicity(hasher, item.attempt_family_multiplicity.as_ref());
+    hash_labeled_bytes(hasher, "item.why", item.why.as_bytes());
+    hash_labeled_bytes(
+        hasher,
+        "item.selected_in",
+        item.selected_in.as_str().as_bytes(),
+    );
+    hash_pack_hash_provenance(hasher, "item.provenance", &item.provenance);
+    hash_labeled_optional_bytes(
+        hasher,
+        "item.diversity_key",
+        item.diversity_key.as_deref().map(str::as_bytes),
+    );
+    hash_labeled_bytes(
+        hasher,
+        "item.trust.class",
+        item.trust.class.as_str().as_bytes(),
+    );
+    if item.trust.subclass.as_deref() == Some("procedural_rule") {
+        // Bind changed authority semantics even when rendered text
+        // is omitted; old authoritative rule packs have another hash.
+        hash_labeled_bytes(hasher, "procedural_rule_posture_policy", b"advisory.v1");
+    }
+    hash_labeled_optional_bytes(
+        hasher,
+        "item.trust.subclass",
+        item.trust.subclass.as_deref().map(str::as_bytes),
+    );
+    hash_labeled_optional_bytes(
+        hasher,
+        "item.tombstoned_at",
+        item.tombstoned_at.as_deref().map(str::as_bytes),
+    );
+    hash_labeled_bool(hasher, "item.lifecycle.present", item.lifecycle.is_some());
+    if let Some(lifecycle) = &item.lifecycle {
+        hash_labeled_bytes(
+            hasher,
+            "item.lifecycle.validity_status",
+            lifecycle.validity_status.as_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            "item.lifecycle.validity_window_kind",
+            lifecycle.validity_window_kind.as_bytes(),
+        );
+        hash_labeled_optional_bytes(
+            hasher,
+            "item.lifecycle.valid_from",
+            lifecycle.valid_from.as_deref().map(str::as_bytes),
+        );
+        hash_labeled_optional_bytes(
+            hasher,
+            "item.lifecycle.valid_to",
+            lifecycle.valid_to.as_deref().map(str::as_bytes),
+        );
+    }
+    hash_labeled_count(hasher, "item.redaction.count", item.redactions.len());
+    for redaction in &item.redactions {
+        hash_labeled_bytes(hasher, "item.redaction.reason", redaction.reason.as_bytes());
+        hash_labeled_bytes(
+            hasher,
+            "item.redaction.placeholder",
+            redaction.placeholder.as_bytes(),
+        );
+    }
+    hash_labeled_count(
+        hasher,
+        "item.freshness_facet.count",
+        item.freshness_facets.len(),
+    );
+    for facet in &item.freshness_facets {
+        for (label, value) in [
+            ("facet.kind", facet.kind.as_str()),
+            ("facet.freshness", facet.freshness.as_str()),
+            ("facet.drift_status", facet.drift_status.as_str()),
+            ("facet.severity", facet.severity.as_str()),
+            ("facet.top_reason", facet.top_reason.as_str()),
+            (
+                "facet.revalidation_command",
+                facet.revalidation_command.as_str(),
+            ),
+        ] {
+            hash_labeled_bytes(hasher, label, value.as_bytes());
+        }
+        hash_labeled_bool(hasher, "facet.stale_anchor", facet.stale_anchor);
+        for (label, value) in [
+            ("facet.degraded_code", facet.degraded_code.as_deref()),
+            (
+                "facet.captured_at_commit",
+                facet.captured_at_commit.as_deref(),
+            ),
+            ("facet.current_commit", facet.current_commit.as_deref()),
+        ] {
+            hash_labeled_optional_bytes(hasher, label, value.map(str::as_bytes));
+        }
+        hash_labeled_optional_u64(
+            hasher,
+            "facet.commit_distance",
+            facet.commit_distance.map(u64::from),
+        );
+        hash_labeled_count(
+            hasher,
+            "facet.changed_region.count",
+            facet.changed_regions.len(),
+        );
+        for changed_region in &facet.changed_regions {
+            hash_labeled_bytes(hasher, "facet.changed_region", changed_region.as_bytes());
+        }
+        hash_labeled_count(hasher, "facet.anchor.count", facet.anchors.len());
+        for anchor in &facet.anchors {
+            for (label, value) in [
+                ("anchor.kind", anchor.anchor_kind.as_str()),
+                ("anchor.value_hash", anchor.anchor_value_hash.as_str()),
+                (
+                    "anchor.redacted_value",
+                    anchor.redacted_anchor_value.as_str(),
+                ),
+                (
+                    "anchor.captured_span_hash",
+                    anchor.captured_span_hash.as_str(),
+                ),
+                ("anchor.freshness_state", anchor.freshness_state.as_str()),
+                ("anchor.freshness", anchor.freshness.as_str()),
+            ] {
+                hash_labeled_bytes(hasher, label, value.as_bytes());
+            }
+            hash_labeled_bytes(
+                hasher,
+                "anchor.generation",
+                &anchor.generation.to_le_bytes(),
+            );
+            hash_labeled_bool(hasher, "anchor.stale_anchor", anchor.stale_anchor);
+        }
+    }
+}
+
+fn hash_pack_hash_evidence_item(hasher: &mut blake3::Hasher, item: &crate::pack::PackEvidenceItem) {
+    for (label, value) in [
+        ("evidence.evidence_id", item.evidence_id.as_str()),
+        ("evidence.entity_revision", item.entity_revision.as_str()),
+        ("evidence.session_id", item.session_id.as_str()),
+    ] {
+        hash_labeled_bytes(hasher, label, value.as_bytes());
+    }
+    hash_labeled_u64(hasher, "evidence.start_line", u64::from(item.start_line));
+    hash_labeled_u64(hasher, "evidence.end_line", u64::from(item.end_line));
+    hash_labeled_u64(hasher, "evidence.rank", u64::from(item.rank));
+    hash_labeled_bytes(hasher, "evidence.section", item.section.as_str().as_bytes());
+    hash_labeled_bytes(hasher, "evidence.content", item.content.as_bytes());
+    hash_labeled_u64(
+        hasher,
+        "evidence.estimated_tokens",
+        u64::from(item.estimated_tokens),
+    );
+    // v1 fed these as raw f32 bytes; v2 quantizes every hashed score.
+    hash_labeled_q20_12(hasher, "evidence.relevance", item.relevance.into_inner());
+    hash_labeled_q20_12(hasher, "evidence.utility", item.utility.into_inner());
+    hash_labeled_bytes(hasher, "evidence.why", item.why.as_bytes());
+    hash_labeled_bytes(
+        hasher,
+        "evidence.trust.class",
+        item.trust.class.as_str().as_bytes(),
+    );
+    hash_labeled_optional_bytes(
+        hasher,
+        "evidence.trust.subclass",
+        item.trust.subclass.as_deref().map(str::as_bytes),
+    );
+    hash_pack_hash_provenance(hasher, "evidence.provenance", &item.provenance);
 }
 
 fn hash_attempt_family_multiplicity(
@@ -8840,6 +9074,12 @@ fn finalize_blake3(hasher: blake3::Hasher) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+/// The v2 composite `pack.hash` string. Its form is the self-identifying
+/// knob ADR 0087 §8 names, kept in one place.
+fn finalize_pack_hash_v2(hasher: blake3::Hasher) -> String {
+    finalize_blake3(hasher)
+}
+
 fn log_pack_hash_components(components: &PackHashComponents) {
     let run_index = PACK_HASH_LOG_RUN_INDEX.fetch_add(1, Ordering::Relaxed) + 1;
     crate::obs::log_event(
@@ -8849,19 +9089,19 @@ fn log_pack_hash_components(components: &PackHashComponents) {
         )
         .with_field(
             "pack_request_hash",
-            serde_json::Value::String(components.pack_request_hash.clone()),
+            serde_json::Value::String(components.digests.request.clone()),
         )
         .with_field(
             "draft_items_hash",
-            serde_json::Value::String(components.draft_items_hash.clone()),
+            serde_json::Value::String(components.digests.items.clone()),
         )
         .with_field(
             "degraded_summary_hash",
-            serde_json::Value::String(components.degraded_summary_hash.clone()),
+            serde_json::Value::String(components.digests.degraded.clone()),
         )
         .with_field(
             "rendered_text_hash",
-            serde_json::Value::String(components.rendered_text_hash.clone()),
+            serde_json::Value::String(components.digests.rendered_text.clone()),
         )
         .with_field(
             "composite_hash",

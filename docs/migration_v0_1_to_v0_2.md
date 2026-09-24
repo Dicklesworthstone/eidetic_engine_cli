@@ -161,6 +161,55 @@ Each section lists the bead ID, the surface affected, a `Before` /
 `ee migrate run` is sufficient to handle the data-side of the
 migration.
 
+### 1azkt.1 — pack-hash input v2 and `snapshotIdentity` v2
+
+**Bead.** bd-reality-core-convergence-1azkt.1 (ADR 0087).
+
+**Surface.** `data.pack.hash` and `data.pack.snapshotIdentity` on
+`ee.pack.v2`. The `ee.pack.v2` schema id does not change; the
+snapshot identity carries its own version, which this change bumps.
+
+**What changed.** The pack hash is now built from labeled,
+length-delimited components under the input schema
+`ee.pack.hash_input.v2`, so every `pack.hash` value changes once. The
+hash keeps its `blake3:<64 hex>` shape. `snapshotIdentity` moves from
+version 1 to 2, gains `inputSchema`, and exposes the component digests.
+
+```jsonc
+// Before
+"snapshotIdentity": {
+  "version": 1,
+  "digest": "blake3:…",
+  "numericDomain": "q20.12",
+  "componentDigestsAvailableLocally": false
+}
+// After
+"snapshotIdentity": {
+  "version": 2,
+  "inputSchema": "ee.pack.hash_input.v2",
+  "digest": "blake3:…",
+  "numericDomain": "q20.12",
+  "componentDigestsAvailableLocally": true,
+  "components": {
+    "request": "blake3:…", "items": "blake3:…", "omitted": "blake3:…",
+    "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…"
+  }
+}
+```
+
+**Agent rewrite.** Do not compare a stored `pack.hash` from before this
+change with a new one: equal state now hashes differently. Read
+`snapshotIdentity.version` (or `inputSchema`) beside the hash and compare
+only hashes of the same version. When two v2 hashes differ, compare
+`snapshotIdentity.components` field by field to name the component that
+differs.
+
+**Data side.** No migration. `pack_records.pack_hash` has no version
+column, so rows written before this change hold v1 hashes and cannot be
+told apart from v2 rows by the row alone. The L2 pack cache key schema
+moved to `ee.pack.l2_cache_key.v7`, so cached v1 responses miss and are
+rebuilt rather than replayed.
+
 ### N7.1 — Bayesian memory posterior columns and optional backfill
 
 **Bead.** bd-17c65.14.7.2

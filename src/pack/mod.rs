@@ -161,9 +161,10 @@ pub(crate) fn revision_hash(parts: &[&str]) -> String {
 
 /// Q20.12 unsigned fixed-point for canonical pack-hash score inputs (ADR 0087).
 ///
-/// Decision scores are quantized before they enter thresholds, ties, or the
-/// pack hash so sub-quantum IEEE-754 noise cannot fork `pack.hash`. JSON item
-/// scores remain f32 display copies until payload quantization lands.
+/// Every score the pack hash consumes is quantized here first, so sub-quantum
+/// IEEE-754 noise cannot fork `pack.hash`. Selection thresholds and ties still
+/// compare raw f32, and JSON item scores are six-decimal display copies; both
+/// belong to bd-reality-core-convergence-1azkt.11.
 #[must_use]
 pub(crate) fn quantize_q20_12(value: f64) -> u32 {
     let scaled = (value * 4096.0).round();
@@ -3580,6 +3581,35 @@ pub const PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE: &str = "pack_assembly_budget_excee
 /// wall-clock time, which is not reproducible, and it is therefore kept out of
 /// pack identity — see `PackAssemblySlo::timing_degradations`.
 pub const PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE: &str = "pack_assembly_elapsed_over_budget";
+
+/// Degradation codes that are operational telemetry, not canonical pack state
+/// (ADR 0087 §5). They may appear in the envelope's `degraded[]`, but the pack
+/// hash drops them by construction, so no call order can let one in.
+pub const NON_CANONICAL_TELEMETRY_DEGRADATION_CODES: &[&str] =
+    &[PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+
+#[must_use]
+pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
+    NON_CANONICAL_TELEMETRY_DEGRADATION_CODES.contains(&code)
+}
+
+/// The pack-hash input schema (ADR 0087 §8). Every component and the composite
+/// bind this tag, and the snapshot identity reports its version.
+pub const PACK_HASH_INPUT_SCHEMA_V2: &str = "ee.pack.hash_input.v2";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 2;
+
+/// The component digests behind a v2 `pack.hash` (ADR 0087 §7). Each is a
+/// `blake3:<hex>` digest of one labeled, length-delimited component; none
+/// carries a raw input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackHashComponentDigests {
+    pub request: String,
+    pub items: String,
+    pub omitted: String,
+    pub degraded: String,
+    pub coordination: String,
+    pub rendered_text: String,
+}
 pub const PACK_CONCURRENT_LIMIT_REACHED_CODE: &str = "pack_concurrent_limit_reached";
 pub const PACK_BUDGET_TOO_SMALL_CODE: &str = "pack_budget_too_small";
 pub const CONSENSUS_SCHEMA_V1: &str = "ee.consensus.v1";
@@ -4409,6 +4439,7 @@ impl ContextResponse {
                 adaptive_budget: None,
                 pagination: None,
                 degraded,
+                pack_hash_components: None,
             },
         })
     }
@@ -4469,6 +4500,7 @@ impl ContextResponse {
                 adaptive_budget: None,
                 pagination: None,
                 degraded: Vec::new(),
+                pack_hash_components: None,
             },
         }
     }
@@ -4491,6 +4523,10 @@ pub struct ContextResponseData {
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
+    /// The per-component digests behind `pack.hash` (ADR 0087 v2), when this
+    /// process computed them. `None` for a response served from the L2 cache,
+    /// whose stored JSON already carries its own snapshot identity.
+    pub pack_hash_components: Option<PackHashComponentDigests>,
 }
 
 fn cached_context_embed_backend(cached_json: &str) -> EmbedBackend {

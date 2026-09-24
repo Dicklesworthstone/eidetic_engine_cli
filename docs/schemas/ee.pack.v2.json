@@ -85,15 +85,30 @@
               "additionalProperties": false,
               "required": [
                 "version",
+                "inputSchema",
                 "digest",
                 "numericDomain",
                 "componentDigestsAvailableLocally"
               ],
               "properties": {
-                "version": { "type": "integer", "const": 1 },
+                "version": { "type": "integer", "const": 2 },
+                "inputSchema": { "type": "string", "const": "ee.pack.hash_input.v2" },
                 "digest": { "type": "string", "minLength": 1 },
                 "numericDomain": { "type": "string", "const": "q20.12" },
-                "componentDigestsAvailableLocally": { "type": "boolean" }
+                "componentDigestsAvailableLocally": { "type": "boolean" },
+                "components": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["request", "items", "omitted", "degraded", "coordination", "renderedText"],
+                  "properties": {
+                    "request": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "items": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "omitted": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "degraded": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "coordination": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "renderedText": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" }
+                  }
+                }
               }
             },
             "items": {

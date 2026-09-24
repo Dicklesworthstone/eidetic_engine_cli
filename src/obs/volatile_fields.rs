@@ -193,7 +193,10 @@ pub fn normalize_pack_slo_measurements(value: &mut Value) -> Result<bool, String
 /// wall-clock time, which is not reproducible, and it is therefore kept out of
 /// pack identity". Kept out of IDENTITY, but still emitted into the response
 /// payload — which is how a golden came to assert it.
-const TIMING_DEGRADED_CODES: &[&str] = &[crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+///
+/// ADR 0087 declares these codes non-canonical telemetry. The product's own
+/// list, which the v2 pack hash drops by construction, is the single source.
+const TIMING_DEGRADED_CODES: &[&str] = crate::pack::NON_CANONICAL_TELEMETRY_DEGRADATION_CODES;
 
 /// Opening words of the timing degradation as rendered into markdown.
 ///

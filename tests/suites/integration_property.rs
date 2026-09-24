@@ -18,6 +18,8 @@ mod graph_generator;
 #[path = "../support/isolated_ee.rs"]
 mod isolated_ee;
 
+#[path = "../pack_hash_property.rs"]
+mod pack_hash_property;
 #[path = "../property_context_query_metamorphic.rs"]
 mod property_context_query_metamorphic;
 #[path = "../property_eql_query_parsing.rs"]

@@ -2,47 +2,36 @@
 
 Status: accepted
 Date: 2026-08-24
-Updated: 2026-09-17
+Updated: 2026-09-24 (pack-hash input v2)
 Bead: bd-reality-core-convergence-1azkt.1
 Depends-on: ADR 0084 (hotset manifest), ADR 0085 (typed pack entity identity)
 
 ## Context
 
 The README promises byte-stable JSON and identical pack hashes for equal
-state. Today that promise is enforced only over a narrow slice of the true
-input space. The production hash path is
-`compute_pack_hash_components` (`src/core/context.rs`) which composes five
-named sub-hashes (`PackHashComponents`):
+state. Before v2 that promise held over a narrow slice of the true input
+space, and the census on bd-reality-core-convergence-1azkt.1 (c10108, read at
+a43c82613) found the v1 hash weaker than this ADR claimed:
 
-| Component | Fed by |
-|---|---|
-| `pack_request_hash` | query, profile, budget max_tokens, output options, `read_snapshot_generation`, task lens |
-| `draft_items_hash` | draft items + `used_tokens` |
-| `degraded_summary_hash` | degradation rows |
-| `rendered_text_hash` | full markdown render |
-| `composite_hash` | the four above |
+1. Every per-item field was fed to blake3 as raw adjacent bytes, with no label
+   and no length, so different field sequences could feed identical bytes.
+   Under the Lean output profile, provenance `("file://a", "bc")` and
+   `("file://ab", "c")` produced one `pack.hash`.
+2. The composite re-fed the raw fields instead of hashing the component
+   digests, so a differing composite could not name what differed.
+3. Evidence-span scores entered the hash as raw f32 bytes, not Q20.12.
+4. The degraded slice entered the hash in emission order with duplicates.
+   Whether the wall-clock timing entry was excluded depended on call order:
+   the refresh after an L2 store added a degradation hashed a slice that
+   already held the timing entry.
+5. Model and execution identity, reference time, tiers, authorization and
+   policy epochs are absent from the pack hash.
+6. Scores reach selection thresholds and ties as raw f32, and JSON item scores
+   are six-decimal display copies: two score domains.
 
-Gaps against the promise:
-
-1. **Model and execution identity are absent from the pack hash.** The index
-   manifest already hashes embedder identity (`hash_embedding_config_str_field`
-   over `EmbeddingConfig{model_id, dimension, deterministic}`,
-   `src/search/mod.rs`), but two packs assembled under different embedders,
-   CPU feature classes, or toolchains can still collide in `pack_hash`.
-2. **No declared numeric execution domain.** Scores flow through f32/f64
-   platform paths before thresholds and ties; cross-target bit-identity is
-   implied but never specified.
-3. **Volatile telemetry adjacency.** Durations, PIDs, queue depths live in the
-   same response envelope as canonical payload; nothing structurally prevents
-   them perturbing hashed fields.
-4. **State-creating writes are not separated** from reads: persisting a pack
-   mints IDs and timestamps whose generation must never feed the hash.
-5. **Partial canonicalization.** `revision_hash` (`src/pack/mod.rs`) already
-   does length-prefixed NUL-delimited BLAKE3 (correct encoding discipline),
-   but map ordering, Unicode policy, float formatting, negative zero, and
-   timestamp precision are conventions, not contract.
-
-A literal, scoped contract must precede any fix (reality-check finding).
+A literal, scoped contract must precede any fix (reality-check finding). v2 is
+that contract for the pack hash: it states exactly which components are bound
+and names the bead that owns every component that is not.
 
 ## Decision
 
@@ -52,19 +41,30 @@ Every machine-facing response partitions into exactly three classes:
 
 | Class | Contents | May enter hash? |
 |---|---|---|
-| **Canonical product payload** | selected items, scores (post-quantization), order, provenance, degraded posture, omissions | yes |
-| **Operational telemetry** | durations, PID, queue depth, arena stats, tracing fields | never |
+| **Canonical product payload** | selected items, hashed scores (Q20.12), order, provenance, canonical degraded posture, omissions | yes |
+| **Operational telemetry** | durations, PID, queue depth, arena stats, tracing fields, the `pack_assembly_elapsed_over_budget` degradation | never |
 | **State-creating artifacts** | pack record ID, persisted-at timestamps, audit sequence numbers | never |
 
-Telemetry and state-creating fields MUST live outside every hashed
-serialization. Enforcement is structural: the canonical serialization is built
-from a closed component list (below), not by stripping a full response.
+Non-canonical telemetry degradation codes are listed once, in
+`NON_CANONICAL_TELEMETRY_DEGRADATION_CODES` (`src/pack/mod.rs`). The pack hash
+drops them by construction, and the volatile registry
+(`src/obs/volatile_fields.rs`) reads the same list. The timing entry still
+appears in the envelope's `degraded[]`. Moving it into a dedicated telemetry
+field is a deferred schema decision owned by
+`bd-pack-timing-telemetry-field-2pfzo`.
+
+`pack.text`: ruled T2 on 1azkt.1 (2026-09-24 13:30Z): `pack.text` is canonical
+but not the hashed bytes; the hash binds its inputs. That behavior lands in the
+immediate follow-up commit; until then the shipped text still renders the
+timing bullet. Making the hash bind the shipped bytes (T1) is owned by
+`bd-pack-hash-shipped-text-8nafb`.
+
+State-creating commands are specified separately, owned by
+`bd-state-creating-spec-8hjtj`.
 
 ### 2. Snapshot identity components
 
-Equal snapshot identity is defined as equality of ALL of the following.
-Each names its owning source; implementations derive digests from these and
-nothing else.
+The full target identity is S1–S10:
 
 | # | Component | Source of truth |
 |---|---|---|
@@ -72,133 +72,162 @@ nothing else.
 | S2 | immutable index manifest root / entity-revision root | hotset manifest (ADR 0084); per-entity revision |
 | S3 | retrieval subsystem identities | lexical cache epoch, L2 candidate-set key, PPR/plan cache keys |
 | S4 | model identity | `EmbeddingConfig{model_id, dimension, deterministic}`, reranker id when active, provider class |
-| S5 | request surface | query (NFC bytes), profile, budget, output options, task lens, seed |
+| S5 | request surface | query (trimmed bytes, no NFC), profile, budget, output options, task lens, task paths |
 | S6 | effective config slice | only keys that can change selection/order/scoring, each individually named and versioned |
 | S7 | reference time domain | explicit `as_of` instant + lifecycle cutoffs; wall-clock absence is itself part of identity |
 | S8 | authorization/redaction/trust epochs | capability set hash, redaction policy version, trust-class floor |
 | S9 | execution domain | target triple class, CPU feature class relevant to declared numeric paths, binary/toolchain digest, enabled features |
-| S10 | serialization versions | `ee.pack.v2`, binary format version, canonical-hash algorithm tag |
+| S10 | serialization versions | `ee.pack.v2`, hash input schema, canonical-hash construction |
 
-S4/S9 make cross-machine equality an EXPLICIT claim: two executions agree iff
-their declared domains match, or their score paths quantize identically
-(§3). Vague "same results everywhere" wording is forbidden by the bead.
+#### 2a. What v2 binds, literally
+
+`pack.hash` under input schema `ee.pack.hash_input.v2` is a function of
+exactly these components and nothing else
+(`compute_pack_hash_components`, `src/core/context.rs`):
+
+| v2 component | Binds |
+|---|---|
+| `request` | query bytes (trimmed, no NFC), request profile, `budget.max_tokens`, output profile, resource profile, the five `include_*` output flags, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
+| `items` | `used_tokens`; every selected item (id, rank, section, content, estimated tokens, Q20.12 relevance/utility/proximity/score breakdown, attempt-family multiplicity, why, selection phase, provenance URIs and notes, diversity key, trust class and subclass, the procedural-rule posture policy, tombstone, lifecycle, redactions, freshness facets and anchors); every evidence span with Q20.12 scores |
+| `omitted` | every omission (id, estimated tokens, reason, attempt-family multiplicity) |
+| `degraded` | the canonical degraded set: telemetry codes dropped, sorted by (code, severity, message, repair), exact duplicates removed |
+| `coordination` | the coordination snapshot, when present |
+| `rendered_text` | the pack-layer markdown rendered from `request`, `items`, `omitted`, the canonical degraded set and `coordination` |
+
+The composite is blake3 over the schema tag and the tagged component
+digests, in this order: `request`, `items`, `omitted` (only when skipped items
+are shown), `degraded`, `coordination`, `rendered_text` (only when the text is
+shown). Equal composites therefore mean equal bound components, and a
+differing composite is localized by comparing the component digests.
+
+#### 2b. What v2 does not bind, and who owns it
+
+| Component | Status in v2 | Owning bead |
+|---|---|---|
+| S1 store tiers / scope identity | not bound | `bd-pack-identity-tiers-vxx8l` |
+| S2 index manifest / entity-revision root | not bound | `bd-reality-core-convergence-1azkt.2` |
+| S3 retrieval subsystem identities (lexical cache, L2 candidate set, PPR/plan caches) | not bound | `bd-reality-core-convergence-1azkt.2` (lexical cache), `bd-reality-core-convergence-1azkt.3` (cache identity under concurrency) |
+| S4 model identity | not bound | `bd-reality-core-convergence-1azkt.2` |
+| S6 effective config slice (candidate pool, max results, sections, speed, source mode, filters, include-tombstoned/expired/future, relevance floor, seed) | not bound except through selected items | `bd-pack-identity-config-slice-188z4` |
+| S7 reference time (`as_of`, or the silent `Utc::now` at `context.rs` `reference_time`) | not bound | `bd-pack-identity-asof-35viu` |
+| S8 authorization / capability / agent | not bound | `bd-pack-identity-authz-ctr51` |
+| S8 trust / redaction / security policy epochs | per-item results bound, policy versions not | `bd-pack-identity-trust-epochs-b7cq9` |
+| S9 execution domain | not bound; see §3 | `bd-pack-identity-exec-domain-junoz` |
+| S5 tokenizer identity, Unicode normalization, locale, line endings | query hashed as trimmed bytes; nothing normalized; tokenizer not bound | `bd-pack-identity-unicode-gitmy` |
+| Selection thresholds/ties on Q20.12; one score domain for JSON | not done | `bd-reality-core-convergence-1azkt.11` |
+| Cross-process and cross-host determinism gates | not in v2 | `bd-reality-core-convergence-1azkt.3` |
 
 ### 3. Numeric execution domain
 
-Decision: **quantize decision scores to fixed-point Q20.12 (u32) at the single
-choke point where selection thresholds, tie-breaks, and hash inputs consume
-them**, before any comparison or serialization. Raw float scores remain
-available as telemetry but are excluded from canonical payload and hash.
-Tie-break after quantization: lexicographic `(entity_ref, revision)` per
-ADR 0085 ordering.
+Every score the pack hash consumes is quantized to fixed-point Q20.12 (u32)
+first (`quantize_q20_12`, `src/pack/mod.rs`): relevance, utility, proximity,
+score breakdown and attempt-family discount factors of selected items, and
+relevance and utility of evidence spans. Sub-quantum IEEE-754 noise (below
+2^-12) cannot fork `pack.hash`; negative zero and positive zero quantize alike.
+Non-finite and negative inputs quantize to 0, so NaN and 0 would collide.
+Relevance and utility are `UnitScore` and cannot be non-finite; proximity and
+score-breakdown values are plain f32 and are not validated at this point.
 
-Rationale: quantize-first keeps the strong promise ("identical bytes") without
-requiring bit-identical libm across targets; the residual platform variance is
-absorbed below the quantum (≤ 2^-12 relative), which is far below every
-selection threshold in use. If a future scoring path proves too sensitive for
-Q20.12, the fallback is narrowing S9 (declare provider+target inside the
-domain) — never silently weakening §5.
+Selection thresholds and tie-breaks still compare raw f32, and JSON item
+scores are six-decimal display copies. Until
+`bd-reality-core-convergence-1azkt.11` moves them onto the quantized domain,
+two runs agree on `pack.hash` only when their raw-f32 selection agrees, which
+is guaranteed within one binary on one target and is NOT claimed across
+targets. That execution domain is owned by
+`bd-pack-identity-exec-domain-junoz`.
 
-### 4. Canonical serialization rules
+### 4. Canonical serialization rules (hash input)
 
-- Encoding: UTF-8, no BOM, LF newlines; Unicode content preserved byte-wise
-  (no NFC normalization — normalization would break memory-content identity);
-  all case folding forbidden in canonical output.
-- Maps/sets serialized with lexicographic key sort; duplicate keys impossible
-  by construction.
-- Degraded arrays sorted by `(severity_rank, code, worker_id, message)` —
-  already the emission order; contract pins it.
-- Timestamps that legitimately appear in canonical payload (e.g., memory
-  `created_at` facts) truncated to millisecond precision, UTC, RFC 3339.
-- Floats cannot appear (§3 removes them); integers only, negative zero N/A.
-- Hash encoding: the existing `revision_hash` length-prefixed NUL-delimited
-  BLAKE3 scheme, tagged `blake3-lp1`. Composite = `blake3-lp1` over the
-  ordered component-digest list, each component itself tagged with its
-  component name string.
-- Algorithm tag travels inside S10 so any future change forks identities
-  instead of colliding.
+- Every field is fed as `len(label) u64 LE ‖ label ‖ len(value) u64 LE ‖ value`
+  (`hash_labeled_bytes`). Optional fields add a labeled presence flag, and
+  repeated fields a labeled count.
+- Every component opens with the labeled schema tag `ee.pack.hash_input.v2`
+  and its component name.
+- The composite is `blake3` over the labeled schema tag and the labeled
+  component digests (§2a).
+- Unicode: bytes are hashed as stored. The query is trimmed and hashed as
+  bytes with no NFC; memory content is never normalized (normalization would
+  break content identity). Line endings are not normalized. Both are owned by
+  `bd-pack-identity-unicode-gitmy`.
+- Degraded entries: canonicalized in the hash input as in §2a. Emission order
+  in `degraded[]` is a separate, presentational contract.
+- No timestamps are hash inputs in v2.
 
 ### 5. Volatile-data firewall
 
-The canonical serializer consumes ONLY typed structs enumerating §2
-components. Telemetry structs are different types and cannot be passed where
-canonical input is expected. Any new response field must declare its class at
-type level (module convention: `Canonical*` vs `*Telemetry`). A volatile value
-that must be visible to agents (e.g., elapsed_ms) appears solely under
-`telemetry` envelope siblings, outside `data.pack`.
+The hash consumes only the fields listed in §2a, built from typed pack
+structs; telemetry never reaches it. The degraded-slice firewall is enforced
+inside the hash function (§1), not by call order, so every
+`refresh_context_pack_hash` call site is covered, including the refresh after
+an L2 store, whose slice already holds the timing entry.
 
 ### 6. Redaction posture
 
-The snapshot identity surfaces ONE field:
-`snapshot_identity.digest` (hex, `blake3-lp1`). The full component vector is
-logged to the flight recorder (local-only) and NEVER serialized into
-agent-facing responses: components contain config-slice and toolchain digests
-that are safe as hashes but whose preimages could name private paths. `ee why`
-may expose component DIGESTS plus the differing-component NAME on mismatch
-(§7), never preimages.
+`data.pack.snapshotIdentity` exposes the composite digest and the per-component
+DIGESTS (`blake3:<hex>`), never preimages. Component preimages can contain
+absolute provenance paths (`file://` URIs are hashed verbatim) and query
+text; a digest reveals neither.
 
 ### 7. Differing-state diagnostics
 
-Because components are named and ordered, inequality localizes: comparing two
-digests yields the first diverging component name (`store`, `index`,
-`retrieval`, `model`, `request`, `config`, `time`, `authz`, `execution`,
-`serialization`). `compute_pack_hash_components` already produces this shape;
-the contract requires the comparator to be total (all ten S-components) rather
-than today's five.
+`snapshotIdentity.components` names six components. Comparing two responses
+field by field names the component that differs; `renderedText` is derived
+from the others and moves exactly when a rendered input moves. No CLI
+comparator is part of v2.
 
 ### 8. Versioning and migration
 
-- New optional object on `ee.pack.v2` data: `snapshotIdentity: {version: 1,
-  digest, numericDomain: "q20.12", componentDigestsAvailableLocally: true}`.
-- Additive; old consumers ignore it; no compatibility shim. Migration note
-  appended to `docs/migration_v0_1_to_v0_2.md` lineage.
-- Pack-record persistence stores `{digest, component_digests}` so replay
-  (bd-…replay surfaces) can re-derive and compare without the original env.
-- Hash-input version bump rule: ANY change to §2 membership, §3 quantum, or §4
-  rules bumps `snapshotIdentity.version` and forks digests. Golden fixtures
-  pin one version explicitly.
+`data.pack.snapshotIdentity` on `ee.pack.v2`:
 
-### 9. Verification plan (all RCH-only)
+```json
+{
+  "version": 2,
+  "inputSchema": "ee.pack.hash_input.v2",
+  "digest": "<pack.hash>",
+  "numericDomain": "q20.12",
+  "componentDigestsAvailableLocally": true,
+  "components": {
+    "request": "blake3:…", "items": "blake3:…", "omitted": "blake3:…",
+    "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…"
+  }
+}
+```
+
+- `componentDigestsAvailableLocally` is `false`, and `components` is absent,
+  for a hand-built response whose hash no pack run computed. An L2 cache hit
+  replays the stored response JSON, including the snapshot identity stored
+  with it.
+- Self-identification: `pack.hash` keeps its `blake3:<64 hex>` shape, because
+  `ee.pack.diff.v2` and `ee.pack.replay.v2` publish `packHash` with the pattern
+  `^blake3:[0-9a-f]{64}$`. The version travels beside the hash in every emitted
+  pack (`version`, `inputSchema`), and the schema tag is bound into the
+  preimage, so a v1 and a v2 digest cannot coincide by construction.
+- `pack_records.pack_hash` has no version column. Rows written before v2 carry
+  v1 hashes and are not comparable with v2 hashes; nothing in the row says
+  which it is. This is accepted and documented; no migration.
+- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v7`, so a
+  response cached under v1 misses rather than replaying a v1 identity.
+- Bump rule: any change to §2a membership, §3 quantization or §4 encoding
+  bumps `snapshotIdentity.version` and the input schema tag, and forks
+  digests. No compatibility shim, no dual hash.
+
+### 9. Verification (all RCH-only)
 
 | Layer | Harness | Asserts |
 |---|---|---|
-| Unit | extend `tests/determinism_unit.rs` | per-component digests stable under re-order-independent construction; quantization ties resolve by §3 |
-| Property | new `tests/pack_hash_property.rs` | perturbation matrix: mutate each S-component → digest changes AND comparator names it; mutate ONLY telemetry → digest unchanged (negative test) |
-| Cross-process | extend `scripts/e2e_overhaul/determinism.sh` | same fixture, two processes, same digest bytes |
-| Golden | fixture under `tests/fixtures/` | pinned `snapshotIdentity.version=1` digest vector |
-| State-creation separation | golden | two consecutive runs differ ONLY in state-creating fields |
+| Unit | `src/core/context_test_module.rs` `pack_hash_v2_*` | the flat-feed provenance collision is separated (red first against v1); each differing input moves its own component and the composite only; timing, order and repetition move nothing; evidence scores quantize |
+| Property | `tests/pack_hash_property.rs` (in `integration_property`) | no elapsed reading moves `pack.hash`; degraded order and repetition never do; sub-quantum noise never does and a one-quantum step always does; a pinned v2 digest vector, checked on two RCH workers |
+| Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
+
+None of these tests uses a test-side normalizer.
 
 ## Consequences
 
-- `compute_pack_hash_*` gains S1–S10 component derivation; five-component
-  `PackHashComponents` becomes the leaf layer under a ten-component snapshot
-  tree. Callers unaffected (same composite entry point).
-- Selection choke point gains one quantization step; perf impact bounded to
-  one integer conversion per scored candidate.
-- Cross-machine pack equality becomes a DECLARED claim scoped by S4+S9 rather
-  than an accident; support bundles gain a one-line equality answer via §7.
-- Implementation is deliberately staged: this ADR is the contract;
-  `-azkt.5` implements the verification manifest + pinned runner;
-  `-azkt.10` builds the regression oracle; `-azkt.18` closes hermeticity.
-
-### Implementation status (2026-09-17)
-
-Shipped with this bead:
-
-- Pack-hash score inputs (`relevance`, `utility`, `proximity_to_seed`,
-  `score_breakdown.*`, attempt-family discount factors) quantize to Q20.12
-  before hashing. Sub-quantum IEEE-754 noise cannot fork `pack.hash`.
-- Additive `data.pack.snapshotIdentity` on `ee.pack.v2`: `{version: 1, digest,
-  numericDomain: "q20.12", componentDigestsAvailableLocally: false}`. `digest`
-  equals `pack.hash`. Agent-facing JSON item scores remain f32 display copies.
-
-Not yet in the digest tree (still five leaves: request, draft items, degraded,
-rendered text, composite). Staged, not silently claimed as S1–S10:
-
-- S2/S3/S4/S6/S8/S9 named component digests
-- JSON payload score quantization (floats still appear in `items[].scores`)
-- `componentDigestsAvailableLocally: true` and `ee why` mismatch names
-- Property/cross-process harness in `.5` / `.10` / `.18`
+- Every pack hash changes once (v1 to v2). Goldens pinning `pack.hash` or
+  `snapshotIdentity` move, and their diffs are limited to those fields.
+- Cross-machine pack equality is a declared, bounded claim (§3), not an
+  accident.
+- The excluded components have owners (§2b); none is silently claimed.
 
 ## Rejected alternatives
 
@@ -211,3 +240,6 @@ rendered text, composite). Staged, not silently claimed as S1–S10:
 - **Strip telemetry from the existing response serializer** — stripping is
   retroactive and provably incomplete; closed-component construction is the
   enforceable form.
+- **A self-identifying hash prefix** (e.g. `blake3-lp1:` or
+  `ee.pack.v2:blake3:`) — would break the published `packHash` pattern in
+  `ee.pack.diff.v2` and `ee.pack.replay.v2`.

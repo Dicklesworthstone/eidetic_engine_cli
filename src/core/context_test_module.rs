@@ -10225,6 +10225,367 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    /// One-item draft shared by the ADR 0087 v2 hash tests below.
+    fn pack_hash_v2_fixture(
+        provenance: Vec<crate::pack::PackProvenance>,
+    ) -> Result<(crate::pack::ContextRequest, crate::pack::PackDraft), String> {
+        use crate::models::{TrustClass, UnitScore};
+        use crate::pack::{
+            ContextRequest, PackDraft, PackDraftItem, PackSection, PackSelectionAudit,
+            PackSelectionObjective, PackSelectionPhase, PackTrustSignal, TokenBudget,
+        };
+
+        let request = ContextRequest::from_query("pack hash v2 contract")
+            .map_err(|error| error.to_string())?;
+        let item = PackDraftItem {
+            rank: 1,
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(87)),
+            section: PackSection::ProceduralRules,
+            content: "hash every field with a label and a length".to_owned(),
+            estimated_tokens: 9,
+            relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
+            proximity_to_seed: None,
+            score_breakdown: None,
+            attempt_family_multiplicity: None,
+            provenance,
+            why: "adr-0087 v2".to_owned(),
+            diversity_key: None,
+            trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+            redactions: Vec::new(),
+            tombstoned_at: None,
+            lifecycle: None,
+            freshness_facets: Vec::new(),
+            selected_in: PackSelectionPhase::StrictMmr,
+        };
+        let draft = PackDraft {
+            query: request.query.clone(),
+            budget: TokenBudget::default_context(),
+            used_tokens: 9,
+            items: vec![item],
+            evidence_items: Vec::new(),
+            omitted: Vec::new(),
+            selection_audit: PackSelectionAudit {
+                profile: request.profile,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm_id: "pack_hash_v2_test",
+                algorithm_description: "pack hash v2 contract",
+                candidate_count: 1,
+                selected_count: 1,
+                omitted_count: 0,
+                budget_limit: TokenBudget::default_context().max_tokens(),
+                budget_used: 9,
+                total_objective_value: 0.0,
+                monotone: true,
+                submodular: true,
+                selected_items: Vec::new(),
+                steps: Vec::new(),
+            },
+            hash: None,
+        };
+        Ok((request, draft))
+    }
+
+    /// ADR 0087 finding 5, red first. v1 fed provenance `uri` and `note` as
+    /// raw adjacent bytes, so `("file://a", "bc")` and `("file://ab", "c")`
+    /// fed identical bytes. Without the rendered text in the composite (the
+    /// Lean output profile), two different packs shared one `pack.hash`. v2
+    /// labels and length-prefixes every field.
+    #[test]
+    fn pack_hash_v2_separates_flat_feed_provenance_collision() -> Result<(), String> {
+        use super::{ContextPackOutputOptions, compute_pack_hash_with_output_options};
+        use crate::models::ProvenanceUri;
+        use crate::pack::PackProvenance;
+
+        let file = |path: &str, note: &str| {
+            PackProvenance::new(
+                ProvenanceUri::File {
+                    path: path.to_owned(),
+                    span: None,
+                },
+                note,
+            )
+            .map_err(|error| error.to_string())
+        };
+        let left = file("a", "bc")?;
+        let right = file("ab", "c")?;
+        let flat = |provenance: &PackProvenance| {
+            format!("{}{}", provenance.uri, provenance.note).into_bytes()
+        };
+        assert_eq!(
+            flat(&left),
+            flat(&right),
+            "fixture precondition: the pair must collide under a flat feed"
+        );
+
+        let (request, draft_left) = pack_hash_v2_fixture(vec![left])?;
+        let (_, draft_right) = pack_hash_v2_fixture(vec![right])?;
+        let without_text = ContextPackOutputOptions {
+            include_rendered_text: false,
+            ..ContextPackOutputOptions::default()
+        };
+        let hash_left =
+            compute_pack_hash_with_output_options(&request, &draft_left, &[], without_text);
+        let hash_right =
+            compute_pack_hash_with_output_options(&request, &draft_right, &[], without_text);
+        assert_ne!(
+            hash_left, hash_right,
+            "provenance (file://a, bc) and (file://ab, c) must hash apart"
+        );
+        Ok(())
+    }
+
+    /// ADR 0087 §7: a differing input changes its own component digest and
+    /// the composite, and no other component. `rendered_text` is derived from
+    /// request, items, omissions, degraded and coordination, so it also moves
+    /// exactly when the input is rendered.
+    #[test]
+    fn pack_hash_v2_component_digests_isolate_the_differing_input() -> Result<(), String> {
+        use super::{
+            ContextPackOutputOptions, ContextResponseDegradation, ContextResponseSeverity,
+            PackHashComponents, compute_pack_hash_components,
+        };
+        use crate::models::{ProvenanceUri, UnitScore};
+        use crate::pack::{
+            DEFAULT_COORDINATION_STALE_AFTER_MS, PackCoordinationSnapshot, PackOmission,
+            PackOmissionReason, PackProvenance, PackRejectionStage,
+        };
+
+        fn changed(left: &PackHashComponents, right: &PackHashComponents) -> Vec<&'static str> {
+            let (l, r) = (&left.digests, &right.digests);
+            [
+                ("request", l.request == r.request),
+                ("items", l.items == r.items),
+                ("omitted", l.omitted == r.omitted),
+                ("degraded", l.degraded == r.degraded),
+                ("coordination", l.coordination == r.coordination),
+                ("rendered_text", l.rendered_text == r.rendered_text),
+                ("composite", left.composite_hash == right.composite_hash),
+            ]
+            .into_iter()
+            .filter_map(|(name, equal)| (!equal).then_some(name))
+            .collect()
+        }
+
+        let mem = MemoryId::from_uuid(uuid::Uuid::from_u128(88));
+        let (request, draft) = pack_hash_v2_fixture(vec![
+            PackProvenance::new(ProvenanceUri::EeMemory(mem), "source")
+                .map_err(|error| error.to_string())?,
+        ])?;
+        let options = ContextPackOutputOptions::default();
+        let degraded = vec![ContextResponseDegradation {
+            code: "search_index_stale".to_owned(),
+            severity: ContextResponseSeverity::Medium,
+            message: "Search index is stale.".to_owned(),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        }];
+        let coordination = PackCoordinationSnapshot::from_json_str(
+            r#"{"schema":"ee.coordination_snapshot.v1","capturedAt":"2026-06-01T00:00:00Z","scope":"workspace","sources":[]}"#,
+            DEFAULT_COORDINATION_STALE_AFTER_MS,
+        )?;
+        let base = compute_pack_hash_components(
+            &request,
+            &draft,
+            &degraded,
+            options,
+            Some(&coordination),
+            Some(1),
+            None,
+        );
+
+        let generation = compute_pack_hash_components(
+            &request,
+            &draft,
+            &degraded,
+            options,
+            Some(&coordination),
+            Some(2),
+            None,
+        );
+        assert_eq!(changed(&base, &generation), ["request", "composite"]);
+
+        let mut draft_content = draft.clone();
+        draft_content.items[0].content = "different content".to_owned();
+        let content = compute_pack_hash_components(
+            &request,
+            &draft_content,
+            &degraded,
+            options,
+            Some(&coordination),
+            Some(1),
+            None,
+        );
+        assert_eq!(
+            changed(&base, &content),
+            ["items", "rendered_text", "composite"]
+        );
+
+        let mut draft_omission = draft.clone();
+        draft_omission.omitted = vec![PackOmission {
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(89)),
+            estimated_tokens: 50,
+            relevance: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.4).map_err(|error| error.to_string())?,
+            attempt_family_multiplicity: None,
+            reason: PackOmissionReason::TokenBudgetExceeded,
+            rejected_at: PackRejectionStage::Selection,
+            feasible: false,
+            could_fit_with_budget: Some(60),
+        }];
+        let omission = compute_pack_hash_components(
+            &request,
+            &draft_omission,
+            &degraded,
+            options,
+            Some(&coordination),
+            Some(1),
+            None,
+        );
+        assert_eq!(
+            changed(&base, &omission),
+            ["omitted", "rendered_text", "composite"]
+        );
+
+        let mut degraded_repair = degraded.clone();
+        degraded_repair[0].repair = Some("ee index rebuild --workspace . --force".to_owned());
+        let repair = compute_pack_hash_components(
+            &request,
+            &draft,
+            &degraded_repair,
+            options,
+            Some(&coordination),
+            Some(1),
+            None,
+        );
+        assert_eq!(
+            changed(&base, &repair),
+            ["degraded", "rendered_text", "composite"]
+        );
+
+        let coordination_later = PackCoordinationSnapshot::from_json_str(
+            r#"{"schema":"ee.coordination_snapshot.v1","capturedAt":"2026-06-02T00:00:00Z","scope":"workspace","sources":[]}"#,
+            DEFAULT_COORDINATION_STALE_AFTER_MS,
+        )?;
+        let later = compute_pack_hash_components(
+            &request,
+            &draft,
+            &degraded,
+            options,
+            Some(&coordination_later),
+            Some(1),
+            None,
+        );
+        let later_changed = changed(&base, &later);
+        assert!(
+            later_changed == ["coordination", "composite"]
+                || later_changed == ["coordination", "rendered_text", "composite"],
+            "a coordination change must move only coordination (plus the text, when it renders the snapshot) and the composite: {later_changed:?}"
+        );
+        Ok(())
+    }
+
+    /// ADR 0087 §4-§5: timing is telemetry, and degraded order and repetition
+    /// are presentation. None of them may move any component or the composite,
+    /// whichever call site hands the hash its degraded slice.
+    #[test]
+    fn pack_hash_v2_drops_timing_and_canonicalizes_degraded() -> Result<(), String> {
+        use super::{
+            ContextPackOutputOptions, ContextResponseDegradation, ContextResponseSeverity,
+            compute_pack_hash_components,
+        };
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let options = ContextPackOutputOptions::default();
+        let stale = ContextResponseDegradation {
+            code: "search_index_stale".to_owned(),
+            severity: ContextResponseSeverity::Medium,
+            message: "Search index is stale.".to_owned(),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        };
+        let floor = ContextResponseDegradation {
+            code: "low_recall_after_floor".to_owned(),
+            severity: ContextResponseSeverity::Low,
+            message: "Only one candidate passed the relevance floor.".to_owned(),
+            repair: None,
+        };
+        let timing = ContextResponseDegradation {
+            code: crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE.to_owned(),
+            severity: ContextResponseSeverity::Low,
+            message: "Pack assembly took 61234ms, at or over the threshold.".to_owned(),
+            repair: None,
+        };
+        let hash = |degraded: &[ContextResponseDegradation]| {
+            let components =
+                compute_pack_hash_components(&request, &draft, degraded, options, None, None, None);
+            (components.digests, components.composite_hash)
+        };
+
+        let base = hash(&[stale.clone(), floor.clone()]);
+        assert_eq!(
+            base,
+            hash(&[stale.clone(), floor.clone(), timing.clone()]),
+            "a timing entry must not move any component or the composite"
+        );
+        assert_eq!(
+            base,
+            hash(&[timing, floor.clone(), stale.clone()]),
+            "degraded order must not move any component or the composite"
+        );
+        assert_eq!(
+            base,
+            hash(&[stale.clone(), floor.clone(), stale.clone()]),
+            "a repeated degraded entry must not move any component or the composite"
+        );
+        assert_ne!(
+            base.1,
+            hash(&[stale]).1,
+            "dropping a canonical degraded entry must still fork the composite"
+        );
+        Ok(())
+    }
+
+    /// ADR 0087 finding 1: evidence scores were hashed as raw f32 bytes. v2
+    /// quantizes them like every other hashed score.
+    #[test]
+    fn pack_hash_v2_quantizes_evidence_scores() -> Result<(), String> {
+        use super::compute_pack_hash;
+        use crate::models::{TrustClass, UnitScore};
+        use crate::pack::{PackEvidenceItem, PackSection, PackTrustSignal};
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let with_evidence = |relevance: f32| -> Result<String, String> {
+            let mut scored = draft.clone();
+            scored.evidence_items = vec![PackEvidenceItem {
+                rank: 2,
+                evidence_id: "evidence-87".to_owned(),
+                entity_revision: "rev-1".to_owned(),
+                session_id: "session-87".to_owned(),
+                start_line: 3,
+                end_line: 9,
+                section: PackSection::ProceduralRules,
+                content: "evidence span".to_owned(),
+                estimated_tokens: 4,
+                relevance: UnitScore::parse(relevance).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
+                provenance: Vec::new(),
+                why: "evidence".to_owned(),
+                trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+            }];
+            Ok(compute_pack_hash(&request, &scored, &[]))
+        };
+        assert_eq!(
+            with_evidence(0.8)?,
+            with_evidence(0.8001)?,
+            "sub-quantum evidence relevance noise must not fork pack.hash"
+        );
+        assert_ne!(
+            with_evidence(0.8)?,
+            with_evidence(0.81)?,
+            "super-quantum evidence relevance change must fork pack.hash"
+        );
+        Ok(())
+    }
+
     #[test]
     fn pack_hash_refresh_includes_late_context_degradation() -> Result<(), String> {
         use super::{
@@ -10266,7 +10627,7 @@ pub fn unrelated_context() -> u64 {{
         let read_snapshot_generation = Some(17);
         let initial_degraded: Vec<ContextResponseDegradation> = Vec::new();
 
-        refresh_context_pack_hash(
+        let stale_components = refresh_context_pack_hash(
             &request,
             &mut draft,
             &initial_degraded,
@@ -10288,7 +10649,7 @@ pub fn unrelated_context() -> u64 {{
                 "Increase the resource profile or retry after the pack slot clears.".to_string(),
             ),
         }];
-        refresh_context_pack_hash(
+        let refreshed_components = refresh_context_pack_hash(
             &request,
             &mut draft,
             &late_degraded,
@@ -10296,6 +10657,14 @@ pub fn unrelated_context() -> u64 {{
             None,
             read_snapshot_generation,
             None,
+        );
+        assert_ne!(
+            stale_components.degraded, refreshed_components.degraded,
+            "a late degradation must change the degraded component digest"
+        );
+        assert_eq!(
+            stale_components.request, refreshed_components.request,
+            "a late degradation must not change the request component digest"
         );
         let refreshed_hash = draft
             .hash
