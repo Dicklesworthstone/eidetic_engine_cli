@@ -12,9 +12,7 @@ use serde::Serialize;
 
 use crate::config::{WORKSPACE_MARKER, derive_workspace_scope};
 use crate::core::workspace::WorkspaceEntry;
-use crate::db::{
-    CreateAuditInput, DbConnection, DbError, DbOperation, generate_audit_id,
-};
+use crate::db::{CreateAuditInput, DbConnection, DbError, DbOperation, generate_audit_id};
 use crate::models::DomainError;
 
 pub const WORKSPACE_REBIND_SCHEMA: &str = "ee.workspace.rebind.v1";
@@ -92,14 +90,16 @@ pub fn rebind_workspace(
             repair: Some("Migrate the store explicitly before previewing the rebind.".to_owned()),
         });
     }
-    let plan = plan_for_connection(&read, &database_text, &destination, options)
-        .map_err(storage_error)?;
+    let plan =
+        plan_for_connection(&read, &database_text, &destination, options).map_err(storage_error)?;
     drop(read);
     let Some(commitment) = options.apply_plan.as_deref() else {
         return Ok(report(plan, None));
     };
     if commitment != plan.plan_hash {
-        return Err(storage_error(conflict("preview commitment is stale or does not match")));
+        return Err(storage_error(conflict(
+            "preview commitment is stale or does not match",
+        )));
     }
 
     // Recheck the destination before opening a writer. The second plan check
@@ -139,7 +139,9 @@ fn local_destination(
     let mut component_path = PathBuf::new();
     for component in absolute.components() {
         if component == Component::ParentDir {
-            return Err(usage("use a destination path without parent-directory components"));
+            return Err(usage(
+                "use a destination path without parent-directory components",
+            ));
         }
         component_path.push(component.as_os_str());
         if matches!(component, Component::Prefix(_)) {
@@ -160,9 +162,17 @@ fn local_destination(
         WorkspaceRebindDestination {
             path: utf8_path(&canonical)?,
             scope_kind: scope.kind.as_str().to_owned(),
-            repository_root: scope.repository_root.as_deref().map(utf8_path).transpose()?,
+            repository_root: scope
+                .repository_root
+                .as_deref()
+                .map(utf8_path)
+                .transpose()?,
             repository_fingerprint: scope.repository_fingerprint,
-            subproject_path: scope.subproject_path.as_deref().map(utf8_path).transpose()?,
+            subproject_path: scope
+                .subproject_path
+                .as_deref()
+                .map(utf8_path)
+                .transpose()?,
         },
     ))
 }
@@ -171,9 +181,15 @@ fn require_file_kind(path: &Path, directory: bool) -> Result<(), DomainError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| usage("an existing, readable project-local store is required"))?;
     if metadata.file_type().is_symlink()
-        || if directory { !metadata.is_dir() } else { !metadata.is_file() }
+        || if directory {
+            !metadata.is_dir()
+        } else {
+            !metadata.is_file()
+        }
     {
-        return Err(usage("symlinks and non-regular local store paths are not accepted"));
+        return Err(usage(
+            "symlinks and non-regular local store paths are not accepted",
+        ));
     }
     Ok(())
 }
@@ -195,7 +211,9 @@ fn plan_for_connection(
     if previous.workspace_id != options.expected_workspace_id
         || previous.path != options.expected_source_path
     {
-        return Err(conflict("stored workspace ID or source path does not match the explicit selection"));
+        return Err(conflict(
+            "stored workspace ID or source path does not match the explicit selection",
+        ));
     }
     if previous.path == destination.path {
         return Err(conflict("store is already bound to the destination"));
@@ -210,8 +228,8 @@ fn plan_for_connection(
     // The fixed struct field order and empty commitment field make the digest
     // reproducible. Include all source binding metadata (including updatedAt)
     // so alias/scope edits invalidate a previously approved plan as well.
-    let bytes = serde_json::to_vec(&plan)
-        .map_err(|_| conflict("cannot encode the preview commitment"))?;
+    let bytes =
+        serde_json::to_vec(&plan).map_err(|_| conflict("cannot encode the preview commitment"))?;
     plan.plan_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
     Ok(plan)
 }
@@ -219,7 +237,9 @@ fn plan_for_connection(
 fn single_workspace(db: &DbConnection) -> Result<WorkspaceEntry, DbError> {
     let mut workspaces = db.list_workspaces()?;
     if workspaces.len() != 1 {
-        return Err(conflict("recovery requires exactly one stored workspace; no identity was guessed"));
+        return Err(conflict(
+            "recovery requires exactly one stored workspace; no identity was guessed",
+        ));
     }
     workspaces
         .pop()
@@ -269,7 +289,9 @@ fn apply_on_connection(
     expected.subproject_path = destination.subproject_path.clone();
     expected.updated_at = actual.updated_at.clone();
     if actual != expected {
-        return Err(conflict("workspace update did not preserve the approved identity"));
+        return Err(conflict(
+            "workspace update did not preserve the approved identity",
+        ));
     }
     db.insert_audit(
         audit_id,
@@ -334,7 +356,10 @@ fn conflict(message: &str) -> DbError {
 fn usage(message: &str) -> DomainError {
     DomainError::Usage {
         message: format!("{CONFLICT_PREFIX}{message}"),
-        repair: Some("Inspect the copied local store and preview using its exact stored ID and path.".to_owned()),
+        repair: Some(
+            "Inspect the copied local store and preview using its exact stored ID and path."
+                .to_owned(),
+        ),
     }
 }
 
@@ -343,12 +368,17 @@ fn storage_error(error: DbError) -> DomainError {
         DbError::MalformedRow { message, .. } if message.starts_with(CONFLICT_PREFIX) => {
             DomainError::Usage {
                 message,
-                repair: Some("Inspect the store again and request a fresh rebind preview.".to_owned()),
+                repair: Some(
+                    "Inspect the store again and request a fresh rebind preview.".to_owned(),
+                ),
             }
         }
         other => DomainError::Storage {
             message: format!("workspace rebind failed: {other}"),
-            repair: Some("Inspect the local store; a failed transaction does not apply a partial rebind.".to_owned()),
+            repair: Some(
+                "Inspect the local store; a failed transaction does not apply a partial rebind."
+                    .to_owned(),
+            ),
         },
     }
 }

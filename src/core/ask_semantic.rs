@@ -80,18 +80,19 @@ fn evaluate_with_prepared_model(
     embedder: &dyn Embedder,
     caller_cx: Option<Cx>,
 ) -> Result<AskReport, DomainError> {
-    let result = crate::core::run_cli_with_cx(STANDALONE_SCORING_TIMEOUT, |runtime_cx| async move {
-        // run_cli_future drives a future but does not mint a request context.
-        // Looking up Cx::current inside it made every standalone invocation
-        // silently lexical, even with a verified local model already selected.
-        // Never replace an existing caller's cancelled context with a fresh one.
-        let cx = caller_cx.unwrap_or(runtime_cx);
-        // Dependencies that consult the active context must see the same
-        // cancellation and capabilities as the explicit inference argument,
-        // never the bridge's fresh bootstrap context in place of the caller.
-        let _ambient = Cx::set_current(Some(cx.clone()));
-        SemanticScores::build(&cx, &request.question, candidates, embedder).await
-    });
+    let result =
+        crate::core::run_cli_with_cx(STANDALONE_SCORING_TIMEOUT, |runtime_cx| async move {
+            // run_cli_future drives a future but does not mint a request context.
+            // Looking up Cx::current inside it made every standalone invocation
+            // silently lexical, even with a verified local model already selected.
+            // Never replace an existing caller's cancelled context with a fresh one.
+            let cx = caller_cx.unwrap_or(runtime_cx);
+            // Dependencies that consult the active context must see the same
+            // cancellation and capabilities as the explicit inference argument,
+            // never the bridge's fresh bootstrap context in place of the caller.
+            let _ambient = Cx::set_current(Some(cx.clone()));
+            SemanticScores::build(&cx, &request.question, candidates, embedder).await
+        });
     finish_evaluation(
         request,
         candidates,
@@ -296,7 +297,10 @@ mod runtime_tests {
             text: &'a str,
         ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
             Box::pin(async move {
-                assert!(Cx::current().is_some(), "the bridge must install its context");
+                assert!(
+                    Cx::current().is_some(),
+                    "the bridge must install its context"
+                );
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let result = self.hash.embed(cx, text).await;
                 if self.cancel_after_query {

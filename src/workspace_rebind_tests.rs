@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::{
-    CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput,
-    EvidenceProducerKind, WorkspaceScopeFields,
+    CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
+    WorkspaceScopeFields,
 };
 
 const WORKSPACE: &str = "wsp_00000000000000000000000000";
@@ -38,7 +38,11 @@ fn bind(db: &DbConnection, id: &str, path: &str) {
     .expect("insert fixture workspace");
 }
 
-fn fixture() -> (DbConnection, WorkspaceRebindOptions, WorkspaceRebindDestination) {
+fn fixture() -> (
+    DbConnection,
+    WorkspaceRebindOptions,
+    WorkspaceRebindDestination,
+) {
     let db = DbConnection::open_memory().expect("open database");
     db.migrate().expect("migrate database");
     bind(&db, WORKSPACE, "/original/project");
@@ -68,7 +72,14 @@ fn apply(
     audit: &str,
 ) -> Result<WorkspaceRebindPlan, DbError> {
     db.with_transaction(|| {
-        apply_on_connection(db, &plan.database_path, target, options, &plan.plan_hash, audit)
+        apply_on_connection(
+            db,
+            &plan.database_path,
+            target,
+            options,
+            &plan.plan_hash,
+            audit,
+        )
     })
 }
 
@@ -79,7 +90,10 @@ fn preview_is_repeatable_and_does_not_change_the_binding() {
     let first = preview(&db, &options, &target);
     let second = preview(&db, &options, &target);
     assert_eq!(first, second);
-    assert_eq!(before, single_workspace(&db).expect("binding after preview"));
+    assert_eq!(
+        before,
+        single_workspace(&db).expect("binding after preview")
+    );
     let result = report(first, None);
     assert!(result.dry_run);
     assert!(!result.persisted);
@@ -142,9 +156,14 @@ fn rebind_preserves_durable_session_and_evidence_identity_and_normal_resolution(
         .expect("read retained session")
         .expect("session still exists");
     assert_eq!(session.id, SESSION);
-    assert_eq!(session.source_path.as_deref(), Some("/original/transcript.jsonl"));
+    assert_eq!(
+        session.source_path.as_deref(),
+        Some("/original/transcript.jsonl")
+    );
     assert_eq!(session.content_hash, "session-source-hash");
-    let spans = db.list_evidence_spans_for_session(SESSION).expect("retained evidence");
+    let spans = db
+        .list_evidence_spans_for_session(SESSION)
+        .expect("retained evidence");
     assert_eq!(spans.len(), 1);
     let span = spans.first().expect("one evidence row");
     assert_eq!(span.id, EVIDENCE);
@@ -152,8 +171,14 @@ fn rebind_preserves_durable_session_and_evidence_identity_and_normal_resolution(
     assert_eq!(span.session_id, SESSION);
     assert_eq!(span.cass_span_id, "/original/transcript.jsonl:1");
     assert_eq!(span.excerpt, excerpt);
-    assert_eq!(span.content_hash, format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()));
-    let entry = db.get_audit(&audit).expect("read audit").expect("audit committed");
+    assert_eq!(
+        span.content_hash,
+        format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex())
+    );
+    let entry = db
+        .get_audit(&audit)
+        .expect("read audit")
+        .expect("audit committed");
     assert_eq!(entry.action, REBIND_ACTION);
     assert_eq!(entry.target_id.as_deref(), Some(WORKSPACE));
     let path = Path::new(&target.path);
@@ -188,8 +213,14 @@ fn a_stale_preview_cannot_overwrite_new_alias_or_scope_metadata() {
         .expect("concurrent metadata edit");
     let changed = single_workspace(&db).expect("changed binding");
     assert!(apply(&db, &options, &target, &original, &generate_audit_id()).is_err());
-    assert_eq!(single_workspace(&db).expect("binding after refusal"), changed);
-    assert_ne!(preview(&db, &options, &target).plan_hash, original.plan_hash);
+    assert_eq!(
+        single_workspace(&db).expect("binding after refusal"),
+        changed
+    );
+    assert_ne!(
+        preview(&db, &options, &target).plan_hash,
+        original.plan_hash
+    );
 }
 
 #[test]
@@ -212,10 +243,22 @@ fn commitments_are_bound_to_the_store_destination_and_source_metadata() {
     changed_target.path = "/another/project".to_owned();
     let other_target = preview(&db, &options, &changed_target);
     assert_ne!(original.plan_hash, other_target.plan_hash);
-    assert!(apply(&db, &options, &changed_target, &original, &generate_audit_id()).is_err());
+    assert!(
+        apply(
+            &db,
+            &options,
+            &changed_target,
+            &original,
+            &generate_audit_id()
+        )
+        .is_err()
+    );
     changed_target = target.clone();
     changed_target.repository_fingerprint = Some("changed-repository-scope".to_owned());
-    assert_ne!(preview(&db, &options, &changed_target).plan_hash, original.plan_hash);
+    assert_ne!(
+        preview(&db, &options, &changed_target).plan_hash,
+        original.plan_hash
+    );
 }
 
 #[test]
@@ -236,8 +279,14 @@ fn an_audit_failure_rolls_back_the_location_update() {
     )
     .expect("occupy audit identity");
     assert!(apply(&db, &options, &target, &plan, &audit).is_err());
-    assert_eq!(single_workspace(&db).expect("rolled back binding"), plan.previous);
-    let existing = db.get_audit(&audit).expect("read existing audit").expect("audit retained");
+    assert_eq!(
+        single_workspace(&db).expect("rolled back binding"),
+        plan.previous
+    );
+    let existing = db
+        .get_audit(&audit)
+        .expect("read existing audit")
+        .expect("audit retained");
     assert_eq!(existing.action, "fixture.existing_audit");
 }
 
@@ -291,7 +340,10 @@ fn preview_refuses_symlinked_store_files_without_following_them() {
         apply_plan: None,
     };
     assert!(rebind_workspace(&options).is_err());
-    assert_eq!(std::fs::read(outside).expect("outside remains unchanged"), b"not a database");
+    assert_eq!(
+        std::fs::read(outside).expect("outside remains unchanged"),
+        b"not a database"
+    );
 }
 
 #[test]
@@ -306,5 +358,8 @@ fn location_update_quotes_apostrophes_and_sql_shaped_path_text() {
     assert_eq!(after.workspace_id, WORKSPACE);
     assert!(sql_text("bad\0binding").is_err());
     assert_eq!(sql_optional_text(None).expect("SQL NULL"), "NULL");
-    assert_eq!(sql_optional_text(Some("NULL")).expect("literal NULL"), "'NULL'");
+    assert_eq!(
+        sql_optional_text(Some("NULL")).expect("literal NULL"),
+        "'NULL'"
+    );
 }

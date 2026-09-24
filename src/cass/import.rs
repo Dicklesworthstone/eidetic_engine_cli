@@ -1762,10 +1762,7 @@ impl CassViewLineCollector {
 /// Older JSONL emitters omit locators; when either supported locator is present
 /// it must agree. Compare paths lexically, without probing a host-private file.
 /// Diagnostics deliberately contain neither path nor transcript content.
-fn validate_cass_view_source(
-    value: &JsonValue,
-    source_path: &str,
-) -> Result<(), CassImportError> {
+fn validate_cass_view_source(value: &JsonValue, source_path: &str) -> Result<(), CassImportError> {
     for field in ["path", "source_path"] {
         let Some(reported) = value.get(field) else {
             continue;
@@ -1836,10 +1833,9 @@ fn parse_view_line_value(
 /// to their separate input bounds, not this retained-evidence allowance.
 fn retained_cass_view_span_bytes(span: &CassViewSpanForImport) -> usize {
     const ROW_OVERHEAD_ALLOWANCE: usize = 256;
-    let reasons = span
-        .redacted_reasons
-        .iter()
-        .fold(0_usize, |bytes, reason| bytes.saturating_add(reason.capacity()));
+    let reasons = span.redacted_reasons.iter().fold(0_usize, |bytes, reason| {
+        bytes.saturating_add(reason.capacity())
+    });
     span.cass_span_id
         .capacity()
         .saturating_add(span.excerpt.capacity())
@@ -2578,18 +2574,14 @@ mod tests {
         pages: &[String],
     ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
         let mut pages = pages.iter();
-        collect_cass_view_snapshot(
-            "session.jsonl",
-            CASS_VIEW_RETAINED_MAX_BYTES,
-            |_, _| {
-                let page = pages
-                    .next()
-                    .ok_or_else(|| invalid_view_page("fixture exhausted before complete view"))?;
-                Ok(CassViewStdoutBuffer {
-                    bytes: page.as_bytes().to_vec(),
-                })
-            },
-        )
+        collect_cass_view_snapshot("session.jsonl", CASS_VIEW_RETAINED_MAX_BYTES, |_, _| {
+            let page = pages
+                .next()
+                .ok_or_else(|| invalid_view_page("fixture exhausted before complete view"))?;
+            Ok(CassViewStdoutBuffer {
+                bytes: page.as_bytes().to_vec(),
+            })
+        })
     }
 
     fn view_window_fixture(first: u32, last: u32, total: u32) -> String {
@@ -2752,8 +2744,8 @@ mod tests {
             for (key, value) in object {
                 line[key.as_str()] = value.clone();
             }
-            let rows = collect_view_fixture(&[line.to_string()])
-                .map_err(|error| error.to_string())?;
+            let rows =
+                collect_view_fixture(&[line.to_string()]).map_err(|error| error.to_string())?;
             ensure_equal(&rows.len(), &1, "matching locator row count")?;
             ensure_equal(
                 &rows[0].cass_span_id,
@@ -2782,8 +2774,7 @@ mod tests {
     fn view_retention_budget_checks_exact_boundary_and_integer_overflow() -> TestResult {
         let limit = CASS_VIEW_RETAINED_MAX_BYTES;
         ensure_equal(
-            &charge_cass_view_retention(limit - 1, 1, limit)
-                .map_err(|error| error.to_string())?,
+            &charge_cass_view_retention(limit - 1, 1, limit).map_err(|error| error.to_string())?,
             &limit,
             "exact retained byte boundary",
         )?;
@@ -2843,14 +2834,19 @@ mod tests {
             "retention rejection must explain the applicable bound",
         )?;
         ensure(collector.spans.is_empty(), "rejected row was retained")?;
-        ensure(collector.seen_lines.is_empty(), "rejected line identity was occupied")?;
+        ensure(
+            collector.seen_lines.is_empty(),
+            "rejected line identity was occupied",
+        )?;
         ensure_equal(
             &collector.retained_bytes,
             &CASS_VIEW_RETAINED_MAX_BYTES,
             "refusal preserves the previous charge",
         )?;
         collector.retained_bytes = 0;
-        collector.accept_value(&line).map_err(|error| error.to_string())?;
+        collector
+            .accept_value(&line)
+            .map_err(|error| error.to_string())?;
         ensure_equal(&collector.spans.len(), &1, "retry captures the row once")?;
         ensure(
             collector.accept_value(&line).is_err(),
@@ -2895,13 +2891,13 @@ mod tests {
     fn view_retention_refuses_long_locator_amplification_with_small_wire_input() -> TestResult {
         let source = format!("{}.jsonl", "source".repeat(256));
         let page = "{\"line\":1,\"content\":\"Build completed\"}";
-        let row = parse_view_line_value(
-            &json!({"line": 1, "content": "Build completed"}),
-            &source,
-        )
-        .map_err(|error| error.to_string())?;
+        let row = parse_view_line_value(&json!({"line": 1, "content": "Build completed"}), &source)
+            .map_err(|error| error.to_string())?;
         let charge = retained_cass_view_span_bytes(&row);
-        ensure(charge > page.len() * 10, "fixture must expand beyond wire bytes")?;
+        ensure(
+            charge > page.len() * 10,
+            "fixture must expand beyond wire bytes",
+        )?;
         for (limit, accepted) in [(charge, true), (charge - 1, false)] {
             let result = collect_cass_view_snapshot(&source, limit, |_, _| {
                 Ok(CassViewStdoutBuffer {
@@ -4748,8 +4744,7 @@ mod tests {
         let mut view: JsonValue =
             serde_json::from_str(&view_stdout).map_err(|error| error.to_string())?;
         view["path"] = json!(session_path.to_string_lossy());
-        let view_stdout =
-            serde_json::to_string_pretty(&view).map_err(|error| error.to_string())?;
+        let view_stdout = serde_json::to_string_pretty(&view).map_err(|error| error.to_string())?;
 
         let cass_binary = bin_dir.join("cass");
         write_fake_cass_binary_with_verbatim_view(
