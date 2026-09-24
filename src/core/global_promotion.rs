@@ -14,6 +14,11 @@ use crate::policy::redact_secret_like_content;
 #[path = "global_promotion_admission.rs"]
 mod admission;
 
+#[path = "global_promotion_payload.rs"]
+mod payload;
+
+use payload::PromotionPayload;
+
 pub const GLOBAL_PROMOTION_PLAN_SCHEMA_V1: &str = "ee.global_promotion.plan.v1";
 
 /// Degraded/refusal code emitted when secret-like content blocks promotion.
@@ -88,6 +93,10 @@ pub enum PromotionRefusal {
     Expired,
     /// Trust class below the evidence gate.
     EvidenceGateTrustTooLow { trust_class: String },
+    /// Current attempt-family evidence no longer permits promotion.
+    AttemptFamily {
+        posture: crate::models::AttemptFamilyPromotionPosture,
+    },
     /// Secret-like content detected; promotion refuses rather than redacts.
     RedactionRefused { reasons: Vec<&'static str> },
 }
@@ -102,7 +111,9 @@ impl PromotionRefusal {
             Self::Superseded => "global_promotion_superseded",
             Self::NotYetValid => "global_promotion_not_yet_valid",
             Self::Expired => "global_promotion_expired",
-            Self::EvidenceGateTrustTooLow { .. } => "global_promotion_evidence_gate",
+            Self::EvidenceGateTrustTooLow { .. } | Self::AttemptFamily { .. } => {
+                "global_promotion_evidence_gate"
+            }
             Self::RedactionRefused { .. } => GLOBAL_PROMOTION_REDACTION_REFUSED_CODE,
         }
     }
@@ -133,6 +144,10 @@ impl PromotionRefusal {
             Self::EvidenceGateTrustTooLow { trust_class } => format!(
                 "Promotion requires trust class human_explicit or agent_validated; this memory is `{trust_class}`."
             ),
+            Self::AttemptFamily { posture } => format!(
+                "Attempt-family evidence blocks global promotion ({}): {}.",
+                posture.as_str(), posture.reason()
+            ),
             Self::RedactionRefused { reasons } => format!(
                 "Secret-like content blocks promotion across workspace boundaries ({}); promotion refuses rather than silently redacting.",
                 reasons.join(", ")
@@ -161,6 +176,9 @@ impl PromotionRefusal {
             Self::EvidenceGateTrustTooLow { .. } => {
                 "Validate the memory first (record outcome evidence or human confirmation), then retry."
                     .to_owned()
+            }
+            Self::AttemptFamily { .. } => {
+                "Record the actual sibling attempts and resolve family conflicts before retrying; a stored trust label does not bypass incomplete evidence.".to_owned()
             }
             Self::RedactionRefused { .. } => {
                 "Remove or externalize the secret-like content, re-remember, and promote the clean row."
@@ -381,6 +399,7 @@ fn promotion_audit_details(
     memory: &crate::db::StoredMemory,
     global_id: &str,
     already_promoted: bool,
+    payload: &PromotionPayload,
 ) -> String {
     json!({
         "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
@@ -388,6 +407,7 @@ fn promotion_audit_details(
         "originMemoryId": memory.id,
         "globalMemoryId": global_id,
         "alreadyPromoted": already_promoted,
+        "sourcePayload": payload.audit_evidence(),
     })
     .to_string()
 }
@@ -443,13 +463,14 @@ fn persist_global_promotion(
     connection: &DbConnection,
     workspace: &str,
     memory: &crate::db::StoredMemory,
+    payload: &PromotionPayload,
     actor: Option<&str>,
     reference: chrono::DateTime<chrono::Utc>,
 ) -> crate::db::Result<(String, bool, Option<String>)> {
     connection.with_transaction(|| {
         // Select the twin inside the write transaction, not in a snapshot
         // released before publication. Never trust a stale preview decision.
-        let twin = admission::find_twin(connection, workspace, memory, reference)?;
+        let twin = admission::find_twin(connection, workspace, memory, payload, reference)?;
         let (id, already_promoted, job) = match twin {
             Some(id) => {
                 let job = unfinished_promotion_index_job(connection, workspace, &id)?;
@@ -491,6 +512,9 @@ fn persist_global_promotion(
                         "UPDATE memories SET valid_from = NULL WHERE id = '{id}'"
                     ))?;
                 }
+                // Preserve the validated structured payload before a search job or
+                // success receipt can make the new row visible as complete.
+                payload.apply(connection, &id)?;
                 connection.insert_search_index_job(
                     &job,
                     &CreateSearchIndexJobInput {
@@ -512,7 +536,12 @@ fn persist_global_promotion(
                 action: "memory.promote_global".to_owned(),
                 target_type: Some("memory".to_owned()),
                 target_id: Some(id.clone()),
-                details: Some(promotion_audit_details(memory, &id, already_promoted)),
+                details: Some(promotion_audit_details(
+                    memory,
+                    &id,
+                    already_promoted,
+                    payload,
+                )),
             },
         )?;
         Ok((id, already_promoted, job))
@@ -529,13 +558,13 @@ fn persist_global_promotion(
 /// so callers render them honestly without string-matching.
 pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionReport, String> {
     let reference = chrono::Utc::now();
-    let (memory, mut plan) = admission::load_source(options, reference)?;
+    let (memory, payload, mut plan) = admission::load_source(options, reference)?;
     // Refusals do not inspect, initialize, migrate, or repair the global store.
     if !plan.allowed() {
         return Ok(admission::preview_report(plan, None));
     }
     if options.dry_run {
-        let twin = admission::preview_twin(options.global_paths, &memory, reference)?;
+        let twin = admission::preview_twin(options.global_paths, &memory, &payload, reference)?;
         admission::set_duplicate(&mut plan, twin.as_deref());
         return Ok(admission::preview_report(plan, twin));
     }
@@ -550,6 +579,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         &global_connection,
         &global_workspace_id,
         &memory,
+        &payload,
         options.actor,
         reference,
     )
@@ -576,6 +606,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                     &memory,
                     &global_memory_id,
                     already_promoted,
+                    &payload,
                 )),
             },
         )
@@ -1718,6 +1749,7 @@ mod tests {
                 &self.destination,
                 &self.workspace,
                 &self.memory,
+                &PromotionPayload::default(),
                 Some("test-actor"),
                 chrono::Utc::now(),
             )

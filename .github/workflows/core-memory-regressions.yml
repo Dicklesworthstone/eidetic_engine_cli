@@ -13,6 +13,7 @@ on:
       - src/core/index*.rs
       - src/core/search*.rs
       - src/core/remote_embed.rs
+      - src/core/global_promotion*.rs
       - src/db/**
       - src/models/**
       - src/pack/**
@@ -103,6 +104,7 @@ jobs:
           done <<'CASES'
           search-producer-integrity core::search::runtime_fallback::tests::
           ask-semantic-runtime core::ask::semantic::
+          global-promotion core::global_promotion::
           CASES
           exit "$failed"
       - name: Exercise native rule admission and authority

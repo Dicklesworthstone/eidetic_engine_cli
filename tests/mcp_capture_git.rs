@@ -220,10 +220,9 @@ fn mcp_capture_git_applies_once_and_retains_sanitized_audited_source() -> TestRe
         found
             .pointer("/data/results")
             .and_then(JsonValue::as_array)
-            .is_some_and(|rows| rows
-                .iter()
-                .any(|row| (row["memoryId"].as_str() == Some(id)
-                    && row["docId"].as_str() == Some(id)))),
+            .is_some_and(|rows| rows.iter().any(
+                |row| row["memoryId"].as_str() == Some(id) && row["docId"].as_str() == Some(id)
+            )),
         "the MCP capture must be searchable through its ordinary index job: {found}"
     );
     assert!(!found.to_string().contains(&token));

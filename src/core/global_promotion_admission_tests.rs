@@ -258,7 +258,7 @@ fn seals_control_promotion_independently_of_body_spelling_and_explicit_reveal() 
 fn body_and_seal_authority_observe_one_snapshot_during_a_concurrent_write() {
     let fixture = Fixture::new();
     let reference = timestamp("2030-01-01T00:00:00Z").unwrap();
-    let (captured, plan) = load_source_with_boundary(&fixture.options(true), reference, || {
+    let (captured, _, plan) = load_source_with_boundary(&fixture.options(true), reference, || {
         fixture.update("content = 'Changed during promotion.'");
         fixture.seal();
         Ok(())
@@ -266,7 +266,7 @@ fn body_and_seal_authority_observe_one_snapshot_during_a_concurrent_write() {
     .unwrap();
     assert_eq!(captured.content, BODY);
     assert!(plan.allowed());
-    let (_, next) = load_source(&fixture.options(true), reference).unwrap();
+    let (_, _, next) = load_source(&fixture.options(true), reference).unwrap();
     assert_eq!(
         next.data_json()["detail"]["code"],
         "global_promotion_sealed"
@@ -460,4 +460,56 @@ fn wrong_workspace_targets_and_nonfinite_feedback_fail_before_writes() {
         global.count_table_rows("feedback_events").unwrap(),
         feedback_events
     );
+}
+
+#[test]
+fn source_body_typed_fields_and_family_gate_share_one_snapshot() {
+    let fixture = Fixture::new();
+    fixture
+        .db
+        .set_memory_typed_fields_json(MEMORY, Some(r#"{"action":"original action"}"#))
+        .unwrap();
+    let original = fixture.db.get_memory_typed_fields_json(MEMORY).unwrap();
+    let reference = timestamp("2030-01-01T00:00:00Z").unwrap();
+    let (memory, payload, plan) =
+        load_source_with_boundary(&fixture.options(true), reference, || {
+            fixture
+                .db
+                .set_memory_typed_fields_json(MEMORY, Some(r#"{"action":"concurrent action"}"#))
+                .unwrap();
+            fixture
+                .db
+                .set_memory_attempt_family(
+                    MEMORY,
+                    &crate::db::MemoryAttemptFamily {
+                        family_id: "private-concurrent-family".to_owned(),
+                        declared_size: Some(2),
+                        attempt_index: Some(1),
+                        disposition: Some("selected".to_owned()),
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(plan.allowed());
+    assert!(
+        payload
+            .matches_fields(&memory.kind, original.as_deref())
+            .unwrap()
+    );
+    assert!(payload.audit_evidence()["attemptFamily"].is_null());
+    let (_, _, next) = load_source(&fixture.options(true), reference).unwrap();
+    assert!(!next.allowed());
+    assert_eq!(
+        next.data_json()["detail"]["code"],
+        "global_promotion_evidence_gate"
+    );
+    assert!(
+        !next
+            .data_json()
+            .to_string()
+            .contains("private-concurrent-family")
+    );
+    assert!(!fixture.global.root.exists());
 }

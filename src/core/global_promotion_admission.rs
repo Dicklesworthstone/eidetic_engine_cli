@@ -14,6 +14,8 @@ use super::{
 use crate::core::global_store::{GlobalStorePaths, global_workspace_id};
 use crate::db::{DbConnection, DbError, DbOperation, StoredMemory};
 
+use super::payload::PromotionPayload;
+
 type DbResult<T> = crate::db::Result<T>;
 
 fn invalid_authority() -> DbError {
@@ -66,7 +68,7 @@ fn lifecycle_refusal(
 pub(super) fn load_source(
     options: &PromoteGlobalOptions<'_>,
     reference: DateTime<Utc>,
-) -> Result<(StoredMemory, PromotionPlan), String> {
+) -> Result<(StoredMemory, PromotionPayload, PromotionPlan), String> {
     load_source_with_boundary(options, reference, || Ok(()))
 }
 
@@ -74,7 +76,7 @@ fn load_source_with_boundary(
     options: &PromoteGlobalOptions<'_>,
     reference: DateTime<Utc>,
     after_body: impl FnOnce() -> Result<(), String>,
-) -> Result<(StoredMemory, PromotionPlan), String> {
+) -> Result<(StoredMemory, PromotionPayload, PromotionPlan), String> {
     let db = DbConnection::open_file_read_only(options.workspace_database_path)
         .map_err(|_| "Could not open the existing workspace database for promotion".to_owned())?;
     let snapshot = ReadSnapshot::begin(&db)
@@ -134,10 +136,22 @@ fn load_source_with_boundary(
         plan.verdict = PromotionVerdict::Refuse { refusal };
         plan.audit_action = "memory.promote_global_refused";
     }
+    // Capture sidecars inside the same body/authority snapshot. Do not inspect
+    // withheld payloads or open a destination for an already-refused source.
+    let payload = if plan.allowed() {
+        let (payload, refusal) = PromotionPayload::capture(&db, &memory)?;
+        if let Some(refusal) = refusal {
+            plan.verdict = PromotionVerdict::Refuse { refusal };
+            plan.audit_action = "memory.promote_global_refused";
+        }
+        payload
+    } else {
+        PromotionPayload::default()
+    };
     snapshot
         .finish()
         .map_err(|_| "Could not release the promotion source snapshot".to_owned())?;
-    Ok((memory, plan))
+    Ok((memory, payload, plan))
 }
 
 pub(super) fn set_duplicate(plan: &mut PromotionPlan, twin: Option<&str>) {
@@ -186,12 +200,13 @@ pub(super) fn find_twin(
     db: &DbConnection,
     workspace: &str,
     source: &StoredMemory,
+    payload: &PromotionPayload,
     reference: DateTime<Utc>,
 ) -> DbResult<Option<String>> {
     let source_start = source.valid_from.as_deref().map(timestamp).transpose()?;
     let source_end = source.valid_to.as_deref().map(timestamp).transpose()?;
     let rows = db.query(
-        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, s.memory_id, s.revealed_at FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
+        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, s.memory_id, s.revealed_at, m.typed_fields_json FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
         &[
             Value::Text(workspace.to_owned()),
             Value::Text(source.content.clone()),
@@ -229,7 +244,10 @@ pub(super) fn find_twin(
         }
         let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if start != source_start || end != source_end {
+        if start != source_start
+            || end != source_end
+            || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)?
+        {
             continue;
         }
         return Ok(Some(id.clone()));
@@ -257,6 +275,7 @@ fn bound_global_workspace(db: &DbConnection, paths: &GlobalStorePaths) -> Result
 pub(super) fn preview_twin(
     paths: &GlobalStorePaths,
     source: &StoredMemory,
+    payload: &PromotionPayload,
     reference: DateTime<Utc>,
 ) -> Result<Option<String>, String> {
     if !paths
@@ -271,7 +290,7 @@ pub(super) fn preview_twin(
     let snapshot = ReadSnapshot::begin(&db)
         .map_err(|_| "Could not begin global preview snapshot".to_owned())?;
     let workspace = bound_global_workspace(&db, paths)?;
-    let twin = find_twin(&db, &workspace, source, reference)
+    let twin = find_twin(&db, &workspace, source, payload, reference)
         .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
     snapshot
         .finish()
@@ -422,6 +441,7 @@ mod duplicate_compatibility_tests {
                 &self.db,
                 &self.workspace,
                 &self.memory,
+                &PromotionPayload::default(),
                 None,
                 timestamp("2030-01-01T00:00:00Z").unwrap(),
             )
@@ -435,6 +455,7 @@ mod duplicate_compatibility_tests {
                 &self.db,
                 &self.workspace,
                 memory,
+                &PromotionPayload::default(),
                 timestamp("2030-01-01T00:00:00Z").unwrap(),
             )
             .unwrap();
