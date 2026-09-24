@@ -114,6 +114,14 @@ run_probe() {
 
     capture version version --json
     capture init init --workspace "$ws" --json
+    # A copied model directory is stale from birth: its .verified receipt binds
+    # inode and ctime, so every later process would re-hash 512 MB and the
+    # probe would measure a path users only hit after a chmod or chown. Re-mint
+    # the receipt the way users do (the documented repair), with downloads
+    # still off. It needs a store, so it runs after init.
+    if [ -d "$XDG_DATA_HOME/ee/models/potion-multilingual-128M" ]; then
+        capture model_fetch model fetch embedding-default --workspace "$ws" --json
+    fi
     local i=0 text
     for text in "${MEMORIES[@]}"; do
         i=$((i + 1))
@@ -344,6 +352,19 @@ grade() {
     row model_missing_fallback check \
         "EE_EMBED_MODEL_DIR=/nonexistent yields hash_fallback plus embed_model_unavailable" \
         "embed_backend=${mm_backend:-<absent>} degraded=[${mm_codes}]" "$mm_ok"
+
+    # 10. The model receipt is fresh after the documented re-mint, so the other
+    # rows ran on the path users run, not a re-hash-every-process path. A
+    # fetch that was attempted must succeed; status must be a real response.
+    local fetch_ok=true st_codes receipt_ok=false
+    if [ -f "$CAP/model_fetch.exit" ] && ! ok_response model_fetch; then fetch_ok=false; fi
+    st_codes="$(codes_of status)"
+    if $fetch_ok && ok_response status; then
+        case ",$st_codes," in *",embed_model_receipt_stale,"*) ;; *) receipt_ok=true ;; esac
+    fi
+    row model_receipt_fresh check \
+        "model fetch (when a model is present) succeeds and status carries no embed_model_receipt_stale" \
+        "modelFetch=$(exit_of model_fetch) status.degraded=[${st_codes}]" "$receipt_ok"
 }
 
 # Assemble the verdict object from ROWS. Precondition false -> incomplete.
@@ -404,7 +425,7 @@ fixture_ok() {
     mkdir -p "$d"
     local mem='mem_FIRST' rule='rule_R1'
     resp() { jq -cn --argjson data "$1" '{schema:"ee.response.v2", success:true, data:$data, degraded:[]}'; }
-    for f in init index_rebuild why index_status; do resp '{}' >"$d/$f.json"; done
+    for f in init index_rebuild why index_status model_fetch; do resp '{}' >"$d/$f.json"; done
     for i in 1 2 3 4 5 6 7 8; do resp "{\"memoryId\":\"mem_$i\"}" >"$d/remember_$i.json"; done
     resp "{\"memoryId\":\"$mem\"}" >"$d/remember_1.json"
     resp '{"version":"9.9.9","source":{"gitCommit":"abc","gitTag":"v9.9.9","gitDirty":false},"build":{"targetTriple":"t"}}' >"$d/version.json"
@@ -469,7 +490,7 @@ self_test() {
 
     d="$(case_dir empty_world)"; command find "$d" -name '*.json' -exec sh -c ': >"$1"' _ {} \;
     expect "empty captures cannot pass" "$d" incomplete \
-        "walking_skeleton,search_deterministic_parallel,pack_deterministic_parallel,ask_direct_hit,rule_searchable,rule_packs_beside_source,unrelated_query_abstains,status_doctor_agree,model_missing_fallback"
+        "walking_skeleton,search_deterministic_parallel,pack_deterministic_parallel,ask_direct_hit,rule_searchable,rule_packs_beside_source,unrelated_query_abstains,status_doctor_agree,model_missing_fallback,model_receipt_fresh"
 
     d="$(case_dir hash_backend)"; mutate "$d" search '.data.embed_backend = "hash_fallback"'
     expect "non-neural backend is incomplete" "$d" incomplete ""
@@ -549,6 +570,15 @@ self_test() {
 
     d="$(case_dir model_still_neural)"; mutate "$d" model_missing '.data.embed_backend = "neural_local"'
     expect "model missing yet neural reported" "$d" fail "model_missing_fallback"
+
+    d="$(case_dir receipt_stale)"; mutate "$d" status '.degraded = [{"code":"embed_model_receipt_stale"}]'
+    expect "receipt still stale after re-mint" "$d" fail "model_receipt_fresh"
+
+    d="$(case_dir fetch_fails)"; printf '1\n' >"$d/model_fetch.exit"; mutate "$d" model_fetch '.success = false'
+    expect "model fetch (the documented repair) fails" "$d" fail "model_receipt_fresh"
+
+    d="$(case_dir no_model_no_fetch)"; command find "$d" -name 'model_fetch.*' -exec sh -c 'mv "$1" "$1.skipped"' _ {} \;
+    expect "no model present: fetch not attempted" "$d" pass ""
 
     # Checksum refusal: a mismatched digest must stop before anything executes.
     local blob="$root/archive.tar.xz" rc
