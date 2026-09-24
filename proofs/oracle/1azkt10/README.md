@@ -188,3 +188,50 @@ Each file's `b3sum` equals its name.
   shared fleet load.
 - **Not `rch_verify.sh` attestation.** The same NOT-ATTESTED list as the first
   run above applies.
+
+## The invisible-index class, end to end (item 5)
+
+Before this change, the plant only moved `.ee/index` aside. ee recovered from
+a retained generation, and the class was never produced. The corrected plant
+(`ORACLE_PLANT=index_aside`) moves `.ee/index` and every `.ee/index.*`
+retained generation into `.ee/oracle-planted-aside/`, inside the job's own
+temp workspace, and moves them back before the durable check.
+
+`ee search` then refuses with an `ee.error.v2` envelope, code
+`search_index`, while `ee index status` still reports the DB's generation.
+The oracle used to count every non-zero probe exit as a resource failure. It
+now treats that refusal as the named class: `index invisible: search_index
+while dbGeneration=<n>` (ruling 10108, P1). The rule keys on the envelope's
+schema and code, never on its message text. `index_missing` exists only as a
+degradation code, not as an error code, so it is not part of the key.
+
+The plant also changes what `ee pack` can see. A pack baseline taken before
+the plant would therefore report a race that the plant itself caused, so a
+plant cell takes its serial pack baseline inside the plant window. Pack's own
+behavior without an index is bd-tjxvl.
+
+All three runs used `rch exec --clean-overlay --base <sha>` with the oracle
+file overlaid, so they are **unattested**. They verify the instrument, not a
+product verdict.
+
+| File | Run | What it holds |
+| --- | --- | --- |
+| `8da0c30d327e83cf8e6c7fe1311c60c2544c9d868ca3a22e5e1599f5d2d669e8.ee-test-event.jsonl` | PL4: the corrected plant BEFORE P1. Base `db8300c59318411b5cb573573fea5ff7769d68fa`, worker vmi1227854, 2026-09-24T02:06-02:36Z. | The class shown, but not named. `ee index status` reported `"dbGeneration":"8"`, and `ee search` exited 4 with `search_index` / "Search index not found". The oracle filed all 24 search refusals as resource signals (`INCONCLUSIVE`). Its `RACE_REPRODUCED` came only from pack probes compared with a baseline taken before the plant. |
+| `a9d2e3909e7df9e772d2194ace16884326f3f13bb852af16d4c4183ed240a058.ee-test-event.jsonl` | J4: the corrected plant WITH P1. Base `426e207d918526ddb22c8bf90601fc8abaaae659`, vmi1227854, 04:56-05:29Z. | Search rounds 0-2 red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT` against the in-window baseline. The in-window `ee index status` reported health `missing` and dbGeneration 8. Both lines were quoted, the plant was restored, and only `audit_log` changed. |
+| `fcacab3a84dafb7ee8f84639efc4915f97e186812f2aff6fc02a507166df2613.ee-test-event.jsonl` | J3: the untouched twin WITH P1, no plant. Same base and worker, 04:26-04:56Z. | `RACE_ABSENT` in every round, with `indexInvisible: []` throughout: the new rule does not fire on a healthy index. |
+
+In the same verification, the classifier's P1 unit tests were first run against
+a stub (detection off, semantic arm off). They were seen red: after a clean
+compile, exactly the two P1 tests failed and every older classifier test
+passed. With the real code they pass. `cargo clippy --test integration_n_r
+-D warnings` exited 0 at the same base.
+
+**What these files are NOT:**
+
+- **Not attested verdicts.** Every run used an overlay.
+- **Not a verdict on `ee pack`.** In this state, pack returns an unranked
+  selection and reports `context_lexical_fallback`. That is bd-tjxvl's
+  question. PL4's pack degraded codes were never compared, because the
+  oracle's comparison skips every `degraded.*` field.
+- **Not a model-backed run.** Every probe used hash fallback (item 4 is still
+  open).
