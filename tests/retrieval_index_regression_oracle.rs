@@ -105,6 +105,15 @@ const INDEX_INVISIBLE_CODES: [&str; 4] = [
     "search_unavailable",
 ];
 
+/// Error codes that mean a process refused because it could not see an index
+/// (1azkt.10 ruling 03:30Z, P1). Keyed on the `ee.error.v2` envelope's code,
+/// never on message text. `DomainError::code` (src/models/mod.rs) maps
+/// `Self::SearchIndex { .. } => "search_index"`; the only error codes it
+/// builds at runtime are handoff HMAC codes and `daemon_already_running`, so
+/// `index_missing` exists only as a degradation code, never as an error code,
+/// and is not listed here.
+const INDEX_INVISIBLE_ERROR_CODES: [&str; 1] = ["search_index"];
+
 /// Degraded codes that mean the lexical arm was lost. Retained from the
 /// bd-…​.23 proof because a silent drop to semantic-only ranking is a
 /// divergence in retrieval semantics even when the id order survives.
@@ -162,6 +171,33 @@ enum ProbeOutcome {
     /// The probe did not produce a usable answer: spawn failure, nonzero exit,
     /// timeout, or unparseable output. A **resource** signal. Never semantic.
     DidNotComplete(String),
+    /// The probe refused with an `ee.error.v2` envelope whose code says it
+    /// could not see an index (`INDEX_INVISIBLE_ERROR_CODES`). A **semantic**
+    /// answer, not a resource signal: see `index_invisible_error_code`.
+    IndexInvisible(String),
+}
+
+/// The index-invisible error code a probe refused with, iff it exited
+/// NONZERO and its stdout parses as an `ee.error.v2` envelope whose
+/// `error.code` is in `INDEX_INVISIBLE_ERROR_CODES` (1azkt.10 ruling 03:30Z,
+/// P1). Everything else is `None` and stays a resource signal:
+/// - a hang, timeout or kill leaves no envelope;
+/// - unparseable output is not an answer;
+/// - any other code is someone else's failure;
+/// - a zero exit carrying the same JSON is not a refusal.
+/// The message text is never read.
+fn index_invisible_error_code(exit_success: bool, stdout: &str) -> Option<String> {
+    if exit_success {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Value>(stdout.trim()).ok()?;
+    if envelope.pointer("/schema").and_then(Value::as_str) != Some("ee.error.v2") {
+        return None;
+    }
+    let code = envelope.pointer("/error/code").and_then(Value::as_str)?;
+    INDEX_INVISIBLE_ERROR_CODES
+        .contains(&code)
+        .then(|| code.to_owned())
 }
 
 /// Which fields must be present and non-empty in the serial baseline before any
@@ -195,16 +231,18 @@ impl ProbeKind {
 
 /// Classify one round of probes against the serial baseline.
 ///
-/// `index_generation_valid` is read from `ee index status` *outside* the
-/// concurrent phase: it says a current, healthy generation exists. Only then
-/// does an "index not found" degradation from a concurrent probe mean a
-/// semantic fault rather than an unbuilt index.
+/// `valid_generation` is the DB generation `ee index status` reported while a
+/// current, healthy generation existed (read *outside* the concurrent phase),
+/// or `None` when there was no valid generation. Only when it is `Some` does
+/// an "index not found" answer from a concurrent probe (a degradation code,
+/// or an `IndexInvisible` refusal) mean a semantic fault rather than an
+/// unbuilt index. The verdict line quotes it.
 fn classify_round(
     kind: ProbeKind,
     baseline: &Record,
     outcomes: &[ProbeOutcome],
     quorum: usize,
-    index_generation_valid: bool,
+    valid_generation: Option<&str>,
 ) -> Verdict {
     // Vacuity guard #1: the baseline must be substantive, or nothing below can
     // mean anything.
@@ -236,6 +274,19 @@ fn classify_round(
                 // Deliberately NOT a divergence. This is the separation rule.
                 incomplete.push(format!("#{index}: {reason}"));
             }
+            ProbeOutcome::IndexInvisible(code) => match valid_generation {
+                // The bead's named class: the process refused because it
+                // could not see an index while a valid generation existed.
+                Some(generation) => divergences.push(format!(
+                    "{} probe #{index}: index invisible: {code} while dbGeneration={generation}",
+                    kind.label()
+                )),
+                // No valid generation: the index was genuinely unbuilt, which
+                // is not this class. It is not an answer either.
+                None => incomplete.push(format!(
+                    "#{index}: refused with {code} while no valid generation existed"
+                )),
+            },
             ProbeOutcome::Completed(record) => {
                 completed = completed.saturating_add(1);
                 divergences.extend(compare_probe(
@@ -243,7 +294,7 @@ fn classify_round(
                     index,
                     baseline,
                     record,
-                    index_generation_valid,
+                    valid_generation.is_some(),
                 ));
             }
         }
@@ -1032,6 +1083,133 @@ fn durable_state(
     })
 }
 
+/// Move `.ee/index` and every `.ee/index.*` entry (the retained generations
+/// ee recovers from; index.rs `find_latest_recoverable_retained_dir` scans for
+/// `index.previous*`) into `aside_dir`, whose name matches none of them.
+/// Returns the moved names. Refuses when there is no `.ee/index` (the plant
+/// would plant nothing) or when `aside_dir` already exists.
+fn plant_index_aside(ee_dir: &Path, aside_dir: &Path) -> Result<Vec<String>, String> {
+    if aside_dir.exists() {
+        return Err(format!("{} already exists", aside_dir.display()));
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(ee_dir).map_err(|error| error.to_string())? {
+        let name = entry
+            .map_err(|error| error.to_string())?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if name == "index" || name.starts_with("index.") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    if !names.iter().any(|name| name == "index") {
+        return Err(format!("no index under {}", ee_dir.display()));
+    }
+    std::fs::create_dir(aside_dir).map_err(|error| error.to_string())?;
+    for name in &names {
+        std::fs::rename(ee_dir.join(name), aside_dir.join(name))
+            .map_err(|error| format!("move {name} aside: {error}"))?;
+    }
+    Ok(names)
+}
+
+/// Move the planted entries back. An entry ee recreated in the meantime is
+/// never overwritten: it is returned as recreated, and its planted original
+/// stays aside. Returns (recreated, errors).
+fn unplant_index_aside(
+    ee_dir: &Path,
+    aside_dir: &Path,
+    names: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut recreated = Vec::new();
+    let mut errors = Vec::new();
+    for name in names {
+        if std::fs::symlink_metadata(ee_dir.join(name)).is_ok() {
+            recreated.push(name.clone());
+        } else if let Err(error) = std::fs::rename(aside_dir.join(name), ee_dir.join(name)) {
+            errors.push(format!("{name}: {error}"));
+        }
+    }
+    (recreated, errors)
+}
+
+/// Every string in `value` that contains `needle`, with its JSON pointer.
+fn strings_containing(value: &Value, needle: &str, pointer: &str, out: &mut Vec<Value>) {
+    match value {
+        Value::String(text) if text.contains(needle) => {
+            out.push(serde_json::json!({ "pointer": pointer, "text": text }));
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                strings_containing(item, needle, &format!("{pointer}/{index}"), out);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, item) in fields {
+                strings_containing(item, needle, &format!("{pointer}/{key}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The two lines the 22:22Z ruling requires, quoted from real ee processes
+/// while the plant is in place: `index status` still reporting the DB's
+/// generation (equal to the pre-window one), and `search` saying "Search index
+/// not found". Both processes' exit codes and full output are kept, so the
+/// quotes can be checked against what ee printed. `classShown` is true only
+/// when both are present.
+fn plant_quotes(
+    status: std::io::Result<std::process::Output>,
+    search: std::io::Result<std::process::Output>,
+    pre_window_db_generation: Option<&str>,
+) -> Value {
+    const NEEDLE: &str = "Search index not found";
+    let captured = |output: &std::io::Result<std::process::Output>| match output {
+        Ok(output) => serde_json::json!({
+            "exitCode": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+        Err(error) => serde_json::json!({ "spawnError": error.to_string() }),
+    };
+    let stdout_json = |output: &std::io::Result<std::process::Output>| {
+        output
+            .as_ref()
+            .ok()
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+    };
+    let status_db_generation = stdout_json(&status)
+        .as_ref()
+        .and_then(|value| pointer_string(value, "/data/dbGeneration"));
+    let generation_line = status_db_generation
+        .as_ref()
+        .map(|generation| format!("\"dbGeneration\":\"{generation}\""));
+    let mut search_quotes = Vec::new();
+    if let Some(value) = stdout_json(&search) {
+        strings_containing(&value, NEEDLE, "", &mut search_quotes);
+    }
+    if let Ok(output) = &search {
+        for line in String::from_utf8_lossy(&output.stderr).lines() {
+            if line.contains(NEEDLE) {
+                search_quotes.push(serde_json::json!({ "stream": "stderr", "text": line }));
+            }
+        }
+    }
+    let generation_valid = status_db_generation.is_some()
+        && status_db_generation.as_deref() == pre_window_db_generation;
+    serde_json::json!({
+        "classShown": generation_valid && !search_quotes.is_empty(),
+        "dbGenerationLine": generation_line,
+        "dbGenerationEqualsPreWindow": generation_valid,
+        "searchIndexNotFound": search_quotes,
+        "indexStatus": captured(&status),
+        "search": captured(&search),
+    })
+}
+
 // ── Harness knobs ──────────────────────────────────────────────────────────
 //
 // Deliberately NOT `EE_*`-prefixed: these configure the test harness, not `ee`
@@ -1228,8 +1406,9 @@ fn row_snapshot(
 /// path the way `ee` itself maps it, and looked up in `EffectManifest`. Never
 /// a hand-list, so the oracle cannot drift from the declarations. An argv
 /// that does not parse, or a path with no declaration, is an error: an
-/// undeclared command cannot be judged. Also returns what was derived, for
-/// the evidence.
+/// undeclared command cannot be judged. A parsed `pack --read-only` gets no
+/// tables at all (ruling 22:22Z). Also returns what was derived, for the
+/// evidence.
 fn declared_write_tables(invocations: &[&[&str]]) -> Result<(BTreeSet<String>, Value), String> {
     use clap::Parser as _;
     let manifest = ee::core::effect::EffectManifest::build();
@@ -1242,17 +1421,25 @@ fn declared_write_tables(invocations: &[&[&str]]) -> Result<(BTreeSet<String>, V
         let effect = manifest.get(&command_path).ok_or_else(|| {
             format!("command path {command_path:?} (argv {args:?}) has no effect declaration")
         })?;
-        tables.extend(
-            effect
-                .write_surfaces
-                .db_tables
-                .iter()
-                .map(|table| (*table).to_owned()),
-        );
+        // `pack --read-only` promises "without writing pack_records, audit rows,
+        // or L2 cache entries", but it maps to the "pack build" declaration and
+        // effect.rs has no separate read-only entry. So the PARSED flag narrows
+        // the allowlist to nothing (ruling 22:22Z): the flag, not the build
+        // declaration, is the contract.
+        let read_only_pack =
+            matches!(&cli.command, Some(ee::cli::Command::Pack(pack)) if pack.read_only);
+        let db_tables: &[&str] = if read_only_pack {
+            &[]
+        } else {
+            &effect.write_surfaces.db_tables
+        };
+        tables.extend(db_tables.iter().map(|table| (*table).to_owned()));
         derived.push(serde_json::json!({
             "argv": args,
             "commandPath": command_path,
-            "dbTables": effect.write_surfaces.db_tables,
+            "readOnlyFlag": read_only_pack,
+            "manifestTables": effect.write_surfaces.db_tables,
+            "dbTables": db_tables,
         }));
     }
     Ok((tables, Value::Array(derived)))
@@ -1510,11 +1697,17 @@ fn collect_probes(
             }
         };
         if !status.success() {
-            outcomes.push(ProbeOutcome::DidNotComplete(format!(
-                "exited {:?}; stderr: {}",
-                status.code(),
-                stderr.trim()
-            )));
+            // A refusal that names an invisible index is an answer; every
+            // other nonzero exit stays a resource signal (ruling 03:30Z, P1).
+            let body = std::fs::read_to_string(&out_path).unwrap_or_default();
+            outcomes.push(match index_invisible_error_code(false, &body) {
+                Some(code) => ProbeOutcome::IndexInvisible(code),
+                None => ProbeOutcome::DidNotComplete(format!(
+                    "exited {:?}; stderr: {}",
+                    status.code(),
+                    stderr.trim()
+                )),
+            });
             continue;
         }
         let body = match std::fs::read_to_string(&out_path) {
@@ -1785,6 +1978,11 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
     let health = pointer_string(&status, "/data/health").unwrap_or_default();
     let index_generation_valid =
         health == "ready" && db_generation.is_some() && db_generation == index_generation;
+    // The generation an "index not found" answer is judged against (P1). A
+    // plant cell replaces it with the generation seen INSIDE its window.
+    let valid_generation: Option<String> = index_generation_valid
+        .then(|| db_generation.clone())
+        .flatten();
     events.push(event(
         "index_generation",
         if index_generation_valid {
@@ -1978,7 +2176,13 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
             ProbeKind::Search => &warm,
             ProbeKind::Pack => &pack_baseline,
         };
-        let verdict = classify_round(kind, baseline, &outcomes, quorum, index_generation_valid);
+        let verdict = classify_round(
+            kind,
+            baseline,
+            &outcomes,
+            quorum,
+            valid_generation.as_deref(),
+        );
         events.push(event(
             "concurrent_round",
             match &verdict {
@@ -1995,27 +2199,33 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                 "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
                 "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
                     ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
-                    ProbeOutcome::Completed(_) => None,
+                    ProbeOutcome::Completed(_) | ProbeOutcome::IndexInvisible(_) => None,
+                }).collect::<Vec<_>>(),
+                "indexInvisible": outcomes.iter().filter_map(|outcome| match outcome {
+                    ProbeOutcome::IndexInvisible(code) => Some(code.clone()),
+                    ProbeOutcome::Completed(_) | ProbeOutcome::DidNotComplete(_) => None,
                 }).collect::<Vec<_>>(),
             }),
         ));
         round_verdicts.push(verdict);
     }
 
-    // ── Planted control: invisible index (ruling 17:12Z item 5) ─────────────
-    // ORACLE_PLANT=index_aside moves `.ee/index` aside INSIDE this job's own
-    // temp workspace for the warm rounds, and moves it back before the durable
-    // check. A run with the plant must come out red, naming the invisible
-    // index; a green means the oracle is blind to "Search index not found while
-    // a valid generation exists". Nothing is deleted.
+    // ── Planted control: invisible index (ruling 17:12Z item 5; the corrected
+    // plant approved 22:22Z) ─────────────────────────────────────────────────
+    // ORACLE_PLANT=index_aside moves `.ee/index` AND every retained generation
+    // (`.ee/index.*`) into `.ee/oracle-planted-aside/`, INSIDE this job's own
+    // temp workspace, for the warm rounds. The DB keeps its valid generation,
+    // so a probe must see "Search index not found" and the run must come out
+    // red, naming the invisible index. Run C moved only `.ee/index`: ee
+    // recovered from a retained generation, and nothing went red (comment
+    // 10020). Everything is moved back before the durable check; nothing is
+    // deleted.
     let plant = std::env::var("ORACLE_PLANT")
         .ok()
         .filter(|value| !value.is_empty());
-    let index_dir = fixture.workspace.join(".ee").join("index");
-    let index_aside = fixture
-        .workspace
-        .join(".ee")
-        .join("index.oracle-planted-aside");
+    let ee_dir = fixture.workspace.join(".ee");
+    let aside_dir = ee_dir.join("oracle-planted-aside");
+    let mut planted = Vec::new();
     if let Some(plant) = plant.as_deref() {
         if plant != "index_aside" {
             return finish(
@@ -2026,17 +2236,80 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                 &mut events,
             );
         }
-        if let Err(error) = std::fs::rename(&index_dir, &index_aside) {
-            return finish(
-                &Verdict::InfraError(format!("could not move .ee/index aside: {error}")),
-                &proof_dir,
-                &mut events,
-            );
-        }
+        planted = match plant_index_aside(&ee_dir, &aside_dir) {
+            Ok(moved) => moved,
+            Err(error) => {
+                return finish(
+                    &Verdict::InfraError(format!("could not plant the index aside: {error}")),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+        };
         events.push(event(
             "plant",
             "info",
-            serde_json::json!({ "plant": plant, "moved": ".ee/index -> .ee/index.oracle-planted-aside" }),
+            serde_json::json!({
+                "plant": plant,
+                "movedAside": &planted,
+                "into": ".ee/oracle-planted-aside",
+            }),
+        ));
+    }
+
+    // ── Inside the plant window (ruling 03:30Z) ─────────────────────────────
+    // The plant itself changes what a pack can see, so a pack baseline taken
+    // BEFORE it would turn that state change into a manufactured race (PL4:
+    // eight pack probes agreeing with each other, differing only from the
+    // pre-plant baseline). The serial pack baseline is therefore taken INSIDE
+    // the window, which keeps the oracle's real question (does a concurrent
+    // probe equal a serial run in the same state?) instead of dropping to
+    // probe-vs-probe agreement. The generation a search refusal is judged
+    // against is the one `ee index status` reports inside the same window.
+    // What pack does with no index at all is bd-tjxvl, not this oracle's.
+    let mut window_generation = valid_generation.clone();
+    let mut window_pack_baseline = pack_baseline.clone();
+    if plant.is_some() {
+        let in_window = match run_ee(&fixture, &status_args) {
+            Ok(value) => value,
+            Err(error) => {
+                return finish(
+                    &Verdict::InfraError(format!(
+                        "index status failed inside the plant window: {error}"
+                    )),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+        };
+        let in_window_db_generation = pointer_string(&in_window, "/data/dbGeneration");
+        if index_generation_valid {
+            window_generation = in_window_db_generation.clone();
+        }
+        window_pack_baseline = match run_ee(&fixture, &pack_args) {
+            Ok(value) => pack_record(&value),
+            Err(error) => {
+                return finish(
+                    &Verdict::InfraError(format!(
+                        "the serial pack baseline failed inside the plant window: {error}"
+                    )),
+                    &proof_dir,
+                    &mut events,
+                );
+            }
+        };
+        events.push(event(
+            "plant_window_baseline",
+            "info",
+            serde_json::json!({
+                "indexStatus": {
+                    "health": pointer_string(&in_window, "/data/health"),
+                    "dbGeneration": &in_window_db_generation,
+                    "indexGeneration": pointer_string(&in_window, "/data/indexGeneration"),
+                },
+                "judgedAgainstGeneration": &window_generation,
+                "pack": &window_pack_baseline,
+            }),
         ));
     }
 
@@ -2052,7 +2325,7 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
             (
                 ProbeKind::Pack,
                 pack_args.as_slice(),
-                &pack_baseline,
+                &window_pack_baseline,
                 pack_record as fn(&Value) -> Record,
             ),
         ] {
@@ -2067,7 +2340,13 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                 }
             };
             let outcomes = collect_probes(children, timeout, extract);
-            let verdict = classify_round(kind, baseline, &outcomes, quorum, index_generation_valid);
+            let verdict = classify_round(
+                kind,
+                baseline,
+                &outcomes,
+                quorum,
+                window_generation.as_deref(),
+            );
             events.push(event(
                 "concurrent_round",
                 match &verdict {
@@ -2084,7 +2363,11 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
                     "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
                     "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
                         ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
-                        ProbeOutcome::Completed(_) => None,
+                        ProbeOutcome::Completed(_) | ProbeOutcome::IndexInvisible(_) => None,
+                    }).collect::<Vec<_>>(),
+                    "indexInvisible": outcomes.iter().filter_map(|outcome| match outcome {
+                        ProbeOutcome::IndexInvisible(code) => Some(code.clone()),
+                        ProbeOutcome::Completed(_) | ProbeOutcome::DidNotComplete(_) => None,
                     }).collect::<Vec<_>>(),
                 }),
             ));
@@ -2092,30 +2375,49 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
         }
     }
 
-    // Undo the plant before the durable check, without clobbering: if `ee`
-    // recreated `.ee/index` while it was aside, that is itself a write during a
-    // read-only window and is reported as such.
     if plant.is_some() {
-        if index_dir.exists() {
-            round_verdicts.push(Verdict::RaceReproduced(vec![
-                "durable mutation under read-only probes: ee recreated .ee/index while the planted original was aside".to_owned(),
-            ]));
-            events.push(event(
-                "plant_restored",
-                "fail",
-                serde_json::json!({ "restored": false, "reason": ".ee/index was recreated during the rounds" }),
-            ));
-        } else if let Err(error) = std::fs::rename(&index_aside, &index_dir) {
-            round_verdicts.push(Verdict::InfraError(format!(
-                "could not move the planted .ee/index back: {error}"
-            )));
-        } else {
-            events.push(event(
-                "plant_restored",
-                "info",
-                serde_json::json!({ "restored": true }),
-            ));
+        // Quote both lines the ruling asks for, from real ee processes while
+        // the plant is still in place: the DB's generation from `index status`
+        // and the "Search index not found" text from one more `search`.
+        let quotes = plant_quotes(
+            ee_command(&fixture, &status_args).output(),
+            ee_command(&fixture, &search_args).output(),
+            db_generation.as_deref(),
+        );
+        let proven = quotes["classShown"] == Value::Bool(true);
+        events.push(event(
+            "plant_quotes",
+            if proven { "pass" } else { "fail" },
+            quotes,
+        ));
+
+        // Undo the plant before the durable check, without clobbering: if ee
+        // recreated an entry while its original was aside, that is itself a
+        // write inside the window and is reported as such.
+        let (recreated, errors) = unplant_index_aside(&ee_dir, &aside_dir, &planted);
+        if !recreated.is_empty() {
+            round_verdicts.push(Verdict::RaceReproduced(vec![format!(
+                "durable mutation: ee recreated {recreated:?} while the planted originals were aside"
+            )]));
         }
+        if !errors.is_empty() {
+            round_verdicts.push(Verdict::InfraError(format!(
+                "could not move the planted index back: {errors:?}"
+            )));
+        }
+        events.push(event(
+            "plant_restored",
+            if recreated.is_empty() && errors.is_empty() {
+                "info"
+            } else {
+                "fail"
+            },
+            serde_json::json!({
+                "restored": recreated.is_empty() && errors.is_empty(),
+                "recreatedByEe": recreated,
+                "errors": errors,
+            }),
+        ));
     }
 
     // ── Durable mutation beyond the declared writes ─────────────────────────
@@ -2553,7 +2855,74 @@ fn sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace
 
 #[cfg(test)]
 mod classifier {
-    use super::{ProbeKind, ProbeOutcome, Record, Verdict, classify_round, fold_rounds};
+    use super::{
+        ProbeKind, ProbeOutcome, Record, Verdict, classify_round, fold_rounds,
+        index_invisible_error_code,
+    };
+
+    /// The envelope `ee search` printed in PL4 (evidence 8da0c30d), trimmed.
+    const SEARCH_INDEX_ENVELOPE: &str = r#"{"schema":"ee.error.v2","error":{"code":"search_index","message":"Search index not found","severity":"medium","repair":"ee index rebuild --workspace ."}}"#;
+
+    #[test]
+    fn index_invisible_is_keyed_on_the_error_envelope_code_only() {
+        // The one admissible state (ruling 03:30Z, P1): nonzero exit AND an
+        // ee.error.v2 envelope AND error.code == "search_index".
+        assert_eq!(
+            index_invisible_error_code(false, SEARCH_INDEX_ENVELOPE).as_deref(),
+            Some("search_index")
+        );
+        // Everything else stays a resource signal.
+        let not_semantic = [
+            // A zero exit carrying the same JSON is not a refusal.
+            (true, SEARCH_INDEX_ENVELOPE.to_owned()),
+            // A hang, timeout (exit 124) or kill leaves no envelope.
+            (false, String::new()),
+            // Exit 4 with an unparseable body, even one that says the words.
+            (false, "Search index not found".to_owned()),
+            // Another code: the message text is never read.
+            (
+                false,
+                r#"{"schema":"ee.error.v2","error":{"code":"configuration","message":"Search index not found"}}"#.to_owned(),
+            ),
+            // The right code under another schema.
+            (
+                false,
+                r#"{"schema":"ee.error.v1","error":{"code":"search_index"}}"#.to_owned(),
+            ),
+        ];
+        for (success, stdout) in not_semantic {
+            assert_eq!(
+                index_invisible_error_code(success, &stdout),
+                None,
+                "success={success} stdout={stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_invisible_refusal_is_a_semantic_red_quoting_code_and_generation() {
+        let refusals: Vec<ProbeOutcome> = (0..8)
+            .map(|_| ProbeOutcome::IndexInvisible("search_index".to_owned()))
+            .collect();
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &refusals, 7, Some("8"));
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+        assert!(
+            verdict
+                .detail()
+                .contains("index invisible: search_index while dbGeneration=8"),
+            "{verdict:?}"
+        );
+        // Twin: with no valid generation the index was genuinely unbuilt, not
+        // invisible, so the same refusals are no finding.
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &refusals, 7, None);
+        assert_ne!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+        // Untouched twin: a healthy index gives agreeing probes and no red.
+        let healthy: Vec<ProbeOutcome> = (0..8).map(|_| agreeing()).collect();
+        assert_eq!(
+            classify_round(ProbeKind::Search, &baseline(), &healthy, 7, Some("8")),
+            Verdict::RaceAbsent
+        );
+    }
 
     fn baseline() -> Record {
         let mut record = Record::new();
@@ -2578,7 +2947,7 @@ mod classifier {
                 "#{index} timed out after 120s"
             )));
         }
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, Some("8"));
         assert_eq!(verdict.class(), "INCONCLUSIVE", "got {verdict:?}");
         assert!(
             verdict.detail().contains("resource signal"),
@@ -2596,7 +2965,7 @@ mod classifier {
             agreeing(),
             ProbeOutcome::DidNotComplete("killed".to_owned()),
         ];
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, Some("8"));
         assert_eq!(verdict.class(), "INCONCLUSIVE", "got {verdict:?}");
     }
 
@@ -2610,7 +2979,7 @@ mod classifier {
             agreeing(),
             agreeing(),
         ];
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, Some("8"));
         assert_eq!(verdict.class(), "RACE_ABSENT", "got {verdict:?}");
     }
 
@@ -2619,7 +2988,7 @@ mod classifier {
         let mut divergent = baseline();
         divergent.insert("results.order".to_owned(), "mem_b@0.5|mem_a@1.0".to_owned());
         let outcomes = vec![agreeing(), ProbeOutcome::Completed(divergent)];
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, Some("8"));
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
     }
 
@@ -2636,7 +3005,7 @@ mod classifier {
             ProbeOutcome::DidNotComplete("timeout".to_owned()),
             ProbeOutcome::DidNotComplete("timeout".to_owned()),
         ];
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 8, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 8, Some("8"));
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
     }
 
@@ -2648,7 +3017,7 @@ mod classifier {
         let mut empty = baseline();
         empty.insert("results.order".to_owned(), String::new());
         let outcomes = vec![agreeing(), ProbeOutcome::Completed(empty)];
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, true);
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, Some("8"));
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
         assert!(
             verdict.detail().contains("not agreement"),
@@ -2664,12 +3033,12 @@ mod classifier {
         let mut vacuous = baseline();
         vacuous.insert("results.order".to_owned(), String::new());
         let outcomes = vec![ProbeOutcome::Completed(vacuous.clone())];
-        let verdict = classify_round(ProbeKind::Search, &vacuous, &outcomes, 1, true);
+        let verdict = classify_round(ProbeKind::Search, &vacuous, &outcomes, 1, Some("8"));
         assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
 
         let mut missing = baseline();
         missing.remove("embed_backend");
-        let verdict = classify_round(ProbeKind::Search, &missing, &[], 1, true);
+        let verdict = classify_round(ProbeKind::Search, &missing, &[], 1, Some("8"));
         assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
     }
 
@@ -2680,14 +3049,20 @@ mod classifier {
         let outcomes = vec![ProbeOutcome::Completed(invisible)];
 
         // With a healthy current generation this is a semantic fault.
-        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes.clone(), 1, true);
+        let verdict = classify_round(
+            ProbeKind::Search,
+            &baseline(),
+            &outcomes.clone(),
+            1,
+            Some("8"),
+        );
         assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
 
         // Without one, an absent index is a configuration fact, not a race —
         // but the degraded-code mismatch against the baseline is still caught.
         let mut invisible_baseline = baseline();
         invisible_baseline.insert("degraded.codes".to_owned(), "index_missing".to_owned());
-        let verdict = classify_round(ProbeKind::Search, &invisible_baseline, &outcomes, 1, false);
+        let verdict = classify_round(ProbeKind::Search, &invisible_baseline, &outcomes, 1, None);
         assert_eq!(verdict.class(), "RACE_ABSENT", "got {verdict:?}");
     }
 
@@ -2966,8 +3341,17 @@ mod durable_mutation_controls {
         let (status, derived) = derive(&["index", "status", "--json"]).expect("status derives");
         assert!(status.is_empty(), "{status:?}");
         assert_eq!(derived[0]["commandPath"], "index status", "{derived}");
-        let (_, derived) = derive(&["pack", "q", "--read-only", "--json"]).expect("pack derives");
+        // pack --read-only maps to "pack build", but the parsed flag holds it to
+        // zero tables (ruling 22:22Z); its twin without the flag keeps the
+        // build declaration.
+        let (read_only, derived) =
+            derive(&["pack", "q", "--read-only", "--json"]).expect("pack derives");
         assert_eq!(derived[0]["commandPath"], "pack build", "{derived}");
+        assert_eq!(derived[0]["readOnlyFlag"], true, "{derived}");
+        assert!(read_only.is_empty(), "{read_only:?}");
+        let (build, derived) = derive(&["pack", "q", "--json"]).expect("pack derives");
+        assert_eq!(derived[0]["readOnlyFlag"], false, "{derived}");
+        assert!(build.contains("pack_items"), "{build:?}");
         assert!(derive(&["no-such-command"]).is_err());
     }
 
@@ -2977,6 +3361,13 @@ mod durable_mutation_controls {
     /// live file between the two snapshots, and the window is judged by
     /// `durable_mutation`. `None` for `plants` is the untouched twin.
     fn judge_planted(plants: Option<&[&str]>) -> Option<Verdict> {
+        judge_planted_against(plants, &declared())
+    }
+
+    fn judge_planted_against(
+        plants: Option<&[&str]>,
+        declared: &BTreeSet<String>,
+    ) -> Option<Verdict> {
         let dir = tempfile::tempdir().expect("tempdir");
         let fixture = Fixture {
             workspace: dir.path().join("workspace"),
@@ -2998,16 +3389,37 @@ mod durable_mutation_controls {
                 connection.execute_raw(sql).expect("seed");
             }
         }
-        let declared = declared();
-        let before = durable_state(&fixture, "before", None, None, &declared).expect("before");
+        let before = durable_state(&fixture, "before", None, None, declared).expect("before");
         if let Some(plants) = plants {
             let connection = ee::db::DbConnection::open_file(&db_path).expect("reopen");
             for sql in plants {
                 connection.execute_raw(sql).expect("plant");
             }
         }
-        let after = durable_state(&fixture, "after", None, None, &declared).expect("after");
-        durable_mutation(&before, &after, &declared)
+        let after = durable_state(&fixture, "after", None, None, declared).expect("after");
+        durable_mutation(&before, &after, declared)
+    }
+
+    #[test]
+    fn a_read_only_pack_window_that_writes_one_row_is_red() {
+        // The allowlist a `pack --read-only` probe derives is empty, so even
+        // one appended audit row (which a search window would allow) is red.
+        let (read_only, _) =
+            declared_write_tables(&[["pack", "q", "--read-only", "--json"].as_slice()])
+                .expect("derives");
+        assert!(read_only.is_empty(), "{read_only:?}");
+        assert_eq!(
+            judge_planted_against(None, &read_only),
+            None,
+            "untouched twin"
+        );
+        assert_red(
+            judge_planted_against(
+                Some(&["INSERT INTO audit_log VALUES (3, 'returned')"]),
+                &read_only,
+            ),
+            "undeclared table audit_log changed",
+        );
     }
 
     fn assert_red(verdict: Option<Verdict>, needle: &str) {
