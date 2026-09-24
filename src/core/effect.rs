@@ -2505,9 +2505,23 @@ impl EffectManifest {
                 "content hash",
                 "Register artifact metadata keyed by content hash",
             ),
+            // Measured per triggering input (bd-kmsd6 probe v4, c10175): a first
+            // import writes sessions, evidence_spans, search_index_jobs,
+            // import_ledger and workspace_generations; any re-import writes
+            // import_ledger; audit_log comes from a refresh after the session
+            // grew, or from a redacted span. No path writes memories. A
+            // storeless address is refused (bd-hin8m), so workspaces is not
+            // written.
             CommandEffect::append_only_write(
                 "import cass",
-                vec!["memories", "audit_log"],
+                vec![
+                    "sessions",
+                    "evidence_spans",
+                    "search_index_jobs",
+                    "import_ledger",
+                    "workspace_generations",
+                    "audit_log",
+                ],
                 "source hash",
                 "Import from CASS sessions",
             ),
