@@ -1060,6 +1060,18 @@ fn view_session_spans(
     client: &CassClient,
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
+    collect_cass_view_snapshot(source_path, |line, context| {
+        read_cass_view_page(client, source_path, line, context)
+    })
+}
+
+/// Assemble the complete view before the caller starts its session transaction.
+/// Envelope windows and EOF-terminated JSONL must obey the same contiguous line
+/// contract. EOF supplies a JSONL endpoint, not permission to omit earlier lines.
+fn collect_cass_view_snapshot(
+    source_path: &str,
+    mut read_page: impl FnMut(u32, u32) -> Result<CassViewStdoutBuffer, CassImportError>,
+) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
     let mut spans = Vec::new();
     let mut first_line = 1;
     let mut target_line = 1;
@@ -1067,7 +1079,7 @@ fn view_session_spans(
     let mut expected_total = None;
     let mut total_bytes = 0_usize;
     loop {
-        let buffer = read_cass_view_page(client, source_path, target_line, context)?;
+        let buffer = read_page(target_line, context)?;
         total_bytes = total_bytes.saturating_add(buffer.as_bytes().len());
         if total_bytes > CASS_VIEW_STDOUT_TOTAL_MAX_BYTES {
             return Err(invalid_view_page(
@@ -1079,11 +1091,10 @@ fn view_session_spans(
             return Err(invalid_view_page("view total_lines changed during import"));
         }
         let page = parse_view_json(buffer.as_bytes(), source_path)?;
-        let next = match total_lines {
-            Some(total) => next_cass_view_page(&page, first_line, total)?,
-            // A JSONL stream has no window envelope and is consumed to EOF.
-            None => None,
-        };
+        // A JSONL stream is read to EOF in one invocation. Validate its line
+        // coverage too; a sparse or reordered stream is not a complete import.
+        let total = total_lines.unwrap_or_else(|| page.last().map_or(0, |span| span.end_line));
+        let next = next_cass_view_page(&page, first_line, total)?;
         spans.extend(page);
         let Some((next_first, next_target, next_context)) = next else {
             return Ok(spans);
@@ -1127,6 +1138,7 @@ fn next_cass_view_page(
 ) -> Result<Option<(u32, u32, u32)>, CassImportError> {
     for (index, span) in spans.iter().enumerate() {
         if u64::from(span.start_line) != u64::from(first_line) + index as u64
+            || span.end_line != span.start_line
             || span.end_line > total_lines
         {
             return Err(invalid_view_page(
@@ -1616,6 +1628,7 @@ fn parse_view_json_envelope(
 ) -> Result<Option<Vec<CassViewSpanForImport>>, CassImportError> {
     if let Ok(value) = serde_json::from_slice::<JsonValue>(input) {
         if let Some(lines) = value.get("lines").and_then(JsonValue::as_array) {
+            validate_cass_view_source(&value, source_path)?;
             let mut collector = CassViewLineCollector::new(source_path);
             for line in lines {
                 collector.accept_value(line)?;
@@ -1716,10 +1729,44 @@ impl CassViewLineCollector {
     }
 }
 
+/// Do not attach another session's returned bytes to the requested identity.
+/// Older JSONL emitters omit locators; when either supported locator is present
+/// it must agree. Compare paths lexically, without probing a host-private file.
+/// Diagnostics deliberately contain neither path nor transcript content.
+fn validate_cass_view_source(
+    value: &JsonValue,
+    source_path: &str,
+) -> Result<(), CassImportError> {
+    for field in ["path", "source_path"] {
+        let Some(reported) = value.get(field) else {
+            continue;
+        };
+        let Some(reported) = reported.as_str() else {
+            return Err(invalid_view_page("view source locator must be a string"));
+        };
+        if reported.is_empty()
+            || reported.trim() != reported
+            || reported.contains('\0')
+            || !Path::new(reported)
+                .components()
+                .filter(|component| *component != std::path::Component::CurDir)
+                .eq(Path::new(source_path)
+                    .components()
+                    .filter(|component| *component != std::path::Component::CurDir))
+        {
+            return Err(invalid_view_page(
+                "view source locator does not match the requested session",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_view_line_value(
     line: &JsonValue,
     source_path: &str,
 ) -> Result<CassViewSpanForImport, CassImportError> {
+    validate_cass_view_source(line, source_path)?;
     let line_number = line
         .get("line")
         .and_then(JsonValue::as_u64)
@@ -2459,6 +2506,202 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn collect_view_fixture(
+        pages: &[String],
+    ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
+        let mut pages = pages.iter();
+        collect_cass_view_snapshot("session.jsonl", |_, _| {
+            let page = pages
+                .next()
+                .ok_or_else(|| invalid_view_page("fixture exhausted before complete view"))?;
+            Ok(CassViewStdoutBuffer {
+                bytes: page.as_bytes().to_vec(),
+            })
+        })
+    }
+
+    fn view_window_fixture(first: u32, last: u32, total: u32) -> String {
+        json!({
+            "path": "session.jsonl",
+            "total_lines": total,
+            "lines": (first..=last)
+                .map(|line| json!({"line": line, "content": format!("Build observation {line}")}))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn complete_jsonl_view_rejects_missing_reordered_and_duplicate_lines() -> TestResult {
+        for lines in [vec![2], vec![1, 3], vec![2, 1], vec![1, 1], vec![1, 2, 4]] {
+            let page = lines
+                .iter()
+                .map(|line| json!({"line": line, "content": "Build completed"}).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            ensure(
+                collect_view_fixture(&[page]).is_err(),
+                format!("incomplete JSONL line sequence was accepted: {lines:?}"),
+            )?;
+        }
+        let rows = collect_view_fixture(&[
+            "{\"line\":1,\"content\":\"First observation\"}\n\n{\"line\":2,\"content\":\"Final observation\"}\n".to_owned(),
+        ])
+        .map_err(|error| error.to_string())?;
+        ensure_equal(&rows.len(), &2, "complete JSONL row count")?;
+        ensure_equal(
+            &rows[1].cass_span_id,
+            &"session.jsonl:2".to_owned(),
+            "tail identity",
+        )?;
+        ensure_equal(
+            &rows[1].excerpt,
+            &"Final observation".to_owned(),
+            "tail content",
+        )
+    }
+
+    #[test]
+    fn complete_view_reads_all_windows_and_preserves_exact_tail() -> TestResult {
+        let mut calls = Vec::new();
+        let rows = collect_cass_view_snapshot("session.jsonl", |target, context| {
+            calls.push((target, context));
+            if calls.len() > 3 {
+                return Err(invalid_view_page(
+                    "fixture received an unexpected extra page request",
+                ));
+            }
+            let first = target.saturating_sub(context).max(1);
+            let last = target.saturating_add(context).min(140);
+            Ok(CassViewStdoutBuffer {
+                bytes: view_window_fixture(first, last, 140).into_bytes(),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &calls,
+            &vec![(1, 4), (70, 64), (140, 5)],
+            "page request sequence",
+        )?;
+        ensure_equal(&rows.len(), &140, "complete envelope row count")?;
+        for (index, row) in rows.iter().enumerate() {
+            let line = u32::try_from(index + 1).map_err(|error| error.to_string())?;
+            ensure_equal(&row.start_line, &line, "contiguous source line")?;
+            ensure_equal(&row.end_line, &line, "single-line source range")?;
+            ensure_equal(
+                &row.cass_span_id,
+                &format!("session.jsonl:{line}"),
+                "stable source identity",
+            )?;
+            ensure_equal(
+                &row.excerpt,
+                &format!("Build observation {line}"),
+                "exact source text",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_view_refuses_late_gaps_total_changes_and_format_changes() -> TestResult {
+        for final_page in [
+            view_window_fixture(7, 8, 8),
+            view_window_fixture(6, 9, 9),
+            "{\"line\":6,\"content\":\"Build completed\"}".to_owned(),
+        ] {
+            ensure(
+                collect_view_fixture(&[view_window_fixture(1, 5, 8), final_page]).is_err(),
+                "invalid later page must not return a partially complete snapshot",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_view_accepts_empty_transcripts_in_both_formats() -> TestResult {
+        for page in [String::new(), "{\"total_lines\":0,\"lines\":[]}".to_owned()] {
+            let rows = collect_view_fixture(&[page]).map_err(|error| error.to_string())?;
+            ensure(
+                rows.is_empty(),
+                "empty transcript unexpectedly produced evidence",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn view_locators_refuse_foreign_sources_without_echoing_private_values() -> TestResult {
+        for field in ["path", "source_path"] {
+            for locator in [
+                json!("private-source-canary.jsonl"),
+                JsonValue::Null,
+                json!(7),
+                json!(""),
+                json!(" session.jsonl"),
+                json!("session.jsonl\u{0000}"),
+            ] {
+                let mut line = json!({"line": 1, "content": "Build completed"});
+                line[field] = locator.clone();
+                let mut envelope = json!({
+                    "total_lines": 1,
+                    "lines": [{"line": 1, "content": "Build completed"}],
+                });
+                envelope[field] = locator;
+                for page in [line.to_string(), envelope.to_string()] {
+                    let error = collect_view_fixture(&[page])
+                        .err()
+                        .ok_or_else(|| "foreign or malformed locator was accepted".to_owned())?;
+                    ensure(
+                        !error.to_string().contains("private-source-canary"),
+                        "source locator leaked through import error",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn view_locators_allow_absent_matching_and_lexically_equivalent_paths() -> TestResult {
+        for fields in [
+            json!({}),
+            json!({"path": "session.jsonl"}),
+            json!({"source_path": "./session.jsonl"}),
+            json!({"path": "session.jsonl", "source_path": "session.jsonl"}),
+        ] {
+            let mut line = json!({"line": 1, "content": "Build completed"});
+            let object = fields
+                .as_object()
+                .ok_or_else(|| "locator fixture is not an object".to_owned())?;
+            for (key, value) in object {
+                line[key.as_str()] = value.clone();
+            }
+            let rows = collect_view_fixture(&[line.to_string()])
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&rows.len(), &1, "matching locator row count")?;
+            ensure_equal(
+                &rows[0].cass_span_id,
+                &"session.jsonl:1".to_owned(),
+                "requested identity",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn view_progress_rejects_a_row_claiming_multiple_source_lines() -> TestResult {
+        let mut row = parse_view_line_value(
+            &json!({"line": 1, "content": "Build completed"}),
+            "session.jsonl",
+        )
+        .map_err(|error| error.to_string())?;
+        row.end_line = 2;
+        ensure(
+            next_cass_view_page(&[row], 1, 2).is_err(),
+            "one row must not certify two source lines",
+        )
     }
 
     #[test]
@@ -4284,6 +4527,14 @@ mod tests {
             &"{",
             "view fixture must be a pretty envelope whose first line is `{`",
         )?;
+
+        // Rebind only the fixed fixture locator to the temporary session this
+        // invocation reports; the transcript and envelope shape stay intact.
+        let mut view: JsonValue =
+            serde_json::from_str(&view_stdout).map_err(|error| error.to_string())?;
+        view["path"] = json!(session_path.to_string_lossy());
+        let view_stdout =
+            serde_json::to_string_pretty(&view).map_err(|error| error.to_string())?;
 
         let cass_binary = bin_dir.join("cass");
         write_fake_cass_binary_with_verbatim_view(
