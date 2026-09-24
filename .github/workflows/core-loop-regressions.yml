@@ -50,7 +50,7 @@ jobs:
             workspace-relocation-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Assemble the reviewed candidate against exact base blobs
+      - name: Integrate reviewed relocation changes without replacing concurrent work
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,41 +65,35 @@ jobs:
               response = json.loads(subprocess.check_output(['gh', 'api', repo + sha]))
               data = base64.b64decode(response['content'])
               digest = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-              assert digest == sha, 'Transport changed candidate bytes'
+              assert digest == sha, 'Transport changed reviewed source bytes'
               return data
-          bases = {
-            'src/db/mod.rs': '4f5a9f4c13df61cc4ae6229d9be8b2cba20685b9',
-            'src/cli/mod.rs': '4fb7fb6849907a8e9941f4c36d4bc82d2deefdb1',
-            'src/core/workspace.rs': 'ca24468cb084174c2f9be1e2a06af4cd40e4df41',
-            'src/policy/store_auth.rs': '712703b439bece376ab7d4f318a43f93354b6e63',
-            'src/core/effect.rs': '8b28e6226f4307f676fc5187aec9a10e51c1a6ab',
-            'src/output/mod.rs': '2fb2a3e2232319d9608e0092794dd8a0cc9ec534',
-            'tests/contracts.rs': 'f36d38050ec5689dc3a51d72e76e77b186b7661b',
-            'README.md': '51ff2445795140e673cc02727c432a0b4e7569a1',
-          }
+          paths = [
+              'src/db/mod.rs', 'src/cli/mod.rs', 'src/core/workspace.rs',
+              'src/policy/store_auth.rs', 'src/core/effect.rs', 'src/output/mod.rs',
+              'tests/contracts.rs', 'README.md',
+          ]
+          bases = {path: git('rev-parse', 'HEAD:' + path) for path in paths}
           additions = {
-            'src/core/workspace_relocation.rs': '684a602c3a23de1a08020a48e53f20d9e19fc922',
-            'src/core/workspace_relocation_tests.rs': '96a06986601ac09e18e71d76fa5f65b85cee2316',
-            'tests/contracts/workspace_relocation.rs': '01a64cc6ef25d0229a85a63c45d2d2c17bf75fca',
-            'docs/schemas/ee.workspace.relocate.v1.json': '9883d38dda2d8b394f6489da5fb01debb8589ebe',
-            'docs/adr/0089-authenticated-workspace-relocation.md': '55e22c08e59b67d23fd930a02e83313f1039f442',
+              'src/core/workspace_relocation.rs': '638fa0ee4180f1dbb8907631dbdd47b529435e83',
+              'src/core/workspace_relocation_tests.rs': '1ff2bf8b88a7549be3ee470a41be233d99f8b8dc',
+              'tests/contracts/workspace_relocation.rs': '30aba23ce3fb0e6187cf7f17e74fc78bdf33f2ef',
+              'docs/schemas/ee.workspace.relocate.v1.json': '9883d38dda2d8b394f6489da5fb01debb8589ebe',
+              'docs/adr/0089-authenticated-workspace-relocation.md': '55e22c08e59b67d23fd930a02e83313f1039f442',
           }
-          for path, expected in bases.items():
-              assert git('rev-parse', 'HEAD:' + path) == expected, 'Concurrent source change: ' + path
           for path in additions:
-              assert not pathlib.Path(path).exists(), 'Unexpected existing candidate path: ' + path
-          def apply(sha, name):
+              assert not pathlib.Path(path).exists(), 'Candidate already landed: ' + path
+          def apply(sha, name, *flags):
               path = pathlib.Path(os.environ['RUNNER_TEMP'], name)
               path.write_bytes(fetch(sha))
-              subprocess.run(['git', 'apply', '--check', str(path)], check=True)
-              subprocess.run(['git', 'apply', str(path)], check=True)
+              subprocess.run(['git', 'apply', '--check', *flags, str(path)], check=True)
+              subprocess.run(['git', 'apply', *flags, str(path)], check=True)
+          # Exact reviewed patches; any conflicting context fails closed. No
+          # replacement of the current main versions of these large modules.
           apply('6c52c35ce65d6dc2fdd6a8506fcd7819f9205579', 'relocation-wiring.patch')
+          apply('1796ac1d6fca758b153eb099d665e2179414cb07', 'relocation-cli.patch', '--include=src/cli/mod.rs')
           for path, sha in additions.items():
               pathlib.Path(path).write_bytes(fetch(sha))
-          apply('1796ac1d6fca758b153eb099d665e2179414cb07', 'relocation-correction.patch')
-          apply('f817259c0cf8d458685ce3fa7dd3040058dcb1c4', 'relocation-contract-correction.patch')
-          apply('f95e548ffbd6bbc46865afe523b6e7c207f2284a', 'relocation-hardlink.patch')
-          paths = list(bases) + list(additions)
+          paths += list(additions)
           rust = [path for path in paths if path.endswith('.rs')]
           subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
           subprocess.run(['git', 'diff', '--check'], check=True)
@@ -108,19 +102,13 @@ jobs:
               data = pathlib.Path(path).read_text()
               response = json.loads(subprocess.check_output(['gh', 'api', repo.rstrip('/'), '--input', '-'], input=json.dumps({'content': data, 'encoding':'utf-8'}).encode()))
               assert response['sha'] == git('hash-object', path)
-              manifest['files'].append({'path':path, 'baseBlob':bases.get(path), 'sha':response['sha']})
+              manifest['files'].append({'path': path, 'baseBlob': bases.get(path), 'sha': response['sha']})
           output = pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-source.json')
           output.write_text(json.dumps(manifest, indent=2))
           print(output.read_text())
           subprocess.run(['git', 'add', '--intent-to-add', '--', *additions], check=True)
           pathlib.Path(os.environ['RUNNER_TEMP'], 'relocation-reviewed.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ always() }}
-        with:
-          name: relocation-source
-          path: ${{ runner.temp }}/relocation-*
-          retention-days: 3
       - name: Check all Cargo targets
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: |
@@ -143,6 +131,7 @@ jobs:
       - name: Report strict Clippy and repository formatting
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: |
+          set +e
           set -uo pipefail
           cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/relocation-clippy.log"
           lint=${PIPESTATUS[0]}
@@ -154,7 +143,7 @@ jobs:
         with:
           name: relocation-verification
           path: ${{ runner.temp }}/relocation-*
-          retention-days: 3
+          retention-days: 7
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
