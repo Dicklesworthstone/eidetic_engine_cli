@@ -612,7 +612,53 @@ fn walk_fixture_scripts(root: &Path) -> Vec<PathBuf> {
     scripts.push(root.join("run_all.sh"));
     for id in manifest_ids() {
         scripts.push(root.join(&id).join("corrupt.sh"));
-        scripts.push(root.join(id).join("assert.sh"));
+        scripts.push(root.join(&id).join("assert.sh"));
+        let condition = root.join(id).join("condition.sh");
+        if condition.is_file() {
+            scripts.push(condition);
+        }
     }
     scripts
+}
+
+/// Damage that is not in the store's bytes, an environment carried in
+/// .fixture_baseline/env.sh or a process that assert.sh starts in the
+/// background, is invisible to a harness that only runs doctor on the target.
+/// Such a fixture must ship condition.sh so every harness can apply it, and
+/// condition.sh must be able to say it was not applied (bd-2oh15 ruling t2250
+/// R2). A pass that did not exercise the condition must not print as a pass.
+#[test]
+fn doctor_fixtures_out_of_store_conditions_ship_condition_sh() {
+    let mut conditioned = 0;
+    for id in manifest_ids() {
+        let dir = fixture_root().join(&id);
+        let corrupt = read(&dir.join("corrupt.sh"));
+        let assert = read(&dir.join("assert.sh"));
+        let carries_env = corrupt.contains("env.sh") || assert.contains("env.sh");
+        let starts_process = assert
+            .lines()
+            .map(str::trim_end)
+            .any(|line| !line.trim_start().starts_with('#') && line.ends_with(" &"));
+        let condition = dir.join("condition.sh");
+        if carries_env || starts_process {
+            conditioned += 1;
+            assert!(
+                condition.is_file(),
+                "{id} carries damage outside the store (env.sh: {carries_env}, \
+                 background process: {starts_process}) but ships no condition.sh"
+            );
+        }
+        if condition.is_file() {
+            let text = read(&condition);
+            assert!(
+                text.contains("DOCTOR_FIXTURE_CONDITION_NOT_APPLIED") && text.contains("\"$@\""),
+                "{id}/condition.sh must run its command and be able to report \
+                 DOCTOR_FIXTURE_CONDITION_NOT_APPLIED"
+            );
+        }
+    }
+    assert!(
+        conditioned > 0,
+        "no out-of-store fixture found: the scan read nothing"
+    );
 }

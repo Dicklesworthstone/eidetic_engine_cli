@@ -20,6 +20,12 @@
 # `--fix` and `--only <FM>` conflict at the CLI level, so both invocations run
 # the full doctor without the per-FM filter.
 #
+# A fixture whose damage is not in the store's bytes (an environment, a live
+# lock holder) ships a condition.sh, and both runs go through
+# doctor_fixture_under_condition (bd-2oh15 ruling t2250 R2). A run whose
+# condition could not be applied is counted as condition_not_applied: never a
+# pass, and it fails this script.
+#
 # Driven by scripts/run-safety-harness.sh.
 
 set -euo pipefail
@@ -51,8 +57,11 @@ PASS=0
 FAIL=0
 SKIP=0
 UNTESTED=0
+NOT_APPLIED=0
+CONDITIONED=0
 FAILED_FMS=""
 SKIPPED_FMS=""
+NOT_APPLIED_FMS=""
 
 guidance_set() {
     jq -r '[.data.fixerResults[]? | select(.outcome == "guidance_recorded") | .findingCode] | unique | join(",")' "$1"
@@ -94,10 +103,20 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     # next digest and makes every fixture look non-idempotent.
     work="$target/.fixture_baseline"
     mkdir -p "$work"
-    "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/idem-fix1.json" 2>/dev/null || true
+    rc1=0
+    doctor_fixture_under_condition "$fm_dir" "$target" \
+        "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/idem-fix1.json" 2> "$work/idem-fix1.err" || rc1=$?
     doctor_fixture_content_digest "$target" > "$work/idem-before-run2.sha256"
-    "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/idem-fix2.json" 2>/dev/null || true
+    rc2=0
+    doctor_fixture_under_condition "$fm_dir" "$target" \
+        "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/idem-fix2.json" 2> "$work/idem-fix2.err" || rc2=$?
     doctor_fixture_content_digest "$target" > "$work/idem-after-run2.sha256"
+    if [ "$rc1" -eq "$DOCTOR_FIXTURE_CONDITION_NOT_APPLIED" ] || [ "$rc2" -eq "$DOCTOR_FIXTURE_CONDITION_NOT_APPLIED" ]; then
+        NOT_APPLIED=$((NOT_APPLIED + 1))
+        NOT_APPLIED_FMS="$NOT_APPLIED_FMS $fm_id"
+        echo "verify-idempotence[$fm_id]: condition not applied; not a pass: $(cat "$work/idem-fix1.err" "$work/idem-fix2.err" | grep -m1 'condition:' || true)" >&2
+        continue
+    fi
 
     # Both runs MUST emit a successful ee.response.v2 envelope with typed
     # ee.doctor.fix_summary.v1 data. If the CLI rejected the invocation, it
@@ -137,13 +156,16 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
         continue
     fi
     PASS=$((PASS + 1))
+    if [ -f "$fm_dir/condition.sh" ]; then
+        CONDITIONED=$((CONDITIONED + 1))
+    fi
 done
 shopt -u nullglob
 
-echo "verify-idempotence: passed=$PASS failed=$FAIL skipped=$SKIP; $UNTESTED UNTESTED (not run)" >&2
+echo "verify-idempotence: passed=$PASS failed=$FAIL skipped=$SKIP condition_not_applied=$NOT_APPLIED; $UNTESTED UNTESTED (not run); $CONDITIONED of the passes ran under their fixture's condition" >&2
 # Every verdict below is reported; none hides another behind an early exit.
 status=0
-if [ $((PASS + FAIL + SKIP)) -eq 0 ]; then
+if [ $((PASS + FAIL + SKIP + NOT_APPLIED)) -eq 0 ]; then
     echo "verify-idempotence: no COVERAGE or GAP fixture ran; a run that tests nothing is not a pass" >&2
     status=1
 fi
@@ -154,6 +176,10 @@ if [ "$FAIL" -gt 0 ]; then
 fi
 if [ "$SKIP" -gt 0 ]; then
     echo "verify-idempotence: skipped:$SKIPPED_FMS (corrupt.sh broken — refusing to declare success)" >&2
+    status=1
+fi
+if [ "$NOT_APPLIED" -gt 0 ]; then
+    echo "verify-idempotence: condition_not_applied:$NOT_APPLIED_FMS (the damage was not in place — refusing to declare success)" >&2
     status=1
 fi
 exit "$status"

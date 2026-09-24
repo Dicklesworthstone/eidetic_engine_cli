@@ -40,3 +40,8 @@ because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`
 when an `ee` binary is on `PATH`; its caller, the `ee doctor Safety Harness`
 stage of `scripts/verify.sh`, is not run by any CI workflow (bd-feftl).
+`scripts/verify-idempotence.sh` and `scripts/verify-metamorphic.sh` run every
+doctor call through `condition.sh`, which sources `.fixture_baseline/env.sh`
+(shard fan-out enabled, `EE_SHARDS_DIR` at the fixture's shard root). Before
+bd-2oh15 ruling t2250 R2 they ran doctor without it, so their passes for this
+fixture checked shard fan-out switched off.

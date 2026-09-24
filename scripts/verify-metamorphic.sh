@@ -15,6 +15,12 @@
 # rulings): COVERAGE and GAP fixtures run; UNTESTED (UNCLASSIFIED,
 # UNRESOLVED) marker-only fixtures are not run and never count as passes,
 # held to the shared pin (doctor_fixture_untested_ratchet).
+#
+# A fixture whose damage is not in the store's bytes (an environment, a live
+# lock holder) ships a condition.sh, and both runs go through
+# doctor_fixture_under_condition (bd-2oh15 ruling t2250 R2). A run whose
+# condition could not be applied is counted as condition_not_applied: never a
+# pass, and it fails this script.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,8 +51,11 @@ PASS=0
 FAIL=0
 SKIP=0
 UNTESTED=0
+NOT_APPLIED=0
+CONDITIONED=0
 FAILED_FMS=""
 SKIPPED_FMS=""
+NOT_APPLIED_FMS=""
 
 normalize_doctor_json() {
     local input="$1"
@@ -94,8 +103,18 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     # would have timestamps if present; the read-only doctor envelope may
     # too) by stripping any keys named `committed_at`, `started_at`,
     # `finished_at`, `ts`, `now`.
-    "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag1.json" 2>/dev/null || true
-    "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag2.json" 2>/dev/null || true
+    rc1=0
+    doctor_fixture_under_condition "$fm_dir" "$target" \
+        "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag1.json" 2> "$target/.diag1.err" || rc1=$?
+    rc2=0
+    doctor_fixture_under_condition "$fm_dir" "$target" \
+        "$EE_BIN" doctor --workspace "$target" --json > "$target/.diag2.json" 2> "$target/.diag2.err" || rc2=$?
+    if [ "$rc1" -eq "$DOCTOR_FIXTURE_CONDITION_NOT_APPLIED" ] || [ "$rc2" -eq "$DOCTOR_FIXTURE_CONDITION_NOT_APPLIED" ]; then
+        NOT_APPLIED=$((NOT_APPLIED + 1))
+        NOT_APPLIED_FMS="$NOT_APPLIED_FMS $fm_id"
+        echo "verify-metamorphic[$fm_id]: condition not applied; not a pass: $(cat "$target/.diag1.err" "$target/.diag2.err" | grep -m1 'condition:' || true)" >&2
+        continue
+    fi
 
     if ! normalize_doctor_json "$target/.diag1.json" "$target/.diag1.normalized.json" 2>/dev/null; then
         FAIL=$((FAIL + 1))
@@ -115,6 +134,9 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
 
     if [ -n "$h1" ] && [ "$h1" = "$h2" ]; then
         PASS=$((PASS + 1))
+        if [ -f "$fm_dir/condition.sh" ]; then
+            CONDITIONED=$((CONDITIONED + 1))
+        fi
     else
         FAIL=$((FAIL + 1))
         FAILED_FMS="$FAILED_FMS $fm_id"
@@ -124,10 +146,10 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
 done
 shopt -u nullglob
 
-echo "verify-metamorphic: passed=$PASS failed=$FAIL skipped=$SKIP; $UNTESTED UNTESTED (not run)" >&2
+echo "verify-metamorphic: passed=$PASS failed=$FAIL skipped=$SKIP condition_not_applied=$NOT_APPLIED; $UNTESTED UNTESTED (not run); $CONDITIONED of the passes ran under their fixture's condition" >&2
 # Every verdict below is reported; none hides another behind an early exit.
 status=0
-if [ $((PASS + FAIL + SKIP)) -eq 0 ]; then
+if [ $((PASS + FAIL + SKIP + NOT_APPLIED)) -eq 0 ]; then
     echo "verify-metamorphic: no COVERAGE or GAP fixture ran; a run that tests nothing is not a pass" >&2
     status=1
 fi
@@ -138,6 +160,10 @@ if [ "$FAIL" -gt 0 ]; then
 fi
 if [ "$SKIP" -gt 0 ]; then
     echo "verify-metamorphic: skipped:$SKIPPED_FMS (corrupt.sh broken — refusing to declare success)" >&2
+    status=1
+fi
+if [ "$NOT_APPLIED" -gt 0 ]; then
+    echo "verify-metamorphic: condition_not_applied:$NOT_APPLIED_FMS (the damage was not in place — refusing to declare success)" >&2
     status=1
 fi
 exit "$status"

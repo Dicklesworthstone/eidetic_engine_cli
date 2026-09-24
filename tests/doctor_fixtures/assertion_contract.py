@@ -574,6 +574,65 @@ class CrashRecoveryContract(unittest.TestCase):
         self.assertIn("unexpected exit=3", result.stderr)
 
 
+class ConditionContract(unittest.TestCase):
+    """doctor_fixture_under_condition (bd-2oh15 ruling t2250 R2): a fixture
+    whose damage is outside the store's bytes runs every doctor call through
+    its condition.sh. Without one, the command runs as given. With one, the
+    command runs under the condition and its status comes back, and a
+    condition that could not be applied returns 97, which a harness must never
+    count as a pass."""
+
+    def setUp(self):
+        evidence_root = os.environ.get("EE_DOCTOR_ASSERTION_TEST_ROOT")
+        if evidence_root:
+            Path(evidence_root).mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix=self._testMethodName + "-", dir=evidence_root))
+        self.fm_dir = self.root / "fm-condition-double"
+        self.fm_dir.mkdir()
+        self.target = self.root / "target"
+        self.target.mkdir()
+
+    def under(self, *command):
+        script = ('set -euo pipefail; source "$1"; shift; '
+                  'status=0; doctor_fixture_under_condition "$@" || status=$?; '
+                  'printf "status=%s\\n" "$status"')
+        result = subprocess.run(
+            ["bash", "-c", script, "condition-control", str(HERE / "lib.sh"),
+             str(self.fm_dir), str(self.target), *command],
+            capture_output=True, text=True, timeout=60, shell=False, check=False)
+        (self.root / "condition.receipt.json").write_text(json.dumps({
+            "exit": result.returncode, "stdout": result.stdout,
+            "stderr": result.stderr}, indent=2) + "\n")
+        print(f"{self._testMethodName}: stdout={result.stdout.strip()!r}; evidence={self.root}",
+              flush=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def condition(self, body):
+        (self.fm_dir / "condition.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+
+    def test_without_condition_the_command_runs_as_given(self):
+        out = self.under("bash", "-c", 'printf "ran target=%s\\n" "${EE_DOCTOR_FIXTURE_TARGET:-unset}"; exit 6')
+        self.assertIn("ran target=unset", out)
+        self.assertIn("status=6", out)
+
+    def test_condition_applies_and_passes_the_status_through(self):
+        self.condition('export FIXTURE_CONDITION=applied\n'
+                       'printf "condition target=%s\\n" "$EE_DOCTOR_FIXTURE_TARGET"\n'
+                       'exec "$@"\n')
+        out = self.under("bash", "-c", 'printf "ran %s\\n" "${FIXTURE_CONDITION:-missing}"; exit 6')
+        self.assertIn(f"condition target={self.target}", out)
+        self.assertIn("ran applied", out)
+        self.assertIn("status=6", out)
+
+    def test_condition_not_applied_returns_97_and_skips_the_command(self):
+        self.condition('printf "condition: not applied\\n" >&2\nexit 97\n')
+        out = self.under("bash", "-c", 'printf "ran anyway\\n"')
+        self.assertNotIn("ran anyway", out)
+        self.assertIn("status=97", out)
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--probe"]:
         sys.exit(doctor_double())

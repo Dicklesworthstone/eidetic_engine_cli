@@ -72,8 +72,8 @@ carries `added_after_inventory`, which says why it was added.
 - The scorer also wrote the P0 fixtures and had seen the manifest. Independence
   rests on the blind inventory, not on the scoring step.
 - The failure-class list may be incomplete.
-- Six manifest FMs were outside the blind inventory's doctor surface and are
-  not in the population. An enumerated code search (bd-2oh15 c9985) then
+- Six manifest FMs were outside the blind inventory's doctor surface, so they
+  were not in the blind inventory's population. An enumerated code search (bd-2oh15 c9985) then
   settled them. `fm-policy_safety-trauma-guard-policy-denied-exit-7` (a correct
   command outcome) and `fm-policy_safety-redaction-class-coverage-gap` (mesh
   lane policy) are OUT-OF-SCOPE. `fm-state_files-jsonl-tombstone-drift` (the

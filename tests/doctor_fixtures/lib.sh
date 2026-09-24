@@ -404,6 +404,32 @@ doctor_fixture_assert_report_only() {
         "$fm_id" "$check_name" "$error_code" >&2
 }
 
+# Some damage is not in the store's bytes: an environment variable (the
+# fixture's .fixture_baseline/env.sh) or a live process (a lock holder). Such a
+# fixture ships a condition.sh next to corrupt.sh. It applies the condition to
+# $EE_DOCTOR_FIXTURE_TARGET, checks that the condition took, runs the command
+# it was given, and exits with that command's status. It exits
+# DOCTOR_FIXTURE_CONDITION_NOT_APPLIED instead when the condition could not be
+# applied (bd-2oh15 ruling t2250 R2). A harness that runs doctor on a fixture
+# target must run it through doctor_fixture_under_condition, and must count a
+# CONDITION_NOT_APPLIED run as neither a pass nor a skip that is silently
+# forgiven: a run that did not exercise the condition proves nothing.
+DOCTOR_FIXTURE_CONDITION_NOT_APPLIED=97
+
+# doctor_fixture_under_condition <fm_dir> <target> <command> [args...]
+# Runs the command under the fixture's condition, or directly when the fixture
+# has no condition.sh. Returns the command's status, or 97 (see above).
+doctor_fixture_under_condition() {
+    local fm_dir="${1:?fixture source dir required}"
+    local target="${2:?target required}"
+    shift 2
+    if [ -f "$fm_dir/condition.sh" ]; then
+        EE_DOCTOR_FIXTURE_TARGET="$target" bash "$fm_dir/condition.sh" "$@"
+    else
+        "$@"
+    fi
+}
+
 # The harness bucket of a fixture, from its manifest label (bd-2oh15 strand 4,
 # ruling c9954). Prints one of:
 #   coverage  REPAIR, GUIDANCE-ONLY: must pass.

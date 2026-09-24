@@ -44,6 +44,9 @@ There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
 because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`
 when an `ee` binary is on `PATH`; its caller, the `ee doctor Safety Harness`
-stage of `scripts/verify.sh`, is not run by any CI workflow (bd-feftl). The
-other counting harnesses run doctor on this target without
-`.fixture_baseline/env.sh`, so there it only checks a healthy workspace.
+stage of `scripts/verify.sh`, is not run by any CI workflow (bd-feftl).
+`scripts/verify-idempotence.sh` and `scripts/verify-metamorphic.sh` run every
+doctor call through `condition.sh`, which sources `.fixture_baseline/env.sh`,
+confirms the conflict with `ee workspace resolve`, and runs doctor from inside
+the target. If the conflict is not in place, the run counts as
+`condition_not_applied`: never a pass, and the harness fails.
