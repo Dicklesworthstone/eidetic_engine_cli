@@ -22,37 +22,151 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Apply only the reviewed patch to exact source preimages
+      - name: Prepare the narrowly scoped source changes
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          import json, os, pathlib, subprocess
           expected = {
               'src/config/file.rs': '38b8d94df8142a6387488cd268726354eae4b93b',
               'src/core/config_surface.rs': '7a9aed19766f8425da7bd3ce95815c95061f8270',
               'src/core/context.rs': '689a041b5d035d4021c0f26e0b5785ffe392517f',
               'src/cli/mod.rs': 'ca1d7ee885b4119ae0ee8551f2d1eb329a8b46dd',
           }
-          added = ['src/cli/candidate_pool_tests.rs', 'src/core/config_candidate_pool_tests.rs',
-                   'src/core/context_candidate_pool_tests.rs', 'tests/pack_candidate_pool_cli.py',
-                   'docs/pack-candidate-pool.md']
+          tests = ['src/cli/candidate_pool_tests.rs', 'src/core/config_candidate_pool_tests.rs',
+                   'src/core/context_candidate_pool_tests.rs']
           for path, sha in expected.items():
               actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
               assert actual == sha, (path, actual, sha)
-          for path in added:
-              assert not pathlib.Path(path).exists(), path
-          payload = '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'
-          patch = gzip.decompress(base64.b64decode(payload))
-          assert hashlib.sha256(patch).hexdigest() == '68cb62c67d746a3371d49baca58ea956e34e05e2168b2e269a799ac8c97c7f31'
-          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
-          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
-          subprocess.run(['git', 'add', '-N', '--', *added], check=True)
+          for path in tests:
+              expected[path] = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+          def edit(path, old, new, count=1):
+              file = pathlib.Path(path)
+              text = file.read_text()
+              assert text.count(old) == count, (path, old, text.count(old))
+              file.write_text(text.replace(old, new))
+          edit('src/core/config_surface.rs',
+               'GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,\n',
+               'GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,\n    PACK_CANDIDATE_POOL_KEY,\n')
+          edit('src/core/config_surface.rs', '    PositiveInteger,\n    PercentInteger,',
+               '    PositiveInteger,\n    PositiveU32,\n    PercentInteger,')
+          edit('src/core/config_surface.rs',
+               'fn config_key_spec(key: &str) -> Option<GraphKeySpec> {\n    match key {',
+               '''fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
+              match key {
+                  PACK_CANDIDATE_POOL_KEY => Some(GraphKeySpec {
+                      key: PACK_CANDIDATE_POOL_KEY,
+                      path: &["pack", "candidate_pool"],
+                      kind: GraphValueKind::PositiveU32,
+                  }),''')
+          edit('src/core/config_surface.rs', '        GraphValueKind::PercentInteger => {',
+               '''        GraphValueKind::PositiveU32 => {
+                      let expected = "an integer in the range 1..=4294967295";
+                      let value = raw
+                          .parse::<u32>()
+                          .ok()
+                          .filter(|value| *value > 0)
+                          .ok_or_else(|| invalid_value(spec, raw, expected))?;
+                      Ok(TomlScalar::Integer(i64::from(value)))
+                  }
+                  GraphValueKind::PercentInteger => {''')
+          edit('src/core/config_surface.rs', 'fn merged_config(\n',
+               '''/// Resolve an omitted request pool using the same layers as `config get`.
+          /// Explicit request values (including query-file and task-lens overrides) win;
+          /// request validation and runtime profile caps still run in the pack core.
+          pub(crate) fn resolve_pack_candidate_pool(
+              workspace_root: &Path,
+              explicit: Option<u32>,
+          ) -> Result<Option<u32>, ConfigSurfaceError> {
+              if explicit.is_some() {
+                  return Ok(explicit);
+              }
+              let merged = merged_workspace_config(workspace_root)?;
+              merged
+                  .values
+                  .pack
+                  .candidate_pool
+                  .map(|value| {
+                      u32::try_from(value).map_err(|_| ConfigSurfaceError::InvalidValue {
+                          key: PACK_CANDIDATE_POOL_KEY,
+                          value: value.to_string(),
+                          expected: "an integer in the range 1..=4294967295",
+                      })
+                  })
+                  .transpose()
+          }
+
+          fn merged_config(
+          ''')
+          edit('src/config/file.rs',
+               'impl PackConfig {\n    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {\n        Ok(Self {',
+               '''impl PackConfig {
+              fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+                  let candidate_pool = optional_u64(document, "pack", "candidate_pool")?;
+                  if let Some(value) = candidate_pool
+                      && (value == 0 || value > u64::from(u32::MAX))
+                  {
+                      return Err(ConfigParseError::InvalidValue {
+                          key: "pack.candidate_pool".to_owned(),
+                          value: value.to_string(),
+                          message: "expected an integer in the range 1..=4294967295".to_owned(),
+                      });
+                  }
+                  Ok(Self {''')
+          edit('src/config/file.rs', '            candidate_pool: optional_u64(document, "pack", "candidate_pool")?,',
+               '            candidate_pool,')
+          edit('src/core/context.rs', '        candidate_pool: options.candidate_pool,',
+               '''        candidate_pool: crate::core::config_surface::resolve_pack_candidate_pool(
+                      &options.workspace_path,
+                      options.candidate_pool,
+                  )
+                  .map_err(|error| ContextPackError::Pack(error.to_string()))?,''', 2)
+          edit('src/cli/mod.rs',
+               '''    /// Explicit maximum token budget for the context pack.
+              #[arg(long, short = 't', value_name = "N")]
+              pub max_tokens: Option<u32>,
+
+              /// Maximum candidate memories to retrieve before packing.
+              #[arg(long, default_value_t = 100)]
+              pub candidate_pool: u32,''',
+               '''    /// Explicit maximum token budget for the context pack.
+              #[arg(long, short = 't', value_name = "N")]
+              pub max_tokens: Option<u32>,
+
+              /// Maximum candidate memories to retrieve (defaults to pack.candidate_pool).
+              #[arg(long)]
+              pub candidate_pool: Option<u32>,''')
+          edit('src/cli/mod.rs',
+               '        max_tokens: args.max_tokens,\n        candidate_pool: Some(args.candidate_pool),',
+               '        max_tokens: args.max_tokens,\n        candidate_pool: args.candidate_pool,')
+          edit('src/cli/mod.rs',
+               '''            candidate_pool: args
+                          .candidate_pool
+                          .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
+                          .unwrap_or(100),''',
+               '''            candidate_pool: args
+                          .candidate_pool
+                          .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool)),''')
+          for path, module in [('src/core/config_surface.rs', 'config_candidate_pool_tests'),
+                               ('src/core/context.rs', 'context_candidate_pool_tests'),
+                               ('src/cli/mod.rs', 'candidate_pool_tests')]:
+              file = pathlib.Path(path)
+              file.write_text(file.read_text() + f'\n#[cfg(test)]\n#[path = "{module}.rs"]\nmod {module};\n')
+          postimages = {
+              'src/cli/mod.rs': 'ad760829d698403845a86a457f8c1667b05b56be',
+              'src/config/file.rs': 'a8a1e1eb4c7bd9fc961a57540e6629775a16eaa0',
+              'src/core/config_surface.rs': '957ff09497669d0892eda158ebc74d15df3adb80',
+              'src/core/context.rs': '51421a2338d956f61adeb637fc7639d5381a9b31',
+          }
+          for path, sha in postimages.items():
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              assert actual == sha, (path, actual, sha)
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate-pool'
           output.mkdir()
           (output / 'source-before.json').write_text(json.dumps(expected, indent=2))
           (output / 'source-sha.txt').write_text(os.environ['GITHUB_SHA'] + '\n')
-          (output / 'paths.json').write_text(json.dumps(sorted([*expected, *added])))
+          (output / 'paths.json').write_text(json.dumps(sorted(expected)))
           PY
       - name: Format and syntax-check the changed Rust sources
         shell: bash
@@ -64,7 +178,7 @@ jobs:
           git diff --check
           git diff --binary > "$RUNNER_TEMP/candidate-pool/prepared.patch"
           git diff --stat > "$RUNNER_TEMP/candidate-pool/diff-stat.txt"
-      - name: Export reviewed source objects without updating any ref
+      - name: Export source objects without updating any ref
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -76,7 +190,7 @@ jobs:
           paths = json.loads((output / 'paths.json').read_text())
           before = json.loads((output / 'source-before.json').read_text())
           changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
-          assert sorted(changed) == paths, (changed, paths)
+          assert set(changed).issubset(paths), changed
           objects = {}
           with zipfile.ZipFile(output / 'prepared-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
               for path in paths:
@@ -91,7 +205,7 @@ jobs:
                   with urllib.request.urlopen(request, timeout=90) as response:
                       result = json.load(response)
                   assert result['sha'] == expected, path
-                  objects[path] = {'before': before.get(path), 'after': expected}
+                  objects[path] = {'before': before[path], 'after': expected}
                   archive.writestr(path, data)
           (output / 'source-blobs.json').write_text(json.dumps(objects, indent=2) + '\n')
           print(json.dumps(objects, indent=2))
