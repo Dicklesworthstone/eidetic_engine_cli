@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 55
     permissions:
       contents: write
@@ -31,7 +31,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - name: Admit exact manually authored patch and format changed Rust
+      - name: Admit exact manually authored patches and format changed Rust
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -41,17 +41,22 @@ jobs:
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cached-pack'
           api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
-          request = urllib.request.Request(api + '/git/blobs/a2146d9837c97050f9aee62c5b9df386a64521d5', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              encoded = base64.b64decode(json.load(response)['content']).decode('ascii')
-          # Correct one known transport insertion; the decoded patch is admitted
-          # only by its original local SHA-256, never by a fuzzy source rewrite.
+          def blob(sha):
+              request = urllib.request.Request(api + '/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return base64.b64decode(json.load(response)['content'])
+          encoded = blob('a2146d9837c97050f9aee62c5b9df386a64521d5').decode('ascii')
+          # Correct one known transport insertion; original SHA-256 is mandatory.
           encoded = encoded.replace('EFpyYY8', 'EFpyY8', 1)
-          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '613f1a92bdd4939063070a0fbcf849e568b72c7e2e2dce92a430a797022f0e29'
-          (out / 'authored.patch').write_bytes(patch)
-          subprocess.run(['git', 'apply', '--check', str(out / 'authored.patch')], check=True)
-          subprocess.run(['git', 'apply', str(out / 'authored.patch')], check=True)
+          patches = [
+              ('authored.patch', zlib.decompress(base64.b64decode(encoded, validate=True)), '613f1a92bdd4939063070a0fbcf849e568b72c7e2e2dce92a430a797022f0e29'),
+              ('client-policy.patch', blob('e781ad328172fbaa79ffc71e591548e943d5fabc'), '8ba0a2a785a10c2111ea46b4ed1d1dbce3946501fefbaa5250013c26154a76c9'),
+          ]
+          for name, patch, expected in patches:
+              assert hashlib.sha256(patch).hexdigest() == expected, name
+              (out / name).write_bytes(patch)
+              subprocess.run(['git', 'apply', '--check', str(out / name)], check=True)
+              subprocess.run(['git', 'apply', str(out / name)], check=True)
           PY
           rustfmt --edition 2024 --config skip_children=true src/core/index_ask.rs src/core/index.rs src/core/search.rs src/core/context.rs src/core/context_test_module.rs src/daemon/server.rs src/cli/mod.rs
           git diff --check
