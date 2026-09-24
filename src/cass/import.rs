@@ -46,6 +46,10 @@ const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnost
 /// `run` path's 100 MiB pipe cap so a pathological session can't make us hold
 /// unbounded memory.
 const CASS_VIEW_STDOUT_TOTAL_MAX_BYTES: usize = 100 * 1024 * 1024;
+/// Bound retained evidence separately from wire bytes. Tiny JSONL records can
+/// expand substantially through repeated source locators, hashes and row data.
+/// This is conservative allocation accounting, not a process-RSS quota.
+const CASS_VIEW_RETAINED_MAX_BYTES: usize = 100 * 1024 * 1024;
 #[cfg(test)]
 const CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES: usize = 10 * 1024 * 1024;
 
@@ -1060,9 +1064,11 @@ fn view_session_spans(
     client: &CassClient,
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
-    collect_cass_view_snapshot(source_path, |line, context| {
-        read_cass_view_page(client, source_path, line, context)
-    })
+    collect_cass_view_snapshot(
+        source_path,
+        CASS_VIEW_RETAINED_MAX_BYTES,
+        |line, context| read_cass_view_page(client, source_path, line, context),
+    )
 }
 
 /// Assemble the complete view before the caller starts its session transaction.
@@ -1070,6 +1076,7 @@ fn view_session_spans(
 /// contract. EOF supplies a JSONL endpoint, not permission to omit earlier lines.
 fn collect_cass_view_snapshot(
     source_path: &str,
+    retained_limit: usize,
     mut read_page: impl FnMut(u32, u32) -> Result<CassViewStdoutBuffer, CassImportError>,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
     let mut spans = Vec::new();
@@ -1078,6 +1085,8 @@ fn collect_cass_view_snapshot(
     let mut context = DEFAULT_VIEW_CONTEXT;
     let mut expected_total = None;
     let mut total_bytes = 0_usize;
+    let mut retained_bytes = 0_usize;
+    let mut memory_sample = CassViewStreamMemorySample::default();
     loop {
         let buffer = read_page(target_line, context)?;
         total_bytes = total_bytes.saturating_add(buffer.as_bytes().len());
@@ -1095,6 +1104,16 @@ fn collect_cass_view_snapshot(
         // coverage too; a sparse or reordered stream is not a complete import.
         let total = total_lines.unwrap_or_else(|| page.last().map_or(0, |span| span.end_line));
         let next = next_cass_view_page(&page, first_line, total)?;
+        // A per-page bound cannot protect a paginated session. Charge every
+        // retained row before making the complete snapshot available to import.
+        for span in &page {
+            retained_bytes = charge_cass_view_retention(
+                retained_bytes,
+                retained_cass_view_span_bytes(span),
+                retained_limit,
+            )?;
+            memory_sample.record_span(span);
+        }
         spans.extend(page);
         let Some((next_first, next_target, next_context)) = next else {
             return Ok(spans);
@@ -1680,6 +1699,7 @@ struct CassViewLineCollector {
     spans: Vec<CassViewSpanForImport>,
     seen_lines: BTreeSet<u32>,
     memory_sample: CassViewStreamMemorySample,
+    retained_bytes: usize,
 }
 
 impl CassViewLineCollector {
@@ -1689,6 +1709,7 @@ impl CassViewLineCollector {
             spans: Vec::new(),
             seen_lines: BTreeSet::new(),
             memory_sample: CassViewStreamMemorySample::default(),
+            retained_bytes: 0,
         }
     }
 
@@ -1713,12 +1734,20 @@ impl CassViewLineCollector {
 
     fn accept_value(&mut self, value: &JsonValue) -> Result<(), CassImportError> {
         let span = parse_view_line_value(value, &self.source_path)?;
-        if !self.seen_lines.insert(span.start_line) {
+        if self.seen_lines.contains(&span.start_line) {
             return Err(CassImportError::InvalidJson {
                 source: "view",
                 message: format!("duplicate line {}", span.start_line),
             });
         }
+        let retained_bytes = charge_cass_view_retention(
+            self.retained_bytes,
+            retained_cass_view_span_bytes(&span),
+            CASS_VIEW_RETAINED_MAX_BYTES,
+        )?;
+        // Refusal must not occupy this line identity or retain a partial row.
+        self.seen_lines.insert(span.start_line);
+        self.retained_bytes = retained_bytes;
         self.memory_sample.record_span(&span);
         self.spans.push(span);
         Ok(())
@@ -1798,6 +1827,42 @@ fn parse_view_line_value(
         redacted,
         redacted_reasons,
     })
+}
+
+/// Account allocated string/vector capacity, not just visible text length.
+/// The additional row slot covers `Vec` growth; the per-row allowance covers
+/// line deduplication and ordinary allocation overhead conservatively. Wire
+/// buffers, the JSON parser and transient screening allocations remain subject
+/// to their separate input bounds, not this retained-evidence allowance.
+fn retained_cass_view_span_bytes(span: &CassViewSpanForImport) -> usize {
+    const ROW_OVERHEAD_ALLOWANCE: usize = 256;
+    let reasons = span
+        .redacted_reasons
+        .iter()
+        .fold(0_usize, |bytes, reason| bytes.saturating_add(reason.capacity()));
+    span.cass_span_id
+        .capacity()
+        .saturating_add(span.excerpt.capacity())
+        .saturating_add(span.content_hash.capacity())
+        .saturating_add(reasons)
+        .saturating_add(
+            span.redacted_reasons
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>()),
+        )
+        .saturating_add(std::mem::size_of::<CassViewSpanForImport>().saturating_mul(2))
+        .saturating_add(ROW_OVERHEAD_ALLOWANCE)
+}
+
+fn charge_cass_view_retention(
+    retained: usize,
+    additional: usize,
+    limit: usize,
+) -> Result<usize, CassImportError> {
+    retained
+        .checked_add(additional)
+        .filter(|projected| *projected <= limit)
+        .ok_or_else(|| invalid_view_page("view evidence exceeds retained session byte limit"))
 }
 
 fn estimated_span_retained_bytes(span: &CassViewSpanForImport) -> usize {
@@ -2512,14 +2577,18 @@ mod tests {
         pages: &[String],
     ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
         let mut pages = pages.iter();
-        collect_cass_view_snapshot("session.jsonl", |_, _| {
-            let page = pages
-                .next()
-                .ok_or_else(|| invalid_view_page("fixture exhausted before complete view"))?;
-            Ok(CassViewStdoutBuffer {
-                bytes: page.as_bytes().to_vec(),
-            })
-        })
+        collect_cass_view_snapshot(
+            "session.jsonl",
+            CASS_VIEW_RETAINED_MAX_BYTES,
+            |_, _| {
+                let page = pages
+                    .next()
+                    .ok_or_else(|| invalid_view_page("fixture exhausted before complete view"))?;
+                Ok(CassViewStdoutBuffer {
+                    bytes: page.as_bytes().to_vec(),
+                })
+            },
+        )
     }
 
     fn view_window_fixture(first: u32, last: u32, total: u32) -> String {
@@ -2566,19 +2635,23 @@ mod tests {
     #[test]
     fn complete_view_reads_all_windows_and_preserves_exact_tail() -> TestResult {
         let mut calls = Vec::new();
-        let rows = collect_cass_view_snapshot("session.jsonl", |target, context| {
-            calls.push((target, context));
-            if calls.len() > 3 {
-                return Err(invalid_view_page(
-                    "fixture received an unexpected extra page request",
-                ));
-            }
-            let first = target.saturating_sub(context).max(1);
-            let last = target.saturating_add(context).min(140);
-            Ok(CassViewStdoutBuffer {
-                bytes: view_window_fixture(first, last, 140).into_bytes(),
-            })
-        })
+        let rows = collect_cass_view_snapshot(
+            "session.jsonl",
+            CASS_VIEW_RETAINED_MAX_BYTES,
+            |target, context| {
+                calls.push((target, context));
+                if calls.len() > 3 {
+                    return Err(invalid_view_page(
+                        "fixture received an unexpected extra page request",
+                    ));
+                }
+                let first = target.saturating_sub(context).max(1);
+                let last = target.saturating_add(context).min(140);
+                Ok(CassViewStdoutBuffer {
+                    bytes: view_window_fixture(first, last, 140).into_bytes(),
+                })
+            },
+        )
         .map_err(|error| error.to_string())?;
         ensure_equal(
             &calls,
@@ -2702,6 +2775,147 @@ mod tests {
             next_cass_view_page(&[row], 1, 2).is_err(),
             "one row must not certify two source lines",
         )
+    }
+
+    #[test]
+    fn view_retention_budget_checks_exact_boundary_and_integer_overflow() -> TestResult {
+        let limit = CASS_VIEW_RETAINED_MAX_BYTES;
+        ensure_equal(
+            &charge_cass_view_retention(limit - 1, 1, limit)
+                .map_err(|error| error.to_string())?,
+            &limit,
+            "exact retained byte boundary",
+        )?;
+        for (retained, additional, limit) in [
+            (limit, 1, limit),
+            (0, limit + 1, limit),
+            (usize::MAX, 1, usize::MAX),
+            (1, usize::MAX, usize::MAX),
+        ] {
+            ensure(
+                charge_cass_view_retention(retained, additional, limit).is_err(),
+                "over-budget or overflowing retention must fail",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn view_retention_charge_counts_spare_capacity_and_redaction_reasons() -> TestResult {
+        let mut row = parse_view_line_value(
+            &json!({"line": 1, "content": "Build completed"}),
+            "session.jsonl",
+        )
+        .map_err(|error| error.to_string())?;
+        let before = retained_cass_view_span_bytes(&row);
+        row.cass_span_id.reserve(4096);
+        row.excerpt.reserve(2048);
+        row.content_hash.reserve(1024);
+        row.redacted_reasons.reserve(8);
+        let mut reason = String::with_capacity(512);
+        reason.push_str("fixture_redaction_class");
+        row.redacted_reasons.push(reason);
+        let allocated = row.cass_span_id.capacity()
+            + row.excerpt.capacity()
+            + row.content_hash.capacity()
+            + row.redacted_reasons.capacity() * std::mem::size_of::<String>()
+            + row.redacted_reasons[0].capacity();
+        let charged = retained_cass_view_span_bytes(&row);
+        ensure(charged > before, "spare capacity must increase the charge")?;
+        ensure(
+            charged >= allocated + std::mem::size_of::<CassViewSpanForImport>(),
+            "allocated strings, reason slots and the retained row must all be charged",
+        )
+    }
+
+    #[test]
+    fn view_retention_refusal_does_not_occupy_a_line_or_keep_partial_evidence() -> TestResult {
+        let mut collector = CassViewLineCollector::new("session.jsonl");
+        collector.retained_bytes = CASS_VIEW_RETAINED_MAX_BYTES;
+        let line = json!({"line": 1, "content": "Build completed"});
+        let error = collector
+            .accept_value(&line)
+            .err()
+            .ok_or_else(|| "full collector unexpectedly accepted another row".to_owned())?;
+        ensure(
+            error.to_string().contains("retained session byte limit"),
+            "retention rejection must explain the applicable bound",
+        )?;
+        ensure(collector.spans.is_empty(), "rejected row was retained")?;
+        ensure(collector.seen_lines.is_empty(), "rejected line identity was occupied")?;
+        ensure_equal(
+            &collector.retained_bytes,
+            &CASS_VIEW_RETAINED_MAX_BYTES,
+            "refusal preserves the previous charge",
+        )?;
+        collector.retained_bytes = 0;
+        collector.accept_value(&line).map_err(|error| error.to_string())?;
+        ensure_equal(&collector.spans.len(), &1, "retry captures the row once")?;
+        ensure(
+            collector.accept_value(&line).is_err(),
+            "normal duplicate rejection still applies",
+        )
+    }
+
+    #[test]
+    fn view_retention_is_one_session_budget_not_a_fresh_budget_per_page() -> TestResult {
+        let pages = [view_window_fixture(1, 1, 2), view_window_fixture(2, 2, 2)];
+        let mut charge = 0;
+        for page in &pages {
+            let rows = parse_view_json(page.as_bytes(), "session.jsonl")
+                .map_err(|error| error.to_string())?;
+            charge += retained_cass_view_span_bytes(&rows[0]);
+        }
+        for (limit, accepted) in [(charge, true), (charge - 1, false)] {
+            let mut calls = 0;
+            let result = collect_cass_view_snapshot("session.jsonl", limit, |_, _| {
+                let page = pages
+                    .get(calls)
+                    .ok_or_else(|| invalid_view_page("unexpected extra page request"))?;
+                calls += 1;
+                Ok(CassViewStdoutBuffer {
+                    bytes: page.as_bytes().to_vec(),
+                })
+            });
+            ensure_equal(&calls, &2, "both pages were read")?;
+            ensure_equal(&result.is_ok(), &accepted, "aggregate retention verdict")?;
+            match result {
+                Ok(rows) => ensure_equal(&rows.len(), &2, "complete accepted snapshot")?,
+                Err(error) => ensure(
+                    error.to_string().contains("retained session byte limit"),
+                    "later-page refusal must identify the retained byte limit",
+                )?,
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn view_retention_refuses_long_locator_amplification_with_small_wire_input() -> TestResult {
+        let source = format!("{}.jsonl", "source".repeat(256));
+        let page = "{\"line\":1,\"content\":\"Build completed\"}";
+        let row = parse_view_line_value(
+            &json!({"line": 1, "content": "Build completed"}),
+            &source,
+        )
+        .map_err(|error| error.to_string())?;
+        let charge = retained_cass_view_span_bytes(&row);
+        ensure(charge > page.len() * 10, "fixture must expand beyond wire bytes")?;
+        for (limit, accepted) in [(charge, true), (charge - 1, false)] {
+            let result = collect_cass_view_snapshot(&source, limit, |_, _| {
+                Ok(CassViewStdoutBuffer {
+                    bytes: page.as_bytes().to_vec(),
+                })
+            });
+            ensure_equal(&result.is_ok(), &accepted, "expanded-row retention verdict")?;
+            if let Err(error) = result {
+                ensure(
+                    !error.to_string().contains(&source),
+                    "retention failure must not expose the private source locator",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
