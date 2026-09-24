@@ -51,6 +51,7 @@ jobs:
           patches = [
               ('authored.patch', zlib.decompress(base64.b64decode(encoded, validate=True)), '613f1a92bdd4939063070a0fbcf849e568b72c7e2e2dce92a430a797022f0e29'),
               ('client-policy.patch', blob('e781ad328172fbaa79ffc71e591548e943d5fabc'), '8ba0a2a785a10c2111ea46b4ed1d1dbce3946501fefbaa5250013c26154a76c9'),
+              ('positive-fixture.patch', blob('e92da03baa3b35a0e88b766cd884822433830ce4'), 'cb87811a221120a593c6e092edc489d405b2c49f362dc7e983b00d7492f4764e'),
           ]
           for name, patch, expected in patches:
               assert hashlib.sha256(patch).hexdigest() == expected, name
@@ -126,6 +127,7 @@ jobs:
           run_tests read_only_semantic_pack_names_cold_daemon_fallback_without_writes read-only-pack
           run_tests daemon_pack_changed_store_restarts_local_admission freshness
           run_tests core::index::ask_model::tests::read_only_ read-only-model
+          run_tests cli::tests::pack_daemon_ cli-pack
       - name: Check strict production Clippy
         run: |
           set -euo pipefail
