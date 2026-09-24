@@ -28023,6 +28023,18 @@ fn task_lens_catalog_for_workspace(workspace_root: &Path) -> Result<TaskLensCata
     })
 }
 
+fn configured_pack_candidate_pool(workspace_root: &Path) -> Result<u32, DomainError> {
+    let merged = crate::core::config_surface::merged_workspace_config(workspace_root)
+        .map_err(config_surface_error_to_domain)?;
+    let pool = merged.values.pack.candidate_pool.unwrap_or(100);
+    u32::try_from(pool).ok().filter(|pool| *pool > 0).ok_or_else(|| {
+        DomainError::Configuration {
+            message: "pack.candidate_pool must be an integer in the range 1..=4294967295".to_owned(),
+            repair: Some("Set [pack].candidate_pool to a positive u32 value in .ee/config.toml.".to_owned()),
+        }
+    })
+}
+
 fn resolve_pack_task_lens(
     workspace_root: &Path,
     lens: Option<&str>,
@@ -45930,6 +45942,10 @@ where
             Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
+        let configured_pool = match configured_pack_candidate_pool(&workspace_path) {
+            Ok(pool) => pool,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
         let query = match error_recall_query_seed(
             &workspace_path,
             args.database.as_deref(),
@@ -45950,7 +45966,7 @@ where
             candidate_pool: args
                 .candidate_pool
                 .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
-                .unwrap_or(100),
+                .unwrap_or(configured_pool),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
             source_mode: args
                 .source_mode
@@ -46128,6 +46144,10 @@ where
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
+    let configured_pool = match configured_pack_candidate_pool(&workspace_root) {
+        Ok(pool) => pool,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
     let output_options = resolve_context_output_options(
         args.pack_profile.or(lens_pack_profile).unwrap_or_default(),
         args.resource_profile
@@ -46227,7 +46247,8 @@ where
         candidate_pool: args
             .candidate_pool
             .or(request.candidate_pool)
-            .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool)),
+            .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
+            .or(Some(configured_pool)),
         max_results: request
             .max_results
             .or_else(|| lens_overlay.and_then(|overlay| overlay.max_results)),
