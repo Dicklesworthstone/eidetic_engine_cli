@@ -370,6 +370,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_candidate_sealed` | info | bd-sealed-preregistration-memory-b67be |
 | `context_delta_no_baseline` | info | bd-7lvbg.6 (GOV) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
+| `context_lexical_fallback` | medium | bd-auto-index-rebuild-on-fallback-x35vi; documented by bd-tjxvl |
 | `context_evidence_hit_unhydrated` | low | bd-16imy |
 | `context_rule_hit_unhydrated` | low | bd-3h6bz |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |

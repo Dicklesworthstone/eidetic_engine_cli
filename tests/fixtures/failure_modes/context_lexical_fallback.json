@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_lexical_fallback",
+  "introduced_by": {
+    "bead": "bd-auto-index-rebuild-on-fallback-x35vi",
+    "epic_letter": "B"
+  },
+  "surfaces": ["context"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The pack's search could not use an index (search status IndexNotFound or IndexError), so context was assembled from a deterministic lexical scan of stored memories instead of ranked retrieval. Documented under bd-tjxvl, which measured it on a read-only pack with .ee/index and every index.previous.* moved aside.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Before release run the checklist.' --level procedural --kind rule --workspace .",
+      "ee index rebuild --workspace .",
+      "# move .ee/index and every .ee/index.previous* out of the way"
+    ],
+    "invocation": "ee pack 'release checklist' --read-only --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_lexical_fallback",
+    "severity": "medium",
+    "message_contains": ["Search index could not satisfy the context request", "lexical memory match"],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
