@@ -21,6 +21,10 @@ use super::{
 };
 
 const EMBEDDING_BATCH_SIZE: usize = 64;
+// Standalone library callers need a bounded production context, not an
+// ambient context left over from a CLI or transport. Enclosing requests retain
+// their own deadline and cancellation capability instead of receiving this one.
+const STANDALONE_SCORING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SemanticFailure {
@@ -67,11 +71,22 @@ pub fn evaluate_ask_with_local_model(
         Ok(Some(embedder)) => embedder,
         Ok(None) | Err(_) => return Ok(evaluate_ask(request, candidates)),
     };
-    let result = crate::core::run_cli_future(async {
-        let cx = caller_cx
-            .or_else(Cx::current)
-            .ok_or(SemanticFailure::Unavailable)?;
-        SemanticScores::build(&cx, &request.question, candidates, embedder.as_ref()).await
+    evaluate_with_prepared_model(request, candidates, embedder.as_ref(), caller_cx)
+}
+
+fn evaluate_with_prepared_model(
+    request: &AskRequest,
+    candidates: &[AskCandidate],
+    embedder: &dyn Embedder,
+    caller_cx: Option<Cx>,
+) -> Result<AskReport, DomainError> {
+    let result = crate::core::run_cli_with_cx(STANDALONE_SCORING_TIMEOUT, |runtime_cx| async move {
+        // run_cli_future drives a future but does not mint a request context.
+        // Looking up Cx::current inside it made every standalone invocation
+        // silently lexical, even with a verified local model already selected.
+        // Never replace an existing caller's cancelled context with a fresh one.
+        let cx = caller_cx.unwrap_or(runtime_cx);
+        SemanticScores::build(&cx, &request.question, candidates, embedder).await
     });
     finish_evaluation(
         request,
@@ -243,3 +258,176 @@ fn cosine(query: &[f32], query_norm: f64, vector: &[f32]) -> Option<f32> {
 #[cfg(test)]
 #[path = "ask_semantic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod runtime_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Execute real hash inference to test the runtime boundary without a model
+    // download. The semantic flag selects the scoring branch under test; this
+    // fixture does not claim a neural model was loaded or prove neural quality.
+    struct RuntimeProbe {
+        hash: crate::search::HashEmbedder,
+        calls: AtomicUsize,
+        cancel_after_query: bool,
+    }
+
+    impl RuntimeProbe {
+        fn new(cancel_after_query: bool) -> Self {
+            Self {
+                hash: crate::search::HashEmbedder::default_256(),
+                calls: AtomicUsize::new(0),
+                cancel_after_query,
+            }
+        }
+    }
+
+    impl Embedder for RuntimeProbe {
+        fn embed<'a>(
+            &'a self,
+            cx: &'a Cx,
+            text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            Box::pin(async move {
+                assert!(Cx::current().is_some(), "the bridge must install its context");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let result = self.hash.embed(cx, text).await;
+                if self.cancel_after_query {
+                    cx.set_cancel_reason(asupersync::CancelReason::user("private-cancel-reason"));
+                }
+                result
+            })
+        }
+
+        fn dimension(&self) -> usize {
+            self.hash.dimension()
+        }
+        fn id(&self) -> &str {
+            self.hash.id()
+        }
+        fn model_name(&self) -> &str {
+            self.hash.model_name()
+        }
+        fn is_semantic(&self) -> bool {
+            true
+        }
+        fn category(&self) -> frankensearch::ModelCategory {
+            self.hash.category()
+        }
+    }
+
+    fn fixture() -> (AskRequest, Vec<AskCandidate>) {
+        let text = "Run cargo fmt on source before release.";
+        (
+            AskRequest {
+                question: text.to_owned(),
+                min_confidence: 0.4,
+                ..AskRequest::default()
+            },
+            vec![AskCandidate {
+                memory_id: "runtime-source".to_owned(),
+                content: text.to_owned(),
+                confidence: 1.0,
+                trust_class: "human_explicit".to_owned(),
+                provenance_uri: Some("manual://runtime-test".to_owned()),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                team_provenance: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn standalone_scoring_runs_inference_without_an_ambient_context() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        let model = RuntimeProbe::new(false);
+        let report = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+        assert!(!report.semantic_degraded);
+        assert!(!report.abstained);
+        assert_eq!(report.citations.len(), 1);
+        assert_eq!(report.citations[0].text, rows[0].content);
+        assert!(
+            model.calls.load(Ordering::SeqCst) >= 2,
+            "query and source inference"
+        );
+        assert!(
+            Cx::current().is_none(),
+            "no ambient context leaks to the caller"
+        );
+    }
+
+    #[test]
+    fn existing_caller_cancellation_is_not_replaced_by_a_new_budget() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        let model = RuntimeProbe::new(false);
+        let caller = Cx::for_testing();
+        caller.set_cancel_reason(asupersync::CancelReason::user("private-caller-reason"));
+        let error = evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!error.to_string().contains("private-caller-reason"));
+        assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+        assert!(caller.checkpoint().is_err());
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn cancellation_after_query_inference_withholds_the_answer_and_restores_context() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        let model = RuntimeProbe::new(true);
+        let error = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!error.to_string().contains("private-cancel-reason"));
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn a_nonsemantic_model_still_uses_the_complete_lexical_evaluation() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        let hash = crate::search::HashEmbedder::default_256();
+        let actual = evaluate_with_prepared_model(&request, &rows, &hash, None).unwrap();
+        let expected = evaluate_ask(&request, &rows);
+        assert!(actual.semantic_degraded);
+        assert_eq!(
+            super::super::ask_data_json(&actual),
+            super::super::ask_data_json(&expected)
+        );
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn concurrent_standalone_calls_own_independent_contexts_and_identical_answers() {
+        let model = RuntimeProbe::new(false);
+        let reports = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let model = &model;
+                    scope.spawn(move || {
+                        assert!(Cx::current().is_none());
+                        let (request, rows) = fixture();
+                        let report =
+                            evaluate_with_prepared_model(&request, &rows, model, None).unwrap();
+                        assert!(!report.semantic_degraded);
+                        assert!(Cx::current().is_none());
+                        super::super::ask_data_json(&report)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(reports.len(), 4);
+        assert!(reports.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(model.calls.load(Ordering::SeqCst) >= 8);
+    }
+}
