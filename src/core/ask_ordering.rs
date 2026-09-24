@@ -51,12 +51,42 @@ fn claim(text: &str) -> Option<OrderingClaim> {
         word.ends_with('.')
             || matches!(
                 word.to_ascii_lowercase().as_str(),
-                "if" | "unless" | "when" | "whenever" | "while" | "until" | "since"
-                    | "during" | "because" | "except" | "otherwise" | "then" | "and"
-                    | "or" | "either" | "not" | "never" | "no" | "without" | "only"
-                    | "in" | "on" | "at" | "for" | "with" | "may" | "might" | "can"
-                    | "could" | "should" | "usually" | "sometimes" | "optionally"
-                    | "perhaps" | "probably" | "recommended" | "example"
+                "if" | "unless"
+                    | "when"
+                    | "whenever"
+                    | "while"
+                    | "until"
+                    | "since"
+                    | "during"
+                    | "because"
+                    | "except"
+                    | "otherwise"
+                    | "then"
+                    | "and"
+                    | "or"
+                    | "either"
+                    | "not"
+                    | "never"
+                    | "no"
+                    | "without"
+                    | "only"
+                    | "in"
+                    | "on"
+                    | "at"
+                    | "for"
+                    | "with"
+                    | "may"
+                    | "might"
+                    | "can"
+                    | "could"
+                    | "should"
+                    | "usually"
+                    | "sometimes"
+                    | "optionally"
+                    | "perhaps"
+                    | "probably"
+                    | "recommended"
+                    | "example"
             )
     }) {
         return None;
@@ -74,8 +104,7 @@ fn claim(text: &str) -> Option<OrderingClaim> {
     // Do not strip a bare `run` executable from the command itself.
     if right.first().is_some_and(|word| {
         (operation.eq_ignore_ascii_case("run") && word.eq_ignore_ascii_case("running"))
-            || (operation.eq_ignore_ascii_case("execute")
-                && word.eq_ignore_ascii_case("executing"))
+            || (operation.eq_ignore_ascii_case("execute") && word.eq_ignore_ascii_case("executing"))
     }) {
         right = &right[1..];
     }
@@ -138,7 +167,9 @@ fn command(words: &[&str]) -> Option<String> {
     // its identity. Quotes inside arguments and their whitespace stay exact.
     let command = if words.len() == 1 {
         match first.chars().next()? {
-            quote @ ('\'' | '"' | '`') => first.strip_prefix(quote)?.strip_suffix(quote)?.to_owned(),
+            quote @ ('\'' | '"' | '`') => {
+                first.strip_prefix(quote)?.strip_suffix(quote)?.to_owned()
+            }
             _ => first.to_owned(),
         }
     } else {
@@ -206,7 +237,11 @@ mod tests {
         assert!(!compatible(FORWARD, REVERSE));
         let clusters = cluster_spans(&[span("a", FORWARD), span("b", REVERSE)]);
         assert_eq!(clusters.len(), 2);
-        assert!(clusters.iter().all(|span| span.score.to_bits() == 0.52_f32.to_bits()));
+        assert!(
+            clusters
+                .iter()
+                .all(|span| span.score.to_bits() == 0.52_f32.to_bits())
+        );
     }
 
     #[test]
@@ -233,8 +268,14 @@ mod tests {
 
     #[test]
     fn quoted_commands_and_gerunds_retain_order() {
-        assert!(compatible(FORWARD, "Execute `cargo fmt` before `cargo test`."));
-        assert!(compatible(FORWARD, "Run cargo fmt before running cargo test."));
+        assert!(compatible(
+            FORWARD,
+            "Execute `cargo fmt` before `cargo test`."
+        ));
+        assert!(compatible(
+            FORWARD,
+            "Run cargo fmt before running cargo test."
+        ));
         assert!(conflicts(FORWARD, "Run `cargo fmt` after `cargo test`."));
         assert!(conflicts(
             "Run `printf 'before build'` before release.",
@@ -244,10 +285,22 @@ mod tests {
 
     #[test]
     fn command_identity_keeps_case_arguments_and_quoted_whitespace() {
-        assert!(!conflicts("Run Build before Test.", "Run test before build."));
-        assert!(!conflicts("Run deploy --prod before verify.", "Run verify before deploy --stage."));
-        assert!(!compatible("Run `echo  x` before test.", "Run `echo x` before test."));
-        assert!(!conflicts("Run cargo fmt before run tests.", "Run tests before cargo fmt."));
+        assert!(!conflicts(
+            "Run Build before Test.",
+            "Run test before build."
+        ));
+        assert!(!conflicts(
+            "Run deploy --prod before verify.",
+            "Run verify before deploy --stage."
+        ));
+        assert!(!compatible(
+            "Run `echo  x` before test.",
+            "Run `echo x` before test."
+        ));
+        assert!(!conflicts(
+            "Run cargo fmt before run tests.",
+            "Run tests before cargo fmt."
+        ));
     }
 
     #[test]
@@ -272,14 +325,20 @@ mod tests {
             "Run cargo fmt | cargo test before release.",
             "Run \"cargo \\\"fmt\\\"\" before release.",
         ] {
-            assert!(claim(text).is_none(), "must not infer an ordering from {text:?}");
+            assert!(
+                claim(text).is_none(),
+                "must not infer an ordering from {text:?}"
+            );
             assert!(!conflicts(text, REVERSE));
         }
     }
 
     #[test]
     fn qualified_near_duplicates_cannot_corroborate_a_known_constraint() {
-        assert!(!compatible(FORWARD, "Run cargo fmt before cargo test if ready."));
+        assert!(!compatible(
+            FORWARD,
+            "Run cargo fmt before cargo test if ready."
+        ));
         assert!(compatible("Unparsed prose.", "Other unparsed prose."));
     }
 
@@ -386,25 +445,37 @@ mod tests {
         assert!(!report.abstained && report.conflict_detected);
         assert_eq!(report.candidates_scanned, candidates.len());
         assert!(report.sides.as_ref().unwrap().iter().any(|side| {
-            side.citations.iter().any(|citation| citation.memory_id == "z-opposing-order")
+            side.citations
+                .iter()
+                .any(|citation| citation.memory_id == "z-opposing-order")
         }));
         let expected = ask_data_json(&report);
         candidates.reverse();
-        assert_eq!(expected, ask_data_json(&evaluate_ask(&request(), &candidates)));
+        assert_eq!(
+            expected,
+            ask_data_json(&evaluate_ask(&request(), &candidates))
+        );
     }
 
     #[test]
     fn unrelated_and_under_floor_orderings_do_not_manufacture_conflict() {
         let mut low_trust = candidate("b", REVERSE);
         low_trust.confidence = 0.0;
-        let strict = AskRequest { min_confidence: 0.95, ..request() };
+        let strict = AskRequest {
+            min_confidence: 0.95,
+            ..request()
+        };
         let report = evaluate_ask(&strict, &[candidate("a", FORWARD), low_trust]);
         assert!(!report.abstained && !report.conflict_detected);
         assert_eq!(report.citations.len(), 1);
         assert_eq!(report.citations[0].memory_id, "a");
-        let report = evaluate_ask(&request(), &[
-            candidate("a", FORWARD), candidate("b", "Run backup before archive."),
-        ]);
+        let report = evaluate_ask(
+            &request(),
+            &[
+                candidate("a", FORWARD),
+                candidate("b", "Run backup before archive."),
+            ],
+        );
         assert!(!report.conflict_detected);
     }
 }

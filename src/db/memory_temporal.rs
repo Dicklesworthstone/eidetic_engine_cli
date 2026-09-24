@@ -268,9 +268,7 @@ fn recent_with_boundary(
             let memory = loaded
                 .remove(id)
                 .ok_or_else(|| malformed("Selected memory is missing from the read snapshot"))?;
-            if memory.id != id
-                || memory.workspace_id != workspace
-                || memory.tombstoned_at.is_some()
+            if memory.id != id || memory.workspace_id != workspace || memory.tombstoned_at.is_some()
             {
                 return Err(malformed(
                     "Selected memory does not belong to the read snapshot",

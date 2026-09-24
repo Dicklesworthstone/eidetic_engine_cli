@@ -216,7 +216,10 @@ mod tests {
             let dispatch = fix_dispatch_for_finding(Path::new("workspace"), finding)
                 .expect("registered guidance dispatcher");
             assert_eq!(dispatch.finding_code, finding);
-            assert_eq!(dispatch.path, Path::new("workspace").join(".ee").join("ee.db"));
+            assert_eq!(
+                dispatch.path,
+                Path::new("workspace").join(".ee").join("ee.db")
+            );
             assert!(dispatch.op.is_advisory());
             let Op::Manual { steps } = dispatch.op else {
                 panic!("no writing operation is allowed for {finding}");
@@ -245,7 +248,11 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].fix_finding, Some("database_locked"));
         assert_eq!(pending[1].fix_finding, Some("database_migration_drift"));
-        assert!(pending.iter().all(|entry| entry.fix_mode == "auto_guidance"));
+        assert!(
+            pending
+                .iter()
+                .all(|entry| entry.fix_mode == "auto_guidance")
+        );
         let json = serde_json::to_string(&pending).expect("serializable pending checks");
         assert!(!json.contains("PRIVATE"));
     }
@@ -294,7 +301,11 @@ mod tests {
                 ],
             };
             let plan = report.to_fix_plan();
-            assert_eq!(plan.steps.len(), 3, "all guidance remains visible: {finding}");
+            assert_eq!(
+                plan.steps.len(),
+                3,
+                "all guidance remains visible: {finding}"
+            );
             assert_eq!(plan.fixable_issues, 0);
             assert_eq!(plan.steps[0].severity, CheckSeverity::Error);
             assert_eq!(plan.steps[0].fix_finding, Some(finding));

@@ -28027,12 +28027,16 @@ fn configured_pack_candidate_pool(workspace_root: &Path) -> Result<u32, DomainEr
     let merged = crate::core::config_surface::merged_workspace_config(workspace_root)
         .map_err(config_surface_error_to_domain)?;
     let pool = merged.values.pack.candidate_pool.unwrap_or(100);
-    u32::try_from(pool).ok().filter(|pool| *pool > 0).ok_or_else(|| {
-        DomainError::Configuration {
-            message: "pack.candidate_pool must be an integer in the range 1..=4294967295".to_owned(),
-            repair: Some("Set [pack].candidate_pool to a positive u32 value in .ee/config.toml.".to_owned()),
-        }
-    })
+    u32::try_from(pool)
+        .ok()
+        .filter(|pool| *pool > 0)
+        .ok_or_else(|| DomainError::Configuration {
+            message: "pack.candidate_pool must be an integer in the range 1..=4294967295"
+                .to_owned(),
+            repair: Some(
+                "Set [pack].candidate_pool to a positive u32 value in .ee/config.toml.".to_owned(),
+            ),
+        })
 }
 
 fn resolve_pack_task_lens(

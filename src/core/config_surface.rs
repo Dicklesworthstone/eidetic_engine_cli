@@ -27,11 +27,11 @@ use crate::config::{
     GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
-    GRAPH_PPR_ALPHA_KEY, PACK_CANDIDATE_POOL_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
+    GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
     GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,
-    PathExpander, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY,
-    SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config,
-    config_from_env, merge_config,
+    PACK_CANDIDATE_POOL_KEY, PathExpander, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY,
+    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
+    SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
 };
 
 pub const CONFIG_GET_SCHEMA_V1: &str = "ee.config.get.v1";
@@ -1052,10 +1052,15 @@ fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, Config
             }
         }
         GraphValueKind::PositiveU32 => {
-            let value = raw.parse::<u32>()
+            let value = raw
+                .parse::<u32>()
                 .map_err(|_| invalid_value(spec, raw, "an integer in the range 1..=4294967295"))?;
             if value == 0 {
-                return Err(invalid_value(spec, raw, "an integer in the range 1..=4294967295"));
+                return Err(invalid_value(
+                    spec,
+                    raw,
+                    "an integer in the range 1..=4294967295",
+                ));
             }
             Ok(TomlScalar::Integer(i64::from(value)))
         }
@@ -1199,13 +1204,13 @@ mod tests {
     fn candidate_pool_set_round_trips_and_rejects_out_of_range_values() -> TestResult {
         let temp = workspace()?;
         let options = options(temp.path());
-        let initial = get_config(&options, "pack.candidate_pool")
-            .map_err(|error| error.to_string())?;
+        let initial =
+            get_config(&options, "pack.candidate_pool").map_err(|error| error.to_string())?;
         assert_eq!(initial.value, "100");
         set_config(&options, "pack.candidate_pool", "20", false)
             .map_err(|error| error.to_string())?;
-        let configured = get_config(&options, "pack.candidate_pool")
-            .map_err(|error| error.to_string())?;
+        let configured =
+            get_config(&options, "pack.candidate_pool").map_err(|error| error.to_string())?;
         assert_eq!(configured.value, "20");
         let before = fs::read_to_string(temp.path().join(".ee/config.toml"))
             .map_err(|error| error.to_string())?;
