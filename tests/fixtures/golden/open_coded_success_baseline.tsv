@@ -63,7 +63,7 @@
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 593 rows (function + missing-set), 869 incomplete assertions.
+# CURRENT: 592 rows (function + missing-set), 868 incomplete assertions.
 
 advanced_e2e::assert_causal_success [stdout+stderr]	1
 advanced_e2e::assert_lab_report_common [stdout+stderr]	1
@@ -523,7 +523,6 @@ primer_cli_golden::sweep_run [code+stdout]	1
 property_context_query_metamorphic::run_ee_json [stdout]	1
 property_pack_metamorphic::refresh_memory_links_graph_snapshot [stdout]	1
 property_pack_profile_variation_metamorphic::ee_stdout_json [stdout]	1
-property_query_and_pack::run_ee_checked [code]	1
 rch_compile_blocker_router::preflight_e2e_temp_repo_logs_and_does_not_mutate_inputs [code]	2
 rch_local_cargo_tripwire::self_test_subcommand_exits_zero_with_passed_marker [code]	1
 rch_portability_diagnostic::self_test_subcommand_exits_zero_with_expected_count [code]	1
