@@ -33,10 +33,8 @@ fn invalid_payload() -> DbError {
 
 fn canonical_fields(kind: &str, raw: Option<&str>) -> crate::db::Result<Option<String>> {
     let kind = MemoryKind::from_str(kind).map_err(|_| invalid_payload())?;
-    raw.map(|raw| {
-        canonicalize_typed_memory_fields_json(&kind, raw).map_err(|_| invalid_payload())
-    })
-    .transpose()
+    raw.map(|raw| canonicalize_typed_memory_fields_json(&kind, raw).map_err(|_| invalid_payload()))
+        .transpose()
 }
 
 impl PromotionPayload {
@@ -186,7 +184,10 @@ mod field_policy_tests {
         )
         .unwrap();
         let key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----";
-        for fields in [json!({"rationale": key}), json!({"options": ["public", key]})] {
+        for fields in [
+            json!({"rationale": key}),
+            json!({"options": ["public", key]}),
+        ] {
             db.set_memory_typed_fields_json(id, Some(&fields.to_string()))
                 .unwrap();
             let memory = db.get_memory(id).unwrap().unwrap();
