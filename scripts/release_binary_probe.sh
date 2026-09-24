@@ -97,6 +97,13 @@ RULE_PACK_QUERY="tagging a release with flaky zebra-lattice tests"
 UNRELATED_QUERY="kubernetes helm chart ingress annotations"
 PARALLEL_SEARCHES=8
 PARALLEL_PACKS=6
+# The learn loop: three structured failures of one command in one session.
+LEARN_TEXT="quartz-ledger integration shard failed: sqlite busy on the shared fixture db"
+LEARN_CMD="cargo test --test quartz_ledger"
+LEARN_STDERR="Error: database is locked (SQLITE_BUSY) on fixtures/quartz.db"
+LEARN_PACK_QUERY="fix the flaky quartz-ledger integration shard"
+CONCURRENT_WRITERS=6
+PROBE_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 
 # Run one ee command, capturing stdout to <cap>/<name>.json and the exit code
 # to <cap>/<name>.exit. stderr goes to <cap>/<name>.stderr.
@@ -166,6 +173,39 @@ run_probe() {
 
     EE_EMBED_MODEL_DIR=/nonexistent capture model_missing search "$PACK_QUERY" \
         --workspace "$ws" --json
+
+    # The learn loop through the public CLI, after every earlier check so its
+    # memories cannot perturb them: repeated failure evidence -> journal
+    # distill -> curation candidate -> validate -> apply -> a LATER read-only
+    # pack carries the learned memory.
+    for n in 1 2 3; do
+        capture "journal_$n" journal append "$LEARN_TEXT" --workspace "$ws" \
+            --source manual --cmd "$LEARN_CMD" --exit-code 101 \
+            --stderr-tail "$LEARN_STDERR" --session probe-learn --json
+    done
+    capture distill journal distill --workspace "$ws" --session probe-learn --apply --json
+    local candidate
+    candidate="$(jq -r '.data.applied.candidateIds[0] // empty' "$CAP/distill.json" 2>/dev/null)"
+    capture curate_validate curate validate "${candidate:-missing-candidate}" --workspace "$ws" --json
+    capture curate_apply curate apply "${candidate:-missing-candidate}" --workspace "$ws" --json
+    capture learn_pack pack "$LEARN_PACK_QUERY" --workspace "$ws" --max-tokens 2000 \
+        --read-only --json
+
+    # Concurrent writers: simultaneous remembers against one workspace while
+    # read-only packs run; every write must land with its own id.
+    local wpids=() k
+    for k in $(seq 1 "$CONCURRENT_WRITERS"); do
+        capture "cwrite_$k" remember "Concurrent probe lesson $k: keep release probes isolated." \
+            --workspace "$ws" --level procedural --kind rule --json &
+        wpids+=("$!")
+    done
+    for k in 1 2 3; do
+        capture "cwrite_pack_$k" pack "$PACK_QUERY" --workspace "$ws" --max-tokens 2000 \
+            --read-only --json &
+        wpids+=("$!")
+    done
+    wait "${wpids[@]}"
+    capture cwrite_list memory list --workspace "$ws" --limit 200 --json
 }
 
 # --------------------------------------------------------------------------
@@ -236,9 +276,12 @@ grade() {
         "$skeleton_pass"
 
     # 2. Parallel searches agree on order and score.
-    local n sig first_sig="" search_ok=true distinct=0 seen=""
+    local n sig first_sig="" search_ok=true distinct=0 seen="" s_failed=""
     for n in $(seq 1 "$PARALLEL_SEARCHES"); do
-        if ! ok_response "parallel_search_$n"; then search_ok=false; fi
+        if ! ok_response "parallel_search_$n"; then
+            search_ok=false
+            s_failed="${s_failed}$n:exit=$(exit_of "parallel_search_$n"):$(q "parallel_search_$n" '.error.code // empty') "
+        fi
         sig="$(q "parallel_search_$n" '[.data.results[]? | [(.docId // .memoryId // .id), .score]] | tostring')"
         case "$sig" in "" | "[]") search_ok=false ;; esac
         case " $seen " in *" $sig "*) ;; *) seen="$seen $sig"; distinct=$((distinct + 1)) ;; esac
@@ -247,12 +290,15 @@ grade() {
     [ "$distinct" -eq 1 ] || search_ok=false
     row search_deterministic_parallel check \
         "$PARALLEL_SEARCHES parallel identical searches return one non-empty ordered id+score list" \
-        "distinctResultLists=$distinct" "$search_ok"
+        "distinctResultLists=$distinct failed=[${s_failed% }]" "$search_ok"
 
     # 3. Parallel read-only packs agree on hash and items.
-    local pack_ok=true hashes="" h pdistinct=0
+    local pack_ok=true hashes="" h pdistinct=0 p_failed=""
     for n in $(seq 1 "$PARALLEL_PACKS"); do
-        if ! ok_response "parallel_pack_$n"; then pack_ok=false; fi
+        if ! ok_response "parallel_pack_$n"; then
+            pack_ok=false
+            p_failed="${p_failed}$n:exit=$(exit_of "parallel_pack_$n"):$(q "parallel_pack_$n" '.error.code // empty') "
+        fi
         h="$(q "parallel_pack_$n" '(.data.pack.hash // "") + "|" + ([(.data.pack.items // [])[]? | (.memoryId // .id)] | tostring)')"
         case "$h" in "" | "|"* | *"|[]") pack_ok=false ;; esac
         case " $hashes " in *" $h "*) ;; *) hashes="$hashes $h"; pdistinct=$((pdistinct + 1)) ;; esac
@@ -260,7 +306,7 @@ grade() {
     [ "$pdistinct" -eq 1 ] || pack_ok=false
     row pack_deterministic_parallel check \
         "$PARALLEL_PACKS parallel --read-only packs share one non-empty hash and item list" \
-        "distinctHashItemSets=$pdistinct" "$pack_ok"
+        "distinctHashItemSets=$pdistinct failed=[${p_failed% }]" "$pack_ok"
 
     # 4. Ask answers a direct hit and cites it.
     local abstained cited ask_ok=false
@@ -365,6 +411,48 @@ grade() {
     row model_receipt_fresh check \
         "model fetch (when a model is present) succeeds and status carries no embed_model_receipt_stale" \
         "modelFetch=$(exit_of model_fetch) status.degraded=[${st_codes}]" "$receipt_ok"
+
+    # 11. The learn loop: evidence becomes a memory that a later pack uses.
+    local learned learn_hits=0 learn_ok=false step failed_learn=""
+    for step in journal_1 journal_2 journal_3 distill curate_validate curate_apply learn_pack; do
+        ok_response "$step" || failed_learn="${failed_learn}${step}(exit=$(exit_of "$step")) "
+    done
+    learned="$(q curate_apply '.data.application.createdMemoryId // empty')"
+    if [ -n "$learned" ]; then
+        learn_hits="$(jq -r --arg m "$learned" '[(.data.pack.items // [])[]? | select((.memoryId // .id) == $m)] | length' \
+            "$CAP/learn_pack.json" 2>/dev/null || echo 0)"
+    fi
+    if [ -z "$failed_learn" ] && [ -n "$learned" ] && [ "${learn_hits:-0}" -ge 1 ] 2>/dev/null; then
+        learn_ok=true
+    fi
+    row learn_loop_applies check \
+        "3 journal failures -> distill --apply -> curate validate+apply creates a memory that a later read-only pack carries" \
+        "failed=[${failed_learn% }] learned=${learned:-<none>} inLaterPack=${learn_hits:-0}" "$learn_ok"
+
+    # 12. Concurrent writers: every simultaneous remember lands, with its own id.
+    local ids="" id w_failed="" w_distinct=0 w_listed=0 w_ok=false k
+    for k in $(seq 1 "$CONCURRENT_WRITERS"); do
+        if ok_response "cwrite_$k"; then
+            id="$(q "cwrite_$k" '.data.memoryId // empty')"
+            case " $ids " in *" $id "*) ;; *) [ -n "$id" ] && ids="$ids $id" && w_distinct=$((w_distinct + 1)) ;; esac
+            if [ -n "$id" ] && [ "$(jq -r --arg m "$id" '[(.data.memories // [])[]? | select(.id == $m)] | length' \
+                "$CAP/cwrite_list.json" 2>/dev/null || echo 0)" -ge 1 ] 2>/dev/null; then
+                w_listed=$((w_listed + 1))
+            fi
+        else
+            w_failed="${w_failed}cwrite_$k(exit=$(exit_of "cwrite_$k")) "
+        fi
+    done
+    for k in 1 2 3; do
+        ok_response "cwrite_pack_$k" || w_failed="${w_failed}cwrite_pack_$k(exit=$(exit_of "cwrite_pack_$k")) "
+    done
+    if [ -z "$w_failed" ] && [ "$w_distinct" -eq "$CONCURRENT_WRITERS" ] &&
+        [ "$w_listed" -eq "$CONCURRENT_WRITERS" ] && ok_response cwrite_list; then
+        w_ok=true
+    fi
+    row concurrent_writes_intact check \
+        "$CONCURRENT_WRITERS simultaneous remembers (with 3 read-only packs running) all succeed with distinct ids, all listed afterwards" \
+        "failed=[${w_failed% }] distinctIds=$w_distinct listed=$w_listed" "$w_ok"
 }
 
 # Assemble the verdict object from ROWS. Precondition false -> incomplete.
@@ -451,6 +539,14 @@ fixture_ok() {
     resp '{"posture":{"overall":"ok"}}' >"$d/status.json"
     resp '{"posture":"ok","healthy":true}' >"$d/doctor.json"
     jq -cn '{schema:"ee.response.v2", success:true, data:{embed_backend:"hash_fallback"}, degraded:[{code:"embed_model_unavailable"}]}' >"$d/model_missing.json"
+    for i in 1 2 3; do resp '{}' >"$d/journal_$i.json"; done
+    resp '{"applied":{"candidateIds":["cand_1"]}}' >"$d/distill.json"
+    resp '{}' >"$d/curate_validate.json"
+    resp '{"application":{"createdMemoryId":"mem_LEARNED"}}' >"$d/curate_apply.json"
+    resp '{"pack":{"hash":"blake3:l","items":[{"memoryId":"mem_LEARNED"},{"memoryId":"mem_FIRST"}]}}' >"$d/learn_pack.json"
+    for i in $(seq 1 "$CONCURRENT_WRITERS"); do resp "{\"memoryId\":\"mem_C$i\"}" >"$d/cwrite_$i.json"; done
+    for i in 1 2 3; do cp "$d/pack.json" "$d/cwrite_pack_$i.json"; done
+    resp "{\"memories\":[$(for i in $(seq 1 "$CONCURRENT_WRITERS"); do printf '{"id":"mem_C%s"},' "$i"; done){\"id\":\"mem_FIRST\"}]}" >"$d/cwrite_list.json"
     for f in "$d"/*.json; do printf '0\n' >"${f%.json}.exit"; done
 }
 
@@ -490,7 +586,7 @@ self_test() {
 
     d="$(case_dir empty_world)"; command find "$d" -name '*.json' -exec sh -c ': >"$1"' _ {} \;
     expect "empty captures cannot pass" "$d" incomplete \
-        "walking_skeleton,search_deterministic_parallel,pack_deterministic_parallel,ask_direct_hit,rule_searchable,rule_packs_beside_source,unrelated_query_abstains,status_doctor_agree,model_missing_fallback,model_receipt_fresh"
+        "walking_skeleton,search_deterministic_parallel,pack_deterministic_parallel,ask_direct_hit,rule_searchable,rule_packs_beside_source,unrelated_query_abstains,status_doctor_agree,model_missing_fallback,model_receipt_fresh,learn_loop_applies,concurrent_writes_intact"
 
     d="$(case_dir hash_backend)"; mutate "$d" search '.data.embed_backend = "hash_fallback"'
     expect "non-neural backend is incomplete" "$d" incomplete ""
@@ -580,6 +676,27 @@ self_test() {
     d="$(case_dir no_model_no_fetch)"; command find "$d" -name 'model_fetch.*' -exec sh -c 'mv "$1" "$1.skipped"' _ {} \;
     expect "no model present: fetch not attempted" "$d" pass ""
 
+    d="$(case_dir learn_not_packed)"; mutate "$d" learn_pack '.data.pack.items = [{"memoryId":"mem_FIRST"}]'
+    expect "learned memory absent from later pack" "$d" fail "learn_loop_applies"
+
+    d="$(case_dir learn_nothing_created)"; mutate "$d" curate_apply '.data.application = {}'
+    expect "curate apply created no memory" "$d" fail "learn_loop_applies"
+
+    d="$(case_dir learn_distill_failed)"; printf '1\n' >"$d/distill.exit"
+    expect "journal distill exiting 1" "$d" fail "learn_loop_applies"
+
+    d="$(case_dir cwrite_one_failed)"; printf '1\n' >"$d/cwrite_4.exit"
+    expect "one concurrent remember exits 1" "$d" fail "concurrent_writes_intact"
+
+    d="$(case_dir cwrite_lost)"; mutate "$d" cwrite_list '.data.memories |= map(select(.id != "mem_C3"))'
+    expect "a concurrent write missing afterwards" "$d" fail "concurrent_writes_intact"
+
+    d="$(case_dir cwrite_dup_id)"; mutate "$d" cwrite_2 '.data.memoryId = "mem_C1"'
+    expect "two writers reported one id" "$d" fail "concurrent_writes_intact"
+
+    d="$(case_dir cwrite_pack_failed)"; printf '1\n' >"$d/cwrite_pack_2.exit"
+    expect "a pack beside the writers exits 1" "$d" fail "concurrent_writes_intact"
+
     # Checksum refusal: a mismatched digest must stop before anything executes.
     local blob="$root/archive.tar.xz" rc
     printf 'not an archive' >"$blob"
@@ -664,9 +781,10 @@ archive_file="$WORK/archive/$(basename "$ARCHIVE")"
 case "$ARCHIVE" in
     http://* | https://*)
         need curl
-        curl -fsSL -o "$archive_file" "$ARCHIVE" || die_env "download failed: $ARCHIVE"
+        # AGENTS.md: every web request sets this user agent.
+        curl -fsSL -A "$PROBE_USER_AGENT" -o "$archive_file" "$ARCHIVE" || die_env "download failed: $ARCHIVE"
         if [ -z "$SHA" ]; then
-            SHA="$(curl -fsSL "$ARCHIVE.sha256" | awk '{print $1}')" ||
+            SHA="$(curl -fsSL -A "$PROBE_USER_AGENT" "$ARCHIVE.sha256" | awk '{print $1}')" ||
                 die_env "no --sha256 given and $ARCHIVE.sha256 could not be fetched"
         fi
         ;;
