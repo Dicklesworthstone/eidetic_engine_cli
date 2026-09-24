@@ -478,12 +478,37 @@ fn structural_recall_ppr_fixture_contract_is_complete() -> TestResult {
         .iter()
         .map(|edge| string_field(edge, "relation").map(str::to_owned))
         .collect::<Result<_, _>>()?;
-    for relation in ["cites", "co_tag", "contradicts", "derived_from"] {
+    for relation in ["supports", "co_tag", "contradicts", "derived_from"] {
         ensure(
             relations.contains(relation),
             &format!("structural edge relation `{relation}` must exist"),
         )?;
     }
+    // bd-mv2c4: the pack-quality eval seeds these edges and memories into real
+    // storage, which accepts only `MemoryLinkRelation` relations and
+    // `TrustClass` trust classes (a CHECK constraint). A value storage rejects
+    // made the whole family unexecutable, so reject it here, at fixture time.
+    // Collect every rejected value so one failure names all of them.
+    let mut rejected: Vec<String> = relations
+        .iter()
+        .filter(|relation| ee::db::MemoryLinkRelation::parse(relation).is_none())
+        .map(|relation| format!("relation `{relation}` is not a stored MemoryLinkRelation"))
+        .collect();
+    for memory in array_field(&source_value, "memories")? {
+        let trust_class = string_field(memory, "trust_class")?;
+        if trust_class
+            .parse::<ee::models::trust::TrustClass>()
+            .is_err()
+        {
+            rejected.push(format!(
+                "trust_class `{trust_class}` is not a stored TrustClass"
+            ));
+        }
+    }
+    ensure(
+        rejected.is_empty(),
+        &format!("fixture values that storage rejects: {rejected:?}"),
+    )?;
 
     let baseline = parse_json(EVAL_PPR_PRE_G1_BASELINE, "pre-G1 PPR baseline snapshot")?;
     let post_g1 = parse_json(
