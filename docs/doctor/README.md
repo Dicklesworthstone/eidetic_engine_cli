@@ -78,13 +78,12 @@ carries `added_after_inventory`, which says why it was added.
   command outcome) and `fm-policy_safety-redaction-class-coverage-gap` (mesh
   lane policy) are OUT-OF-SCOPE. `fm-state_files-jsonl-tombstone-drift` (the
   FM-SF-02 family), `fm-agent_coordination-mcp-agent-mail-file-reservation-conflict`
-  (FM-AC-01) and `fm-state_files-workspace-ambiguous-multiple-candidates` are
-  doctor-owned, and their NOT-DETECTED fixtures are built. Their three scored
-  rows were added AFTER the blind inventory, scored by the same rubric, and
-  each carries an `added_after_inventory` field saying so. The independence
-  argument above does not cover those three rows.
-  `fm-workspace_config-nested-ee-markers` is doctor-owned too and stays
-  UNCLASSIFIED until its NOT-DETECTED fixture is built.
+  (FM-AC-01), `fm-state_files-workspace-ambiguous-multiple-candidates` and
+  `fm-workspace_config-nested-ee-markers` are doctor-owned, and their
+  NOT-DETECTED fixtures are built. Their four scored rows were added AFTER the
+  blind inventory, scored by the same rubric, and each carries an
+  `added_after_inventory` field saying so. The independence argument above does
+  not cover those four rows.
 - Five fixtures were P0 in the manifest but score P1: `index_corrupt`,
   `cass_not_found`, `rch-workers-all-blocked-by-pressure`,
   `snapshot-write-lock-held` and `merge-conflict-markers`. By the bd-2oh15

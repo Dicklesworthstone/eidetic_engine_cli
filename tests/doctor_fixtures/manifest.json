@@ -119,7 +119,7 @@
       "id": "fm-workspace_config-nested-ee-markers",
       "severity": "P1",
       "subsystem": "workspace_config",
-      "label": "UNCLASSIFIED",
+      "label": "NOT-DETECTED",
       "spec": "docs/doctor/repair-specs/workspace_config.md"
     },
     {
