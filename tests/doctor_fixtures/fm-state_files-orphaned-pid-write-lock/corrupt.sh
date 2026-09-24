@@ -4,7 +4,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/doctor_fixtures/lib.sh
 . "$SCRIPT_DIR/../lib.sh"
 
-# PINNED DEFECT bd-ixxzq, re-scoped to the LIVE holder (bd-2oh15 c9984/c9986).
+# GUIDANCE-ONLY since the bd-ixxzq fix (was PINNED-DEFECT bd-ixxzq), re-scoped
+# to the LIVE holder (bd-2oh15 c9984/c9986).
 # An orphan as named self-heals: the kernel releases a flock when its process
 # dies. The failure that remains is a live process that holds
 # .ee/ee.write.lock and makes no progress (a hung or stopped writer). This

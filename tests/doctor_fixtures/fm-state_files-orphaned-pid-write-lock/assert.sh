@@ -16,13 +16,13 @@ lock="$target/.ee/ee.write.lock"
 test -f "$lock"
 test -f "$base/lock-held" && { printf 'fixture assert: %s stale readiness file %s\n' "$FM" "$base/lock-held" >&2; exit 1; }
 
-# PINNED DEFECT bd-ixxzq as it is today: a live writer that holds the write
-# lock and makes no progress is reported as database EE-E202, and --fix
-# records database_corrupted guidance (copy ee.db aside, restore a backup, or
-# "move .ee/ee.db aside and run ee init") for a store that is not damaged.
-# When bd-ixxzq gives the held lock its own finding, this fixture goes red on
-# purpose and is relabelled.
-doctor_fixture_content_digest "$target" > "$base/defect-before.sha256"
+# GUIDANCE-ONLY since the bd-ixxzq fix: a live writer that holds the write lock
+# and makes no progress is reported as database EE-E201 (locked), and --fix
+# records database_locked guidance (wait for the writer; leave the lock file,
+# database and sidecars in place). It used to be EE-E202 with the
+# corrupted-store plan ("move .ee/ee.db aside and run ee init") for a store
+# that is not damaged, and then EE-E207 (unavailable) after the first fix.
+doctor_fixture_content_digest "$target" > "$base/locked-before.sha256"
 python3 "$base/hold-write-lock.py" "$lock" "$base/lock-held" 900 &
 holder=$!
 release() {
@@ -46,30 +46,28 @@ if [ "$(python3 "$base/probe-write-lock.py" "$lock")" != held ]; then
     exit 1
 fi
 
-"$ee_bin" doctor --workspace "$target" --json > "$base/defect-doctor.json"
+"$ee_bin" doctor --workspace "$target" --json > "$base/locked-doctor.json"
 if ! jq -es '
     length == 1 and (.[0] |
         .schema == "ee.response.v2" and .success == true and
         .data.healthy == false and .data.posture == "blocked" and
-        any(.data.actionable[]; .name == "database" and .errorCode == "EE-E202" and
+        any(.data.actionable[]; .name == "database" and .errorCode == "EE-E201" and
             (.message | test("write lock holder made no progress"))))
-' "$base/defect-doctor.json" >/dev/null; then
-    printf 'fixture assert: %s doctor no longer reports the held lock as database EE-E202 (bd-ixxzq); relabel; see %s\n' \
-        "$FM" "$base/defect-doctor.json" >&2
+' "$base/locked-doctor.json" >/dev/null; then
+    printf 'fixture assert: %s doctor does not report the held lock as database EE-E201; see %s\n' \
+        "$FM" "$base/locked-doctor.json" >&2
     exit 1
 fi
-fix_exit=0
-"$ee_bin" doctor --workspace "$target" --fix --json > "$base/defect-fix.json" || fix_exit=$?
-if [ "$fix_exit" -ne 6 ] || ! jq -es '
+doctor_fixture_assert_guidance_only "$FM" "database_locked" "database" "EE-E201" \
+    ".ee/index-rebuild-request.json"
+# Lock guidance only: never the corrupted-store or unavailable plan.
+if ! jq -es '
     length == 1 and (.[0] |
-        .schema == "ee.response.v2" and .success == true and
-        .data.status == "completed_partial" and
-        any(.data.fixerResults[]; .findingCode == "database_corrupted" and
-            .operation == "manual" and .outcome == "guidance_recorded") and
-        all(.data.fixerResults[]; .outcome == "guidance_recorded"))
-' "$base/defect-fix.json" >/dev/null; then
-    printf 'fixture assert: %s --fix (exit %s) no longer records database_corrupted guidance for a held lock (bd-ixxzq); relabel; see %s\n' \
-        "$FM" "$fix_exit" "$base/defect-fix.json" >&2
+        all(.data.fixerResults[]; .operation == "manual" and .outcome == "guidance_recorded") and
+        all(.data.fixerResults[]; .findingCode != "database_corrupted" and .findingCode != "database_unavailable"))
+' "$base/doctor-fix.json" >/dev/null; then
+    printf 'fixture assert: %s --fix recorded guidance other than database_locked; see %s\n' \
+        "$FM" "$base/doctor-fix.json" >&2
     exit 1
 fi
 release
@@ -77,13 +75,13 @@ trap - EXIT
 
 # The store was never damaged: once the holder is gone doctor is healthy and
 # no byte outside doctor's own run records changed.
-"$ee_bin" doctor --workspace "$target" --json > "$base/defect-released.json"
-doctor_fixture_assert_health_report "$FM" "$base/defect-released.json"
-doctor_fixture_content_digest "$target" > "$base/defect-after.sha256"
-if ! cmp -s "$base/defect-before.sha256" "$base/defect-after.sha256"; then
+"$ee_bin" doctor --workspace "$target" --json > "$base/locked-released.json"
+doctor_fixture_assert_health_report "$FM" "$base/locked-released.json"
+doctor_fixture_content_digest "$target" > "$base/locked-after.sha256"
+if ! cmp -s "$base/locked-before.sha256" "$base/locked-after.sha256"; then
     printf 'fixture assert: %s bytes changed while the lock was held\n' "$FM" >&2
     exit 1
 fi
 mv "$base/lock-held" "$base/lock-held.$(date -u +%Y%m%dT%H%M%SZ)"
-printf 'pinned defect confirmed: %s (held lock reported as EE-E202, --fix recorded database_corrupted guidance, store healthy after release) -- bd-ixxzq, NOT coverage\n' \
+printf 'guidance-only confirmed: %s (held lock reported as EE-E201, --fix recorded database_locked guidance only, store healthy after release)\n' \
     "$FM" >&2

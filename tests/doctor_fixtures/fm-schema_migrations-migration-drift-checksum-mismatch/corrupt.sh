@@ -4,11 +4,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/doctor_fixtures/lib.sh
 . "$SCRIPT_DIR/../lib.sh"
 
-# GUIDANCE-ONLY (bd-2oh15 c9853; guidance since 9ed78b70d): the stored checksum
-# of the first applied migration is changed with SQL. doctor's database check
-# reports EE-E202 with an EE-E040 migration_drift message (posture blocked);
-# --fix records manual guidance only. A byte copy of the pre-drift database is
-# kept in the baseline.
+# GUIDANCE-ONLY (bd-2oh15 c9853; bd-ixxzq): the stored checksum of the first
+# applied migration is changed with SQL. doctor's database check reports
+# EE-E702 (migration drift, routed from the typed EE-E040 migration_drift
+# error) with posture blocked; --fix records database_migration_drift guidance
+# only. Before bd-ixxzq this was EE-E202 with corruption guidance. A byte copy
+# of the pre-drift database is kept in the baseline.
 FM="fm-schema_migrations-migration-drift-checksum-mismatch"
 target="$(doctor_fixture_target)"
 ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
@@ -38,10 +39,10 @@ doctor_fixture_corrupt "$FM" "P0" "schema_migrations"
 "$ee_bin" doctor --workspace "$target" --json > "$base/doctor-corrupt.json"
 if ! jq -e '
     .schema == "ee.response.v2" and .success == true and .data.posture == "blocked" and
-    any(.data.actionable[]; .name == "database" and .errorCode == "EE-E202")
+    any(.data.actionable[]; .name == "database" and .errorCode == "EE-E702")
 ' "$base/doctor-corrupt.json" >/dev/null; then
-    printf 'migration-drift fixture did not produce database EE-E202 / blocked; see %s\n' \
+    printf 'migration-drift fixture did not produce database EE-E702 / blocked; see %s\n' \
         "$base/doctor-corrupt.json" >&2
     exit 1
 fi
-printf 'real corruption confirmed: migration checksum drift (EE-E202, blocked)\n' >&2
+printf 'real damage confirmed: migration checksum drift (EE-E702, blocked)\n' >&2

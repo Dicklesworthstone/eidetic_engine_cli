@@ -778,6 +778,45 @@ fn observe_flock_gate_epoch(lock_file: &mut File, previous: Option<u64>) -> Opti
 }
 
 #[cfg(unix)]
+/// Inner-message prefixes of the two flock-gate outcomes that mean "another
+/// writer holds the lock": a holder that made no progress, and the hard wait
+/// deadline. Only [`write_lock_stagnant_error`] and
+/// [`write_lock_deadline_error`] build them, and
+/// [`DbError::is_write_lock_contention`] recognizes exactly them, so the
+/// producer and the classifier cannot drift apart (bd-ixxzq).
+const WRITE_LOCK_STAGNANT_MESSAGE: &str = "database write lock holder made no progress";
+const WRITE_LOCK_DEADLINE_MESSAGE: &str = "database write lock wait deadline exceeded";
+
+pub(crate) fn write_lock_stagnant_error(
+    lock_path: PathBuf,
+    stagnant_max_wait: Duration,
+    error: &impl std::fmt::Display,
+) -> DbError {
+    DbError::InvalidPath {
+        operation: DbOperation::BeginTransaction,
+        path: lock_path,
+        message: format!(
+            "{WRITE_LOCK_STAGNANT_MESSAGE} for {}ms: {error}",
+            stagnant_max_wait.as_millis()
+        ),
+    }
+}
+
+pub(crate) fn write_lock_deadline_error(
+    lock_path: PathBuf,
+    max_wait: Duration,
+    error: &impl std::fmt::Display,
+) -> DbError {
+    DbError::InvalidPath {
+        operation: DbOperation::BeginTransaction,
+        path: lock_path,
+        message: format!(
+            "{WRITE_LOCK_DEADLINE_MESSAGE} after {}ms: {error}",
+            max_wait.as_millis()
+        ),
+    }
+}
+
 fn lock_database_write_file_with_wait_observer(
     database_path: &Path,
     stagnant_max_wait: Duration,
@@ -828,14 +867,11 @@ fn lock_database_write_file_with_wait_observer(
                     let elapsed = gate_wait_started.elapsed();
                     if elapsed >= max_wait {
                         record_flock_gate_timeout(elapsed);
-                        return Err(DbError::InvalidPath {
-                            operation: DbOperation::BeginTransaction,
-                            path: lock_path.clone(),
-                            message: format!(
-                                "database write lock wait deadline exceeded after {}ms: {error}",
-                                max_wait.as_millis()
-                            ),
-                        });
+                        return Err(write_lock_deadline_error(
+                            lock_path.clone(),
+                            max_wait,
+                            &error,
+                        ));
                     }
 
                     let observed_epoch =
@@ -856,14 +892,11 @@ fn lock_database_write_file_with_wait_observer(
                         }
                         FlockGateWaitDecision::Stagnant => {
                             record_flock_gate_timeout(elapsed);
-                            return Err(DbError::InvalidPath {
-                                operation: DbOperation::BeginTransaction,
-                                path: lock_path.clone(),
-                                message: format!(
-                                    "database write lock holder made no progress for {}ms: {error}",
-                                    stagnant_max_wait.as_millis()
-                                ),
-                            });
+                            return Err(write_lock_stagnant_error(
+                                lock_path.clone(),
+                                stagnant_max_wait,
+                                &error,
+                            ));
                         }
                     }
                 }
@@ -2909,6 +2942,31 @@ impl DbError {
             | Self::InvalidMigration { .. }
             | Self::MalformedRow { .. }
             | Self::StoragePanic { .. } => None,
+        }
+    }
+
+    /// Another writer holds the store's lock: the flock gate gave up on a
+    /// holder that made no progress or hit its wait deadline, or the SQL layer
+    /// reported typed lock contention. Decided from the error's structure,
+    /// never from the text an outer layer renders around it (bd-ixxzq).
+    #[must_use]
+    pub fn is_write_lock_contention(&self) -> bool {
+        match self {
+            Self::InvalidPath {
+                operation: DbOperation::BeginTransaction,
+                message,
+                ..
+            } => {
+                message.starts_with(WRITE_LOCK_STAGNANT_MESSAGE)
+                    || message.starts_with(WRITE_LOCK_DEADLINE_MESSAGE)
+            }
+            Self::SqlModel { source, .. } => sqlmodel_error_is_transient_sqlite_contention(source),
+            Self::InvalidPath { .. }
+            | Self::InvalidMode { .. }
+            | Self::InvalidMigration { .. }
+            | Self::MigrationDrift { .. }
+            | Self::MalformedRow { .. }
+            | Self::StoragePanic { .. } => false,
         }
     }
 }
