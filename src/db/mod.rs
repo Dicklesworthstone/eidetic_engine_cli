@@ -39558,7 +39558,7 @@ mod tests {
 
         connection.execute_raw("UPDATE audit_log SET body = 'changed' WHERE id = 1")?;
         let modified = connection.table_row_digests_by_rowid("audit_log")?;
-        assert!(modified.get(&1).is_some() && modified.get(&1) != before.get(&1));
+        assert!(modified.contains_key(&1) && modified.get(&1) != before.get(&1));
 
         connection.execute_raw("DELETE FROM audit_log WHERE id = 2")?;
         let deleted = connection.table_row_digests_by_rowid("audit_log")?;
