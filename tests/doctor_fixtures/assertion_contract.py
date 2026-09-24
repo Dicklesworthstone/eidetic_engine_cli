@@ -498,7 +498,14 @@ class CrashRecoveryContract(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             'ws=""; prev=""; for a in "$@"; do [ "$prev" = "--workspace" ] && ws="$a"; prev="$a"; done\n'
             'n=$(( $(cat "$DOUBLE_COUNT" 2>/dev/null || echo 0) + 1 )); printf \'%s\' "$n" > "$DOUBLE_COUNT"\n'
-            'if [ "$n" -ge 2 ] && [ -n "${DOUBLE_WRITE:-}" ]; then printf x > "$ws/.ee/$DOUBLE_WRITE"; fi\n'
+            # Write only during the RETRY, which the harness brackets with
+            # store digests. Keying on the harness's own before-retry digest,
+            # not on a call count, keeps this deterministic: the first run is
+            # SIGKILLed 0.1 s after start and, on a loaded host, dies before
+            # it can count itself (measured 2026-09-24: calls=1, so a
+            # count-keyed write never happened and the control passed).
+            'set -- "$TMPDIR"/ee-doctor-crash-work.*/store-before-retry.sha256\n'
+            'if [ -f "$1" ] && [ -n "${DOUBLE_WRITE:-}" ]; then printf x > "$ws/.ee/$DOUBLE_WRITE"; fi\n'
             'cat "$DOUBLE_BODY"\n'
             'exit "$DOUBLE_EXIT"\n')
         self.double.chmod(0o700)
