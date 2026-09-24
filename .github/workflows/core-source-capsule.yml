@@ -33,7 +33,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - name: Prepare reviewed promotion sources with exact preimage guards
+      - name: Prepare reviewed promotion and feedback sources with exact preimage guards
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -72,6 +72,15 @@ jobs:
           assert touched == set(expected)
           subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
           subprocess.run(['git', 'apply', str(patch)], check=True)
+          supplement = json.loads(subprocess.check_output(['gh', 'api', endpoint + '/6fd7bc09670ff5ed32d09ae86fad1535177bb9b8']))
+          followup = base64.b64decode(supplement['content'])
+          assert hashlib.sha256(followup).hexdigest() == '32ca67f6745134f2d8d169f1d3e3722daf7c3e783b72f4014931d4b011b11ae8'
+          delta = root / 'feedback.patch'
+          delta.write_bytes(lzma.decompress(followup))
+          delta_paths = {line.split('\t', 2)[2] for line in git('apply', '--numstat', str(delta)).splitlines()}
+          assert delta_paths == {'src/core/global_promotion.rs', 'src/core/global_promotion_payload.rs', 'src/core/global_promotion_payload_tests.rs'}
+          subprocess.run(['git', 'apply', '--check', str(delta)], check=True)
+          subprocess.run(['git', 'apply', str(delta)], check=True)
           rust = [path for path in expected if path.endswith('.rs')]
           subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', *rust], check=True)
           subprocess.run(['git', 'add', '-N', *[path for path, sha in expected.items() if sha is None]], check=True)
@@ -92,7 +101,7 @@ jobs:
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: global-promotion-prepared-${{ github.sha }}
+          name: global-promotion-feedback-prepared-${{ github.sha }}
           path: ${{ runner.temp }}/promotion-source/
           retention-days: 7
           if-no-files-found: error
@@ -105,7 +114,7 @@ jobs:
           restore-keys: |
             core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
             cass-refresh-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Verify promotion payloads and attempt-family admission
+      - name: Verify structured promotion, evidence admission and feedback attribution
         shell: bash
         run: |
           set -euo pipefail
@@ -118,6 +127,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: global-promotion-checks-${{ github.sha }}
+          name: global-promotion-feedback-checks-${{ github.sha }}
           path: ${{ runner.temp }}/promotion-checks/
           retention-days: 7
