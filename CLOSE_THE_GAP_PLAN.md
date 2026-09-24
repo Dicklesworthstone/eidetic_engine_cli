@@ -17,8 +17,9 @@
 > **2026-08-23 audit addendum (full project reality check).** All remainder
 > closures were re-verified against current Beads evidence. That audit found a
 > mismatch: `.3.8` closed on two-host evidence while §5 required two humans.
-> The user approved the two-host boundary on 2026-09-17 in WildBluff's session
-> (`bd-reality-core-convergence-1azkt.8`). The earlier claim that `.3.9` had an empty
+> The two-host boundary was accepted on 2026-09-17 on delegated authority
+> (`bd-reality-core-convergence-1azkt.8`; its close struck the earlier "user
+> approved in WildBluff's session" provenance as unverifiable). The earlier claim that `.3.9` had an empty
 > close reason is stale: its current reason names the property/fuzz surface,
 > remote host, duration, and commit. Windows, the publication fence, the
 > narrowed fake-IdP v1 decision, remaining fuzz, and the program closeout all
@@ -826,7 +827,7 @@ unbuilt product:
 - Two-human Tailscale, Windows-host soak, production IdP vendor soak, T2.7
   frame/session fuzz beyond origin properties, and the T5.7 publication fence
   were the **real remainders** at Part III opening. All now have evidence or an
-  allowed product decision, including the user-approved 2026-09-17 two-host amendment.
+  allowed product decision, including the 2026-09-17 two-host amendment (delegated authority, `.8`).
   None is an excuse to rebuild transport.
 
 **Non-negotiables for Part III:**
@@ -914,7 +915,7 @@ inputs to §15 rather than a second, competing close gate.
 Archive this file to `docs/archive/close_the_gap_2026-08.md` and start Part IV
 **in this same path** only when these criteria and §15 are both satisfied:
 
-- `.3.8`: the user-approved 2026-09-17 amendment accepts the retained two-independent-host Tailscale artifact. Independent-operator usability remains unproven; no two-human soak is promised or assigned.
+- `.3.8`: the 2026-09-17 amendment (delegated authority, `.8`) accepts the retained two-independent-host Tailscale artifact. Independent-operator usability remains unproven; no two-human soak is promised or assigned.
 - `.12` has a Windows-host soak artifact (or an explicit fail-closed
   product decision recorded in the matrix).
 - `.8.8` has a production IdP soak artifact (or an explicit "fake-IdP is
@@ -1124,7 +1125,7 @@ candidate before `.2` changes the implementation.
 | 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **PARTIAL / UNPROVEN** | ADR 0085 and source screening are strong; cross-source live admission, retained-generation, proof-sink, and recovery negatives remain. |
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
-| 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The user-approved 2026-09-17 amendment resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
+| 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The 2026-09-17 amendment, decided on delegated authority, resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
 | 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Historical focused checks are retained; the 2026-09-04 current-source attempt is infrastructure-blocked. The complete candidate manifest is absent and all hosted workflows remain manually disabled. `.5`, `.17`, `.18`, `.19`. |
 | 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README now labels the old baseline historical/advisory. Current-candidate raw samples, whole-command/sequence SLOs, correctness and resource evidence remain `.6`; inner packing timers are insufficient. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
@@ -1172,7 +1173,7 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.5` | P0 | No single executable manifest/pinned composite RCH/proof-capsule contract | Build the verifier now; final green truth belongs to `.19`, avoiding a dependency deadlock. |
 | `bd-reality-core-convergence-1azkt.6` | P1 | Public latency/SLO claims lack reproducible correct-output evidence | RCH-built attested candidate, local M3 black-box driver, raw samples/correctness, explicit reproduce-or-remove decision. |
 | `bd-reality-core-convergence-1azkt.7` | P1 | Release staging is non-hermetic and publication currently precedes native installer proof | Private draft/local staging only; locked signed/provenance-complete assets and native smoke before human publish. |
-| `bd-reality-core-convergence-1azkt.8` | P1 | Original two-human criterion exceeded the retained two-host evidence | User approved two-host boundary on 2026-09-17; preserve artifact identity and residual independent-operator risk, without an ownerless roadmap promise. |
+| `bd-reality-core-convergence-1azkt.8` | P1 | Original two-human criterion exceeded the retained two-host evidence | Two-host boundary accepted on 2026-09-17 on delegated authority (the earlier "user approved" provenance was struck as unverifiable); preserve artifact identity and residual independent-operator risk, without an ownerless roadmap promise. |
 | `bd-reality-core-convergence-1azkt.9` | P1 | Shipped claims, maturity, primary journey, docs, and release copy disagree | Pre-release stable/beta/experimental/reserved ledger; close blocker or demote claim; generated truthful copy. |
 | `bd-reality-core-convergence-1azkt.10` | P0 | Live race evidence lacks source authority | Build exact attested candidate and reproduce or refute before `.2` changes code. |
 | `bd-reality-core-convergence-1azkt.11` | P0 | Raw BM25 saturates public relevance and contaminates quality/admission | Frankensearch-backed calibration or explicit unknown; correct per-source domains and every downstream consumer. |

@@ -1461,8 +1461,9 @@ Part N to Part N+1 instead of creating another plan file at the repo root.
 Historical bridges (most recent first):
 - Part III (2026-08-17) — active at repo-root `CLOSE_THE_GAP_PLAN.md`.
   Mesh/team-confed honesty closeout after the Unix EE-to-EE campaign.
-  Original mesh remainders have evidence or recorded decisions; the user-approved
-  2026-09-17 amendment (`bd-reality-core-convergence-1azkt.8`) accepts two independent
+  Original mesh remainders have evidence or recorded decisions; the 2026-09-17
+  amendment, decided on delegated authority (`bd-reality-core-convergence-1azkt.8`,
+  whose close struck the earlier "user approved" provenance as unverifiable), accepts two independent
   tailnet hosts. Independent-operator usability remains unproven; no two-human
   soak is promised or assigned. Broader Part III §15 criteria still block archive.
 - Part I + Part II (2026-05-06 / 2026-05-14) — archived at

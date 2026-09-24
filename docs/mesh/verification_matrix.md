@@ -208,7 +208,9 @@ follow-ups live on `bd-tc-followup-oo7d2` and are not children of this
 epic:
 
 **Scope amendment — 2026-09-17, `bd-reality-core-convergence-1azkt.8`.**
-The user in WildBluff's session approved “Accept two-host boundary” (Branch B).
+“Accept two-host boundary” (Branch B) was decided on delegated authority. The
+bead's close struck the earlier "approved by the user in WildBluff's session"
+provenance as unverifiable.
 Two independent tailnet hosts are the v1 acceptance boundary: the retained
 artifact exercises cross-host exchange and team-scoped recall. This decision
 does not relabel that artifact as two-human evidence or change authentication,

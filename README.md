@@ -1266,8 +1266,8 @@ plus grant-gated BodyFetch. Authorized bodies hydrate into local memories so
 The v1 evidence and dispositions are recorded in
 [`docs/mesh/verification_matrix.md`](docs/mesh/verification_matrix.md): a live
 two-host Tailscale tailnet soak (`bd-tc-epic-qzk7o.3.8`, closed 2026-08-17;
-accepted as the v1 boundary by the user-approved 2026-09-17 amendment in
-`bd-reality-core-convergence-1azkt.8`), a Windows-host inbound crash/restart soak
+accepted as the v1 boundary by the 2026-09-17 amendment, decided on delegated
+authority in `bd-reality-core-convergence-1azkt.8`), a Windows-host inbound crash/restart soak
 (`bd-tc-epic-qzk7o.12`), and an explicit fail-closed decision that fake-IdP
 RS256 + live `identity_attest` is the v1 identity ceiling (`bd-tc-epic-qzk7o.8.8`;
 vendor tenant is a post-v1 epic). The opt-in
@@ -2971,7 +2971,7 @@ Boundaries to know:
 | Boundary | Practical meaning |
 |---|---|
 | Concurrent writes | FrankenSQLite uses single-process MVCC WAL. Many agents can read at once; heavy write swarms should route through job locks or the optional daemon write owner. |
-| Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). Two-host tailnet and Windows-host soak evidence and the fake-IdP v1-ceiling decision are recorded in `docs/mesh/verification_matrix.md`. The user-approved 2026-09-17 amendment (`bd-reality-core-convergence-1azkt.8`) accepts two independent tailnet hosts as the v1 boundary. Independent-operator usability remains unproven; no two-human soak is promised or assigned. FrankenSQLite remains the local source of truth. |
+| Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). Two-host tailnet and Windows-host soak evidence and the fake-IdP v1-ceiling decision are recorded in `docs/mesh/verification_matrix.md`. The 2026-09-17 amendment, decided on delegated authority (`bd-reality-core-convergence-1azkt.8`), accepts two independent tailnet hosts as the v1 boundary. Independent-operator usability remains unproven; no two-human soak is promised or assigned. FrankenSQLite remains the local source of truth. |
 | Agent loop | `ee` stores and retrieves memory. Claude Code, Codex, or another harness still owns tools, approvals, and the prompt loop. |
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
