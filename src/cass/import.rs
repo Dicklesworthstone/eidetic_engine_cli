@@ -2247,7 +2247,8 @@ fn push_missing_metadata(fields: &mut Vec<String>, field: &'static str) {
     }
 }
 
-fn database_path(options: &CassImportOptions) -> PathBuf {
+/// The store an import writes; the CLI preflights this exact path (bd-hin8m).
+pub(crate) fn database_path(options: &CassImportOptions) -> PathBuf {
     options.database_path.clone().unwrap_or_else(|| {
         options
             .workspace_path

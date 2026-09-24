@@ -11,6 +11,10 @@
 #[path = "support/native_evidence_delta.rs"]
 mod native_evidence_delta;
 
+#[cfg(unix)]
+#[path = "support/import_cass_store_preflight.rs"]
+mod import_cass_store_preflight;
+
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeSet;

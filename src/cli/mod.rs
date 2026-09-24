@@ -24121,6 +24121,15 @@ where
         dry_run: args.dry_run,
         include_spans: !args.no_spans,
     };
+    // bd-hin8m: like every write surface since 91cf7bcbd, an import into a
+    // storeless address is refused instead of planting a new store there.
+    if !options.dry_run
+        && let Err(error) = crate::core::ensure_addressed_database_exists(
+            &crate::cass::import::database_path(&options),
+        )
+    {
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+    }
 
     let cass_client = match discover_import_binary(None).map(CassClient::from_discovered) {
         Ok(client) => client,
