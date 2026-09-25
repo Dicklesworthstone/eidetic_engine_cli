@@ -2412,12 +2412,21 @@ fn prepare_memory(
                 .unwrap_or_else(|| trust_class.initial_confidence()),
             utility: validated.utility,
             importance: validated.importance,
-            provenance_uri: memory.provenance_uri.clone().or_else(|| {
-                Some(format!(
-                    "jsonl-import://{}",
-                    memory.source_agent.as_deref().unwrap_or("unknown")
-                ))
-            }),
+            // A recovery point describes the original memory's evidence,
+            // including its absence. The restore operation is already audited;
+            // inventing an import origin here would change that evidence on
+            // every backup/restore cycle (bd-9yhqu).
+            provenance_uri: match native_trust_policy {
+                NativeTrustPolicy::VerifiedBackupRestore => memory.provenance_uri.clone(),
+                NativeTrustPolicy::StoreAuthenticatedOnly => {
+                    memory.provenance_uri.clone().or_else(|| {
+                        Some(format!(
+                            "jsonl-import://{}",
+                            memory.source_agent.as_deref().unwrap_or("unknown")
+                        ))
+                    })
+                }
+            },
             trust_class: trust_class.as_str().to_owned(),
             trust_subclass,
             tags,

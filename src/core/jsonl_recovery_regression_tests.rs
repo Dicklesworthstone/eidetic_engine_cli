@@ -139,6 +139,78 @@ impl Fixture {
 }
 
 #[test]
+fn verified_restore_preserves_missing_provenance_even_with_a_source_agent() -> TestResult {
+    let mut records = rows();
+    records[1]["provenance_uri"] = JsonValue::Null;
+    records[1]["source_agent"] = json!("RecoveryAgent");
+    let fixture = Fixture::new(&records)?;
+    for record in [&records[1], &records[3]] {
+        let id = record["memory_id"].as_str().ok_or("memory identity")?;
+        let memory = fixture
+            .db
+            .get_memory(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("restored memory")?;
+        assert_eq!(
+            memory.provenance_uri.as_deref(),
+            record["provenance_uri"].as_str()
+        );
+    }
+    fixture.verify().map_err(|error| error.to_string())?;
+    // A verifier sharing import preparation must still reject a writer that
+    // manufactures evidence after admission, including for absent provenance.
+    fixture
+        .db
+        .execute_raw("UPDATE memories SET provenance_uri = 'jsonl-import://unknown' WHERE provenance_uri IS NULL")
+        .map_err(|error| error.to_string())?;
+    assert!(fixture.verify().is_err());
+    Ok(())
+}
+
+#[test]
+fn ordinary_jsonl_import_retains_origin_markers_for_missing_provenance() -> TestResult {
+    for source_agent in [None, Some("ExternalAgent")] {
+        let mut records = rows();
+        records[1]["provenance_uri"] = JsonValue::Null;
+        records[1]["source_agent"] = json!(source_agent);
+        records[1]["trust_class"] = json!("agent_validated");
+        records[3]["trust_class"] = json!("agent_validated");
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: workspace,
+            database_path: None,
+            source_path: root.path().join("records.jsonl"),
+            dry_run: false,
+        };
+        fs::write(&options.source_path, source_text(&records))
+            .map_err(|error| error.to_string())?;
+        let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(report.status, "completed", "{:?}", report.issues);
+        assert_eq!(report.memories_imported, 2);
+        let db = DbConnection::open_file(database_path(&options))
+            .map_err(|error| error.to_string())?;
+        for (record, expected) in [
+            (
+                &records[1],
+                format!("jsonl-import://{}", source_agent.unwrap_or("unknown")),
+            ),
+            (&records[3], "ee-export://recovery-regression".to_owned()),
+        ] {
+            let id = record["memory_id"].as_str().ok_or("memory identity")?;
+            let memory = db
+                .get_memory(id)
+                .map_err(|error| error.to_string())?
+                .ok_or("imported memory")?;
+            assert_eq!(memory.provenance_uri.as_deref(), Some(expected.as_str()));
+        }
+        db.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
 fn explicit_head_expiry_cannot_become_supersession_under_clock_skew() -> TestResult {
     for reverse_reference in [false, true] {
         let mut records = rows();

@@ -102,6 +102,91 @@ fn source() -> Result<(tempfile::TempDir, PathBuf, PathBuf, String, String, Stri
 }
 
 #[test]
+fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> TestResult {
+    for redaction in [RedactionLevel::Minimal, RedactionLevel::Standard] {
+        let (root, workspace, database, workspace_id, prior, _head) = source()?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET provenance_uri = NULL WHERE id = '{prior}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        db.restore_imported_memory_tombstone(&prior, "2026-06-02T00:00:00+00:00")
+            .map_err(|error| error.to_string())?;
+        let source_provenance = db
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|memory| (memory.content, memory.provenance_uri))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(source_provenance.len(), 2);
+        assert!(source_provenance.values().any(Option::is_none));
+        assert!(source_provenance.values().any(Option::is_some));
+        db.close().map_err(|error| error.to_string())?;
+
+        let create = |workspace: &Path, database: &Path| {
+            create_backup(&BackupCreateOptions {
+                workspace_path: workspace.to_owned(),
+                database_path: Some(database.to_owned()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())
+        };
+        let export_provenance = |backup: &Path| -> Result<BTreeMap<String, Option<String>>, String> {
+            let text = fs::read_to_string(backup.join(RECORDS_FILE))
+                .map_err(|error| error.to_string())?;
+            text.lines()
+                .map(serde_json::from_str::<JsonValue>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|row| row["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1)
+                .map(|row| {
+                    serde_json::from_value::<ExportMemoryRecord>(row)
+                        .map(|record| (record.content, record.provenance_uri))
+                        .map_err(|error| error.to_string())
+                })
+                .collect()
+        };
+        let created = create(&workspace, &database)?;
+        assert_eq!(
+            export_provenance(Path::new(&created.backup_path))?,
+            source_provenance
+        );
+        let side_path = root.path().join("restored");
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        let restored_database = PathBuf::from(&restored.restored_database_path);
+        let db = DbConnection::open_file(&restored_database)
+            .map_err(|error| error.to_string())?;
+        let restored_provenance = db
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|memory| (memory.content, memory.provenance_uri))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(restored_provenance, source_provenance);
+        db.close().map_err(|error| error.to_string())?;
+        let rebackup = create(&side_path, &restored_database)?;
+        assert_eq!(
+            export_provenance(Path::new(&rebackup.backup_path))?,
+            source_provenance
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_successor_hints_use_durable_headship_and_timestamp_instants() -> TestResult {
     let (_root, _workspace, database, workspace_id, prior, head) = source()?;
     let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
