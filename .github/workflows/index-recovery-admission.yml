@@ -6,34 +6,187 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: index-recovery-admission
+  cancel-in-progress: false
 jobs:
-  inspect:
+  integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - name: Capture exact recovery inputs and open feature work
+          ref: main
+          fetch-depth: 1
+      - name: Install pinned formatter
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - name: Connect rejection fence without rewriting unrelated index code
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=(src/core/index.rs src/core/index_rollback_manifest.rs src/core/index_rollback_admission_tests.rs)
+          if grep -q '^fn rollback_published_index_namespace(' src/core/index.rs; then
+            grep -Fq 'let retirement = rollback_manifest::retire(index_dir);' src/core/index.rs
+            grep -Fq 'mod rollback_manifest;' src/core/index.rs
+          else
+            test "$(git rev-parse HEAD:src/core/index_rollback_manifest.rs)" = b620bebb53a5065c6ce94ae6fca1c99044548eff
+            test "$(git rev-parse HEAD:src/core/index_rollback_admission_tests.rs)" = bd1cb3ac8b56d7bc95b83e3068e1de04735210b1
+            base=$(git rev-parse HEAD)
+            cat > "$RUNNER_TEMP/rollback-admission.patch" <<'PATCH'
+          diff --git a/src/core/index.rs b/src/core/index.rs
+          --- a/src/core/index.rs
+          +++ b/src/core/index.rs
+          @@ -65,6 +65,9 @@
+           #[path = "index_storage.rs"]
+           mod storage;
+           
+          +#[path = "index_rollback_manifest.rs"]
+          +mod rollback_manifest;
+          +
+           #[path = "index_source_snapshot.rs"]
+           mod source_snapshot;
+           
+          @@ -4628,6 +4631,26 @@
+           fn rollback_published_index(
+               index_dir: &Path,
+               staging_dir: &Path,
+          +    retained_dir: Option<&Path>,
+          +) -> Result<(), IndexRebuildError> {
+          +    // Path restoration is fallible too. Remove the rejected generation's
+          +    // admission manifest before even validating the retained/staging paths;
+          +    // those validations must not leave a complete rejected live index readable.
+          +    // A failed fence never skips the best-effort restoration of accepted bytes.
+          +    let retirement = rollback_manifest::retire(index_dir);
+          +    let rollback = rollback_published_index_namespace(index_dir, staging_dir, retained_dir);
+          +    match (retirement, rollback) {
+          +        (Ok(()), rollback) => rollback,
+          +        (Err(error), Ok(())) => Err(error),
+          +        (Err(retirement_error), Err(rollback_error)) => Err(IndexRebuildError::Index(format!(
+          +            "index rejection fence failed ({retirement_error}); filesystem rollback also failed ({rollback_error})"
+          +        ))),
+          +    }
+          +}
+          +
+          +fn rollback_published_index_namespace(
+          +    index_dir: &Path,
+          +    staging_dir: &Path,
+               retained_dir: Option<&Path>,
+           ) -> Result<(), IndexRebuildError> {
+               ensure_index_path_has_no_symlinks(index_dir, "roll back published index generation")?;
+          PATCH
+            git apply --check "$RUNNER_TEMP/rollback-admission.patch"
+            git apply "$RUNNER_TEMP/rollback-admission.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/index_rollback_manifest.rs src/core/index_rollback_admission_tests.rs
+            git diff --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- "${paths[@]}"
+            git commit -m 'fix(index): fence rejected live generations before attempting rollback' -m 'Retire the rejected admission manifest before retained/staging validation, allocation, quarantine or reverse exchange. Preserve its bytes and retry directory barriers on repeated rejection. Always attempt existing namespace restoration even after a fence error, retaining both errors. Nine primitive fault tests and six complete vector/lexical-generation admission regressions are registered. Formatting and patch checks passed; behavioral verification runs separately.'
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=1; break; fi
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            test "$pushed" -eq 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/recovery-source.tar"
+      - name: Report open recovery and feature beads from the delivered source
+        shell: bash
+        run: |
           python3 - <<'PY'
           import json
           with open('.beads/issues.jsonl') as f:
               issues = [json.loads(line) for line in f if line.strip()]
           opened = [i for i in issues if i.get('status') not in ('closed', 'tombstone')]
           print('OPEN BEADS:', len(opened))
-          terms = ('index', 'recovery', 'publication', 'crash', 'neural', 'readiness')
           for i in sorted(opened, key=lambda i: (i.get('priority', 9), i['id'])):
-              if i.get('priority', 9) <= 1 and any(t in (i.get('title', '') + i.get('description', '')).lower() for t in terms):
-                  print(json.dumps(i, ensure_ascii=False))
+              if i.get('priority', 9) <= 1:
+                  print(json.dumps({k: i.get(k) for k in ('id', 'title', 'status', 'priority', 'description')}, ensure_ascii=False))
           PY
-          git archive --format=tar HEAD > "$RUNNER_TEMP/recovery-source.tar"
       - uses: actions/upload-artifact@v4
         with:
           name: index-recovery-source
           path: ${{ runner.temp }}/recovery-source.tar
           retention-days: 1
+  verify:
+    needs: integrate
+    runs-on: macos-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - name: Install the repository-pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: rejection-admission-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            rejection-admission-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Check production library
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/recovery-source-sha.log"
+          rustc --version | tee "$RUNNER_TEMP/recovery-toolchain.log"
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/recovery-check.log"
+      - name: Execute all fifteen new rejection-fence regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rejection-tests.log"
+          grep -Fq 'test result: ok. 15 passed; 0 failed;' "$RUNNER_TEMP/recovery-rejection-tests.log"
+      - name: Execute existing publication and read-lease regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib 'core::index::rollback_durability_tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rollback-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-rollback-tests.log"
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-reader-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-reader-tests.log"
+      - name: Check production Clippy and new-source formatting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/recovery-clippy.log"
+          rustfmt --edition 2024 --config skip_children=true --check src/core/index_rollback_manifest.rs src/core/index_rollback_admission_tests.rs
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: index-rejection-admission-verification
+          path: ${{ runner.temp }}/recovery-*.log
+          retention-days: 7
