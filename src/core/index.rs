@@ -3975,7 +3975,6 @@ fn processing_mode_for_job(job: &StoredSearchIndexJob) -> &'static str {
 enum IndexPublishRecoveryAction {
     ActivePresent,
     RetainedGenerationRestored,
-    StagedGenerationPromoted,
     NoRecoverableGeneration,
 }
 
@@ -3999,13 +3998,12 @@ fn recover_interrupted_publish(
         return Ok(IndexPublishRecoveryAction::RetainedGenerationRestored);
     }
 
-    if let Some(staging_dir) = find_complete_staging_dir(index_dir)? {
-        sync_index_generation(&staging_dir, || Ok(()))?;
-        rename_index_dir(&staging_dir, index_dir, "promote staged index generation")?;
-        sync_index_directory(index_parent(index_dir))?;
-        return Ok(IndexPublishRecoveryAction::StagedGenerationPromoted);
-    }
-
+    // A complete manifest only proves that a build finished. It does not
+    // prove that its publisher committed the generation. Recovery runs before
+    // the next build, which may fail or spend a long time loading a model;
+    // exposing such staging here would make never-published documents readable.
+    // Only prior-live retention (including an inode-attested displacement)
+    // can recover the active name. Leave other staging intact for inspection.
     Ok(IndexPublishRecoveryAction::NoRecoverableGeneration)
 }
 
@@ -5236,37 +5234,7 @@ fn publish_index_metadata_temp_file(
     Ok(())
 }
 
-fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexRebuildError> {
-    let parent = index_parent(index_dir);
-    if !path_exists_no_follow(parent) {
-        return Ok(None);
-    }
-
-    let base = index_base_name(index_dir)?;
-    let prefix = format!(".{base}{INDEX_STAGING_PREFIX}");
-    let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(parent).map_err(|e| {
-        IndexRebuildError::Index(format!("Failed to inspect index parent directory: {e}"))
-    })? {
-        let entry = entry.map_err(|e| {
-            IndexRebuildError::Index(format!("Failed to inspect index staging entry: {e}"))
-        })?;
-        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&prefix)
-            && path_is_regular_file_no_follow(&entry.path().join(INDEX_METADATA_FILE))
-            && index_generation_is_recoverable(&entry.path())
-        {
-            candidates.push(entry.path());
-        }
-    }
-    candidates.sort();
-    Ok(candidates.pop())
-}
-
+#[cfg(test)]
 fn index_generation_is_recoverable(index_dir: &Path) -> bool {
     recoverable_index_generation(index_dir).is_some()
 }
@@ -5404,10 +5372,13 @@ fn find_latest_recoverable_retained_dir(
         })?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Some(sequence) = retained_generation_sequence(&name, &retained_prefix) else {
+        let candidate = entry.path();
+        let sequence = retained_generation_sequence(&name, &retained_prefix);
+        #[cfg(unix)]
+        let sequence = sequence.or(displaced_generation_sequence(index_dir, &candidate)?);
+        let Some(sequence) = sequence else {
             continue;
         };
-        let candidate = entry.path();
         ensure_index_path_has_no_symlinks(
             &candidate,
             "inspect retained index generation for recovery",
@@ -20784,31 +20755,148 @@ mod tests {
     }
 
     #[test]
-    fn recover_interrupted_publish_promotes_complete_staging_generation() -> TestResult {
+    fn recover_interrupted_publish_leaves_complete_uncommitted_staging_generation() -> TestResult {
         let root = unique_test_dir("recover-staging");
         let index_dir = root.join("index");
-        let staging_dir = root.join(".index.publish-20260501-000");
+        let allocated =
+            create_publish_staging_dir(&index_dir).map_err(|error| error.to_string())?;
+        for staging_dir in [&allocated, &root.join(".index.publish-20260501-000")] {
+            build_current_test_index(
+                staging_dir,
+                3,
+                vec![test_indexable_doc("mem-staged", "never published evidence")],
+            )?;
+        }
+        let before = index_regular_file_snapshot(&root)?;
+        for attempt in 0..2 {
+            let action =
+                recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
+            ensure(
+                action == IndexPublishRecoveryAction::NoRecoverableGeneration,
+                format!("restart {attempt} promoted an uncommitted build: {action:?}"),
+            )?;
+            ensure(
+                !index_dir.exists(),
+                "complete uncommitted staging must never become active",
+            )?;
+            ensure(
+                index_regular_file_snapshot(&root)? == before,
+                "recovery must preserve all staged bytes without publishing them",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn recover_interrupted_publish_restores_only_attested_displacement() -> TestResult {
+        let root = unique_test_dir("recover-attested-displacement");
+        let index_dir = root.join("index");
+        let older = root.join("index.previous");
         build_current_test_index(
-            &staging_dir,
-            3,
-            vec![test_indexable_doc("mem-staged", "staged generation")],
+            &older,
+            7,
+            vec![test_indexable_doc("mem_older", "older retained evidence")],
         )?;
-        write_marker(&staging_dir, "generation.txt", "new")?;
+        build_current_test_index(
+            &index_dir,
+            8,
+            vec![test_indexable_doc("mem_old", "formerly published evidence")],
+        )?;
+        let displaced =
+            create_publish_staging_dir(&index_dir).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &displaced,
+            9,
+            vec![test_indexable_doc("mem_new", "uncommitted replacement")],
+        )?;
+        let uncommitted =
+            create_publish_staging_dir(&index_dir).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &uncommitted,
+            10,
+            vec![test_indexable_doc("mem_later", "another uncommitted build")],
+        )?;
+        let old_bytes = index_regular_file_snapshot(&index_dir)?;
+        let uncommitted_bytes = index_regular_file_snapshot(&uncommitted)?;
+        exchange_index_directories(&index_dir, &displaced).map_err(|error| error.to_string())?;
+        let abandoned = root.join("uncommitted-active-preserved");
+        std::fs::rename(&index_dir, &abandoned).map_err(|error| error.to_string())?;
 
-        let action = recover_interrupted_publish(&index_dir).map_err(|e| e.to_string())?;
+        // Both names encode the former live inode, but only the directory
+        // actually displaced by the exchange has that inode. A finished build
+        // with a higher source generation must not outrank the prior live tree.
+        assert!(
+            displaced_generation_sequence(&index_dir, &displaced)
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        assert!(
+            displaced_generation_sequence(&index_dir, &uncommitted)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let action = recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
+        assert_eq!(
+            action,
+            IndexPublishRecoveryAction::RetainedGenerationRestored
+        );
+        assert_eq!(validated_index_generation(&index_dir)?, 8);
+        assert_eq!(index_regular_file_snapshot(&index_dir)?, old_bytes);
+        assert_eq!(
+            index_regular_file_snapshot(&uncommitted)?,
+            uncommitted_bytes
+        );
+        assert_eq!(validated_index_generation(&abandoned)?, 9);
+        assert_eq!(validated_index_generation(&older)?, 7);
+        assert!(!displaced.exists());
+        assert_eq!(
+            recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?,
+            IndexPublishRecoveryAction::ActivePresent
+        );
+        Ok(())
+    }
 
-        ensure(
-            action == IndexPublishRecoveryAction::StagedGenerationPromoted,
-            format!("unexpected recovery action: {action:?}"),
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn recover_interrupted_publish_refuses_security_stale_displacement() -> TestResult {
+        let root = unique_test_dir("recover-security-stale-displacement");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            8,
+            vec![test_indexable_doc("mem_old", "formerly published evidence")],
         )?;
-        ensure(index_dir.is_dir(), "complete staging should become active")?;
+        let displaced =
+            create_publish_staging_dir(&index_dir).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &displaced,
+            9,
+            vec![test_indexable_doc("mem_new", "uncommitted replacement")],
+        )?;
+        exchange_index_directories(&index_dir, &displaced).map_err(|error| error.to_string())?;
+        std::fs::rename(&index_dir, root.join("uncommitted-active-preserved"))
+            .map_err(|error| error.to_string())?;
+        let metadata_path = displaced.join(INDEX_METADATA_FILE);
+        let mut metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&metadata_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        metadata["evidenceSecurityPolicyEpoch"] = serde_json::json!(0);
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let before = index_regular_file_snapshot(&root)?;
+        let action = recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
         ensure(
-            !staging_dir.exists(),
-            "staging path should have moved into active index",
+            action == IndexPublishRecoveryAction::NoRecoverableGeneration && !index_dir.exists(),
+            "a proven displacement still needs the current security and corpus contract",
         )?;
         ensure(
-            read_marker(&index_dir, "generation.txt")? == "new",
-            "active index should contain completed staged generation",
+            index_regular_file_snapshot(&root)? == before,
+            "refused displaced and uncommitted generations must remain intact",
         )
     }
 

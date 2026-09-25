@@ -18,22 +18,28 @@ generation is the filesystem linearization point; the associated database job
 transition follows in the same masked tail. An ordinary transition error or
 panic triggers rollback: `ee` restores the previous active generation and moves
 the unpublished generation into a rejected quarantine for inspection. Recovery
-never promotes quarantined generations, while `ee index vacuum` still reports
-them as reclaimable derived assets. Cooperative cancellation is checked before
+restores only a compatible prior active generation: a retained directory, or
+on Unix the former live inode stranded at its attested staging name after an
+atomic exchange. A structurally complete build is not evidence of publication,
+so ordinary staging and rejected generations are never promoted by recovery.
+Their files remain available for inspection and explicit vacuum. Cooperative
+cancellation is checked before
 the tail, so it produces no partial active index, leaves no running job or
 advisory lock behind, and preserves the exact caller reason for the CLI's typed
 `cancelled` response and exit code 130.
 
 The filesystem rename and database transition are not a crash-atomic
 cross-store transaction. Abrupt process termination can leave a fully validated
-staged or active generation alongside an orphaned `running` job row; directory
-rename semantics still prevent that process termination from exposing a
-half-built active generation. Power-loss durability is not established by this
-protocol because the publication directories are not fsynced. FrankenSQLite
-remains the source of truth, and generation health marks older derived indexes
-stale. Durable publish-intent, directory-fsync ordering, and orphan-job
-reconciliation require a separate hard-crash protocol and are not claimed by
-this cancellation contract.
+staged or active generation alongside an orphaned `running` job row. Publication
+flushes tier files and the generation and parent directories, with rollback
+covering durability-barrier failures. On Linux, Android, and Apple platforms,
+atomic directory exchange keeps the active pathname present while replacing
+an existing generation; Unix readers hold an OS lease across their generation
+reads, and publication holds the exclusive lease through commit and rollback.
+These mechanisms do not make the filesystem and database job transition one
+transaction. FrankenSQLite remains the source of truth, and generation health
+marks older derived indexes stale. A durable database pointer and full orphan-job
+reconciliation remain separate parts of the hard-crash protocol.
 
 Job types named `incremental` and `single_document` remain intake and telemetry
 contracts, not permission to edit active files. They may be coalesced into one
