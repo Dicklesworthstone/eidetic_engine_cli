@@ -66,6 +66,9 @@ mod storage;
 #[path = "index_rollback_manifest.rs"]
 mod rollback_manifest;
 
+#[path = "index_generation_watermark.rs"]
+mod generation_watermark;
+
 #[path = "index_source_snapshot.rs"]
 mod source_snapshot;
 #[cfg(feature = "lexical-bm25")]
@@ -5068,11 +5071,7 @@ fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>,
             .get("schema")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
-        generation: object
-            .get("sourceGeneration")
-            .or_else(|| object.get("source_generation"))
-            .or_else(|| object.get("generation"))
-            .and_then(serde_json::Value::as_u64),
+        generation: Some(generation_watermark::parse(object)?),
         last_rebuild_at: object
             .get("lastRebuildAt")
             .or_else(|| object.get("last_rebuild_at"))
@@ -5358,7 +5357,9 @@ fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
         .tier_document_counts
         .ok_or_else(|| "index metadata is missing tierDocumentCounts".to_owned())?;
     verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())?;
-    Ok(metadata.generation.unwrap_or(0))
+    metadata.generation.ok_or_else(|| {
+        "index metadata is missing a source generation watermark; rebuild the index".to_owned()
+    })
 }
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
