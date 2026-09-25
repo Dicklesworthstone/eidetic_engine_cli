@@ -1,0 +1,394 @@
+name: Index source generation admission
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/index-generation-admission-20260925.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: index-generation-admission-20260925
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Install the repository-pinned nightly
+        run: |
+          set -euo pipefail
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          case "$channel" in nightly|nightly-*) ;; *) exit 1 ;; esac
+          rustup toolchain install "$channel" --profile minimal --component rustfmt
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: generation-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            generation-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Apply strict admission, execute regressions, and commit source to main
+        run: |
+          set -euo pipefail
+          paths=(src/core/index.rs src/core/index_generation_watermark.rs)
+          if test -f src/core/index_generation_watermark.rs; then
+            echo 'Generation admission source already exists; refusing automatic reapplication.'
+            exit 1
+          fi
+          test "$(git rev-parse HEAD:src/core/index.rs)" = c09fb551d055c1fe90cdbbe63d0c7d1952ca8518
+          base=$(git rev-parse HEAD)
+          echo "$base" | tee "$RUNNER_TEMP/generation-base.log"
+          cat > "$RUNNER_TEMP/generation.patch" <<'PATCH'
+          diff --git a/src/core/index.rs b/src/core/index.rs
+          --- a/src/core/index.rs
+          +++ b/src/core/index.rs
+          @@ -65,6 +65,9 @@
+           #[path = "index_rollback_manifest.rs"]
+           mod rollback_manifest;
+           
+          +#[path = "index_generation_watermark.rs"]
+          +mod generation_watermark;
+          +
+           #[path = "index_source_snapshot.rs"]
+           mod source_snapshot;
+           #[cfg(feature = "lexical-bm25")]
+          @@ -5070,11 +5073,7 @@
+                   schema: object
+                       .get("schema")
+                       .and_then(serde_json::Value::as_str)
+                       .map(str::to_owned),
+          -        generation: object
+          -            .get("sourceGeneration")
+          -            .or_else(|| object.get("source_generation"))
+          -            .or_else(|| object.get("generation"))
+          -            .and_then(serde_json::Value::as_u64),
+          +        generation: Some(generation_watermark::parse(object)?),
+                   last_rebuild_at: object
+                       .get("lastRebuildAt")
+          @@ -5360,5 +5359,7 @@
+               verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())?;
+          -    Ok(metadata.generation.unwrap_or(0))
+          +    metadata.generation.ok_or_else(|| {
+          +        "index metadata is missing a source generation watermark; rebuild the index".to_owned()
+          +    })
+           }
+           
+           fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
+          diff --git a/src/core/index_generation_watermark.rs b/src/core/index_generation_watermark.rs
+          new file mode 100644
+          --- /dev/null
+          +++ b/src/core/index_generation_watermark.rs
+          @@ -0,0 +1,262 @@
+          +//! One unambiguous source watermark for every index admission surface.
+          +//!
+          +//! A complete set of tiers is not sufficient evidence of the source snapshot.
+          +//! Missing watermarks must not become generation zero during writer recovery,
+          +//! and canonical/legacy aliases must not name different snapshots. Do not
+          +//! include untrusted metadata values in the error text.
+          +
+          +use serde_json::{Map, Value};
+          +
+          +const FIELDS: [&str; 3] = ["sourceGeneration", "source_generation", "generation"];
+          +
+          +pub(super) fn parse(object: &Map<String, Value>) -> Result<u64, String> {
+          +    let mut generation = None;
+          +    for field in FIELDS {
+          +        let Some(value) = object.get(field) else {
+          +            continue;
+          +        };
+          +        let value = value.as_u64().ok_or_else(|| {
+          +            format!("index metadata {field} must be an unsigned 64-bit integer; rebuild the index")
+          +        })?;
+          +        if generation.is_some_and(|previous| previous != value) {
+          +            return Err(
+          +                "index metadata has conflicting source generation fields; rebuild the index"
+          +                    .to_owned(),
+          +            );
+          +        }
+          +        generation = Some(value);
+          +    }
+          +    generation.ok_or_else(|| {
+          +        "index metadata is missing a source generation watermark; rebuild the index".to_owned()
+          +    })
+          +}
+          +
+          +#[cfg(test)]
+          +mod tests {
+          +    use super::*;
+          +    use crate::core::index::{
+          +        INDEX_METADATA_FILE, IndexBuilder, IndexDocumentCounts,
+          +        IndexPublishRecoveryAction, find_latest_recoverable_retained_dir,
+          +        hash_fallback_embedder_stack, index_parent, recover_interrupted_publish,
+          +        validated_index_generation, write_index_metadata,
+          +    };
+          +    #[cfg(unix)]
+          +    use crate::core::index::IndexGenerationLease;
+          +    use std::collections::BTreeMap;
+          +    use std::path::{Path, PathBuf};
+          +    use std::time::Duration;
+          +
+          +    type TestResult = Result<(), String>;
+          +
+          +    fn parse_value(value: Value) -> Result<u64, String> {
+          +        parse(value.as_object().expect("object fixture"))
+          +    }
+          +
+          +    #[test]
+          +    fn explicit_zero_and_full_width_watermarks_are_valid() {
+          +        assert_eq!(parse_value(serde_json::json!({"sourceGeneration": 0})), Ok(0));
+          +        assert_eq!(
+          +            parse_value(serde_json::json!({"sourceGeneration": u64::MAX})),
+          +            Ok(u64::MAX)
+          +        );
+          +    }
+          +
+          +    #[test]
+          +    fn legacy_aliases_are_accepted_when_unambiguous() {
+          +        for field in FIELDS {
+          +            let mut metadata = Map::new();
+          +            metadata.insert(field.to_owned(), Value::from(17_u64));
+          +            assert_eq!(parse(&metadata), Ok(17));
+          +        }
+          +        assert_eq!(
+          +            parse_value(serde_json::json!({
+          +                "sourceGeneration": 17, "source_generation": 17, "generation": 17
+          +            })),
+          +            Ok(17)
+          +        );
+          +    }
+          +
+          +    #[test]
+          +    fn missing_watermark_is_not_generation_zero() {
+          +        assert!(parse_value(serde_json::json!({})).is_err());
+          +        assert!(parse_value(serde_json::json!({"documentCount": 0})).is_err());
+          +    }
+          +
+          +    #[test]
+          +    fn every_present_alias_must_be_an_integer() {
+          +        for field in FIELDS {
+          +            for invalid in [
+          +                Value::Null,
+          +                serde_json::json!(-1),
+          +                serde_json::json!(7.0),
+          +                serde_json::json!(7.5),
+          +                serde_json::json!(true),
+          +                serde_json::json!("private-untrusted-watermark"),
+          +                serde_json::json!([]),
+          +                serde_json::json!({}),
+          +                serde_json::from_str::<Value>("18446744073709551616")
+          +                    .expect("JSON number outside u64"),
+          +            ] {
+          +                let mut metadata = serde_json::json!({
+          +                    "sourceGeneration": 7, "source_generation": 7, "generation": 7
+          +                });
+          +                metadata[field] = invalid;
+          +                let error = parse_value(metadata).expect_err("invalid alias cannot be ignored");
+          +                assert!(error.contains(field));
+          +                assert!(!error.contains("private-untrusted-watermark"));
+          +            }
+          +        }
+          +    }
+          +
+          +    #[test]
+          +    fn conflicting_aliases_never_inherit_canonical_precedence() {
+          +        for (left, left_field) in FIELDS.iter().enumerate() {
+          +            for right_field in FIELDS.iter().skip(left + 1) {
+          +                for (a, b) in [(0_u64, 1_u64), (7, 9), (u64::MAX, 0)] {
+          +                    let mut metadata = Map::new();
+          +                    metadata.insert((*left_field).to_owned(), Value::from(a));
+          +                    metadata.insert((*right_field).to_owned(), Value::from(b));
+          +                    assert!(parse(&metadata).expect_err("conflicting aliases").contains("conflicting"));
+          +                }
+          +            }
+          +        }
+          +    }
+          +
+          +    // Build actual vector and (when enabled) lexical tiers. A bad
+          +    // watermark must fail admission, not just an isolated parser test.
+          +    async fn build_generation(cx: &asupersync::Cx, path: &Path, generation: u64) -> TestResult {
+          +        let documents = vec![crate::search::IndexableDocument::new(
+          +            "mem_watermark_recovery",
+          +            "Recovery must preserve the identity of the accepted source snapshot.",
+          +        )];
+          +        IndexBuilder::new(path)
+          +            .with_embedder_stack(hash_fallback_embedder_stack())
+          +            .add_documents(documents.clone())
+          +            .build(cx)
+          +            .await
+          +            .map_err(|error| error.to_string())?;
+          +        #[cfg(feature = "lexical-bm25")]
+          +        crate::core::index::build_lexical_tier(cx, path, &documents)
+          +            .await
+          +            .map_err(|error| error.to_string())?;
+          +        write_index_metadata(path, generation, IndexDocumentCounts::memory_only(1), None)
+          +            .map_err(|error| error.to_string())?;
+          +        assert_eq!(validated_index_generation(path)?, generation);
+          +        Ok(())
+          +    }
+          +
+          +    fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, String> {
+          +        let mut result = BTreeMap::new();
+          +        let mut pending = vec![root.to_path_buf()];
+          +        while let Some(path) = pending.pop() {
+          +            let relative = path.strip_prefix(root).map_err(|error| error.to_string())?.to_path_buf();
+          +            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+          +            if metadata.is_dir() {
+          +                result.insert(relative, None);
+          +                for entry in std::fs::read_dir(&path).map_err(|error| error.to_string())? {
+          +                    pending.push(entry.map_err(|error| error.to_string())?.path());
+          +                }
+          +            } else if metadata.is_file() {
+          +                result.insert(relative, Some(std::fs::read(&path).map_err(|error| error.to_string())?));
+          +            } else {
+          +                return Err("unexpected special entry in watermark test inventory".to_owned());
+          +            }
+          +        }
+          +        Ok(result)
+          +    }
+          +
+          +    fn damage_watermark(path: &Path, damage: &str) -> TestResult {
+          +        let metadata_path = path.join(INDEX_METADATA_FILE);
+          +        let mut metadata: Value = serde_json::from_slice(
+          +            &std::fs::read(&metadata_path).map_err(|error| error.to_string())?,
+          +        ).map_err(|error| error.to_string())?;
+          +        match damage {
+          +            "missing" => { metadata.as_object_mut().expect("manifest").remove("sourceGeneration"); }
+          +            "null" => metadata["sourceGeneration"] = Value::Null,
+          +            "conflicting" => metadata["generation"] = Value::from(1_u64),
+          +            "invalid_alias" => metadata["source_generation"] = Value::from("untrusted"),
+          +            _ => return Err("unknown watermark damage fixture".to_owned()),
+          +        }
+          +        std::fs::write(&metadata_path, serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?)
+          +            .map_err(|error| error.to_string())
+          +    }
+          +
+          +    fn recovery_case(damage: &'static str) -> TestResult {
+          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
+          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+          +            let _root = root;
+          +            let accepted = index_parent(&index).join("index.previous");
+          +            let ambiguous = index_parent(&index).join("index.previous.001");
+          +            build_generation(&cx, &accepted, 7).await?;
+          +            build_generation(&cx, &ambiguous, 9).await?;
+          +            damage_watermark(&ambiguous, damage)?;
+          +            assert!(validated_index_generation(&ambiguous).is_err());
+          +            assert_eq!(
+          +                find_latest_recoverable_retained_dir(&index).map_err(|error| error.to_string())?,
+          +                Some(accepted.clone())
+          +            );
+          +            let before = inventory(index_parent(&index))?;
+          +            #[cfg(unix)]
+          +            {
+          +                let lease = IndexGenerationLease::read(&cx, &index).await.map_err(|error| error.to_string())?;
+          +                assert_eq!(lease.index_for_snapshot(&cx, &index, 9).map_err(|error| error.to_string())?, accepted);
+          +                assert!(lease.index_for_snapshot(&cx, &index, 6).is_err());
+          +                drop(lease);
+          +            }
+          +            assert_eq!(inventory(index_parent(&index))?, before, "selection must be read-only");
+          +            let rejected_bytes = inventory(&ambiguous)?;
+          +            assert_eq!(
+          +                recover_interrupted_publish(&index).map_err(|error| error.to_string())?,
+          +                IndexPublishRecoveryAction::RetainedGenerationRestored
+          +            );
+          +            assert_eq!(validated_index_generation(&index)?, 7);
+          +            assert_eq!(inventory(&ambiguous)?, rejected_bytes, "unadmitted bytes stay intact");
+          +            Ok(())
+          +        }).map_err(|error| error.to_string())?
+          +    }
+          +
+          +    #[test]
+          +    fn recovery_uses_accepted_tiers_instead_of_a_missing_watermark() -> TestResult {
+          +        recovery_case("missing")
+          +    }
+          +
+          +    #[test]
+          +    fn recovery_uses_accepted_tiers_instead_of_a_null_watermark() -> TestResult {
+          +        recovery_case("null")
+          +    }
+          +
+          +    #[test]
+          +    fn readers_and_repair_reject_conflicting_aliases() -> TestResult {
+          +        recovery_case("conflicting")
+          +    }
+          +
+          +    #[test]
+          +    fn readers_and_repair_reject_invalid_secondary_aliases() -> TestResult {
+          +        recovery_case("invalid_alias")
+          +    }
+          +
+          +    #[test]
+          +    fn missing_watermark_alone_is_never_promoted_but_explicit_zero_is() -> TestResult {
+          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
+          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+          +            let _root = root;
+          +            let retained = index_parent(&index).join("index.previous");
+          +            build_generation(&cx, &retained, 0).await?;
+          +            let valid_manifest = std::fs::read(retained.join(INDEX_METADATA_FILE)).map_err(|error| error.to_string())?;
+          +            damage_watermark(&retained, "missing")?;
+          +            let before = inventory(index_parent(&index))?;
+          +            assert_eq!(recover_interrupted_publish(&index).map_err(|error| error.to_string())?, IndexPublishRecoveryAction::NoRecoverableGeneration);
+          +            assert!(!index.exists());
+          +            assert_eq!(inventory(index_parent(&index))?, before);
+          +            // Explicit zero is a real snapshot, unlike a missing watermark.
+          +            std::fs::write(retained.join(INDEX_METADATA_FILE), valid_manifest).map_err(|error| error.to_string())?;
+          +            assert_eq!(recover_interrupted_publish(&index).map_err(|error| error.to_string())?, IndexPublishRecoveryAction::RetainedGenerationRestored);
+          +            assert_eq!(validated_index_generation(&index)?, 0);
+          +            Ok(())
+          +        }).map_err(|error| error.to_string())?
+          +    }
+          +}
+          PATCH
+          git apply --recount --check "$RUNNER_TEMP/generation.patch"
+          git apply --recount "$RUNNER_TEMP/generation.patch"
+          rustfmt --edition 2024 src/core/index_generation_watermark.rs
+          git diff --check
+          cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-tests.log"
+          grep -Fq 'test result: ok. 10 passed; 0 failed;' "$RUNNER_TEMP/generation-tests.log"
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log"
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log"
+          cargo test --locked --lib parse_index_metadata -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-metadata.log"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          git commit -m 'fix(index): reject missing and conflicting source generation watermarks' -m 'Require an unsigned source watermark and agreement among canonical and legacy aliases across shared index admission. Preserve explicit generation zero and unadmitted directory bytes. Ten focused regressions construct real vector and lexical tiers and cover read-only fallback plus writer recovery. Focused admission, existing read-lease, rollback-manifest, and metadata-filter tests passed before this commit.'
+          pushed=0
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then pushed=1; break; fi
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            git merge --no-edit origin/main
+            base=$(git rev-parse origin/main)
+            cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2
+          done
+          test "$pushed" -eq 1
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-source-sha.log"
+          git log -1 --format=%B | tee "$RUNNER_TEMP/generation-commit.log"
+          git diff HEAD^ HEAD -- src/core/index.rs src/core/index_generation_watermark.rs > "$RUNNER_TEMP/generation-delivered.patch"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generation-admission-verification
+          path: |
+            ${{ runner.temp }}/generation-*.log
+            ${{ runner.temp }}/generation*.patch
+            src/core/index_generation_watermark.rs
+          retention-days: 7
