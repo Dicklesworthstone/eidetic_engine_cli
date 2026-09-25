@@ -27145,7 +27145,7 @@ mod tests {
             // Model a previously captured planning clock without sleeping.
             // In the expiry case the stored candidate stays byte-identical;
             // only elapsed time invalidates its authorization to apply.
-            let planned_clock = Utc::now() - chrono::Duration::days(2);
+            let planned_clock = chrono::Utc::now() - chrono::Duration::days(2);
             let now = planned_clock.to_rfc3339();
             if interleave == "expired_during_wait" {
                 let expires_at = (planned_clock + chrono::Duration::days(1)).to_rfc3339();
