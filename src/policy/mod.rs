@@ -4201,12 +4201,12 @@ mod tests {
         assert_eq!(report.instruction_risk, "high");
         assert!(!report.content.contains(raw_secret));
         assert!(report.content.contains("[REDACTED:"));
-        assert!(
-            report
-                .redacted_reasons
-                .iter()
-                .any(|reason| reason == "api_key")
-        );
+        // The ingestion screen resolves provider bearers on the original text
+        // before key/value redaction (8e7003e74), so the span reports its
+        // stable provider reason code, not the generic `api_key` it replaced;
+        // provider codes are the documented `allowCategories` vocabulary
+        // (docs/query-schema.md). bd-c24le.
+        assert_eq!(report.redacted_reasons, ["openai_api_key"]);
         assert!(
             report
                 .rejected_reasons
