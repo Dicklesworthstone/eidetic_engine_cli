@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.model_fetch.v2",
+  "title": "Verified model fetch and optional workspace registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workspacePath", "databasePath", "modelId", "modelPurpose", "sourcePath", "storedPath", "copied", "contentLengthBytes", "hashBlake3", "hashSha256", "registryEntry"],
+  "properties": {
+    "schema": { "const": "ee.model_fetch.v2" },
+    "workspacePath": { "type": "string" },
+    "databasePath": { "type": ["string", "null"] },
+    "modelId": { "type": "string", "minLength": 1 },
+    "modelPurpose": { "enum": ["embedding", "reranker"] },
+    "sourcePath": { "type": "string" },
+    "storedPath": { "type": "string" },
+    "copied": { "type": "boolean" },
+    "contentLengthBytes": { "type": "integer", "minimum": 1 },
+    "hashBlake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hashSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "registryEntry": { "type": ["object", "null"] }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "modelPurpose": { "const": "embedding" },
+        "databasePath": { "type": "null" },
+        "registryEntry": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "databasePath": { "type": "string", "minLength": 1 },
+        "registryEntry": { "type": "object", "required": ["id", "status"] }
+      }
+    }
+  ]
+}

@@ -221,6 +221,156 @@ fn model_fetch_embedding_default_uses_public_embedding_dispatcher() -> TestResul
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_embedding_fetch_respects_offline_policy_with_and_without_a_store() -> TestResult {
+    let workspace = E2eWorkspace::create("fetch-offline-policy")?;
+    let model_root = workspace.path.join("empty-model-cache");
+    let network_tripwire = NetworkTripwire::start()?;
+    for initialized in [false, true] {
+        if initialized {
+            let init = run_ee_with_env(
+                &workspace,
+                "offline_fetch_init",
+                &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+                &[("EE_EMBED_DOWNLOAD".to_string(), "off".to_string())],
+            )?;
+            ensure_success(&init, "offline fetch init")?;
+        }
+        for mode in ["off", "OFF", "0", "false", "no"] {
+            let mut env = network_tripwire.proxy_env();
+            env.extend([
+                ("EE_EMBED_DOWNLOAD".to_string(), mode.to_string()),
+                ("EE_EMBED_MODEL_DIR".to_string(), path_string(&model_root)),
+            ]);
+            let output = run_ee_with_env(
+                &workspace,
+                &format!("offline_fetch_{initialized}_{mode}"),
+                &[
+                    "model",
+                    "fetch",
+                    "embedding-default",
+                    "--workspace",
+                    workspace.workspace_arg()?,
+                    "--json",
+                ],
+                &env,
+            )?;
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            let value = stdout_json(&output, "offline embedding fetch")?;
+            assert_eq!(value["schema"], ERROR_SCHEMA_V2);
+            assert_eq!(value["error"]["code"], "configuration");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| { message.contains("network downloads are disabled") })
+            );
+            assert_eq!(workspace.path.join(".ee/ee.db").is_file(), initialized);
+            if !initialized {
+                assert!(!workspace.path.join(".ee").exists());
+            }
+            assert!(!model_root.exists(), "refused download created a cache");
+        }
+    }
+    network_tripwire.assert_unused()
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn embedding_fetch_repairs_machine_receipt_without_initializing_a_workspace() -> TestResult {
+    let fixture_root = isolated_ee::model_fixture_root()?;
+    let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
+    let workspace = E2eWorkspace::create("fetch-machine-receipt")?;
+    let model_root = workspace.path.join("machine-model-cache");
+    // An operator may name the directory itself without the canonical basename.
+    // Both explicit fetch and later offline status must resolve the same model.
+    let model_dir = model_root.clone();
+    let manifest = ModelManifest::potion_128m();
+    materialize_regular_model_fixture(&fixture_model_dir, &model_dir, &manifest)?;
+    let tokenizer = model_dir.join("tokenizer.json");
+    let mode = fs::metadata(&tokenizer)
+        .map_err(|error| error.to_string())?
+        .permissions()
+        .mode();
+    fs::set_permissions(&tokenizer, fs::Permissions::from_mode(mode ^ 0o100))
+        .map_err(|error| error.to_string())?;
+    assert!(
+        !is_verification_cached(&manifest, &model_dir),
+        "receipt was not made stale"
+    );
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut env = network_tripwire.proxy_env();
+    env.extend([
+        ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
+        ("EE_EMBED_MODEL_DIR".to_string(), path_string(&model_root)),
+    ]);
+    // Deliberately omit --workspace: first-use repair runs from an ordinary cwd.
+    let output = ee_command_with_env(
+        &workspace,
+        &["model", "fetch", "embedding-default", "--json"],
+        &env,
+    )
+    .current_dir(&workspace.path)
+    .output()
+    .map_err(|error| error.to_string())?;
+    ensure_success(&output, "machine-only receipt repair")?;
+    let value = stdout_json(&output, "machine-only receipt repair")?;
+    assert_eq!(value["schema"], RESPONSE_SCHEMA_V2);
+    let data = response_data(&value, "machine-only receipt repair")?;
+    assert_eq!(data["schema"], "ee.model_fetch.v2");
+    assert_eq!(data.get("databasePath"), Some(&Value::Null));
+    assert_eq!(data.get("registryEntry"), Some(&Value::Null));
+    assert_eq!(data["copied"], false);
+    assert!(!workspace.path.join(".ee").exists());
+    assert!(is_verification_cached(&manifest, &model_dir));
+
+    let init = run_ee_with_env(
+        &workspace,
+        "machine_fetch_later_init",
+        &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+        &env,
+    )?;
+    ensure_success(&init, "later workspace init")?;
+    let fetch = run_ee_with_env(
+        &workspace,
+        "machine_fetch_later_registration",
+        &[
+            "model",
+            "fetch",
+            "embedding-default",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&fetch, "existing workspace registration")?;
+    let registered = stdout_json(&fetch, "existing workspace registration")?;
+    assert!(registered["data"]["databasePath"].is_string());
+    assert_eq!(registered["data"]["registryEntry"]["status"], "available");
+    assert_eq!(registered["data"]["hashBlake3"], data["hashBlake3"]);
+    let status = run_ee_with_env(
+        &workspace,
+        "machine_fetch_later_status",
+        &[
+            "model",
+            "status",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&status, "later-process model status")?;
+    ensure_text_absent(
+        &status.stdout,
+        "embed_model_receipt_stale",
+        "repaired receipt",
+    )?;
+    network_tripwire.assert_unused()
+}
+
 struct E2eWorkspace {
     path: PathBuf,
     home: PathBuf,

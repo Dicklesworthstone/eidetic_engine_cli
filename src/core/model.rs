@@ -75,7 +75,7 @@ const DEFAULT_RERANK_MODEL_ALIAS: &str = "rerank-default";
 const DEFAULT_RERANK_MODEL_ARTIFACT_NAME: &str = "rerank-default-v1.tar.zst";
 
 pub const RERANK_MODEL_MANIFEST_SCHEMA_V1: &str = "ee.model_manifest.v1";
-pub const MODEL_FETCH_SCHEMA_V1: &str = "ee.model_fetch.v1";
+pub const MODEL_FETCH_SCHEMA_V2: &str = "ee.model_fetch.v2";
 pub const MODEL_LIFECYCLE_SCHEMA_V1: &str = "ee.model_lifecycle.v1";
 
 const MODEL_LIFECYCLE_REDACTION_STATUS: &str = "paths_workspace_relative_or_hashed_no_content";
@@ -865,7 +865,7 @@ pub struct ModelListReport {
 pub struct ModelFetchReport {
     pub schema: &'static str,
     pub workspace_path: PathBuf,
-    pub database_path: PathBuf,
+    pub database_path: Option<PathBuf>,
     pub model_id: String,
     pub model_purpose: &'static str,
     pub source_path: PathBuf,
@@ -874,7 +874,7 @@ pub struct ModelFetchReport {
     pub content_length_bytes: u64,
     pub hash_blake3: String,
     pub hash_sha256: String,
-    pub registry_entry: ModelRegistryEntryView,
+    pub registry_entry: Option<ModelRegistryEntryView>,
 }
 
 impl ModelFetchReport {
@@ -883,7 +883,7 @@ impl ModelFetchReport {
         serde_json::json!({
             "schema": self.schema,
             "workspacePath": self.workspace_path.to_string_lossy(),
-            "databasePath": self.database_path.to_string_lossy(),
+            "databasePath": self.database_path.as_ref().map(|path| path.to_string_lossy()),
             "modelId": self.model_id,
             "modelPurpose": self.model_purpose,
             "sourcePath": redact_model_source_uri(&self.source_path.to_string_lossy()),
@@ -892,19 +892,26 @@ impl ModelFetchReport {
             "contentLengthBytes": self.content_length_bytes,
             "hashBlake3": self.hash_blake3,
             "hashSha256": self.hash_sha256,
-            "registryEntry": self.registry_entry.data_json(),
+            "registryEntry": self.registry_entry.as_ref().map(ModelRegistryEntryView::data_json),
         })
     }
 
     #[must_use]
     pub fn human_summary(&self) -> String {
+        let registration = self.registry_entry.as_ref().map_or_else(
+            || {
+                "Model verified in the machine cache; no workspace registration requested."
+                    .to_string()
+            },
+            |entry| format!("Registered model: {}", entry.id),
+        );
         format!(
-            "Fetched {} model {} ({} bytes, blake3:{})\nRegistered model: {}\n",
+            "Fetched {} model {} ({} bytes, blake3:{})\n{}\n",
             self.model_purpose,
             self.model_id,
             self.content_length_bytes,
             self.hash_blake3,
-            self.registry_entry.id,
+            registration,
         )
     }
 }
@@ -2394,6 +2401,20 @@ fn resolved_database_path(
     }
 }
 
+fn model_fetch_database_path(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+) -> Result<Option<PathBuf>, DomainError> {
+    match resolved_database_path(workspace_path, database_path) {
+        Ok(path) => Ok(Some(path)),
+        // An explicit database selector is still authoritative. Only an absent
+        // implicit workspace store opts out of registration; corrupt, unreadable,
+        // and symlinked stores must retain their existing diagnostics.
+        Err(DomainError::WorkspaceStoreMissing { .. }) if database_path.is_none() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn ensure_no_model_database_symlink_components(path: &Path) -> Result<(), DomainError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -2776,22 +2797,38 @@ fn fetch_bundled_embedding_model(
     }
 
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
-    let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let connection = DbConnection::open_file(&database_path).map_err(|error| {
-        db_error_to_domain(
-            error,
-            "Failed to open database",
-            Some("ee init --workspace .".to_string()),
-        )
-    })?;
-    let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
-    ensure_bundled_embedding_model_registered_for_status(&connection, &workspace_id)?;
+    let database_path = model_fetch_database_path(&workspace_path, options.database_path)?;
+    let registration = database_path
+        .as_ref()
+        .map(|path| {
+            let connection = DbConnection::open_file(path).map_err(|error| {
+                db_error_to_domain(
+                    error,
+                    "Failed to open database",
+                    Some("ee doctor --json".to_string()),
+                )
+            })?;
+            let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+            Ok::<_, DomainError>((connection, workspace_id))
+        })
+        .transpose()?;
 
     let model_root = options
         .model_store_root
         .map(Path::to_path_buf)
         .unwrap_or_else(default_embedder_model_root);
-    let stored_path = potion_model_destination_dir(&model_root);
+    let destination = potion_model_destination_dir(&model_root);
+    // Match local search discovery when EE_EMBED_MODEL_DIR names a verified
+    // model directory with an operator-chosen basename. Do not download into
+    // a new child instead of repairing the model already in use.
+    let stored_path = if destination != model_root
+        && !destination.is_dir()
+        && crate::core::index::verified_potion_model_dir(&model_root)
+    {
+        model_root
+    } else {
+        destination
+    };
     let manifest = ModelManifest::potion_128m();
     let content_length_bytes = manifest.total_size_bytes();
     let source_path = PathBuf::from(format!(
@@ -2817,13 +2854,14 @@ fn fetch_bundled_embedding_model(
             );
         }
     }
-    let was_cached = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).is_ok();
-
-    if !was_cached {
+    // Keep the successful load: a cached fetch must not parse the large
+    // tokenizer and allocate the embedding matrix twice.
+    let cached = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).ok();
+    let was_cached = cached.is_some();
+    let loaded = if let Some(loaded) = cached {
+        loaded
+    } else {
         download_embedding_manifest(&manifest, &stored_path)?;
-    }
-
-    let loaded =
         Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).map_err(|error| {
             DomainError::Configuration {
                 message: format!(
@@ -2832,21 +2870,59 @@ fn fetch_bundled_embedding_model(
                 ),
                 repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
             }
+        })?
+    };
+    let hash_blake3 = crate::core::index::embedding_model_content_hash(&loaded)
+        .trim_start_matches("blake3:")
+        .to_string();
+    let hash_sha256 = model_manifest_sha256_fingerprint(&manifest);
+    let registry_entry = registration
+        .as_ref()
+        .map(|(connection, workspace_id)| {
+            register_fetched_embedding_model(
+                connection,
+                workspace_id,
+                &loaded,
+                &stored_path,
+                was_cached,
+                content_length_bytes,
+            )
+        })
+        .transpose()?;
+
+    Ok(ModelFetchReport {
+        schema: MODEL_FETCH_SCHEMA_V2,
+        workspace_path,
+        database_path,
+        model_id: POTION_MODEL_NAME.to_string(),
+        model_purpose: "embedding",
+        source_path,
+        stored_path,
+        copied: !was_cached,
+        content_length_bytes,
+        hash_blake3,
+        hash_sha256,
+        registry_entry,
+    })
+}
+
+fn register_fetched_embedding_model(
+    connection: &DbConnection,
+    workspace_id: &str,
+    loaded: &Model2VecEmbedder,
+    stored_path: &Path,
+    was_cached: bool,
+    content_length_bytes: u64,
+) -> Result<ModelRegistryEntryView, DomainError> {
+    ensure_loaded_embedding_registry_record(connection, workspace_id, loaded, Some(stored_path))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to register downloaded bundled embedding model: {error}"),
+            repair: Some("ee model status --workspace . --json".to_string()),
         })?;
-    ensure_loaded_embedding_registry_record(
-        &connection,
-        &workspace_id,
-        &loaded,
-        Some(&stored_path),
-    )
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to register downloaded bundled embedding model: {error}"),
-        repair: Some("ee model status --workspace . --json".to_string()),
-    })?;
 
     let registry_entry = connection
         .find_model_registry_entry(
-            &workspace_id,
+            workspace_id,
             ModelProvider::Model2Vec,
             POTION_MODEL_NAME,
             ModelPurpose::Embedding,
@@ -2862,26 +2938,18 @@ fn fetch_bundled_embedding_model(
             message: "Downloaded bundled embedding model was not registered".to_string(),
             repair: Some("ee model status --workspace . --json".to_string()),
         })?;
-    let hash_blake3 = registry_entry
-        .content_hash
-        .as_deref()
-        .and_then(|hash| hash.strip_prefix("blake3:"))
-        .unwrap_or_default()
-        .to_string();
-    let hash_sha256 = model_manifest_sha256_fingerprint(&manifest);
-
     connection
         .insert_audit(
             &crate::db::generate_audit_id(),
             &crate::db::CreateAuditInput {
-                workspace_id: Some(workspace_id),
+                workspace_id: Some(workspace_id.to_string()),
                 actor: None,
                 action: "model.fetched".to_string(),
                 target_type: Some("model_registry".to_string()),
                 target_id: Some(registry_entry.id.clone()),
                 details: Some(
                     serde_json::json!({
-                        "schema": MODEL_FETCH_SCHEMA_V1,
+                        "schema": MODEL_FETCH_SCHEMA_V2,
                         "modelId": POTION_MODEL_NAME,
                         "modelPurpose": "embedding",
                         "storedPath": stored_path.to_string_lossy(),
@@ -2900,26 +2968,22 @@ fn fetch_bundled_embedding_model(
             )
         })?;
 
-    Ok(ModelFetchReport {
-        schema: MODEL_FETCH_SCHEMA_V1,
-        workspace_path,
-        database_path,
-        model_id: POTION_MODEL_NAME.to_string(),
-        model_purpose: "embedding",
-        source_path,
-        stored_path,
-        copied: !was_cached,
-        content_length_bytes,
-        hash_blake3,
-        hash_sha256,
-        registry_entry: ModelRegistryEntryView::from_stored(registry_entry),
-    })
+    Ok(ModelRegistryEntryView::from_stored(registry_entry))
 }
 
 fn download_embedding_manifest(
     manifest: &ModelManifest,
     destination: &Path,
 ) -> Result<(), DomainError> {
+    if !crate::core::index::embedding_download_allowed() {
+        return Err(DomainError::Configuration {
+            message: "Bundled embedding model is unavailable locally and network downloads are disabled by EE_EMBED_DOWNLOAD=off.".to_string(),
+            repair: Some(
+                "Populate the model cache from a verified offline copy, or explicitly set EE_EMBED_DOWNLOAD=auto and rerun ee model fetch embedding-default."
+                    .to_string(),
+            ),
+        });
+    }
     let manifest = manifest.clone();
     let destination = destination.to_path_buf();
     crate::core::run_cli_future(async move {
@@ -3234,7 +3298,7 @@ pub fn fetch_rerank_model(
                 target_id: Some(registry_entry.id.clone()),
                 details: Some(
                     serde_json::json!({
-                        "schema": MODEL_FETCH_SCHEMA_V1,
+                        "schema": MODEL_FETCH_SCHEMA_V2,
                         "modelId": manifest.model_id.clone(),
                         "storedPath": stored_path.to_string_lossy(),
                         "hashBlake3": hash_blake3.clone(),
@@ -3254,9 +3318,9 @@ pub fn fetch_rerank_model(
         })?;
 
     Ok(ModelFetchReport {
-        schema: MODEL_FETCH_SCHEMA_V1,
+        schema: MODEL_FETCH_SCHEMA_V2,
         workspace_path,
-        database_path,
+        database_path: Some(database_path),
         model_id: manifest.model_id,
         model_purpose: "reranker",
         source_path: source_path.to_path_buf(),
@@ -3265,7 +3329,7 @@ pub fn fetch_rerank_model(
         content_length_bytes,
         hash_blake3,
         hash_sha256,
-        registry_entry: ModelRegistryEntryView::from_stored(registry_entry),
+        registry_entry: Some(ModelRegistryEntryView::from_stored(registry_entry)),
     })
 }
 
@@ -5243,6 +5307,67 @@ mod tests {
             error.message().contains(AUTOMATIC_REPAIR_UNAVAILABLE),
             "reranker fetch error must expose automatic_repair_unavailable",
         )
+    }
+
+    #[test]
+    fn embedding_fetch_store_resolution_only_allows_an_absent_implicit_database() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        assert!(matches!(
+            model_fetch_database_path(&workspace_path, None),
+            Ok(None)
+        ));
+        assert!(!workspace_path.join(".ee").exists());
+        let explicit = workspace_path.join("missing.db");
+        assert!(matches!(
+            model_fetch_database_path(&workspace_path, Some(&explicit)),
+            Err(DomainError::WorkspaceStoreMissing { .. })
+        ));
+        fs::create_dir_all(workspace_path.join(".ee/ee.db")).map_err(|error| error.to_string())?;
+        assert!(matches!(
+            model_fetch_database_path(&workspace_path, None),
+            Err(DomainError::Storage { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedding_fetch_rejects_a_dangling_database_symlink() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            workspace_path.join("missing.db"),
+            workspace_path.join(".ee/ee.db"),
+        )
+        .map_err(|error| error.to_string())?;
+        let error = model_fetch_database_path(&workspace_path, None)
+            .expect_err("a dangling database link must not opt out of registration");
+        assert!(error.message().contains("symlink component"));
+        Ok(())
+    }
+
+    #[test]
+    fn machine_model_fetch_report_does_not_claim_workspace_registration() {
+        let report = ModelFetchReport {
+            schema: MODEL_FETCH_SCHEMA_V2,
+            workspace_path: PathBuf::from("/workspace"),
+            database_path: None,
+            model_id: POTION_MODEL_NAME.to_string(),
+            model_purpose: "embedding",
+            source_path: PathBuf::from("https://huggingface.co/model"),
+            stored_path: PathBuf::from("/cache/model"),
+            copied: false,
+            content_length_bytes: 1,
+            hash_blake3: "a".repeat(64),
+            hash_sha256: "b".repeat(64),
+            registry_entry: None,
+        };
+        let value = report.data_json();
+        assert_eq!(value["schema"], MODEL_FETCH_SCHEMA_V2);
+        assert_eq!(value.get("databasePath"), Some(&serde_json::Value::Null));
+        assert_eq!(value.get("registryEntry"), Some(&serde_json::Value::Null));
+        assert!(!report.human_summary().contains("Registered model:"));
+        assert!(report.human_summary().contains("machine cache"));
     }
 
     #[test]

@@ -6588,12 +6588,10 @@ fn verified_default_model_dir(settings: &EeEmbedderSettings) -> Option<PathBuf> 
     if verified_potion_model_dir(&destination) {
         return Some(destination);
     }
-    // Preserve auto-discovery's support for an explicitly supplied model
-    // directory whose basename differs from the canonical model name.
-    (settings.download_mode == EeEmbedDownloadMode::Auto
-        && destination != settings.model_root
-        && verified_potion_model_dir(&settings.model_root))
-    .then(|| settings.model_root.clone())
+    // A verified, explicitly supplied model directory is usable offline too,
+    // regardless of whether its basename is the canonical model name.
+    (destination != settings.model_root && verified_potion_model_dir(&settings.model_root))
+        .then(|| settings.model_root.clone())
 }
 
 /// Test-only since 5434b5b4e (bd-kvltg). Production now resolves through
@@ -7283,6 +7281,11 @@ fn default_embed_download_mode() -> EeEmbedDownloadMode {
         crate::config::env_registry::EnvVar::EmbedDownload,
     );
     parse_embed_download_mode(raw.as_deref())
+}
+
+/// The explicit fetch command and lazy search loader share the same offline policy.
+pub(crate) fn embedding_download_allowed() -> bool {
+    default_embed_download_mode() == EeEmbedDownloadMode::Auto
 }
 
 fn parse_embed_download_mode(raw: Option<&str>) -> EeEmbedDownloadMode {
@@ -8155,6 +8158,11 @@ fn active_embedder_fingerprint(
         revision,
         content_hash,
     }
+}
+
+/// Model identity used by both workspace registration and machine-level fetches.
+pub(crate) fn embedding_model_content_hash(embedder: &dyn crate::search::Embedder) -> String {
+    active_embedder_fingerprint(embedder, provider_for_embedder(embedder)).content_hash
 }
 
 fn active_embedder_content_hash(

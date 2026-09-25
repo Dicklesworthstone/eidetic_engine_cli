@@ -137,8 +137,8 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
             .map_err(|error| error.to_string())
         };
         let exported = |backup: &Path| -> Result<BTreeMap<String, Option<String>>, String> {
-            let text = fs::read_to_string(backup.join(RECORDS_FILE))
-                .map_err(|error| error.to_string())?;
+            let text =
+                fs::read_to_string(backup.join(RECORDS_FILE)).map_err(|error| error.to_string())?;
             text.lines()
                 .map(serde_json::from_str::<JsonValue>)
                 .collect::<Result<Vec<_>, _>>()
@@ -167,8 +167,7 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
         })
         .map_err(|error| error.to_string())?;
         let restored_database = PathBuf::from(&restored.restored_database_path);
-        let db = DbConnection::open_file(&restored_database)
-            .map_err(|error| error.to_string())?;
+        let db = DbConnection::open_file(&restored_database).map_err(|error| error.to_string())?;
         let restored_provenance = db
             .list_memories(&workspace_id, None, true)
             .map_err(|error| error.to_string())?

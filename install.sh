@@ -1572,7 +1572,7 @@ run_semantic_first_use_smoke() {
   fi
   compact=$(tr -d '\n' <"$fetch_json")
   if ! printf '%s' "$compact" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' \
-     || ! printf '%s' "$compact" | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"ee.model_fetch.v1"' \
+     || ! printf '%s' "$compact" | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"ee.model_fetch.v2"' \
      || ! printf '%s' "$compact" | grep -Eq '"modelId"[[:space:]]*:[[:space:]]*"rerank-default-v1"' \
      || ! printf '%s' "$compact" | grep -Eq '"modelPurpose"[[:space:]]*:[[:space:]]*"reranker"' \
      || ! printf '%s' "$compact" | grep -Eq '"registryEntry"[[:space:]]*:[[:space:]]*\{[^}]*"status"[[:space:]]*:[[:space:]]*"available"'; then

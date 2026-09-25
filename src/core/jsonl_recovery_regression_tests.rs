@@ -191,8 +191,8 @@ fn ordinary_jsonl_import_retains_origin_markers_for_missing_provenance() -> Test
         let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
         assert_eq!(report.status, "completed", "{:?}", report.issues);
         assert_eq!(report.memories_imported, 2);
-        let db = DbConnection::open_file(database_path(&options))
-            .map_err(|error| error.to_string())?;
+        let db =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
         for (record, expected) in [
             (
                 &records[1],

@@ -2805,6 +2805,22 @@ Windows). The `models/model2vec/potion-multilingual-128M/` layout mentioned
 above is *read* (and preferred when it already verifies) but never written by
 `ee model fetch`, so a fresh machine always ends up with the layout shown here.
 
+**Machine-level repair.** `ee model fetch embedding-default` works in a directory
+without an initialized workspace. It verifies or installs the machine cache and
+refreshes a stale verification receipt without creating an `.ee` directory or a
+database. When the addressed workspace already has a store, the command also
+updates its model registry and records the fetch audit. An explicit `--database`
+still requires that database to exist; unreadable or corrupt stores are errors.
+`EE_EMBED_DOWNLOAD=off` prohibits network access for explicit fetches as well as
+automatic loading. It permits verification of an existing local model and
+reports a configuration error when no usable local model is available.
+
+The fetch response uses `ee.model_fetch.v2` inside the `ee.response.v2` envelope.
+Compared with v1, `databasePath` and `registryEntry` are nullable: both are `null`
+for a machine-only embedding fetch, and both are populated after workspace
+registration. Consumers must check for registration before reading registry
+fields. Reranker artifact imports still require workspace registration.
+
 **Verification.** Frankensearch owns the pinned manifest: each file is checked
 against its pinned size and SHA-256, and the `.verified` receipt lets later
 loads skip re-hashing the 512 MB weights while sizes, mtimes, and inodes still
@@ -2824,7 +2840,7 @@ shared location once, then reuse it everywhere:
 
 ```bash
 export EE_EMBED_MODEL_DIR=/shared/models       # root; the model lands in /shared/models/potion-multilingual-128M
-ee model fetch embedding-default --workspace .  # one download, receipt minted
+ee model fetch embedding-default                # one download, receipt minted; no workspace needed
 # on every other machine/user with the same EE_EMBED_MODEL_DIR:
 EE_EMBED_DOWNLOAD=off ee model status --workspace .   # verified local model, no network
 ```

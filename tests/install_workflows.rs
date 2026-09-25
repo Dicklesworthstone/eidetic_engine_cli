@@ -1079,7 +1079,7 @@ fn release_installer_model_smoke_is_pinned_and_fail_closed() -> TestResult {
         "EE_INSTALL_RERANK_MODEL_URL",
         "rerank-default-v1/rerank-default-v1.tar.zst",
         "model fetch rerank-default --from-file \"$archive\" --json",
-        "\"schema\"[[:space:]]*:[[:space:]]*\"ee.model_fetch.v1\"",
+        "\"schema\"[[:space:]]*:[[:space:]]*\"ee.model_fetch.v2\"",
         "\"modelId\"[[:space:]]*:[[:space:]]*\"rerank-default-v1\"",
         "\"modelPurpose\"[[:space:]]*:[[:space:]]*\"reranker\"",
         "\"registryEntry\"[[:space:]]*:[[:space:]]*\\{[^}]*\"status\"",

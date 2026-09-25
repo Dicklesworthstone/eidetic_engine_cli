@@ -595,13 +595,13 @@ run_native_rerank_determinism_lane() {
         --from-file "$RERANK_MODEL_ARCHIVE" --json || return 1
     model_fetch_json="$RERANK_JSON_OUTPUT"
     if ! printf '%s' "$model_fetch_json" | jq -e '
-        .data.schema == "ee.model_fetch.v1"
+        .data.schema == "ee.model_fetch.v2"
         and .data.modelId == "rerank-default-v1"
         and .data.modelPurpose == "reranker"
         and .data.registryEntry.status == "available"
     ' >/dev/null 2>&1; then
         e2e_log_assert_eq "invalid model fetch contract" \
-            "ee.model_fetch.v1 reranker available" "rerank_model_fetch_contract"
+            "ee.model_fetch.v2 reranker available" "rerank_model_fetch_contract"
         return 1
     fi
     e2e_log_assert_eq "true" "true" "rerank_model_fetch_contract"

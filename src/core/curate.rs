@@ -13806,27 +13806,26 @@ fn evaluate_link_candidate_for_apply(
             }
         }
     }
-    let already_linked = match connection
-        .list_memory_links_for_memory(&payload.memory_a, Some(payload.relation))
-    {
-        Ok(links) => links.iter().any(|link| {
-            link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
-        }),
-        Err(error) => {
-            errors.push(validation_issue(
-                "link_candidate_link_unavailable",
-                format!("Failed to inspect the proposed link: {error}"),
-                "ee doctor --json",
-            ));
-            return blocked_apply(
-                stored,
-                None,
-                errors,
-                warnings,
-                "ee doctor --json".to_owned(),
-            );
-        }
-    };
+    let already_linked =
+        match connection.list_memory_links_for_memory(&payload.memory_a, Some(payload.relation)) {
+            Ok(links) => links.iter().any(|link| {
+                link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
+            }),
+            Err(error) => {
+                errors.push(validation_issue(
+                    "link_candidate_link_unavailable",
+                    format!("Failed to inspect the proposed link: {error}"),
+                    "ee doctor --json",
+                ));
+                return blocked_apply(
+                    stored,
+                    None,
+                    errors,
+                    warnings,
+                    "ee doctor --json".to_owned(),
+                );
+            }
+        };
     if already_linked {
         warnings.push(validation_issue(
             "link_candidate_link_exists",
@@ -14313,8 +14312,7 @@ fn persist_candidate_application_inner(
             })?;
         if current.as_ref() != Some(stored) {
             return Err(DomainError::Usage {
-                message: "Link candidate changed during preparation; inspect and retry."
-                    .to_owned(),
+                message: "Link candidate changed during preparation; inspect and retry.".to_owned(),
                 repair: Some("ee curate show <ID> --json".to_owned()),
             });
         }
@@ -14325,8 +14323,9 @@ fn persist_candidate_application_inner(
             evaluate_link_candidate_for_apply(connection, stored, &Utc::now().to_rfc3339());
         if !current_decision.should_persist || !current_decision.application.errors.is_empty() {
             return Err(DomainError::Usage {
-                message: "Link candidate is no longer applicable; apply rolled back with no mutation."
-                    .to_owned(),
+                message:
+                    "Link candidate is no longer applicable; apply rolled back with no mutation."
+                        .to_owned(),
                 repair: Some(format!("ee curate show {} --json", stored.id)),
             });
         }
@@ -26971,11 +26970,18 @@ mod tests {
     fn suggested_link_apply_preserves_memories_and_records_one_audited_link() -> TestResult {
         for (candidate_type, relation, already_linked) in [
             ("link_proposal", MemoryLinkRelation::Related, false),
-            ("contradiction_review", MemoryLinkRelation::Contradicts, false),
+            (
+                "contradiction_review",
+                MemoryLinkRelation::Contradicts,
+                false,
+            ),
             ("link_proposal", MemoryLinkRelation::Supports, true),
         ] {
             let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let workspace = dir.path().canonicalize().map_err(|error| error.to_string())?;
+            let workspace = dir
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
             let database = workspace.join("ee.db");
             let workspace_id = test_workspace_id(&workspace);
             let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D01)).to_string();
@@ -27190,7 +27196,10 @@ mod tests {
                 &now,
                 "suggested-link-test",
             );
-            assert!(result.is_err(), "{interleave} must refuse or roll back apply");
+            assert!(
+                result.is_err(),
+                "{interleave} must refuse or roll back apply"
+            );
             assert!(
                 connection
                     .list_memory_links_for_memory(&memory_a, None)

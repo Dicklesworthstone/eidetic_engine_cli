@@ -662,7 +662,7 @@ run_model_backed_lane() {
     assert_json_file "${LAST_STDOUT_FILE}" '
         .schema == "ee.response.v2"
         and .success == true
-        and .data.schema == "ee.model_fetch.v1"
+        and .data.schema == "ee.model_fetch.v2"
         and .data.modelId == "rerank-default-v1"
         and .data.modelPurpose == "reranker"
         and .data.registryEntry.status == "available"
