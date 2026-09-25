@@ -1,0 +1,39 @@
+name: Index recovery admission
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/index-recovery-admission.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Capture exact recovery inputs and open feature work
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          python3 - <<'PY'
+          import json
+          with open('.beads/issues.jsonl') as f:
+              issues = [json.loads(line) for line in f if line.strip()]
+          opened = [i for i in issues if i.get('status') not in ('closed', 'tombstone')]
+          print('OPEN BEADS:', len(opened))
+          terms = ('index', 'recovery', 'publication', 'crash', 'neural', 'readiness')
+          for i in sorted(opened, key=lambda i: (i.get('priority', 9), i['id'])):
+              if i.get('priority', 9) <= 1 and any(t in (i.get('title', '') + i.get('description', '')).lower() for t in terms):
+                  print(json.dumps(i, ensure_ascii=False))
+          PY
+          git archive --format=tar HEAD > "$RUNNER_TEMP/recovery-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: index-recovery-source
+          path: ${{ runner.temp }}/recovery-source.tar
+          retention-days: 1
