@@ -47,6 +47,142 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    #[test]
+    fn writer_recovery_selects_the_latest_generation_within_the_source_snapshot() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+            let _root = root;
+            let accepted = index_parent(&index).join("index.previous");
+            let future = index_parent(&index).join("index.previous.001");
+            build_generation(&cx, &accepted, 7).await?;
+            build_generation(&cx, &future, 9).await?;
+            let future_bytes = inventory(&future)?;
+            assert_eq!(
+                crate::core::index::find_latest_recoverable_retained_dir_for_snapshot(&index, 8)
+                    .map_err(|error| error.to_string())?,
+                Some(accepted)
+            );
+            assert_eq!(
+                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 8)
+                    .map_err(|error| error.to_string())?,
+                IndexPublishRecoveryAction::RetainedGenerationRestored
+            );
+            assert_eq!(validated_index_generation(&index)?, 7);
+            assert_eq!(inventory(&future)?, future_bytes);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn future_only_retention_is_preserved_without_activation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+            let _root = root;
+            let future = index_parent(&index).join("index.previous");
+            build_generation(&cx, &future, 9).await?;
+            let before = inventory(index_parent(&index))?;
+            for ceiling in [0, 7, 8] {
+                assert_eq!(
+                    crate::core::index::recover_interrupted_publish_for_snapshot(&index, ceiling)
+                        .map_err(|error| error.to_string())?,
+                    IndexPublishRecoveryAction::NoRecoverableGeneration
+                );
+                assert!(!index.exists());
+                assert_eq!(inventory(index_parent(&index))?, before);
+            }
+            // A later source snapshot may use the preserved generation.
+            assert_eq!(
+                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 9)
+                    .map_err(|error| error.to_string())?,
+                IndexPublishRecoveryAction::RetainedGenerationRestored
+            );
+            assert_eq!(validated_index_generation(&index)?, 9);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn generation_zero_is_a_real_recovery_ceiling_not_an_unbounded_sentinel() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+            let _root = root;
+            build_generation(&cx, &index_parent(&index).join("index.previous"), 0).await?;
+            let future = index_parent(&index).join("index.previous.001");
+            build_generation(&cx, &future, 1).await?;
+            let future_bytes = inventory(&future)?;
+            assert_eq!(
+                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 0)
+                    .map_err(|error| error.to_string())?,
+                IndexPublishRecoveryAction::RetainedGenerationRestored
+            );
+            assert_eq!(validated_index_generation(&index)?, 0);
+            assert_eq!(inventory(&future)?, future_bytes);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn displaced_inode_identity_does_not_bypass_the_source_generation_ceiling() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+            let _root = root;
+            let accepted = index_parent(&index).join("index.previous");
+            build_generation(&cx, &accepted, 7).await?;
+            build_generation(&cx, &index, 9).await?;
+            let displaced = crate::core::index::create_publish_staging_dir(&index)
+                .map_err(|error| error.to_string())?;
+            build_generation(&cx, &displaced, 10).await?;
+            // Exercise the actual exchange path: the formerly live inode
+            // lands at its attested staging name, not a fabricated fixture.
+            crate::core::index::exchange_index_directories(&index, &displaced)
+                .map_err(|error| error.to_string())?;
+            let unpublished = index_parent(&index).join("uncommitted.saved");
+            std::fs::rename(&index, &unpublished).map_err(|error| error.to_string())?;
+            assert!(
+                crate::core::index::displaced_generation_sequence(&index, &displaced)
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
+            assert_eq!(validated_index_generation(&displaced)?, 9);
+            let displaced_bytes = inventory(&displaced)?;
+            let unpublished_bytes = inventory(&unpublished)?;
+            assert_eq!(
+                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 8)
+                    .map_err(|error| error.to_string())?,
+                IndexPublishRecoveryAction::RetainedGenerationRestored
+            );
+            assert_eq!(validated_index_generation(&index)?, 7);
+            assert_eq!(inventory(&displaced)?, displaced_bytes);
+            assert_eq!(inventory(&unpublished)?, unpublished_bytes);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
     fn parse_value(value: Value) -> Result<u64, String> {
         parse(value.as_object().expect("object fixture"))
     }
