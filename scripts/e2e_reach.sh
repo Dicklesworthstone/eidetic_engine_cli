@@ -345,7 +345,7 @@ if [ "$SCORECARD_MODE" != "none" ]; then
             --level procedural \
             --kind rule \
             --tags reach,scorecard,coverage \
-            --source "file://$SCORE_EVIDENCE:1" \
+            --source "file://$SCORE_EVIDENCE#L1" \
             --json
     )"
     score_decision="$(
@@ -354,7 +354,7 @@ if [ "$SCORECARD_MODE" != "none" ]; then
             --level procedural \
             --kind decision \
             --tags reach,scorecard,trend \
-            --source "file://$SCORE_EVIDENCE:1" \
+            --source "file://$SCORE_EVIDENCE#L1" \
             --json
     )"
     assert_jq "$score_rule" '.schema == "ee.response.v2" and .success == true' \
@@ -381,7 +381,7 @@ if [ "$SCORECARD_MODE" != "none" ]; then
                 --level procedural \
                 --kind rule \
                 --tags reach,scorecard,duplicate \
-                --source "file://$SCORE_EVIDENCE:1" \
+                --source "file://$SCORE_EVIDENCE#L1" \
                 --json
         )"
         assert_jq "$dup_out" '.schema == "ee.response.v2" and .success == true' \
@@ -393,7 +393,7 @@ if [ "$SCORECARD_MODE" != "none" ]; then
             --level semantic \
             --kind fact \
             --tags reach,scorecard,stale \
-            --source "file://$SCORE_WS/missing-evidence.md:1" \
+            --source "file://$SCORE_WS/missing-evidence.md#L1" \
             --json
     )"
     assert_jq "$stale_out" '.schema == "ee.response.v2" and .success == true' \

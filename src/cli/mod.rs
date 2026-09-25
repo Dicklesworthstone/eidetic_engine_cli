@@ -10020,7 +10020,7 @@ pub struct RememberArgs {
     #[arg(long, default_value = "0.8")]
     pub confidence: f32,
 
-    /// Source provenance URI (e.g., file://path:line).
+    /// Source provenance URI (e.g., file://path#L12 or file://path#L12-20).
     #[arg(long)]
     pub source: Option<String>,
 
@@ -10074,7 +10074,10 @@ pub struct RememberArgs {
 
     /// Read a JSONL batch of remember inputs (one object per line, content
     /// required per line) from stdin. Requires --stdin; each line is
-    /// validated and persisted independently.
+    /// validated and persisted independently. Line keys: content, level,
+    /// kind, tags, workflow, confidence, source, allowSecretMention,
+    /// validFrom, validTo, idempotencyKey, reinforce, fields (snake_case also
+    /// accepted); a line with any other key fails with remember_unknown_key.
     #[arg(long, action = ArgAction::SetTrue)]
     pub batch: bool,
 
@@ -10206,7 +10209,7 @@ pub struct NoteArgs {
     #[arg(long, default_value = "0.8")]
     pub confidence: f32,
 
-    /// Source provenance URI (e.g., file://path:line).
+    /// Source provenance URI (e.g., file://path#L12 or file://path#L12-20).
     #[arg(long)]
     pub source: Option<String>,
 

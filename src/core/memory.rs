@@ -6644,9 +6644,34 @@ fn remember_usage_error(message: String) -> DomainError {
 }
 
 fn parse_remember_provenance_uri(source: &str) -> Result<String, DomainError> {
-    ProvenanceUri::from_str(source)
-        .map(|uri| uri.to_string())
-        .map_err(remember_provenance_uri_usage_error)
+    let uri = ProvenanceUri::from_str(source).map_err(remember_provenance_uri_usage_error)?;
+    if let ProvenanceUri::File { path, span: None } = &uri
+        && let Some((file, locator)) = colon_line_locator_suffix(path)
+    {
+        // GH #58: `file://notes.md:2` used to be stored as a file literally
+        // named `notes.md:2`, which every later pack reported as
+        // `missing_source`. The line locator is the `#L<n>` fragment.
+        return Err(DomainError::Usage {
+            message: format!(
+                "invalid provenance URI: `{source}` ends in a `:{locator}` line suffix, which \
+                 ee would store as part of the file name; line locators use the `#L<n>` or \
+                 `#L<n>-<m>` fragment"
+            ),
+            repair: Some(format!("--source 'file://{file}#L{locator}'")),
+        });
+    }
+    Ok(uri.to_string())
+}
+
+/// Split a trailing `:<n>` or `:<n>-<m>` line suffix off a `file://` path.
+fn colon_line_locator_suffix(path: &str) -> Option<(&str, &str)> {
+    let (file, locator) = path.rsplit_once(':')?;
+    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let is_locator = match locator.split_once('-') {
+        Some((start, end)) => is_number(start) && is_number(end),
+        None => is_number(locator),
+    };
+    (is_locator && !file.is_empty() && !file.ends_with(['/', ':'])).then_some((file, locator))
 }
 
 fn remember_provenance_uri_usage_error(error: ProvenanceUriError) -> DomainError {
@@ -8368,6 +8393,86 @@ fn remember_batch_typed_field_assignments(
     Ok(assignments)
 }
 
+/// Top-level keys a `remember --batch` JSONL line accepts. Two-word keys take
+/// either camelCase or snake_case.
+const REMEMBER_BATCH_LINE_KEYS: &[&str] = &[
+    "content",
+    "level",
+    "kind",
+    "tags",
+    "workflow",
+    "confidence",
+    "source",
+    "allowSecretMention",
+    "allow_secret_mention",
+    "validFrom",
+    "valid_from",
+    "validTo",
+    "valid_to",
+    "idempotencyKey",
+    "idempotency_key",
+    "reinforce",
+    "fields",
+];
+
+/// Single-memory `ee remember` options that have no per-line batch form.
+/// Compared after `remember_batch_key_spelling` normalization, so
+/// `revive-when`, `revive_when` and `reviveWhen` all match.
+const REMEMBER_BATCH_SINGLE_MODE_ONLY_KEYS: &[&str] = &[
+    "sentinel",
+    "revivewhen",
+    "seal",
+    "family",
+    "ofn",
+    "attempt",
+    "attemptoutcome",
+];
+
+/// Error code for a batch line that carries a key the parser does not read.
+const REMEMBER_BATCH_UNKNOWN_KEY_CODE: &str = "remember_unknown_key";
+
+fn remember_batch_key_spelling(key: &str) -> String {
+    key.chars()
+        .filter(|character| !matches!(character, '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// GH #59: a key the parser does not read must fail the line instead of being
+/// dropped. A dropped `idempotency-key` stores a duplicate row on replay, and
+/// a dropped `sentinel` attaches nothing, both with `status: "stored"`.
+fn reject_unknown_remember_batch_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), RememberBatchLineError> {
+    let Some(unknown) = object
+        .keys()
+        .find(|key| !REMEMBER_BATCH_LINE_KEYS.contains(&key.as_str()))
+    else {
+        return Ok(());
+    };
+    let spelling = remember_batch_key_spelling(unknown);
+    let message = if let Some(accepted) = REMEMBER_BATCH_LINE_KEYS
+        .iter()
+        .find(|accepted| remember_batch_key_spelling(accepted) == spelling)
+    {
+        format!("unknown key `{unknown}` on a remember batch line; did you mean `{accepted}`?")
+    } else if REMEMBER_BATCH_SINGLE_MODE_ONLY_KEYS.contains(&spelling.as_str()) {
+        format!(
+            "key `{unknown}` is not supported on a remember batch line; the matching option \
+             applies to single-memory `ee remember` only"
+        )
+    } else {
+        format!(
+            "unknown key `{unknown}` on a remember batch line; accepted keys: {}",
+            REMEMBER_BATCH_LINE_KEYS.join(", ")
+        )
+    };
+    Err(RememberBatchLineError::new(
+        REMEMBER_BATCH_UNKNOWN_KEY_CODE,
+        message,
+    ))
+}
+
 fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, RememberBatchLineError> {
     let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
         RememberBatchLineError::new(
@@ -8381,6 +8486,7 @@ fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, Remem
             "each JSONL line must be one remember input object",
         )
     })?;
+    reject_unknown_remember_batch_keys(object)?;
 
     let content = remember_batch_string_field(object, "content", "content")?.ok_or_else(|| {
         RememberBatchLineError::new(
@@ -20778,6 +20884,110 @@ mod tests {
             )?;
         }
         connection.close().map_err(|error| error.to_string())
+    }
+
+    /// GH #58: `file://path:<n>` (the old `--source` help example) is rejected
+    /// with the `#L<n>` repair instead of being stored as a file named
+    /// `path:<n>` that every pack then reports as `missing_source`.
+    #[test]
+    fn remember_source_rejects_colon_line_suffix_with_fragment_repair() -> TestResult {
+        for (source, repair) in [
+            ("file://notes.md:2", "--source 'file://notes.md#L2'"),
+            (
+                "file:///abs/dir/notes.md:12-20",
+                "--source 'file:///abs/dir/notes.md#L12-20'",
+            ),
+        ] {
+            match parse_remember_provenance_uri(source) {
+                Err(DomainError::Usage {
+                    message,
+                    repair: Some(actual),
+                }) => {
+                    ensure(message.contains("#L<n>"), true, "message names #L<n>")?;
+                    ensure(actual, repair.to_owned(), "repair rewrites to a fragment")?;
+                }
+                other => return Err(format!("{source}: expected usage error, got {other:?}")),
+            }
+            let fixed = repair
+                .trim_start_matches("--source '")
+                .trim_end_matches('\'');
+            ensure(
+                parse_remember_provenance_uri(fixed).is_ok(),
+                true,
+                "the suggested repair parses",
+            )?;
+        }
+        for accepted in [
+            "file://notes.md#L2",
+            "file://notes.md",
+            "file://dir:name/notes.md",
+            "file://notes.md:v2",
+            "file://notes.md:",
+            "file://C:/work/notes.md",
+            "https://example.com:8080/page",
+        ] {
+            ensure(
+                parse_remember_provenance_uri(accepted).is_ok(),
+                true,
+                &format!("{accepted} stays accepted"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// GH #59: an unrecognised top-level key fails its line with an
+    /// actionable message instead of being dropped (which, for
+    /// `idempotency-key`, stored a duplicate row on replay).
+    #[test]
+    fn remember_batch_rejects_unknown_line_keys() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Kebab key lesson.\",\"idempotency-key\":\"k-kebab\"}\n",
+            "{\"content\":\"Bogus key lesson.\",\"zzz_unknown\":\"x\"}\n",
+            "{\"content\":\"Sentinel key lesson.\",\"sentinel\":\"path_exists:Cargo.toml\"}\n",
+            "{\"content\":\"Revive key lesson.\",\"revive_when\":\"path_exists:Cargo.toml\"}\n",
+            "{\"content\":\"Camel key lesson.\",\"idempotencyKey\":\"k-camel\",\"validFrom\":\"2026-01-01T00:00:00Z\",\"allow_secret_mention\":false,\"fields\":null}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+
+        ensure(report.line_count, 5, "line count")?;
+        ensure(report.stored_count, 1, "stored count")?;
+        ensure(report.failed_count, 4, "failed count")?;
+        for result in &report.results[..4] {
+            ensure(result.status, "failed", "unknown-key line status")?;
+            ensure(
+                result.error_code,
+                Some(REMEMBER_BATCH_UNKNOWN_KEY_CODE),
+                "unknown-key line error code",
+            )?;
+            ensure(result.memory_id.is_none(), true, "no row for rejected line")?;
+        }
+        let message = |index: usize| {
+            report.results[index]
+                .error_message
+                .clone()
+                .unwrap_or_default()
+        };
+        ensure(
+            message(0).contains("`idempotency-key`") && message(0).contains("`idempotencyKey`"),
+            true,
+            "kebab spelling names the accepted key",
+        )?;
+        ensure(
+            message(1).contains("`zzz_unknown`") && message(1).contains("accepted keys:"),
+            true,
+            "unknown key lists the accepted keys",
+        )?;
+        for index in [2, 3] {
+            ensure(
+                message(index).contains("single-memory `ee remember` only"),
+                true,
+                "single-mode-only key explains why it is rejected",
+            )?;
+        }
+        ensure(report.results[4].status, "stored", "known keys still store")?;
+        Ok(())
     }
 
     #[test]
