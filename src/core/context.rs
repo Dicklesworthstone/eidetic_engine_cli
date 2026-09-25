@@ -3913,6 +3913,13 @@ async fn run_context_pack_with_performance_inner(
         &consensus_conflicts,
         draft.items.len(),
     );
+    if options.persist_pack {
+        push_global_items_not_persisted_degradation(
+            &mut response_degraded,
+            &draft,
+            &global_store_memory_ids,
+        );
+    }
     let mut pack_hash_components = refresh_context_pack_hash(
         &request,
         &mut draft,
@@ -3939,6 +3946,7 @@ async fn run_context_pack_with_performance_inner(
                         &request,
                         &draft,
                         &response_degraded,
+                        &global_store_memory_ids,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
                         &mut pack_persistence,
@@ -3950,6 +3958,7 @@ async fn run_context_pack_with_performance_inner(
                         &request,
                         &draft,
                         &response_degraded,
+                        &global_store_memory_ids,
                         &determinism,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
@@ -3973,6 +3982,7 @@ async fn run_context_pack_with_performance_inner(
                                 &request,
                                 &draft,
                                 &response_degraded,
+                                &global_store_memory_ids,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
                                 &mut pack_persistence,
@@ -3984,6 +3994,7 @@ async fn run_context_pack_with_performance_inner(
                                 &request,
                                 &draft,
                                 &response_degraded,
+                                &global_store_memory_ids,
                                 &determinism,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
@@ -6489,6 +6500,7 @@ fn persist_pack_record(
         request,
         draft,
         degraded,
+        &BTreeSet::new(),
         None,
         None,
         &mut subspans,
@@ -6501,6 +6513,7 @@ fn persist_pack_record_measured(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
+    global_store_memory_ids: &BTreeSet<String>,
     task_lens: Option<&ContextTaskLens>,
     baseline: Option<&PackBaselineWrite>,
     subspans: &mut PackPersistenceSubspans,
@@ -6511,6 +6524,7 @@ fn persist_pack_record_measured(
         request,
         draft,
         degraded,
+        global_store_memory_ids,
         task_lens,
         baseline,
         PackId::now(),
@@ -6535,6 +6549,7 @@ fn persist_pack_record_seeded(
         request,
         draft,
         degraded,
+        &BTreeSet::new(),
         determinism,
         None,
         None,
@@ -6548,6 +6563,7 @@ fn persist_pack_record_seeded_measured(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
+    global_store_memory_ids: &BTreeSet<String>,
     determinism: &Deterministic<Seed>,
     task_lens: Option<&ContextTaskLens>,
     baseline: Option<&PackBaselineWrite>,
@@ -6560,6 +6576,7 @@ fn persist_pack_record_seeded_measured(
         request,
         draft,
         degraded,
+        global_store_memory_ids,
         task_lens,
         baseline,
         PackId::now_seeded(&mut pack_id_token),
@@ -6567,20 +6584,101 @@ fn persist_pack_record_seeded_measured(
     )
 }
 
+/// GH #57: user-global memories (ADR 0083) live in a separate database, so a
+/// persisted pack's workspace ledger cannot reference them. Say so instead of
+/// letting `ee outcome --pack <hash> --item <n>` fail later for those ranks
+/// without an explanation.
+fn push_global_items_not_persisted_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    draft: &crate::pack::PackDraft,
+    global_store_memory_ids: &BTreeSet<String>,
+) {
+    if global_store_memory_ids.is_empty() {
+        return;
+    }
+    let global_ranks = draft
+        .items
+        .iter()
+        .filter(|item| global_store_memory_ids.contains(&item.memory_id.to_string()))
+        .map(|item| item.rank.to_string())
+        .collect::<Vec<_>>();
+    let global_omissions = draft
+        .omitted
+        .iter()
+        .filter(|omission| global_store_memory_ids.contains(&omission.memory_id.to_string()))
+        .count();
+    if global_ranks.is_empty() && global_omissions == 0 {
+        return;
+    }
+    let selected = if global_ranks.is_empty() {
+        "no selected items".to_owned()
+    } else {
+        format!(
+            "selected item rank{} {}",
+            if global_ranks.len() == 1 { "" } else { "s" },
+            global_ranks.join(", ")
+        )
+    };
+    push_degradation(
+        degraded,
+        "context_pack_global_items_not_persisted",
+        ContextResponseSeverity::Low,
+        format!(
+            "Pack persisted without its user-global memories ({selected}; {global_omissions} omission{}): they live in the user-global store, not this workspace's database, so this workspace's pack ledger does not record them.",
+            if global_omissions == 1 { "" } else { "s" }
+        ),
+        Some(
+            "Grade this workspace's own items with `ee outcome --pack <hash> --item <n>`; the global ranks listed here are not addressable that way. Set `memory.include_global = false` to keep the global lane out of packs."
+                .to_owned(),
+        ),
+    );
+}
+
+/// Persist the pack record, items, omissions and replay ledger.
+///
+/// `global_store_memory_ids` names memories read from the separate
+/// user-global store (ADR 0083). They have no row in this workspace's
+/// `memories` table, so `pack_items` / `pack_omissions` (foreign keys to
+/// `memories`) cannot reference them; they are left out of the workspace
+/// ledger while every workspace item keeps its rank, so the pack still
+/// persists and `ee outcome --pack <hash> --item <n>` resolves the
+/// workspace's own items (GH #57). The response reports the exclusion via
+/// `context_pack_global_items_not_persisted`.
 fn persist_pack_record_with_pack_id(
     connection: &DbConnection,
     workspace_path: &Path,
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
+    global_store_memory_ids: &BTreeSet<String>,
     task_lens: Option<&ContextTaskLens>,
     baseline: Option<&PackBaselineWrite>,
     pack_id: PackId,
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
+    let is_workspace_memory =
+        |memory_id: &MemoryId| !global_store_memory_ids.contains(&memory_id.to_string());
+    let ledger_items = draft
+        .items
+        .iter()
+        .filter(|item| is_workspace_memory(&item.memory_id))
+        .collect::<Vec<_>>();
+    let ledger_omissions = draft
+        .omitted
+        .iter()
+        .filter(|omission| is_workspace_memory(&omission.memory_id))
+        .collect::<Vec<_>>();
+    let excluded_item_tokens = draft
+        .items
+        .iter()
+        .filter(|item| !is_workspace_memory(&item.memory_id))
+        .map(|item| item.estimated_tokens)
+        .fold(0_u32, u32::saturating_add);
     subspans.attempted = true;
-    subspans.item_count = draft.items.len().saturating_add(draft.evidence_items.len());
-    subspans.omission_count = draft.omitted.len();
+    subspans.item_count = ledger_items
+        .len()
+        .saturating_add(draft.evidence_items.len());
+    subspans.omission_count = ledger_omissions.len();
 
     // Bead bd-17c65.1.9 (A9). Pre-overhaul this surface emitted
     // `context_pack_persist_failed: workspace not found` on every call
@@ -6635,18 +6733,21 @@ fn persist_pack_record_with_pack_id(
         query: request.query.clone(),
         profile: request.profile.as_str().to_string(),
         max_tokens: request.budget.max_tokens(),
-        used_tokens: draft.used_tokens,
-        item_count: u32::try_from(draft.items.len().saturating_add(draft.evidence_items.len()))
-            .unwrap_or(u32::MAX),
-        omitted_count: draft.omitted.len() as u32,
+        used_tokens: draft.used_tokens.saturating_sub(excluded_item_tokens),
+        item_count: u32::try_from(
+            ledger_items
+                .len()
+                .saturating_add(draft.evidence_items.len()),
+        )
+        .unwrap_or(u32::MAX),
+        omitted_count: u32::try_from(ledger_omissions.len()).unwrap_or(u32::MAX),
         pack_hash,
         degraded_json,
         created_by: Some("ee context".to_string()),
     };
 
     let item_input_start = Instant::now();
-    let items: Vec<CreatePackItemInput> = draft
-        .items
+    let items: Vec<CreatePackItemInput> = ledger_items
         .iter()
         .map(|item| CreatePackItemInput {
             pack_id: pack_id.to_string(),
@@ -6689,8 +6790,7 @@ fn persist_pack_record_with_pack_id(
     subspans.item_input_build = item_input_start.elapsed();
 
     let omission_input_start = Instant::now();
-    let omissions: Vec<CreatePackOmissionInput> = draft
-        .omitted
+    let omissions: Vec<CreatePackOmissionInput> = ledger_omissions
         .iter()
         .map(|omission| CreatePackOmissionInput {
             pack_id: pack_id.to_string(),
@@ -11853,19 +11953,23 @@ fn filter_candidates_by_memory_scope(
     stats
 }
 
+/// True when a search hit was read from the separate user-global store
+/// (ADR 0083) rather than the workspace database.
+fn search_hit_is_global_store_lane(hit: &crate::core::search::SearchHit) -> bool {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("storeLane"))
+        .and_then(serde_json::Value::as_str)
+        == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
+}
+
 fn global_store_search_memory_ids(
     search_report: &crate::core::search::SearchReport,
 ) -> BTreeSet<String> {
     search_report
         .results
         .iter()
-        .filter(|hit| {
-            hit.metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("storeLane"))
-                .and_then(serde_json::Value::as_str)
-                == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
-        })
+        .filter(|hit| search_hit_is_global_store_lane(hit))
         .filter_map(|hit| MemoryId::from_str(&hit.doc_id).ok())
         .map(|memory_id| memory_id.to_string())
         .collect()
@@ -12533,6 +12637,7 @@ fn candidate_from_hit_preloaded(
         memory_id,
         source.workspace_path,
         source.bound_workspace_id,
+        search_hit_is_global_store_lane(hit),
         degraded,
         source.freshness_file_cache,
     );
@@ -13746,16 +13851,22 @@ fn provenance_for_memory(
         memory_id,
         workspace_path,
         bound_workspace_id,
+        false,
         degraded,
         &mut freshness_file_cache,
     )
 }
 
+/// `global_store_lane` marks a memory read from the user-global store
+/// (ADR 0083): its note carries `lane=global` so the pack labels the lane the
+/// same way `ee search` does (`storeLane=global`), instead of presenting it
+/// only as an anonymous cross-shard read.
 fn provenance_for_memory_cached(
     memory: &StoredMemory,
     memory_id: MemoryId,
     workspace_path: &Path,
     bound_workspace_id: Option<&str>,
+    global_store_lane: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
     freshness_file_cache: &mut crate::core::memory::EvidenceFreshnessFileCache,
 ) -> Option<PackProvenance> {
@@ -13792,7 +13903,16 @@ fn provenance_for_memory_cached(
                 memory.workspace_id == stable_context_workspace_id(&path)
                     || memory.workspace_id == crate::core::workspace::stable_workspace_id(&path)
             });
-    let note = if local_workspace {
+    let note = if global_store_lane {
+        format!(
+            "Memory {} selected by cross_shard_read from the user-global store; lane={}; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
+            memory.id,
+            crate::core::global_store::GLOBAL_PROVENANCE_LANE,
+            memory.workspace_id,
+            active_workspace_id,
+            freshness.status.as_str()
+        )
+    } else if local_workspace {
         format!(
             "Memory {} selected for context pack; evidenceFreshness={}",
             memory.id,

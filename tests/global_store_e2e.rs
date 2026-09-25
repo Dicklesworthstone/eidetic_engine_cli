@@ -1042,3 +1042,180 @@ fn memory_curation_verbs_reach_global_store() -> TestResult {
 
     Ok(())
 }
+
+/// GH #57: a persisting pack that selects a user-global memory must still be
+/// recorded. The global memory has no row in the workspace database, so it
+/// stays out of the workspace ledger (reported as
+/// `context_pack_global_items_not_persisted`), while the workspace's own item
+/// keeps its rank and is gradeable through `ee outcome --pack/--item`.
+#[test]
+fn persisting_pack_with_global_memory_records_workspace_ledger() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&xdg_data_home).map_err(|error| error.to_string())?;
+    stdout_json(
+        run_ee(&workspace, &xdg_data_home, &["init", "--json"])?,
+        "ee init",
+    )?;
+
+    let global_id = remember_global(
+        &workspace,
+        &xdg_data_home,
+        "Always run cargo fmt check before tagging a gh57 release.",
+    )?;
+    let local = stdout_json(
+        run_ee(
+            &workspace,
+            &xdg_data_home,
+            &[
+                "remember",
+                "Release checklist for gh57: tag only after the cargo fmt check passes.",
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+                "--json",
+            ],
+        )?,
+        "ee remember (workspace)",
+    )?;
+    let local_id = local
+        .pointer("/data/memory_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("remember response missing memory_id: {local}"))?
+        .to_owned();
+
+    let pack = stdout_json(
+        run_ee(
+            &workspace,
+            &xdg_data_home,
+            &[
+                "pack",
+                "gh57 cargo fmt check before tagging a release",
+                "--candidate-pool",
+                "20",
+                "--max-tokens",
+                "1000",
+                "--json",
+            ],
+        )?,
+        "ee pack (persisting)",
+    )?;
+    let degraded_codes = pack
+        .pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("code").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if degraded_codes
+        .iter()
+        .any(|code| code == "context_pack_persist_failed")
+    {
+        return Err(format!("persisting pack was not recorded: {pack}"));
+    }
+    let items = pack
+        .pointer("/data/pack/items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("pack response missing items: {pack}"))?;
+    let item_for = |id: &str| {
+        items
+            .iter()
+            .find(|item| item.get("memoryId").and_then(serde_json::Value::as_str) == Some(id))
+    };
+    let global_item =
+        item_for(&global_id).ok_or_else(|| format!("pack omitted global {global_id}: {pack}"))?;
+    let local_item =
+        item_for(&local_id).ok_or_else(|| format!("pack omitted local {local_id}: {pack}"))?;
+    let global_notes = global_item
+        .get("provenance")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("note").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .unwrap_or_default();
+    if !global_notes.contains("lane=global") {
+        return Err(format!(
+            "global pack item must carry lane=global provenance, got notes: {global_notes}"
+        ));
+    }
+    if !degraded_codes
+        .iter()
+        .any(|code| code == "context_pack_global_items_not_persisted")
+    {
+        return Err(format!(
+            "pack must report that its global items are not in the workspace ledger: {pack}"
+        ));
+    }
+
+    let hash = pack
+        .pointer("/data/pack/hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("pack response missing hash: {pack}"))?
+        .to_owned();
+    let rank_of = |item: &serde_json::Value| {
+        item.get("rank")
+            .and_then(serde_json::Value::as_u64)
+            .map(|rank| rank.to_string())
+            .ok_or_else(|| format!("pack item missing rank: {item}"))
+    };
+    let local_rank = rank_of(local_item)?;
+    let global_rank = rank_of(global_item)?;
+
+    let graded = stdout_json(
+        run_ee(
+            &workspace,
+            &xdg_data_home,
+            &[
+                "outcome",
+                "--pack",
+                &hash,
+                "--item",
+                &local_rank,
+                "--signal",
+                "helpful",
+                "--json",
+            ],
+        )?,
+        "ee outcome --pack/--item on the workspace item",
+    )?;
+    let graded_text = graded.to_string();
+    if !graded_text.contains(&local_id) {
+        return Err(format!(
+            "outcome --pack/--item did not resolve to workspace memory {local_id}: {graded}"
+        ));
+    }
+
+    let global_grade = run_ee(
+        &workspace,
+        &xdg_data_home,
+        &[
+            "outcome",
+            "--pack",
+            &hash,
+            "--item",
+            &global_rank,
+            "--signal",
+            "helpful",
+            "--json",
+        ],
+    )?;
+    if global_grade.status.success() {
+        return Err(format!(
+            "outcome --pack/--item must not resolve the unledgered global rank {global_rank}: exit={:?} stdout={} stderr={}",
+            global_grade.status.code(),
+            String::from_utf8_lossy(&global_grade.stdout),
+            String::from_utf8_lossy(&global_grade.stderr)
+        ));
+    }
+    Ok(())
+}
