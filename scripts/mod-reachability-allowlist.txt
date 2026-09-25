@@ -33,7 +33,7 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 
 # =========================================================================
 # @SECTION-2-BEGIN
-# @SECTION-2-BUDGET: 11
+# @SECTION-2-BUDGET: 10
 #
 # THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
 # sentence here. The gate fails in BOTH directions: more entries than the budget
@@ -77,6 +77,10 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 # record them here WITH their disposition, so CI Static can go green, and to
 # finish #49 in bd-4rl3n, whose acceptance REMOVES these three lines and lowers
 # this budget back to 8 in the same commit.
+# 11 -> 10 ON 2026-09-24: src/cli/candidate_pool_tests.rs is now declared from
+# src/cli/mod.rs and passes (`ee context --candidate-pool` became Option<u32>
+# and an omitted flag follows pack.candidate_pool, GH #49). The two core files
+# remain for bd-4rl3n.
 # =========================================================================
 src/core/preflight_token.rs	bd-l6h3g item 1. DEAD: 0f68778a0 removed `pub mod preflight_token;` finishing the command-authorization control-plane retirement, and nothing references PreflightToken or preflight_token:: today. 1151 lines, security-adjacent (bypass-token issue/use/reject/revoke). Deletion escalated to the user under AGENTS.md RULE 1; REMOVE THIS LINE WHEN THE FILE IS DELETED OR RE-DECLARED.
 src/core/ask_evidence.rs	bd-l6h3g item 2. LIVE, declaration owed. scripts/delivery/ask-evidence-20260918.patch already specifies `#[path = "ask_evidence.rs"] pub(super) mod evidence;` in src/core/ask_admission.rs; the delivery applied the file and not the declaration. Ask lane owns it. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
@@ -86,6 +90,5 @@ tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. 
 tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/real_test_exists.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/real_test_exists.rs; byte-identical, unreferenced.
 src/core/backup_workflow_recovery_tests.rs	bd-l6h3g. DOES NOT COMPILE. Shipped by dec5235e1 (2026-09-20) "fix(workflow): deliver atomic completion and full recovery lifecycle". I declared it and ran `cargo check --profile test --lib`: CHECK_RC=101. It asserts `expected.workflow_id` on jsonl::ExportMemoryRecord, a field that does not exist. The declaration is NOT the fix -- the feature the commit says it delivered is absent, and declaring this file only moves a red from invisible to main. Workflow lane owns it. REMOVE THIS LINE WHEN workflow_id EXISTS AND THE FILE COMPILES DECLARED.
-src/cli/candidate_pool_tests.rs	bd-rass5. outside #49 tests for the pack candidate-pool design NOT on main (they do not compile against 426e207d9); retained as the spec for the follow-up bead bd-4rl3n; wire or delete there. REMOVE THIS LINE when bd-4rl3n wires it (lower the budget in the same commit).
 src/core/config_candidate_pool_tests.rs	bd-rass5. outside #49 tests for the pack candidate-pool design NOT on main (they do not compile against 426e207d9); retained as the spec for the follow-up bead bd-4rl3n; wire or delete there. REMOVE THIS LINE when bd-4rl3n wires it (lower the budget in the same commit).
 src/core/context_candidate_pool_tests.rs	bd-rass5. outside #49 tests for the pack candidate-pool design NOT on main (they do not compile against 426e207d9); retained as the spec for the follow-up bead bd-4rl3n; wire or delete there. REMOVE THIS LINE when bd-4rl3n wires it (lower the budget in the same commit).

@@ -1,3 +1,6 @@
+#[cfg(test)]
+#[path = "candidate_pool_tests.rs"]
+mod candidate_pool_tests;
 mod context_delta_evidence;
 #[cfg(test)]
 #[path = "pack_stream_tests.rs"]
@@ -3249,9 +3252,10 @@ pub struct ContextArgs {
     #[arg(long, short = 't', value_name = "N")]
     pub max_tokens: Option<u32>,
 
-    /// Maximum candidate memories to retrieve before packing.
-    #[arg(long, default_value_t = 100)]
-    pub candidate_pool: u32,
+    /// Maximum candidate memories to retrieve before packing. Defaults to
+    /// `pack.candidate_pool` from config (built-in default 100).
+    #[arg(long)]
+    pub candidate_pool: Option<u32>,
 
     /// Retrieval speed/quality budget: instant, default, or quality.
     #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
@@ -42538,6 +42542,15 @@ where
     };
 
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    // GH #49: an omitted `--candidate-pool` follows `pack.candidate_pool`.
+    // `ee pack` resolves this (with lens overrides) before bridging here.
+    let candidate_pool = match args.candidate_pool {
+        Some(pool) => pool,
+        None => match configured_pack_candidate_pool(&workspace_path) {
+            Ok(pool) => pool,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        },
+    };
     let advisory_workspace_id =
         crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     let database_path_for_pack_dna = args
@@ -42577,7 +42590,7 @@ where
         strict_source_mode: args.strict_source_mode,
         profile: Some(profile),
         max_tokens: args.max_tokens,
-        candidate_pool: Some(args.candidate_pool),
+        candidate_pool: Some(candidate_pool),
         max_results: args.max_results,
         include_tombstoned: args.include_tombstoned,
         as_of: args.as_of,
@@ -45980,10 +45993,11 @@ where
             max_tokens: args
                 .max_tokens
                 .or_else(|| lens_overlay.and_then(|overlay| overlay.max_tokens)),
-            candidate_pool: args
-                .candidate_pool
-                .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
-                .unwrap_or(configured_pool),
+            candidate_pool: Some(
+                args.candidate_pool
+                    .or_else(|| lens_overlay.and_then(|overlay| overlay.candidate_pool))
+                    .unwrap_or(configured_pool),
+            ),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
             source_mode: args
                 .source_mode
