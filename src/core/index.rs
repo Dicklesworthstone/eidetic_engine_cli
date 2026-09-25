@@ -63,6 +63,9 @@ pub(crate) mod doctor_repair;
 #[path = "index_storage.rs"]
 mod storage;
 
+#[path = "index_rollback_manifest.rs"]
+mod rollback_manifest;
+
 #[path = "index_source_snapshot.rs"]
 mod source_snapshot;
 
@@ -4626,6 +4629,26 @@ impl Drop for IndexExchangeRestoreGuard<'_> {
 }
 
 fn rollback_published_index(
+    index_dir: &Path,
+    staging_dir: &Path,
+    retained_dir: Option<&Path>,
+) -> Result<(), IndexRebuildError> {
+    // Path restoration is fallible too. Remove the rejected generation's
+    // admission manifest before even validating the retained/staging paths;
+    // those validations must not leave a complete rejected live index readable.
+    // A failed fence never skips the best-effort restoration of accepted bytes.
+    let retirement = rollback_manifest::retire(index_dir);
+    let rollback = rollback_published_index_namespace(index_dir, staging_dir, retained_dir);
+    match (retirement, rollback) {
+        (Ok(()), rollback) => rollback,
+        (Err(error), Ok(())) => Err(error),
+        (Err(retirement_error), Err(rollback_error)) => Err(IndexRebuildError::Index(format!(
+            "index rejection fence failed ({retirement_error}); filesystem rollback also failed ({rollback_error})"
+        ))),
+    }
+}
+
+fn rollback_published_index_namespace(
     index_dir: &Path,
     staging_dir: &Path,
     retained_dir: Option<&Path>,

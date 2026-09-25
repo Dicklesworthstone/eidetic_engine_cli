@@ -12,8 +12,8 @@ use std::io;
 use std::path::Path;
 
 use super::{
-    INDEX_METADATA_FILE, IndexRebuildError, ensure_index_path_has_no_symlinks,
-    monotonicish_stamp, sync_index_directory,
+    INDEX_METADATA_FILE, IndexRebuildError, ensure_index_path_has_no_symlinks, monotonicish_stamp,
+    sync_index_directory,
 };
 
 const RETIRED_PREFIX: &str = ".rejected-meta-";
@@ -69,7 +69,9 @@ fn retire_with(
 }
 
 fn retirement_error(action: &str, error: io::Error) -> IndexRebuildError {
-    IndexRebuildError::Index(format!("Failed to {action} rejected index manifest: {error}"))
+    IndexRebuildError::Index(format!(
+        "Failed to {action} rejected index manifest: {error}"
+    ))
 }
 
 fn rename_manifest(source: &Path, destination: &Path) -> io::Result<()> {
@@ -97,7 +99,10 @@ fn rename_manifest(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "android", target_vendor = "apple")
+))]
 #[path = "index_rollback_admission_tests.rs"]
 mod admission_tests;
 
@@ -109,7 +114,11 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let root = tempfile::tempdir().expect("temporary directory");
-        let index = root.path().canonicalize().expect("canonical root").join("index");
+        let index = root
+            .path()
+            .canonicalize()
+            .expect("canonical root")
+            .join("index");
         std::fs::create_dir(&index).expect("index directory");
         (root, index)
     }
@@ -138,13 +147,20 @@ mod tests {
         let saved = retired_manifests(&index);
         assert_eq!(saved.len(), 1);
         assert_eq!(std::fs::read(&saved[0]).expect("saved manifest"), bytes);
-        assert_eq!(std::fs::read(index.join("tier")).expect("tier"), b"unchanged");
+        assert_eq!(
+            std::fs::read(index.join("tier")).expect("tier"),
+            b"unchanged"
+        );
     }
 
     #[test]
     fn missing_generation_is_not_created_by_retirement() {
         let root = tempfile::tempdir().expect("root");
-        let index = root.path().canonicalize().expect("canonical root").join("absent");
+        let index = root
+            .path()
+            .canonicalize()
+            .expect("canonical root")
+            .join("absent");
         retire(&index).expect("already inadmissible");
         assert!(!index.exists());
     }
@@ -170,10 +186,16 @@ mod tests {
         let (_root, index) = fixture();
         std::fs::write(index.join(INDEX_METADATA_FILE), b"manifest").expect("manifest");
         let error = retire_with(&index, rename_manifest, |_| {
-            Err(IndexRebuildError::Index("injected manifest barrier failure".into()))
+            Err(IndexRebuildError::Index(
+                "injected manifest barrier failure".into(),
+            ))
         })
         .expect_err("failed barrier");
-        assert!(error.to_string().contains("injected manifest barrier failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected manifest barrier failure")
+        );
         assert!(!index.join(INDEX_METADATA_FILE).exists());
         assert_eq!(retired_manifests(&index).len(), 1);
     }
@@ -182,14 +204,22 @@ mod tests {
     fn retry_after_failed_barrier_flushes_the_existing_generation() {
         let (_root, index) = fixture();
         std::fs::write(index.join(INDEX_METADATA_FILE), b"manifest").expect("manifest");
-        assert!(retire_with(&index, rename_manifest, |_| {
-            Err(IndexRebuildError::Index("injected barrier failure".into()))
-        }).is_err());
+        assert!(
+            retire_with(&index, rename_manifest, |_| {
+                Err(IndexRebuildError::Index("injected barrier failure".into()))
+            })
+            .is_err()
+        );
         let calls = Cell::new(0);
-        retire_with(&index, |_, _| panic!("manifest is already retired"), |directory| {
-            calls.set(calls.get() + 1);
-            sync_index_directory(directory)
-        }).expect("retry barrier");
+        retire_with(
+            &index,
+            |_, _| panic!("manifest is already retired"),
+            |directory| {
+                calls.set(calls.get() + 1);
+                sync_index_directory(directory)
+            },
+        )
+        .expect("retry barrier");
         assert_eq!(calls.get(), 1);
         assert_eq!(retired_manifests(&index).len(), 1);
     }
@@ -204,8 +234,15 @@ mod tests {
             |_| panic!("must not report a rename that never happened"),
         )
         .expect_err("rename failure");
-        assert!(error.to_string().contains("Failed to rename rejected index manifest"));
-        assert_eq!(std::fs::read(index.join(INDEX_METADATA_FILE)).expect("manifest"), b"manifest");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to rename rejected index manifest")
+        );
+        assert_eq!(
+            std::fs::read(index.join(INDEX_METADATA_FILE)).expect("manifest"),
+            b"manifest"
+        );
         assert!(retired_manifests(&index).is_empty());
     }
 
@@ -226,7 +263,10 @@ mod tests {
             sync_index_directory,
         )
         .expect("retry after collision");
-        assert_eq!(std::fs::read(collision.expect("collision")).expect("existing bytes"), b"existing diagnostic");
+        assert_eq!(
+            std::fs::read(collision.expect("collision")).expect("existing bytes"),
+            b"existing diagnostic"
+        );
         assert_eq!(retired_manifests(&index).len(), 2);
     }
 
@@ -248,8 +288,15 @@ mod tests {
         let link = index.join(INDEX_METADATA_FILE);
         std::os::unix::fs::symlink(&outside, &link).expect("metadata link");
         assert!(retire(&index).is_err());
-        assert!(std::fs::symlink_metadata(link).expect("link remains").is_symlink());
-        assert_eq!(std::fs::read(outside).expect("outside remains"), b"private bytes");
+        assert!(
+            std::fs::symlink_metadata(link)
+                .expect("link remains")
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(outside).expect("outside remains"),
+            b"private bytes"
+        );
         assert!(retired_manifests(&index).is_empty());
     }
 }
