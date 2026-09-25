@@ -57,6 +57,83 @@ fn identities(rows: &[StoredMemory]) -> Vec<String> {
 }
 
 #[test]
+fn native_capture_and_revision_default_to_canonical_validity_instants() -> TestResult {
+    let db = DbConnection::open_memory()?;
+    setup(&db)?;
+    db.insert_memory(&id(1), &input())?;
+    db.insert_memory_revision(&id(2), &id(1), &input())?;
+    for number in 1..=2 {
+        let row = db.get_memory(&id(number))?.ok_or("memory missing")?;
+        let created = DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&Utc);
+        assert_eq!(
+            row.valid_from.as_deref(),
+            Some(crate::core::memory::normalize_validity_timestamp(created).as_str())
+        );
+        assert!(row.created_at.ends_with("+00:00"));
+        assert!(
+            row.valid_from
+                .as_deref()
+                .is_some_and(|value| value.ends_with('Z'))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn default_validity_preserves_nanos_offsets_and_bookkeeping_bytes() -> TestResult {
+    let db = DbConnection::open_memory()?;
+    setup(&db)?;
+    for (number, created, expected) in [
+        (1, "2026-09-22T12:00:00+00:00", "2026-09-22T12:00:00Z"),
+        (
+            2,
+            "2026-09-22T08:00:00.123456789-04:00",
+            "2026-09-22T12:00:00.123456789Z",
+        ),
+        (
+            3,
+            "2026-09-22T17:30:00.000000001+05:30",
+            "2026-09-22T12:00:00.000000001Z",
+        ),
+    ] {
+        insert(&db, number, created, &input())?;
+        let row = db.get_memory(&id(number))?.ok_or("memory missing")?;
+        assert_eq!(row.created_at, created);
+        assert_eq!(row.updated_at, created);
+        assert_eq!(row.valid_from.as_deref(), Some(expected));
+        assert_eq!(
+            row.valid_from.as_deref(),
+            Some(
+                crate::core::memory::normalize_validity_timestamp(
+                    DateTime::parse_from_rfc3339(created)?.with_timezone(&Utc),
+                )
+                .as_str()
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_author_start_is_preserved_and_bad_default_cannot_insert() -> TestResult {
+    let db = DbConnection::open_memory()?;
+    setup(&db)?;
+    let mut value = input();
+    value.valid_from = Some("2026-09-23T08:00:00.123456789-04:00".to_owned());
+    db.insert_memory(&id(1), &value)?;
+    db.insert_memory_revision(&id(2), &id(1), &value)?;
+    insert(&db, 3, BASE, &value)?;
+    for number in 1..=3 {
+        let row = db.get_memory(&id(number))?.ok_or("memory missing")?;
+        assert_eq!(row.valid_from, value.valid_from);
+    }
+    assert!(insert(&db, 4, "not-a-timestamp", &input()).is_err());
+    assert!(db.get_memory(&id(4))?.is_none());
+    assert!(db.list_memory_anchors(&id(4))?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn applicability_and_tag_surfaces_use_exact_inclusive_expiry() -> TestResult {
     let db = DbConnection::open_memory()?;
     setup(&db)?;

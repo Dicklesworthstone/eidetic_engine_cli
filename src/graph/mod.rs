@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
@@ -1226,8 +1226,8 @@ struct CausalEvidenceGraphRow {
 struct RevisionDagMemoryRow {
     memory_id: String,
     logical_id: String,
-    valid_from: String,
-    created_at: String,
+    valid_from: DateTime<Utc>,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1414,8 +1414,10 @@ pub fn build_causal_evidence_graph_from_table(
 /// Build the memory revision DAG for a workspace from logical revision chains.
 ///
 /// Nodes are memory IDs. Edges inside a shared `logical_id` chain point from
-/// older to newer rows by `valid_from`, and explicit `derived_from` links add
-/// cross-chain provenance edges. The resulting directed graph must be acyclic.
+/// older to newer rows by the `valid_from` instant, then the `created_at` instant
+/// and memory ID. Timestamp comparisons preserve nanoseconds and normalize UTC
+/// offsets. Explicit `derived_from` links add cross-chain provenance edges. The
+/// resulting directed graph must be acyclic.
 pub fn build_revision_dag_from_logical_ids(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1796,7 +1798,7 @@ fn revision_dag_memory_rows(
         "SELECT id, COALESCE(logical_id, id) AS logical_id, COALESCE(valid_from, created_at) AS valid_from, created_at
          FROM memories
          WHERE workspace_id = ?1 AND tombstoned_at IS NULL
-         ORDER BY logical_id ASC, valid_from ASC, created_at ASC, id ASC",
+         ORDER BY logical_id ASC, id ASC",
         &[Value::Text(workspace_id.to_string())],
     )
     .map_err(|error| GraphError::storage("query revision DAG memory rows", error))?
@@ -1806,11 +1808,30 @@ fn revision_dag_memory_rows(
 }
 
 fn revision_dag_memory_row_from_row(row: &Row) -> GraphResult<RevisionDagMemoryRow> {
+    let memory_id = graph_row_text(row, 0, "memories.id")?;
+    let parse_timestamp = |index, column| -> GraphResult<DateTime<Utc>> {
+        let value = graph_row_text(row, index, column)?;
+        DateTime::parse_from_rfc3339(&value)
+            .map(|instant| instant.with_timezone(&Utc))
+            .map_err(|error| {
+                GraphError::storage(
+                    "parse revision DAG memory timestamp",
+                    DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: format!("memory {memory_id} {column} must be RFC 3339: {error}"),
+                    },
+                )
+            })
+    };
+    // Parse once before sorting: text order differs across offsets and between
+    // whole/fractional seconds, and integer-second keys would discard precision.
+    let valid_from = parse_timestamp(2, "memories.valid_from")?;
+    let created_at = parse_timestamp(3, "memories.created_at")?;
     Ok(RevisionDagMemoryRow {
-        memory_id: graph_row_text(row, 0, "memories.id")?,
+        memory_id,
         logical_id: graph_row_text(row, 1, "memories.logical_id")?,
-        valid_from: graph_row_text(row, 2, "memories.valid_from")?,
-        created_at: graph_row_text(row, 3, "memories.created_at")?,
+        valid_from,
+        created_at,
     })
 }
 
@@ -8129,6 +8150,175 @@ mod tests {
             attrs.get("logical_id"),
             Some(&CgseValue::String("logical_release_rule".to_string()))
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_orders_legacy_validity_timestamps_by_instant() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        for (id, valid_from) in [
+            (MEMORY_C, "2026-05-13T20:00:00.000000002-04:00"),
+            (MEMORY_A, "2026-05-14T01:30:00+02:00"),
+            (MEMORY_D, "2026-05-14T00:00:00.000000001Z"),
+            (MEMORY_B, "2026-05-14T00:00:00.000000010Z"),
+            (MEMORY_E, "2026-05-14T00:00:00Z"),
+        ] {
+            insert_revision_memory(&connection, id, "logical_instants", id, valid_from)?;
+            // Preserve historical spellings even if the normal writer
+            // canonicalizes incoming RFC 3339 values.
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET valid_from = '{valid_from}', \
+                     created_at = '2026-05-14T00:00:00Z' WHERE id = '{id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(graph.node_count(), 5);
+        assert_eq!(graph.edge_count(), 4);
+        for pair in [MEMORY_A, MEMORY_E, MEMORY_D, MEMORY_C, MEMORY_B].windows(2) {
+            assert_eq!(graph.successors(pair[0]), Some(vec![pair[1]]));
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_orders_equivalent_validity_by_creation_instant_then_id() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        for (id, valid_from, created_at) in [
+            (
+                MEMORY_D,
+                "2026-05-14T01:00:00+01:00",
+                "2026-05-13T20:00:00.000000001-04:00",
+            ),
+            (
+                MEMORY_A,
+                "2026-05-14T00:00:00.000000000Z",
+                "2026-05-14T01:00:00.000000002+01:00",
+            ),
+            (
+                MEMORY_C,
+                "2026-05-14T00:00:00Z",
+                "2026-05-14T00:00:00.000000001Z",
+            ),
+            (
+                MEMORY_B,
+                "2026-05-13T20:00:00-04:00",
+                "2026-05-14T00:00:00Z",
+            ),
+        ] {
+            insert_revision_memory(&connection, id, "logical_ties", id, valid_from)?;
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET valid_from = '{valid_from}', \
+                     created_at = '{created_at}' WHERE id = '{id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(graph.node_count(), 4);
+        assert_eq!(graph.edge_count(), 3);
+        // C and D have equal validity AND creation instants despite distinct
+        // spellings. The existing memory-ID tie break must put C before D.
+        for pair in [MEMORY_B, MEMORY_C, MEMORY_D, MEMORY_A].windows(2) {
+            assert_eq!(graph.successors(pair[0]), Some(vec![pair[1]]));
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_null_validity_falls_back_to_creation_instant() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        for (id, created_at) in [
+            (MEMORY_A, "2026-05-14T00:00:00.000000001Z"),
+            (MEMORY_B, "2026-05-14T00:00:00Z"),
+            (MEMORY_C, "2026-05-14T01:00:00+02:00"),
+        ] {
+            insert_revision_memory(&connection, id, "logical_legacy", id, created_at)?;
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET valid_from = NULL, \
+                     created_at = '{created_at}' WHERE id = '{id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.successors(MEMORY_C), Some(vec![MEMORY_B]));
+        assert_eq!(graph.successors(MEMORY_B), Some(vec![MEMORY_A]));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_rejects_malformed_stored_timestamps() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_A,
+            "logical_malformed",
+            "malformed revision timestamp",
+            "2026-05-14T00:00:00Z",
+        )?;
+
+        for (column, invalid) in [
+            ("valid_from", "not-a-timestamp"),
+            ("valid_from", "2026-05-14T25:00:00Z"),
+            ("created_at", "2026-02-30T00:00:00Z"),
+        ] {
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET valid_from = '2026-05-14T00:00:00Z', \
+                     created_at = '2026-05-14T00:00:00Z' WHERE id = '{MEMORY_A}'; \
+                     UPDATE memories SET {column} = '{invalid}' WHERE id = '{MEMORY_A}'"
+                ))
+                .map_err(|error| error.to_string())?;
+
+            let error = super::build_revision_dag_from_logical_ids(&connection, WORKSPACE_ID)
+                .err()
+                .ok_or_else(|| format!("malformed {column} should be rejected"))?;
+            match error {
+                GraphError::Storage { operation, source } => {
+                    assert_eq!(operation, "parse revision DAG memory timestamp");
+                    assert!(matches!(
+                        source.as_ref(),
+                        DbError::MalformedRow {
+                            operation: DbOperation::Query,
+                            ..
+                        }
+                    ));
+                    let message = source.to_string();
+                    assert!(message.contains(MEMORY_A));
+                    assert!(message.contains(column));
+                    assert!(message.contains("RFC 3339"));
+                }
+                other => return Err(format!("expected malformed storage row, got {other}")),
+            }
+            assert!(
+                super::typed_graph_snapshot_topology(
+                    &connection,
+                    WORKSPACE_ID,
+                    GraphSnapshotType::RevisionDag,
+                )
+                .is_err()
+            );
+        }
 
         connection.close().map_err(|error| error.to_string())
     }

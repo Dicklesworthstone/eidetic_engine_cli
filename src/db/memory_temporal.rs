@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlmodel_core::Value;
 
 use super::{
@@ -31,6 +31,21 @@ fn instant(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|value| value.with_timezone(&Utc))
+}
+
+/// A missing author start inherits the row's creation instant, expressed in
+/// the validity-column canon rather than the bookkeeping-column spelling.
+/// Native captures, revisions and timestamp-preserving imports all use this
+/// boundary; explicit author bounds remain the caller's validated values.
+/// AutoSi matches the core/import normalizer and retains every nanosecond.
+/// Historical rows stay untouched; applicability readers compare parsed instants.
+pub(super) fn default_valid_from(created_at: &str) -> Result<String> {
+    instant(created_at)
+        .map(|value| value.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "Memory created_at must be RFC3339 to derive valid_from".to_owned(),
+        })
 }
 
 fn reference(raw: &str) -> Result<DateTime<Utc>> {

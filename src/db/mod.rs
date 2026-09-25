@@ -10780,9 +10780,12 @@ CREATE INDEX idx_memories_workspace_content_simhash
 ///
 /// TWO canons, deliberately different, and this migration does NOT unify them:
 ///   validity columns   `valid_from`, `valid_to`, `superseded_at`
-///                      -> SecondsFormat::Secs `Z` (normalize_validity_timestamp)
+///                      -> UTC `Z` (normalize_validity_timestamp)
 ///   bookkeeping columns `created_at`, `updated_at`, `tombstoned_at`
 ///                      -> offset form (normalize_row_timestamp)
+/// The current validity normalizer uses `SecondsFormat::AutoSi` to preserve
+/// nanoseconds. This historical migration predates that change and used whole
+/// seconds; do not repeat its SQL to normalize newer, higher-precision rows.
 /// Rewriting `created_at` to the `Z` spelling would touch every existing row for
 /// cosmetic consistency. Only rows whose spelling disagrees with THEIR OWN
 /// column are repaired.
@@ -23231,10 +23234,10 @@ impl DbConnection {
 
         // Ordinary captures start singleton chains; imports preserve the
         // validated root identity before any family ledger is reconstructed.
-        let valid_from = input
-            .valid_from
-            .clone()
-            .unwrap_or_else(|| created_at.to_owned());
+        let valid_from = match &input.valid_from {
+            Some(valid_from) => valid_from.clone(),
+            None => memory_temporal::default_valid_from(created_at)?,
+        };
 
         self.execute_for(
             DbOperation::Execute,
@@ -25788,7 +25791,10 @@ impl DbConnection {
                 trust_subclass: input.trust_subclass.as_deref(),
                 created_at: &now,
             });
-        let valid_from = input.valid_from.clone().unwrap_or_else(|| now.clone());
+        let valid_from = match &input.valid_from {
+            Some(valid_from) => valid_from.clone(),
+            None => memory_temporal::default_valid_from(&now)?,
+        };
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
