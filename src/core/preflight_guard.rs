@@ -25,6 +25,11 @@ use crate::core::tripwire::glob_match;
 use crate::db::StoredMemory;
 use crate::models::{DomainError, RecoveryKind, RepairActionRiskClass, repair_action_safety};
 
+#[path = "preflight_advice.rs"]
+mod advice;
+
+pub use advice::{PreflightAdvice, load_preflight_advice};
+
 /// Stable schema string for the JSON payload returned by `ee preflight <cmd>`.
 pub const PREFLIGHT_GUARD_SCHEMA_V1: &str = "ee.preflight.guard.v1";
 pub const NO_RISK_MEMORIES_CODE: &str = "no_risk_memories";
@@ -2820,7 +2825,23 @@ fn trauma_guard_memory_match(
     memory: &StoredMemory,
     command_terms: &std::collections::BTreeSet<String>,
 ) -> Option<PreflightMemoryMatch> {
-    let memory_terms = trauma_guard_text_terms(&memory.content);
+    trauma_guard_content_match(
+        &memory.id,
+        &memory.kind,
+        &memory.content,
+        memory.provenance_uri.as_deref(),
+        command_terms,
+    )
+}
+
+fn trauma_guard_content_match(
+    id: &str,
+    kind: &str,
+    content: &str,
+    provenance_uri: Option<&str>,
+    command_terms: &std::collections::BTreeSet<String>,
+) -> Option<PreflightMemoryMatch> {
+    let memory_terms = trauma_guard_text_terms(content);
     let matched_terms = command_terms
         .intersection(&memory_terms)
         .cloned()
@@ -2830,11 +2851,11 @@ fn trauma_guard_memory_match(
     }
     let score = matched_terms.len() as f64 / command_terms.len() as f64;
     Some(PreflightMemoryMatch {
-        memory_id: memory.id.clone(),
-        kind: memory.kind.clone(),
-        content: memory.content.clone(),
-        provenance_uri: memory.provenance_uri.clone(),
-        severity: inferred_trauma_guard_severity(memory.kind.as_str()),
+        memory_id: id.to_owned(),
+        kind: kind.to_owned(),
+        content: content.to_owned(),
+        provenance_uri: provenance_uri.map(str::to_owned),
+        severity: inferred_trauma_guard_severity(kind),
         severity_source: "inferred_from_memory_kind",
         score,
         matched_terms,
@@ -2842,7 +2863,7 @@ fn trauma_guard_memory_match(
 }
 
 fn trauma_guard_memory_kind(kind: &str) -> bool {
-    matches!(kind, "risk" | "anti-pattern" | "failure")
+    matches!(kind, "risk" | "anti-pattern" | "failure" | "rule")
 }
 
 fn inferred_trauma_guard_severity(kind: &str) -> &'static str {

@@ -27,6 +27,8 @@ pub use store::load_scoped_contradictions;
 #[path = "ask_corpus.rs"]
 mod corpus;
 
+pub(crate) use corpus::load_command_advice_corpus;
+
 pub use corpus::{
     AskCorpus, load_ask_corpus_for_paths, load_current_ask_corpus, load_scoped_ask_corpus,
 };

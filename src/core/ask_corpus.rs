@@ -30,6 +30,46 @@ pub struct AskCorpus {
     pub native_sources: BTreeMap<String, AskNativeSource>,
 }
 
+/// Load live, public command advice without searching transcripts or indexes.
+///
+/// Preflight uses the same source authority as answers: current revisions,
+/// author validity, seals, public-body screening, and workspace-owned native
+/// rule lineage. It must not acquire evidence from an index or turn imported
+/// transcript prose into an instruction. File/directory rules require explicit
+/// task targets and are therefore withheld on this command-only surface.
+pub(crate) fn load_command_advice_corpus(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+) -> Result<AskCorpus, DomainError> {
+    let snapshot = AskReadSnapshot::begin(connection)?;
+    let stored =
+        memory_admission::load_command_advice_revisions(connection, workspace_id, reference_time)?;
+    let mut candidates = stored
+        .into_iter()
+        .filter(|memory| {
+            matches!(
+                memory.kind.as_str(),
+                "risk" | "anti-pattern" | "failure" | "rule"
+            )
+        })
+        .filter_map(admission::into_candidate)
+        .collect();
+    let scope = MemoryScopeContext {
+        scope: MemoryScope::Workspace,
+        strict_scope: false,
+        current_agent: None,
+        team_members: BTreeSet::new(),
+    };
+    let native_sources = load_rules(connection, workspace_id, &scope, &[], &mut candidates)?;
+    snapshot.finish()?;
+    Ok(AskCorpus {
+        candidates,
+        contradictions: Vec::new(),
+        native_sources,
+    })
+}
+
 /// Load current evidence for one already-resolved workspace.
 ///
 /// `reference_time` is captured once by the caller, not separately per row.

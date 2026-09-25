@@ -219,8 +219,8 @@ use crate::core::preflight::{
 };
 use crate::core::preflight_guard::{
     PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport, PreflightGuardRule,
-    RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
-    preflight_patterns_unavailable_degradation, run_preflight_guard,
+    RuleSource, no_risk_memories_degradation, preflight_patterns_unavailable_degradation,
+    run_preflight_guard,
 };
 use crate::core::profile::{
     HostProfileProbeOptions, HostResourceProbeReport, MemoryProbe, OperatingProfile,
@@ -26690,9 +26690,6 @@ fn attach_preflight_memory_matches(
     database: Option<&Path>,
     report: &mut PreflightGuardReport,
 ) {
-    if report.matches.is_empty() {
-        return;
-    }
     let (connection, workspace_id) =
         match open_preflight_memory_database_for_read(workspace, database) {
             Ok(opened) => opened,
@@ -26706,17 +26703,24 @@ fn attach_preflight_memory_matches(
                 return;
             }
         };
-    let memories = match connection.list_memories(&workspace_id, None, false) {
-        Ok(memories) => memories,
-        Err(error) => {
+    let advice = match crate::core::preflight_guard::load_preflight_advice(
+        &connection,
+        &workspace_id,
+        &report.command,
+        chrono::Utc::now(),
+    ) {
+        Ok(advice) => advice,
+        Err(_) => {
             let mut degraded = no_risk_memories_degradation();
-            degraded.message = format!("Failed to query preflight risk memories: {error}");
+            degraded.message = "Live preflight memory and rule advice is unavailable; built-in advisory matches remain available.".to_owned();
             report.degraded.push(degraded);
             return;
         }
     };
-    report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
-    if report.matched_memories.is_empty() {
+    let has_advice = !advice.memories.is_empty() || !advice.rules.is_empty();
+    report.matched_memories = advice.memories;
+    report.matches.extend(advice.rules);
+    if !has_advice && !report.matches.is_empty() {
         report.degraded.push(no_risk_memories_degradation());
     }
 }

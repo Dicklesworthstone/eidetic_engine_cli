@@ -1,22 +1,18 @@
-name: Live preflight advice source integration
+name: Live preflight advice formatting
 
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/live-preflight-advice.yml]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Source-only check. The behavioral regressions are part of the existing
+# core::preflight_guard::advice::tests library suite; this job does not claim
+# to compile or execute them. No source export or branch write is performed.
 jobs:
-  prepare:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  format:
     runs-on: macos-15
     timeout-minutes: 10
-    permissions:
-      contents: write
-      statuses: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -25,66 +21,17 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Apply exact integration patch and export formatted source objects
+      - name: Check committed preflight and shared admission source formatting
         env:
-          GH_TOKEN: ${{ github.token }}
           RUSTUP_TOOLCHAIN: nightly-2026-08-31
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess
-          # This job creates source objects only. Branch updates and the final
-          # integration commit are performed explicitly through the connector.
-          repo = os.environ['GITHUB_REPOSITORY']
-          base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-          assert base == os.environ['GITHUB_SHA']
-          api = 'repos/' + repo + '/git/blobs'
-          def git_hash(data):
-              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-          def upload(data):
-              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
-              created = json.loads(subprocess.check_output(['gh', 'api', api, '--input', '-'], input=payload))
-              assert created['sha'] == git_hash(data)
-              return created['sha']
-          files = [
-              ('README.md', '480a20896ab6761c3210db047049a5fcf4b69b5a', 'e93435982afee11ff0e06a64166e00d0a35a7753'),
-              ('src/cli/mod.rs', '17c5d9ef20ab3444fa913e60be15760af4409d81', '7b6f97ad62d79cb7cba221a80fb6494bd1cf2e85'),
-              ('src/core/ask.rs', '2c83b9195b7c637ee5e60316e841c1eaea1087dc', 'c0bb2d73458913eec23edc473a04acccd503b371'),
-              ('src/core/ask_corpus.rs', '57c7b0f7e00bc4c0ae96c9bac159d6999c815119', '483fb5ddcb7fbef94b60f5c08c4848d395c7d28d'),
-              ('src/core/ask_memory_admission.rs', '2b388bb09edfa244fc4bf7101a9247f1ee62a510', 'f74e78e473a894068bd89bb04e58f8966840fd7e'),
-              ('src/core/preflight_guard.rs', '7713fc9fc7bad97756602283c5808ef912ac833c', '0619f4f89fe2acb3e3054b76a3d6f2217c6fba32'),
-              ('src/core/preflight_advice.rs', '145ceb9be6ebc234722329cdb816768a7ce1c616', '145ceb9be6ebc234722329cdb816768a7ce1c616'),
-              ('src/core/preflight_advice_tests.rs', '6bd8924baea96640c4489bb8e546236f60a22f10', '6bd8924baea96640c4489bb8e546236f60a22f10'),
-          ]
-          for name, before, _ in files:
-              current = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + name], text=True).strip()
-              assert current == before, 'Concurrent source change: ' + name
-          patch_sha = '6fea3ada902bc3df20897f8822d7a791189032a9'
-          blob = json.loads(subprocess.check_output(['gh', 'api', api + '/' + patch_sha]))
-          patch = base64.b64decode(blob['content'])
-          assert git_hash(patch) == patch_sha
-          assert hashlib.sha256(patch).hexdigest() == '79e286df8fdb0a94c3a405a629fbd3eb5a8b120f420746b6b4c163c916501e88'
-          subprocess.run(['git', 'apply', '--check', '--whitespace=error-all', '-'], input=patch, check=True)
-          subprocess.run(['git', 'apply', '--whitespace=error-all', '-'], input=patch, check=True)
-          for name, _, expected in files:
-              assert git_hash(pathlib.Path(name).read_bytes()) == expected, 'Unexpected patched bytes: ' + name
-          rust = [name for name, _, _ in files if name.endswith('.rs')]
-          subprocess.run(['rustfmt', '--edition', '2024', '--config-path', 'rustfmt.toml', '--config', 'skip_children=true', *rust], check=True)
-          subprocess.run(['rustfmt', '--check', '--edition', '2024', '--config-path', 'rustfmt.toml', '--config', 'skip_children=true', *rust], check=True)
-          subprocess.run(['git', 'diff', '--check'], check=True)
-          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
-          assert changed <= {name for name, _, _ in files}
-          manifest = {'base': base, 'patch': patch_sha, 'rustfmt_passed': True, 'cargo_tests_run': False, 'entries': []}
-          for name, before, expected in files:
-              data = pathlib.Path(name).read_bytes()
-              sha = upload(data)
-              manifest['entries'].append({'path': name, 'before': before, 'patched': expected, 'sha': sha, 'sha256': hashlib.sha256(data).hexdigest()})
-          receipt = json.dumps(manifest, indent=2).encode() + b'\n'
-          receipt_sha = upload(receipt)
-          print(receipt.decode())
-          print('Source manifest Git blob: ' + receipt_sha)
-          status = json.dumps({'state': 'success', 'context': 'preflight-advice/source-manifest', 'description': receipt_sha, 'target_url': 'https://github.com/' + repo + '/actions/runs/' + os.environ['GITHUB_RUN_ID']}).encode()
-          subprocess.run(['gh', 'api', 'repos/' + repo + '/statuses/' + base, '--input', '-'], input=status, check=True)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('Exact-preimage patch application and nightly rustfmt passed. Cargo tests were not run.\n\n```json\n' + receipt.decode() + '```\n')
-          PY
+          rustfmt --check --edition 2024 --config-path rustfmt.toml --config skip_children=true \
+            src/cli/mod.rs \
+            src/core/ask.rs \
+            src/core/ask_corpus.rs \
+            src/core/ask_memory_admission.rs \
+            src/core/preflight_guard.rs \
+            src/core/preflight_advice.rs \
+            src/core/preflight_advice_tests.rs
+          git diff --exit-code

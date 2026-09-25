@@ -24,6 +24,24 @@ pub(super) fn load_memory_revisions(
     load_with_hydration_observer(connection, workspace_id, reference_time, |_| {})
 }
 
+/// Command advice needs only explicit rules and risk memories. Keep the same
+/// lifecycle/authority decoder, but do not hydrate unrelated notes and facts
+/// merely to discard them in the caller. This is a kind predicate, not a limit:
+/// a relevant late-ID rule must still participate in matching.
+pub(super) fn load_command_advice_revisions(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+) -> Result<Vec<StoredMemory>, DomainError> {
+    load_selected_revisions(
+        connection,
+        workspace_id,
+        reference_time,
+        "SELECT id, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND kind IN ('risk', 'anti-pattern', 'failure', 'rule') ORDER BY id ASC",
+        |_| {},
+    )
+}
+
 // The observer lets real-store tests assert which identities reach the body
 // decoder, and commit through a second connection at that exact boundary.
 // Production passes a no-op; there is no process-global hook or extra query.
@@ -31,13 +49,26 @@ fn load_with_hydration_observer(
     connection: &DbConnection,
     workspace_id: &str,
     reference_time: DateTime<Utc>,
+    before_hydration: impl FnMut(&[&str]),
+) -> Result<Vec<StoredMemory>, DomainError> {
+    load_selected_revisions(
+        connection,
+        workspace_id,
+        reference_time,
+        "SELECT id, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC",
+        before_hydration,
+    )
+}
+
+fn load_selected_revisions(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    selection_sql: &str,
     mut before_hydration: impl FnMut(&[&str]),
 ) -> Result<Vec<StoredMemory>, DomainError> {
     let rows = connection
-        .query(
-            "SELECT id, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC",
-            &[Value::Text(workspace_id.to_owned())],
-        )
+        .query(selection_sql, &[Value::Text(workspace_id.to_owned())])
         .map_err(|_| corpus_storage_error())?;
     if rows.is_empty() {
         return Ok(Vec::new());
