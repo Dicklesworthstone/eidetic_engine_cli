@@ -1,5 +1,5 @@
-# Stage one is retained in commit e6e423da6da30e6c3d3cfd34b9c33f6e5db5032e.
-# The shared concurrency group lets its already-dispatched run finish first.
+# The two hand-authored source patches are retained in immutable commits below.
+# This job applies them in order, tests each change, and makes two source commits.
 name: Index source generation admission
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: index-generation-admission-20260925
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           case "$channel" in nightly|nightly-*) ;; *) exit 1 ;; esac
-          rustup toolchain install "$channel" --profile minimal --component rustfmt
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
           echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
@@ -46,238 +46,65 @@ jobs:
           restore-keys: |
             generation-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             rollback-durability-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-      - name: Bound recovery to the captured source snapshot and commit tested source
+      - name: Recover the submitted patches without rewriting source
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          path = '.github/workflows/index-generation-admission-20260925.yml'
+          for number, revision in [(1, 'e6e423da6da30e6c3d3cfd34b9c33f6e5db5032e'), (2, 'e8fcfe914f8d4cfe6fc8b9ae5d4bb7ff400198d1')]:
+              text = subprocess.check_output(['git', 'show', f'{revision}:{path}'], text=True)
+              assert text.count("<<'PATCH'\n") == 1
+              body = text.split("<<'PATCH'\n", 1)[1].split('          PATCH\n', 1)[0]
+              lines = body.splitlines(keepends=True)
+              assert all(line.startswith('          ') for line in lines)
+              patch = ''.join(line[10:] for line in lines)
+              assert patch.startswith('diff --git a/src/core/index.rs b/src/core/index.rs\n')
+              pathlib.Path(os.environ['RUNNER_TEMP'], f'generation-stage{number}.patch').write_text(patch)
+          PY
+      - name: Test strict watermark admission and commit the first source change
         run: |
           set -euo pipefail
           paths=(src/core/index.rs src/core/index_generation_watermark.rs)
-          test -f src/core/index_generation_watermark.rs
-          grep -Fq 'generation: Some(generation_watermark::parse(object)?),' src/core/index.rs
-          if grep -Fq 'fn recover_interrupted_publish_for_snapshot(' src/core/index.rs; then
-            echo 'Snapshot-bounded recovery already exists; refusing automatic reapplication.'
-            exit 1
-          fi
+          test ! -f src/core/index_generation_watermark.rs
+          test "$(git rev-parse HEAD:src/core/index.rs)" = c09fb551d055c1fe90cdbbe63d0c7d1952ca8518
           base=$(git rev-parse HEAD)
-          echo "$base" | tee "$RUNNER_TEMP/generation-base.log"
-          cat > "$RUNNER_TEMP/generation.patch" <<'PATCH'
-          diff --git a/src/core/index.rs b/src/core/index.rs
-          --- a/src/core/index.rs
-          +++ b/src/core/index.rs
-          @@ -1740,3 +1740,5 @@
-               let _recovery_action = publish_lock
-          -        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
-          +        .with_generation_fence(&index_dir, || {
-          +            recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
-          +        })
-                   .await?;
-          @@ -2000,3 +2002,5 @@
-               let _recovery_action = publish_lock
-          -        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
-          +        .with_generation_fence(&index_dir, || {
-          +            recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
-          +        })
-                   .await?;
-          @@ -2670,4 +2674,6 @@
-               let _recovery_action = match _publish_lock
-          -        .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
-          +        .with_generation_fence(index_dir, || {
-          +            recover_interrupted_publish_for_snapshot(index_dir, published_generation)
-          +        })
-                   .await
-               {
-          @@ -2930,3 +2936,5 @@
-                   let _recovery_action = _publish_lock
-          -            .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
-          +            .with_generation_fence(index_dir, || {
-          +                recover_interrupted_publish_for_snapshot(index_dir, published_generation)
-          +            })
-                       .await?;
-          @@ -3990,6 +3998,19 @@
-          +#[cfg(test)]
-           fn recover_interrupted_publish(
-               index_dir: &Path,
-          +) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
-          +    recover_interrupted_publish_for_snapshot(index_dir, u64::MAX)
-          +}
-          +
-          +/// A retained index can outlive the source database that produced it (for
-          +/// example, after restoring an older backup). Recovery must use the source
-          +/// snapshot already captured by the publisher, not the greatest watermark
-          +/// found on disk. Keep future generations for inspection without activating
-          +/// them while the replacement build is pending or fails.
-          +fn recover_interrupted_publish_for_snapshot(
-          +    index_dir: &Path,
-          +    maximum_generation: u64,
-           ) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
-               ensure_index_path_has_no_symlinks(index_dir, "recover interrupted index publish")?;
-           
-               if path_exists_no_follow(index_dir) {
-          @@ -4000,2 +4021,4 @@
-          -    if let Some(retained_dir) = find_latest_recoverable_retained_dir(index_dir)? {
-          +    if let Some(retained_dir) =
-          +        find_latest_recoverable_retained_dir_for_snapshot(index_dir, maximum_generation)?
-          +    {
-                   sync_index_generation(&retained_dir, || Ok(()))?;
-          @@ -5450,7 +5473,15 @@
-          +#[cfg(test)]
-           fn find_latest_recoverable_retained_dir(
-               index_dir: &Path,
-          +) -> Result<Option<PathBuf>, IndexRebuildError> {
-          +    find_latest_recoverable_retained_dir_for_snapshot(index_dir, u64::MAX)
-          +}
-          +
-          +fn find_latest_recoverable_retained_dir_for_snapshot(
-          +    index_dir: &Path,
-          +    maximum_generation: u64,
-           ) -> Result<Option<PathBuf>, IndexRebuildError> {
-               let parent = index_parent(index_dir);
-               if !path_exists_no_follow(parent) {
-                   return Ok(None);
-               }
-          @@ -5510,4 +5541,6 @@
-          -        let Some(generation) = recoverable_index_generation(&candidate) else {
-          +        let Some(generation) = recoverable_index_generation(&candidate)
-          +            .filter(|generation| *generation <= maximum_generation)
-          +        else {
-                       continue;
-                   };
-                   let key = (generation, sequence, candidate);
+          echo "$base" | tee "$RUNNER_TEMP/generation-stage1-base.log"
+          git apply --recount --check "$RUNNER_TEMP/generation-stage1.patch"
+          git apply --recount "$RUNNER_TEMP/generation-stage1.patch"
+          # Production manifests contain canonical AND legacy watermarks. Remove
+          # every alias in the missing-watermark fixture, not just the canonical one.
+          cat > "$RUNNER_TEMP/generation-fixture.patch" <<'PATCH'
           diff --git a/src/core/index_generation_watermark.rs b/src/core/index_generation_watermark.rs
           --- a/src/core/index_generation_watermark.rs
           +++ b/src/core/index_generation_watermark.rs
-          @@ -45,5 +45,142 @@
-               type TestResult = Result<(), String>;
-           
-          +    #[test]
-          +    fn writer_recovery_selects_the_latest_generation_within_the_source_snapshot() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
-          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
-          +            let _root = root;
-          +            let accepted = index_parent(&index).join("index.previous");
-          +            let future = index_parent(&index).join("index.previous.001");
-          +            build_generation(&cx, &accepted, 7).await?;
-          +            build_generation(&cx, &future, 9).await?;
-          +            let future_bytes = inventory(&future)?;
-          +            assert_eq!(
-          +                crate::core::index::find_latest_recoverable_retained_dir_for_snapshot(&index, 8)
-          +                    .map_err(|error| error.to_string())?,
-          +                Some(accepted)
-          +            );
-          +            assert_eq!(
-          +                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 8)
-          +                    .map_err(|error| error.to_string())?,
-          +                IndexPublishRecoveryAction::RetainedGenerationRestored
-          +            );
-          +            assert_eq!(validated_index_generation(&index)?, 7);
-          +            assert_eq!(inventory(&future)?, future_bytes);
-          +            Ok(())
-          +        }).map_err(|error| error.to_string())?
-          +    }
-          +
-          +    #[test]
-          +    fn future_only_retention_is_preserved_without_activation() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
-          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
-          +            let _root = root;
-          +            let future = index_parent(&index).join("index.previous");
-          +            build_generation(&cx, &future, 9).await?;
-          +            let before = inventory(index_parent(&index))?;
-          +            for ceiling in [0, 7, 8] {
-          +                assert_eq!(
-          +                    crate::core::index::recover_interrupted_publish_for_snapshot(&index, ceiling)
-          +                        .map_err(|error| error.to_string())?,
-          +                    IndexPublishRecoveryAction::NoRecoverableGeneration
-          +                );
-          +                assert!(!index.exists());
-          +                assert_eq!(inventory(index_parent(&index))?, before);
+          @@ -169,5 +169,10 @@
+                   ).map_err(|error| error.to_string())?;
+                   match damage {
+          -            "missing" => { metadata.as_object_mut().expect("manifest").remove("sourceGeneration"); }
+          +            "missing" => {
+          +                let object = metadata.as_object_mut().expect("manifest");
+          +                for field in FIELDS {
+          +                    object.remove(field);
+          +                }
           +            }
-          +            // A later source snapshot may use the preserved generation.
-          +            assert_eq!(
-          +                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 9)
-          +                    .map_err(|error| error.to_string())?,
-          +                IndexPublishRecoveryAction::RetainedGenerationRestored
-          +            );
-          +            assert_eq!(validated_index_generation(&index)?, 9);
-          +            Ok(())
-          +        }).map_err(|error| error.to_string())?
-          +    }
-          +
-          +    #[test]
-          +    fn generation_zero_is_a_real_recovery_ceiling_not_an_unbounded_sentinel() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
-          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
-          +            let _root = root;
-          +            build_generation(&cx, &index_parent(&index).join("index.previous"), 0).await?;
-          +            let future = index_parent(&index).join("index.previous.001");
-          +            build_generation(&cx, &future, 1).await?;
-          +            let future_bytes = inventory(&future)?;
-          +            assert_eq!(
-          +                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 0)
-          +                    .map_err(|error| error.to_string())?,
-          +                IndexPublishRecoveryAction::RetainedGenerationRestored
-          +            );
-          +            assert_eq!(validated_index_generation(&index)?, 0);
-          +            assert_eq!(inventory(&future)?, future_bytes);
-          +            Ok(())
-          +        }).map_err(|error| error.to_string())?
-          +    }
-          +
-          +    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-          +    #[test]
-          +    fn displaced_inode_identity_does_not_bypass_the_source_generation_ceiling() -> TestResult {
-          +        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-          +        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
-          +        crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
-          +            let _root = root;
-          +            let accepted = index_parent(&index).join("index.previous");
-          +            build_generation(&cx, &accepted, 7).await?;
-          +            build_generation(&cx, &index, 9).await?;
-          +            let displaced = crate::core::index::create_publish_staging_dir(&index)
-          +                .map_err(|error| error.to_string())?;
-          +            build_generation(&cx, &displaced, 10).await?;
-          +            // Exercise the actual exchange path: the formerly live inode
-          +            // lands at its attested staging name, not a fabricated fixture.
-          +            crate::core::index::exchange_index_directories(&index, &displaced)
-          +                .map_err(|error| error.to_string())?;
-          +            let unpublished = index_parent(&index).join("uncommitted.saved");
-          +            std::fs::rename(&index, &unpublished).map_err(|error| error.to_string())?;
-          +            assert!(crate::core::index::displaced_generation_sequence(&index, &displaced)
-          +                .map_err(|error| error.to_string())?.is_some());
-          +            assert_eq!(validated_index_generation(&displaced)?, 9);
-          +            let displaced_bytes = inventory(&displaced)?;
-          +            let unpublished_bytes = inventory(&unpublished)?;
-          +            assert_eq!(
-          +                crate::core::index::recover_interrupted_publish_for_snapshot(&index, 8)
-          +                    .map_err(|error| error.to_string())?,
-          +                IndexPublishRecoveryAction::RetainedGenerationRestored
-          +            );
-          +            assert_eq!(validated_index_generation(&index)?, 7);
-          +            assert_eq!(inventory(&displaced)?, displaced_bytes);
-          +            assert_eq!(inventory(&unpublished)?, unpublished_bytes);
-          +            Ok(())
-          +        }).map_err(|error| error.to_string())?
-          +    }
-          +
-               fn parse_value(value: Value) -> Result<u64, String> {
-                   parse(value.as_object().expect("object fixture"))
-               }
+                       "null" => metadata["sourceGeneration"] = Value::Null,
+                       "conflicting" => metadata["generation"] = Value::from(1_u64),
           PATCH
-          git apply --recount --check "$RUNNER_TEMP/generation.patch"
-          git apply --recount "$RUNNER_TEMP/generation.patch"
+          git apply --recount --check "$RUNNER_TEMP/generation-fixture.patch"
+          git apply --recount "$RUNNER_TEMP/generation-fixture.patch"
           rustfmt --edition 2024 src/core/index_generation_watermark.rs
           git diff --check
-          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/generation-check.log"
-          cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-tests.log"
-          grep -Fq 'test result: ok. 14 passed; 0 failed;' "$RUNNER_TEMP/generation-tests.log"
-          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log"
-          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log"
-          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-recovery.log"
+          cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage1-tests.log"
+          grep -Fq 'test result: ok. 10 passed; 0 failed;' "$RUNNER_TEMP/generation-stage1-tests.log"
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage1-readers.log"
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage1-rollback.log"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
-          git commit -m 'fix(index): bound recovery to each publishers captured source snapshot' -m 'Thread the captured source generation through rebuild, re-embedding, coalesced jobs, and individual jobs. Never activate a retained or inode-attested displaced generation ahead of that snapshot. Preserve future and uncommitted bytes. Production cargo check, all 14 admission regressions, existing read-lease and rollback-manifest suites, and the interrupted-recovery filter passed before this commit.'
+          git commit -m 'fix(index): reject missing and conflicting source generation watermarks' -m 'Require an unsigned source watermark and agreement among canonical and legacy aliases across shared index admission. Preserve explicit generation zero and unadmitted directory bytes. Ten focused regressions construct real vector and lexical tiers and cover read-only fallback plus writer recovery. The admission, existing read-lease, and rollback-manifest test commands passed before this commit.'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage1-commit.log"
+          git show --format=fuller --stat HEAD > "$RUNNER_TEMP/generation-stage1-stat.log"
           pushed=0
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then pushed=1; break; fi
@@ -288,15 +115,50 @@ jobs:
             cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2
           done
           test "$pushed" -eq 1
-          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-source-sha.log"
-          git log -1 --format=%B | tee "$RUNNER_TEMP/generation-commit.log"
-          git diff HEAD^ HEAD -- src/core/index.rs src/core/index_generation_watermark.rs > "$RUNNER_TEMP/generation-delivered.patch"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage1-published.log"
+      - name: Test snapshot-bounded recovery and commit the second source change
+        run: |
+          set -euo pipefail
+          paths=(src/core/index.rs src/core/index_generation_watermark.rs)
+          base=$(git rev-parse HEAD)
+          echo "$base" | tee "$RUNNER_TEMP/generation-stage2-base.log"
+          git apply --recount --check "$RUNNER_TEMP/generation-stage2.patch"
+          git apply --recount "$RUNNER_TEMP/generation-stage2.patch"
+          rustfmt --edition 2024 src/core/index_generation_watermark.rs
+          git diff --check
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/generation-stage2-check.log"
+          cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage2-tests.log"
+          grep -Fq 'test result: ok. 14 passed; 0 failed;' "$RUNNER_TEMP/generation-stage2-tests.log"
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage2-readers.log"
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage2-rollback.log"
+          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-stage2-recovery.log"
+          git add -- "${paths[@]}"
+          git commit -m 'fix(index): bound recovery to the captured source snapshot' -m 'Thread the captured source generation through rebuild, re-embedding, coalesced jobs, and individual jobs. Never activate a retained or inode-attested displaced generation ahead of that snapshot. Preserve future and uncommitted bytes. Production cargo check, all 14 admission regressions, and existing reader, rollback-manifest, and interrupted-recovery test commands passed before this commit.'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage2-commit.log"
+          git show --format=fuller --stat HEAD > "$RUNNER_TEMP/generation-stage2-stat.log"
+          pushed=0
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then pushed=1; break; fi
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            git merge --no-edit origin/main
+            base=$(git rev-parse origin/main)
+            cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2
+          done
+          test "$pushed" -eq 1
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage2-published.log"
+      - name: Production lint and module formatting
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/generation-clippy.log"
+          rustfmt --edition 2024 --check src/core/index_generation_watermark.rs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: generation-snapshot-verification
+          name: generation-admission-verification
           path: |
             ${{ runner.temp }}/generation-*.log
             ${{ runner.temp }}/generation*.patch
             src/core/index_generation_watermark.rs
+            src/core/index.rs
           retention-days: 7
