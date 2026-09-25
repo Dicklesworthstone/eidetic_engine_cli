@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.workspace.rebind.v1.json",
+  "title": "ee.workspace.rebind.v1",
+  "description": "Authenticated preview or applied recovery of one moved project-local workspace. Durable identities and source keys are preserved; indexes are not rebuilt by this operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "success", "data", "degraded"],
+  "properties": {
+    "schema": { "const": "ee.response.v2" },
+    "success": { "const": true },
+    "degraded": { "type": "array", "maxItems": 0 },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "command", "status", "dryRun", "persisted", "plan", "auditId", "workspaceIdPreserved", "derivedAssetsModified", "indexRebuildCommand"],
+      "properties": {
+        "schema": { "const": "ee.workspace.rebind.v1" },
+        "command": { "const": "workspace rebind" },
+        "status": { "enum": ["preview", "rebound"] },
+        "dryRun": { "type": "boolean" },
+        "persisted": { "type": "boolean" },
+        "auditId": { "type": ["string", "null"] },
+        "workspaceIdPreserved": { "const": true },
+        "derivedAssetsModified": { "const": false },
+        "indexRebuildCommand": { "type": "string", "minLength": 1 },
+        "plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "databasePath", "sourceKeysDir", "sourceAuthKeyId", "previous", "destination", "rollbackPreviewCommand", "contentHash", "planHash"],
+          "properties": {
+            "schema": { "const": "ee.workspace.rebind.v1" },
+            "databasePath": { "type": "string", "minLength": 1 },
+            "sourceKeysDir": { "type": "string", "minLength": 1 },
+            "sourceAuthKeyId": { "type": "string", "pattern": "^[0-9a-f]+$" },
+            "previous": { "$ref": "#/$defs/workspace" },
+            "destination": { "$ref": "#/$defs/destination" },
+            "rollbackPreviewCommand": { "type": "string", "minLength": 1 },
+            "contentHash": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+            "planHash": { "type": "string", "pattern": "^ee-rebind-v1:[0-9a-f]+:[0-9a-f]{64}$" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "preview" } } },
+          "then": { "properties": { "dryRun": { "const": true }, "persisted": { "const": false }, "auditId": { "type": "null" } } },
+          "else": { "properties": { "dryRun": { "const": false }, "persisted": { "const": true }, "auditId": { "type": "string", "minLength": 1 } } }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "scopeKind", "repositoryRoot", "repositoryFingerprint", "subprojectPath"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "scopeKind": { "type": "string", "minLength": 1 },
+        "repositoryRoot": { "type": ["string", "null"] },
+        "repositoryFingerprint": { "type": ["string", "null"] },
+        "subprojectPath": { "type": ["string", "null"] }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceId", "path", "alias", "scopeKind", "repositoryRoot", "repositoryFingerprint", "subprojectPath", "createdAt", "updatedAt"],
+      "properties": {
+        "workspaceId": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "alias": { "type": ["string", "null"] },
+        "scopeKind": { "type": "string", "minLength": 1 },
+        "repositoryRoot": { "type": ["string", "null"] },
+        "repositoryFingerprint": { "type": ["string", "null"] },
+        "subprojectPath": { "type": ["string", "null"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    }
+  }
+}

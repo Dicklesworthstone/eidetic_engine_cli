@@ -9867,6 +9867,8 @@ pub enum WorkspaceCommand {
     List(WorkspaceListArgs),
     /// Set or clear a human alias for a registered workspace.
     Alias(WorkspaceAliasArgs),
+    /// Preview or authenticate an explicit recovery of a moved local store.
+    Rebind(WorkspaceRebindArgs),
     /// Report dirty-path hygiene and commit-readiness guidance.
     Hygiene(WorkspaceHygieneArgs),
 }
@@ -9882,6 +9884,26 @@ pub struct WorkspaceResolveArgs {
 /// Arguments for `ee workspace list`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct WorkspaceListArgs {}
+
+/// Arguments for `ee workspace rebind`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct WorkspaceRebindArgs {
+    /// Durable workspace ID recorded in the moved database.
+    #[arg(long, value_name = "ID")]
+    pub expected_workspace_id: String,
+
+    /// Exact former workspace path recorded in the moved database.
+    #[arg(long, value_name = "PATH")]
+    pub expected_source_path: String,
+
+    /// Existing source authentication keys, selected explicitly by the caller.
+    #[arg(long, value_name = "PATH")]
+    pub source_keys_dir: PathBuf,
+
+    /// Apply the exact authenticated plan token returned by a prior preview.
+    #[arg(long, value_name = "TOKEN")]
+    pub apply_plan: Option<String>,
+}
 
 /// Arguments for `ee workspace hygiene`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
@@ -21937,6 +21959,19 @@ where
                 Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
+        WorkspaceCommand::Rebind(args) => {
+            let options = crate::workspace_rebind::WorkspaceRebindOptions {
+                workspace_path: cli.resolve_workspace(),
+                expected_workspace_id: args.expected_workspace_id.clone(),
+                expected_source_path: args.expected_source_path.clone(),
+                source_keys_dir: args.source_keys_dir.clone(),
+                apply_plan: args.apply_plan.clone(),
+            };
+            match crate::workspace_rebind::rebind_workspace(&options) {
+                Ok(report) => render_workspace_rebind(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
+            }
+        }
         WorkspaceCommand::Alias(args) => {
             let alias = match workspace_alias_name(args) {
                 Ok(alias) => alias,
@@ -22001,6 +22036,46 @@ fn workspace_alias_name(args: &WorkspaceAliasArgs) -> Result<Option<String>, Dom
         }),
         (Some(name), None) | (None, Some(name)) => Ok(Some(name.clone())),
         (None, None) => Ok(None),
+    }
+}
+
+fn render_workspace_rebind<W: Write>(
+    cli: &Cli,
+    report: &crate::workspace_rebind::WorkspaceRebindReport,
+    stdout: &mut W,
+) -> ProcessExitCode {
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "Workspace rebind: {}\nID: {}\nFrom: {}\nTo: {}\nSource authentication key: {}\nPlan: {}\n",
+                report.status,
+                report.plan.previous.workspace_id,
+                report.plan.previous.path,
+                report.plan.destination.path,
+                report.plan.source_auth_key_id,
+                report.plan.plan_hash,
+            );
+            if report.persisted {
+                text.push_str(&format!(
+                    "\nRebuild derived indexes: {}\nRollback preview after returning the store: {}\n",
+                    report.index_rebuild_command, report.plan.rollback_preview_command,
+                ));
+            } else {
+                text.push_str(&format!(
+                    "\nApply this plan by repeating the command with --apply-plan {}\n",
+                    report.plan.plan_hash,
+                ));
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
     }
 }
 
@@ -69113,7 +69188,7 @@ const VERIFICATION_SUBCOMMANDS: &[&str] = &[
     "closure-guidance",
 ];
 const VERIFICATION_RCH_SUBCOMMANDS: &[&str] = &["ingest", "blockers", "runs"];
-const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias", "hygiene"];
+const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias", "rebind", "hygiene"];
 
 /// Read-only normalized representation of a CLI invocation.
 #[derive(Clone, Debug, PartialEq)]
@@ -69856,6 +69931,7 @@ impl NormalizedInvocation {
                     WorkspaceCommand::Resolve(_) => "workspace resolve".to_string(),
                     WorkspaceCommand::List(_) => "workspace list".to_string(),
                     WorkspaceCommand::Alias(_) => "workspace alias".to_string(),
+                    WorkspaceCommand::Rebind(_) => "workspace rebind".to_string(),
                     WorkspaceCommand::Hygiene(_) => "workspace hygiene".to_string(),
                 },
                 Command::Workflow(workflow) => match workflow {
@@ -81464,6 +81540,155 @@ mod tests {
         ensure(
             !workspace_dir.path().join(".ee").exists(),
             "the storeless miss must not create the addressed store",
+        )
+    }
+
+    #[test]
+    fn workspace_rebind_cli_recovers_moved_store_without_rekeying_memory() -> TestResult {
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use crate::policy::store_auth::{KEY_FILE_NAME, StoreAuthRoot};
+
+        let temporary = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let root = temporary.path().canonicalize().map_err(|e| e.to_string())?;
+        let original = root.join("original");
+        let moved = root.join("moved");
+        std::fs::create_dir_all(original.join(".ee")).map_err(|e| e.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000081";
+        let memory_id = "mem_00000000000000000000000081";
+        let body = "Keep the source signing identity when relocating release memory.";
+        let database = original.join(".ee/ee.db");
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.migrate().map_err(|e| e.to_string())?;
+        db.upsert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: original.to_string_lossy().into_owned(),
+                name: Some("relocation-fixture".to_owned()),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db.insert_memory(
+            memory_id,
+            &CreateMemoryInput {
+                workspace_id: workspace_id.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: body.to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: Some("manual://source-relocation".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: vec!["release".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        StoreAuthRoot::create(original.join(".ee/keys")).map_err(|e| e.to_string())?;
+        std::fs::rename(&original, &moved).map_err(|e| e.to_string())?;
+        let moved_database = moved.join(".ee/ee.db");
+        let keys = moved.join(".ee/keys");
+        let database_before = std::fs::read(&moved_database).map_err(|e| e.to_string())?;
+        let key_before = std::fs::read(keys.join(KEY_FILE_NAME)).map_err(|e| e.to_string())?;
+        let moved_text = moved.to_string_lossy();
+        let source_text = original.to_string_lossy();
+        let keys_text = keys.to_string_lossy();
+        let args = [
+            "ee",
+            "--json",
+            "--workspace",
+            &moved_text,
+            "workspace",
+            "rebind",
+            "--expected-workspace-id",
+            workspace_id,
+            "--expected-source-path",
+            &source_text,
+            "--source-keys-dir",
+            &keys_text,
+        ];
+        let (exit, stdout, stderr) = invoke(&args);
+        ensure_equal(&exit, &ProcessExitCode::Success, &stdout)?;
+        ensure(stderr.is_empty(), "rebind preview keeps JSON stderr clean")?;
+        let preview: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+        assert_eq!(preview["schema"], "ee.response.v2");
+        assert_eq!(preview["data"]["schema"], "ee.workspace.rebind.v1");
+        assert_eq!(preview["data"]["status"], "preview");
+        assert_eq!(preview["data"]["persisted"], false);
+        assert_eq!(
+            std::fs::read(&moved_database).map_err(|e| e.to_string())?,
+            database_before
+        );
+        assert_eq!(
+            std::fs::read(keys.join(KEY_FILE_NAME)).map_err(|e| e.to_string())?,
+            key_before
+        );
+        let commitment = preview["data"]["plan"]["planHash"]
+            .as_str()
+            .ok_or("missing commitment")?;
+        let mut apply = args.to_vec();
+        apply.extend(["--apply-plan", commitment]);
+        let (exit, stdout, stderr) = invoke(&apply);
+        ensure_equal(&exit, &ProcessExitCode::Success, &stdout)?;
+        ensure(stderr.is_empty(), "rebind apply keeps JSON stderr clean")?;
+        let applied: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+        assert_eq!(applied["data"]["status"], "rebound");
+        assert_eq!(applied["data"]["persisted"], true);
+        assert_eq!(applied["data"]["workspaceIdPreserved"], true);
+        assert_eq!(applied["data"]["derivedAssetsModified"], false);
+        assert_eq!(
+            std::fs::read(keys.join(KEY_FILE_NAME)).map_err(|e| e.to_string())?,
+            key_before
+        );
+        let db = DbConnection::open_file_read_only(&moved_database).map_err(|e| e.to_string())?;
+        let memory = db
+            .get_memory(memory_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing memory")?;
+        assert_eq!(memory.workspace_id, workspace_id);
+        assert_eq!(memory.content, body);
+        assert_eq!(memory.trust_class, "human_explicit");
+        assert_eq!(
+            memory.provenance_uri.as_deref(),
+            Some("manual://source-relocation")
+        );
+        let audit_id = applied["data"]["auditId"]
+            .as_str()
+            .ok_or("missing audit ID")?;
+        let audit = db
+            .get_audit(audit_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing audit")?;
+        assert_eq!(audit.action, "workspace.rebound");
+        db.close().map_err(|e| e.to_string())?;
+        let (exit, stdout, _) =
+            invoke(&["ee", "memory", "list", "--workspace", &moved_text, "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, &stdout)?;
+        ensure(
+            stdout.contains(memory_id),
+            "normal memory reads resolve the preserved identity",
+        )?;
+        let (exit, stdout, _) = invoke(&[
+            "ee",
+            "index",
+            "rebuild",
+            "--workspace",
+            &moved_text,
+            "--dry-run",
+            "--json",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, &stdout)?;
+        assert!(!moved.join(".ee/index").exists());
+        let (exit, _, _) = invoke(&apply);
+        ensure(
+            exit != ProcessExitCode::Success,
+            "a used relocation plan cannot replay against the new binding",
         )
     }
 

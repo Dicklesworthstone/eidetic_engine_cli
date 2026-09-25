@@ -1489,6 +1489,7 @@ equivalence, fallback, and RCH-only E2E contracts.
 | Command | Purpose |
 |---|---|
 | `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
+| `ee workspace rebind --expected-workspace-id <id> --expected-source-path <path> --source-keys-dir <path>` | Preview authenticated recovery of a moved local store; apply the returned commitment with `--apply-plan <token>` |
 | `ee workspace hygiene [--mode report\|precommit] --json` | Dirty-path hygiene, secret-risk, generated/scratch/local-machine classification, and commit-readiness guidance |
 | `ee migrate status` / `run` / `shard-fanout --dry-run` | Migration posture and shard-fanout planning |
 | `ee db status` / `inspect <table>` / `check-integrity` / `reindex --dry-run` | Inspect FrankenSQLite schema, table rows, integrity, and derived-index rebuild plans without bypassing `ee` |
@@ -2463,9 +2464,36 @@ List, search, resume, and workspace resolution report `workspace_identity_mismat
 when a local store belongs to another path; status and doctor explain the same
 recoverable condition. Follow the returned `ee memory list --workspace ...
 --database ... --json` command to read the existing identity explicitly. Neither
-`ee init` nor `ee workspace alias` relocates old memories. Durable relocation uses
-authenticated backup restoration to a fresh side path and requires the source
-authentication material; automatic or in-place rebind is not provided.
+`ee init` nor `ee workspace alias` relocates old memories. Authenticated backup
+restoration into a fresh side path remains available. For an existing moved
+single-workspace `.ee` store, explicit in-place recovery is also available:
+
+```bash
+ee workspace rebind --workspace /new/project \
+  --expected-workspace-id wsp_00000000000000000000000000 \
+  --expected-source-path /old/project \
+  --source-keys-dir /new/project/.ee/keys --json
+```
+
+Use the actual stored ID and former path reported by the mismatch diagnostic.
+The first invocation only previews. Supply existing source authentication keys
+from the store you intend to recover; they must match the moved store's current
+key material. The command never creates missing keys. Review `data.plan`, then
+repeat the command with `--apply-plan` set to its exact `planHash` token.
+
+Apply changes the stored workspace address and repository scope together with
+an audit record. It preserves the workspace ID, memory and rule IDs, provenance,
+sealed history, and current/retired authentication keys. Wrong identities,
+foreign keys, changed bindings, stale commitments, symlinked local stores, and
+ambiguous multi-workspace stores are refused. This proves possession of the
+selected source key; it does not freshly authenticate every historical row.
+
+The result includes an explicit index-rebuild command and a rollback-preview
+command for use after returning the store bundle to its previous physical
+location. Rebind does not move files or rebuild indexes. Existing copied indexes
+remain subject to their normal corpus, generation, model, and security checks;
+destination-specific cache identity prevents reuse of the original store's
+cached packs.
 
 Authenticated backup assets also preserve memory seals (including reveal
 history), source quarantine and release history, certificate records, and the

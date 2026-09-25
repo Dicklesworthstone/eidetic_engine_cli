@@ -3323,6 +3323,21 @@ impl EffectManifest {
                 "Classify graph algorithm witnesses and delete only rows older than policy TTL that are not tied to active snapshots",
             ),
             CommandEffect::schema_migration_run(),
+            {
+                let mut rebind = CommandEffect::durable_write(
+                    "workspace rebind",
+                    vec!["workspaces", "audit_log"],
+                    "Preview a moved local store; apply only an authenticated exact binding plan",
+                )
+                .with_read_snapshot();
+                rebind.mutation_contract.idempotency_key =
+                    Some("authenticated plan commitment and exact previous workspace binding");
+                rebind.mutation_contract.dry_run_behavior = Some(
+                    "default preview reads existing store and keys; only --apply-plan can commit",
+                );
+                rebind.mutation_contract.recovery_behavior = "binding and audit commit together; audit and report retain previous addressing for an authenticated reverse rebind";
+                rebind
+            },
         ]
     }
 

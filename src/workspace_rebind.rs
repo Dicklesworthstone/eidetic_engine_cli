@@ -14,16 +14,23 @@ use crate::config::{WORKSPACE_MARKER, derive_workspace_scope};
 use crate::core::workspace::WorkspaceEntry;
 use crate::db::{CreateAuditInput, DbConnection, DbError, DbOperation, generate_audit_id};
 use crate::models::DomainError;
+use crate::policy::store_auth::{
+    Mac, MacDomain, StoreAuthError, StoreAuthRoot, workspace_keys_dir,
+};
 
 pub const WORKSPACE_REBIND_SCHEMA: &str = "ee.workspace.rebind.v1";
 const REBIND_ACTION: &str = "workspace.rebound";
 const CONFLICT_PREFIX: &str = "workspace rebind: ";
+const COMMITMENT_PREFIX: &str = "ee-rebind-v1";
 
 /// Both source selectors are required: recovery must not guess which identity
 /// a copied database belongs to. With no `apply_plan`, this only previews.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRebindOptions {
     pub workspace_path: PathBuf,
+    /// Existing source authentication material selected by the caller, never
+    /// by database metadata. It must match the copied store's current root.
+    pub source_keys_dir: PathBuf,
     pub expected_workspace_id: String,
     /// The exact stored path, even when it no longer exists on this host.
     pub expected_source_path: String,
@@ -46,8 +53,15 @@ pub struct WorkspaceRebindDestination {
 pub struct WorkspaceRebindPlan {
     pub schema: &'static str,
     pub database_path: String,
+    pub source_keys_dir: String,
+    pub source_auth_key_id: String,
     pub previous: WorkspaceEntry,
     pub destination: WorkspaceRebindDestination,
+    /// Run only after returning the local store to its original directory.
+    /// Recovery never moves files or overwrites the original store itself.
+    pub rollback_preview_command: String,
+    pub content_hash: String,
+    /// Opaque MAC-authenticated commitment accepted by `apply_plan`.
     pub plan_hash: String,
 }
 
@@ -83,6 +97,14 @@ pub fn rebind_workspace(
 ) -> Result<WorkspaceRebindReport, DomainError> {
     let (database, destination) = local_destination(&options.workspace_path)?;
     let database_text = utf8_path(&database)?;
+    let source_keys_dir = existing_directory(&options.source_keys_dir)?;
+    let copied_keys_dir = workspace_keys_dir(Path::new(&destination.path));
+    let source_auth = StoreAuthRoot::open(&source_keys_dir).map_err(authentication_error)?;
+    let copied_auth = StoreAuthRoot::open(&copied_keys_dir).map_err(authentication_error)?;
+    let options = WorkspaceRebindOptions {
+        source_keys_dir,
+        ..options.clone()
+    };
     let read = DbConnection::open_file_read_only(&database).map_err(storage_error)?;
     if read.needs_migration().map_err(storage_error)? {
         return Err(DomainError::MigrationRequired {
@@ -90,17 +112,16 @@ pub fn rebind_workspace(
             repair: Some("Migrate the store explicitly before previewing the rebind.".to_owned()),
         });
     }
-    let plan =
-        plan_for_connection(&read, &database_text, &destination, options).map_err(storage_error)?;
+    let plan = plan_for_connection(&read, &database_text, &destination, &options, &source_auth)
+        .map_err(storage_error)?;
+    verify_plan_commitment(&plan, &plan.plan_hash, &copied_auth).map_err(storage_error)?;
     drop(read);
     let Some(commitment) = options.apply_plan.as_deref() else {
         return Ok(report(plan, None));
     };
-    if commitment != plan.plan_hash {
-        return Err(storage_error(conflict(
-            "preview commitment is stale or does not match",
-        )));
-    }
+    verify_plan_commitment(&plan, commitment, &source_auth).map_err(storage_error)?;
+    drop(source_auth);
+    drop(copied_auth);
 
     // Recheck the destination before opening a writer. The second plan check
     // below is the authoritative one: previewing must not create a TOCTOU
@@ -109,6 +130,19 @@ pub fn rebind_workspace(
     if checked_database != database || checked_destination != destination {
         return Err(storage_error(conflict("destination changed after preview")));
     }
+    if existing_directory(&options.source_keys_dir)? != options.source_keys_dir {
+        return Err(storage_error(conflict(
+            "source key directory changed after preview",
+        )));
+    }
+    // Hold both roots across the writer transaction so a normal key rotation
+    // cannot invalidate the authenticated selection between check and commit.
+    // Two shared locks also work when the caller explicitly selected the
+    // copied store's own keys; neither path creates or rotates key material.
+    let source_auth =
+        StoreAuthRoot::open_read_locked(&options.source_keys_dir).map_err(authentication_error)?;
+    let copied_auth =
+        StoreAuthRoot::open_read_locked(&copied_keys_dir).map_err(authentication_error)?;
     let db = DbConnection::open_file(&database).map_err(storage_error)?;
     let audit_id = generate_audit_id();
     let applied = db
@@ -117,7 +151,9 @@ pub fn rebind_workspace(
                 &db,
                 &database_text,
                 &destination,
-                options,
+                &options,
+                &source_auth,
+                &copied_auth,
                 commitment,
                 &audit_id,
             )
@@ -129,29 +165,7 @@ pub fn rebind_workspace(
 fn local_destination(
     workspace: &Path,
 ) -> Result<(PathBuf, WorkspaceRebindDestination), DomainError> {
-    let absolute = if workspace.is_absolute() {
-        workspace.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|_| usage("cannot resolve the current directory"))?
-            .join(workspace)
-    };
-    let mut component_path = PathBuf::new();
-    for component in absolute.components() {
-        if component == Component::ParentDir {
-            return Err(usage(
-                "use a destination path without parent-directory components",
-            ));
-        }
-        component_path.push(component.as_os_str());
-        if matches!(component, Component::Prefix(_)) {
-            continue;
-        }
-        require_file_kind(&component_path, true)?;
-    }
-    let canonical = absolute
-        .canonicalize()
-        .map_err(|_| usage("destination directory is not readable"))?;
+    let canonical = existing_directory(workspace)?;
     let marker = canonical.join(WORKSPACE_MARKER);
     require_file_kind(&marker, true)?;
     let database = marker.join("ee.db");
@@ -177,6 +191,30 @@ fn local_destination(
     ))
 }
 
+fn existing_directory(path: &Path) -> Result<PathBuf, DomainError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| usage("cannot resolve the current directory"))?
+            .join(path)
+    };
+    let mut component_path = PathBuf::new();
+    for component in absolute.components() {
+        if component == Component::ParentDir {
+            return Err(usage("use paths without parent-directory components"));
+        }
+        component_path.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
+        require_file_kind(&component_path, true)?;
+    }
+    absolute
+        .canonicalize()
+        .map_err(|_| usage("an existing readable directory is required"))
+}
+
 fn require_file_kind(path: &Path, directory: bool) -> Result<(), DomainError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| usage("an existing, readable project-local store is required"))?;
@@ -196,9 +234,9 @@ fn require_file_kind(path: &Path, directory: bool) -> Result<(), DomainError> {
 
 fn utf8_path(path: &Path) -> Result<String, DomainError> {
     path.to_str()
-        .filter(|value| !value.contains('\0'))
+        .filter(|value| !value.chars().any(char::is_control))
         .map(str::to_owned)
-        .ok_or_else(|| usage("destination paths must be valid UTF-8 without NUL bytes"))
+        .ok_or_else(|| usage("destination paths must be valid UTF-8 without control characters"))
 }
 
 fn plan_for_connection(
@@ -206,6 +244,7 @@ fn plan_for_connection(
     database: &str,
     destination: &WorkspaceRebindDestination,
     options: &WorkspaceRebindOptions,
+    source_auth: &StoreAuthRoot,
 ) -> Result<WorkspaceRebindPlan, DbError> {
     let previous = single_workspace(db)?;
     if previous.workspace_id != options.expected_workspace_id
@@ -218,11 +257,37 @@ fn plan_for_connection(
     if previous.path == destination.path {
         return Err(conflict("store is already bound to the destination"));
     }
+    if !Path::new(&previous.path).is_absolute() || previous.path.chars().any(char::is_control) {
+        return Err(conflict(
+            "the stored source path must be absolute without control characters",
+        ));
+    }
+    let source_keys_dir = options
+        .source_keys_dir
+        .to_str()
+        .filter(|path| !path.chars().any(char::is_control))
+        .ok_or_else(|| conflict("source key paths must be valid UTF-8 without control characters"))?
+        .to_owned();
+    let rollback_preview_command = format!(
+        "ee workspace rebind --workspace {} --source-keys-dir {} --expected-workspace-id {} --expected-source-path {}",
+        shell_quote(&previous.path),
+        shell_quote(
+            workspace_keys_dir(Path::new(&previous.path))
+                .to_str()
+                .ok_or_else(|| conflict("rollback key path is not valid UTF-8"))?,
+        ),
+        shell_quote(&previous.workspace_id),
+        shell_quote(&destination.path),
+    );
     let mut plan = WorkspaceRebindPlan {
         schema: WORKSPACE_REBIND_SCHEMA,
         database_path: database.to_owned(),
+        source_keys_dir,
+        source_auth_key_id: source_auth.current_key_id().to_hex(),
         previous,
         destination: destination.clone(),
+        rollback_preview_command,
+        content_hash: String::new(),
         plan_hash: String::new(),
     };
     // The fixed struct field order and empty commitment field make the digest
@@ -230,8 +295,56 @@ fn plan_for_connection(
     // so alias/scope edits invalidate a previously approved plan as well.
     let bytes =
         serde_json::to_vec(&plan).map_err(|_| conflict("cannot encode the preview commitment"))?;
-    plan.plan_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    plan.content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    let mac = source_auth
+        .mac(MacDomain::WorkspaceRebindPlan, &commitment_message(&plan)?)
+        .map_err(authentication_conflict)?;
+    plan.plan_hash = format!(
+        "{COMMITMENT_PREFIX}:{}:{}",
+        plan.source_auth_key_id,
+        mac.to_hex()
+    );
     Ok(plan)
+}
+
+fn commitment_message(plan: &WorkspaceRebindPlan) -> Result<Vec<u8>, DbError> {
+    let mut unsigned = plan.clone();
+    unsigned.plan_hash.clear();
+    serde_json::to_vec(&unsigned).map_err(|_| conflict("cannot encode the preview commitment"))
+}
+
+fn verify_plan_commitment(
+    plan: &WorkspaceRebindPlan,
+    commitment: &str,
+    auth: &StoreAuthRoot,
+) -> Result<(), DbError> {
+    let refused =
+        || conflict("preview commitment is stale or source authentication does not match");
+    let Some((prefix, rest)) = commitment.split_once(':') else {
+        return Err(refused());
+    };
+    let Some((key_id, encoded_mac)) = rest.split_once(':') else {
+        return Err(refused());
+    };
+    if prefix != COMMITMENT_PREFIX
+        || key_id != plan.source_auth_key_id
+        || key_id != auth.current_key_id().to_hex()
+    {
+        return Err(refused());
+    }
+    let mac = Mac::from_hex(encoded_mac).map_err(|_| refused())?;
+    if encoded_mac != mac.to_hex()
+        || !auth
+            .verify(
+                MacDomain::WorkspaceRebindPlan,
+                &commitment_message(plan)?,
+                &mac,
+            )
+            .map_err(authentication_conflict)?
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 fn single_workspace(db: &DbConnection) -> Result<WorkspaceEntry, DbError> {
@@ -254,13 +367,14 @@ fn apply_on_connection(
     database: &str,
     destination: &WorkspaceRebindDestination,
     options: &WorkspaceRebindOptions,
+    source_auth: &StoreAuthRoot,
+    copied_auth: &StoreAuthRoot,
     commitment: &str,
     audit_id: &str,
 ) -> Result<WorkspaceRebindPlan, DbError> {
-    let plan = plan_for_connection(db, database, destination, options)?;
-    if plan.plan_hash != commitment {
-        return Err(conflict("preview commitment is stale or does not match"));
-    }
+    let plan = plan_for_connection(db, database, destination, options, source_auth)?;
+    verify_plan_commitment(&plan, commitment, source_auth)?;
+    verify_plan_commitment(&plan, commitment, copied_auth)?;
     // This MUST remain an UPDATE, never an INSERT/REPLACE or identity upsert.
     // The primary key, alias, creation timestamp and all child rows stay put.
     // DbConnection's raw writer has no parameter-binding public counterpart;
@@ -350,6 +464,20 @@ fn conflict(message: &str) -> DbError {
     DbError::MalformedRow {
         operation: DbOperation::Execute,
         message: format!("{CONFLICT_PREFIX}{message}"),
+    }
+}
+
+fn authentication_conflict(error: StoreAuthError) -> DbError {
+    conflict(&error.message())
+}
+
+fn authentication_error(error: StoreAuthError) -> DomainError {
+    DomainError::Usage {
+        message: format!("{CONFLICT_PREFIX}{}", error.message()),
+        repair: Some(
+            "Select the existing source key directory and preserve the matching protected keys with the copied store; rebind never creates authentication keys."
+                .to_owned(),
+        ),
     }
 }
 

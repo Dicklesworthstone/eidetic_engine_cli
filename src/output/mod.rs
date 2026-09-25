@@ -10885,6 +10885,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: workspace_hygiene_schema_definition,
         },
         SchemaEntry {
+            id: crate::workspace_rebind::WORKSPACE_REBIND_SCHEMA,
+            version: "1",
+            description: "Authenticated preview and recovery of a moved local workspace",
+            category: "ops",
+            definition: workspace_rebind_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::completion_audit::COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
             version: "1",
             description: "Objective-to-artifact completion audit checklist",
@@ -12503,6 +12510,10 @@ fn db_inspect_schema_definition() -> String {
 
 fn workspace_hygiene_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.workspace_hygiene.v1.json").to_string()
+}
+
+fn workspace_rebind_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.workspace.rebind.v1.json").to_string()
 }
 
 fn completion_audit_checklist_schema_definition() -> String {

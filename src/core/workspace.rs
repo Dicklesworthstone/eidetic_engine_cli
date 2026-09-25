@@ -2907,7 +2907,7 @@ pub(crate) fn addressed_workspace_row(
         })
     }).collect::<Vec<_>>();
     let repair = recovery_actions.first().and_then(|action| action.command.clone()).or_else(|| {
-        Some("Keep the addressed store unchanged. Backup restoration into a fresh side path requires the source authentication material; automatic rebind is not available.".to_owned())
+        Some("Inspect the stored identity first. Recover through authenticated backup restoration, or preview `ee workspace rebind` with the exact stored ID, source path, and existing source authentication keys.".to_owned())
     });
     Err(DomainError::WorkspaceIdentityMismatch {
         message: WORKSPACE_IDENTITY_MISMATCH_MESSAGE.to_owned(),
