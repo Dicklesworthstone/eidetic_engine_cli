@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_write_followup_failed",
+  "introduced_by": { "bead": "bd-wx6ou.3", "epic_letter": "L" },
+  "surfaces": ["ee.daemon.write"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The daemon commits a source memory, database audit row, and index job, then cannot append the audit JSONL stream or complete/encode the full remember report. The daemon retains the exact committed IDs and still attempts queued indexing.",
+    "setup_commands": [
+      "# Initialize a fresh workspace database and make .ee/audit.jsonl a directory before its first remember.",
+      "# Covered by daemon_direct_remember_preserves_commit_when_audit_stream_append_fails."
+    ],
+    "invocation": "ee.daemon.write with a supported memory payload addressed to that workspace"
+  },
+  "expected_emission": {
+    "code": "daemon_write_followup_failed",
+    "severity": "medium",
+    "message_contains": ["committed", "Do not repeat the source write"],
+    "repair_contains": "--workspace"
+  }
+}

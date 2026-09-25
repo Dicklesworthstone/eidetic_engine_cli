@@ -444,6 +444,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
+| `search_live_snapshot_lexical` | warning | bd-l2271 — a stale persisted generation was replaced for this request by complete current-source lexical retrieval; no source/index writes or semantic credit |
+| `search_live_snapshot_unavailable` | warning | bd-l2271 — complete current-source retrieval exceeded its bound or could not run; newly committed content may be absent and persisted-index staleness remains explicit |
 | `search_lexical_only` | medium | bd-status-search-lexical-honesty-ejdpo — a healthy index whose active embedder can only serve lexical evidence. Classified `response_time`, not `mixed`: the emission is decided entirely by workspace embedding state (hash fallback, or a semantic embedder with zero embedded vectors over a non-empty corpus) against an unchanged binary. The build-time half — search or the embedder not being compiled in at all — is already reported by `search_unimplemented` and `lexical_unavailable`, so it is not double-counted here. The two causes differ in weight (bd-rzfov): zero embedded vectors degrades the `search` row (repair `ee index rebuild`), while the hash fallback leaves the row `ok` per ADR 0081 D1 and is reported only here (repair: `ee model fetch`, then rebuild). |
 | `embed_model_receipt_stale` | low | bd-h1xbv — the bundled potion model is present but its `.verified` receipt is missing or stale (a chmod or chown changes ctime), so every process re-hashes 512 MB before loading. Classified `response_time`: it is decided by on-disk receipt state against an unchanged binary. Advisory; results are unaffected. Repair: `ee model fetch embedding-default`, which re-mints the receipt (bd-vlkfk). |
 | `model_lifecycle_unknown` | warning | gh-32 (F4) |
@@ -697,7 +699,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (11)
+#### Concurrency + write owner (14)
 | Code | Severity | Bead |
 |------|----------|------|
 | `advisory_lock_timeout` | medium | bd-3usjw.57 |
@@ -705,6 +707,9 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `audit_lane_batch_commit_failed` | high | bd-2kzk9 |
 | `audit_lane_shutdown_drain_timeout` | medium | bd-wp5ac.1 |
 | `daemon_overloaded` | warning | bd-jnyui — bounded `ee daemon` accept loop refuses excess connections to bound peak RSS amplification |
+| `daemon_write_followup_failed` | medium | bd-wx6ou.3 — the source memory, audit row, and index job committed, but subsequent reporting or housekeeping failed; inspect the existing memory instead of repeating the source write |
+| `daemon_write_index_queued` | low | bd-wx6ou.3 — the source memory committed while its durable index work or final published generation remains pending or unverified |
+| `daemon_write_index_failed` | medium | bd-wx6ou.3 — the source memory committed but durable index processing failed; repair derived indexing while preserving the successful write acknowledgement |
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |

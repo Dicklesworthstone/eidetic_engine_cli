@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_write_index_failed",
+  "introduced_by": { "bead": "bd-wx6ou.3", "epic_letter": "L" },
+  "surfaces": ["ee.daemon.write"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A daemon memory write commits, then derived publication fails against an invalid index path. The successful source acknowledgement retains the memory ID, index job ID, full remember report, and indexStatus:failed. Sibling journal/outcome writes remain successful.",
+    "setup_commands": [
+      "# Initialize a fresh workspace database, then place a regular file at the absent .ee/index path.",
+      "# Covered by daemon_remember_reports_failed_publication_without_failing_committed_write and daemon_derived_failure_preserves_sibling_journal_and_outcome_success."
+    ],
+    "invocation": "ee.daemon.write with a supported memory payload addressed to that workspace"
+  },
+  "expected_emission": {
+    "code": "daemon_write_index_failed",
+    "severity": "medium",
+    "message_contains": ["is stored", "search indexing is failed", "Do not repeat the source write"],
+    "repair_contains": "index rebuild --json"
+  }
+}

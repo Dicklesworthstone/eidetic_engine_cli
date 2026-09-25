@@ -68,6 +68,8 @@ mod rollback_manifest;
 
 #[path = "index_source_snapshot.rs"]
 mod source_snapshot;
+#[cfg(feature = "lexical-bm25")]
+pub(crate) use source_snapshot::read_only_documents_in_current_snapshot;
 
 #[cfg(unix)]
 #[path = "index_read_lease.rs"]
@@ -5856,35 +5858,19 @@ fn evidence_documents(
     })
 }
 
-fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
-    let rows = db.query("SELECT id FROM workspaces ORDER BY id LIMIT 2", &[])?;
-
-    if rows.len() > 1 {
-        return Err(IndexRebuildError::NoWorkspace);
-    }
-
-    rows.first()
-        .and_then(|row| row.get(0).and_then(|v| v.as_str().map(str::to_string)))
-        .ok_or(IndexRebuildError::NoWorkspace)
-}
-
 /// GH#20: resolve the workspace row targeted by `--workspace` for the index
 /// entry points (`rebuild`, `reembed`, `process-jobs`).
 ///
 /// Looks the requested path up by canonical root first and lexical key second
-/// (same contract as `workspace_id_for_index_status`). Only when the path is
-/// not registered at all may a database's sole workspace row be selected.
-/// Multiple stored workspaces require an explicit matching identity; choosing
-/// whichever row was created last would publish another workspace's documents
-/// into the requested index and consume that unrelated workspace's jobs.
+/// (same contract as `workspace_id_for_index_status`). An unmatched path never
+/// adopts another workspace, even when its row is the only one in the store.
+/// A moved local store requires explicit authenticated rebind before indexing;
+/// external shared stores require a matching registered workspace.
 fn resolve_index_workspace_id(
     db: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, IndexRebuildError> {
-    if let Some(workspace_id) = workspace_id_for_index_status(db, workspace_path)? {
-        return Ok(workspace_id);
-    }
-    get_default_workspace_id(db)
+    workspace_id_for_index_status(db, workspace_path)?.ok_or(IndexRebuildError::NoWorkspace)
 }
 
 #[derive(Debug)]
@@ -9382,17 +9368,12 @@ fn workspace_id_for_index_status(
     workspace_path: &Path,
 ) -> Result<Option<String>, DbError> {
     let canonical_root = default_workspace_root(workspace_path);
-    let requested = crate::core::workspace::stable_workspace_id(&canonical_root);
-    crate::core::workspace::select_existing_workspace_row(
-        db,
-        &requested,
-        &[workspace_path, canonical_root.as_path()],
-    )
-    .map(|row| row.map(|workspace| workspace.id))
-    .map_err(|error| DbError::MalformedRow {
-        operation: DbOperation::Query,
-        message: error.message(),
-    })
+    crate::core::workspace::addressed_workspace_row(db, &canonical_root, Path::new(db.path()))
+        .map(|row| row.map(|workspace| workspace.id))
+        .map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: error.message(),
+        })
 }
 
 fn log_db_generation_observed(report: &IndexStatusReport) {
@@ -22332,6 +22313,104 @@ mod tests {
             Err(IndexRebuildError::NoWorkspace)
         ));
         connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_entry_points_refuse_a_moved_local_stores_only_workspace() -> TestResult {
+        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temporary
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace = root.join("moved");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        let index_dir = workspace.join(".ee/index");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000082";
+        let source_path = root.join("original").to_string_lossy().into_owned();
+        connection
+            .upsert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: source_path.clone(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_search_index_job(
+                "sidx_moved_store_job",
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before_preview = std::fs::read(&database).map_err(|error| error.to_string())?;
+        let rebuild = IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: true,
+        };
+        let preview_error = rebuild_index(&rebuild).expect_err("copied store cannot be adopted");
+        assert!(
+            preview_error
+                .to_string()
+                .contains("different workspace identity")
+        );
+        assert_eq!(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            before_preview
+        );
+        assert!(
+            rebuild_index(&IndexRebuildOptions {
+                dry_run: false,
+                ..rebuild
+            })
+            .is_err()
+        );
+        assert!(
+            reembed_index(&IndexReembedOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index_dir.clone()),
+                dry_run: false,
+            })
+            .is_err()
+        );
+        assert!(
+            process_index_jobs(&IndexProcessingOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index_dir.clone()),
+                dry_run: false,
+                job_limit: None,
+            })
+            .is_err()
+        );
+        assert!(!index_dir.exists());
+        let connection =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        assert!(workspace_id_for_index_status(&connection, &workspace).is_err());
+        let stored = connection
+            .get_workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("workspace missing")?;
+        assert_eq!(stored.path, source_path);
+        let job = connection
+            .get_search_index_job("sidx_moved_store_job")
+            .map_err(|error| error.to_string())?
+            .ok_or("queued job missing")?;
+        assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Pending));
+        assert!(job.started_at.is_none() && job.completed_at.is_none());
+        Ok(())
     }
 
     #[test]

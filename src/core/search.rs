@@ -107,6 +107,13 @@ pub const SEARCH_INDEX_LARGE_GAP_THRESHOLD: u64 = 50;
 /// be expensive. Larger stores remain truthfully stale and use the explicit
 /// rebuild repair instead of blocking an interactive read.
 const SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS: u64 = 64;
+/// A stale generation can be replaced for this request by a complete,
+/// ephemeral lexical corpus. Larger stores retain explicit stale reporting;
+/// no truncated corpus is presented as a fresh snapshot.
+#[cfg(feature = "lexical-bm25")]
+const SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS: u32 = 4096;
+#[cfg(feature = "lexical-bm25")]
+const SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 /// Wall-clock budget for repairing a small stale corpus before retrieval.
 ///
 /// Reconciliation publishes complete vector and lexical tiers even for a
@@ -1782,15 +1789,26 @@ impl PackSearchHandoff {
     /// Retrieval-only workers never repair derived indexes. Let the caller run
     /// canonical read repair whenever this result cannot establish freshness.
     pub(crate) fn can_reuse_for_pack(&self) -> bool {
+        let complete_live_snapshot = self.report.source_mode_applied
+            == SearchSourceMode::LexicalOnly
+            && self
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_lexical");
         matches!(
             self.report.status,
             SearchStatus::Success | SearchStatus::NoResults
-        ) && !self
-            .report
-            .index_freshness
-            .as_ref()
-            .is_some_and(|freshness| freshness.stale)
+        ) && (complete_live_snapshot
+            || !self
+                .report
+                .index_freshness
+                .as_ref()
+                .is_some_and(|freshness| freshness.stale))
             && !self.report.degraded.iter().any(|degradation| {
+                if complete_live_snapshot && degradation.code == "index_stale" {
+                    return false;
+                }
                 matches!(
                     degradation.code.as_str(),
                     "index_stale"
@@ -7801,12 +7819,19 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         && index_dir.exists()
         && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
     {
+        let preparation = if retrieval_only {
+            crate::core::index::prepare_read_only_search_embedder_for_workspace(
+                cx,
+                &options.workspace_path,
+                &database_path,
+            )
+        } else {
+            prepare_search_embedder_for_workspace(cx, &options.workspace_path, &database_path).await
+        };
         Some(
-            prepare_search_embedder_for_workspace(cx, &options.workspace_path, &database_path)
-                .await
-                .map_err(|error| {
-                    map_frankensearch_error(cx, "search embedder preparation", error)
-                })?,
+            preparation.map_err(|error| {
+                map_frankensearch_error(cx, "search embedder preparation", error)
+            })?,
         )
     } else {
         None
@@ -9254,6 +9279,17 @@ async fn run_search_inner_with_performance(
         None
     };
     let read_connection = read_connection.or(owned_read_connection.as_ref());
+    // Public seeded/connection APIs can supply an unpinned read handle. Keep
+    // one source view across generation selection, full-corpus projection and
+    // every live admission gate. Borrow an existing caller transaction without
+    // ever committing or rolling it back.
+    let source_snapshot = read_connection
+        .filter(|connection| connection.mode() == crate::db::DatabaseOpenMode::ReadOnly)
+        .map(rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow)
+        .transpose()
+        .map_err(|error| {
+            SearchError::Index(format!("Failed to pin search source snapshot: {error}"))
+        })?;
     let source_generation = if let Some(connection) = read_connection {
         let workspace = crate::core::workspace::addressed_workspace_row(
             connection,
@@ -9360,13 +9396,28 @@ async fn run_search_inner_with_performance(
     }
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
+    let live_snapshot_start = Instant::now();
+    let live_snapshot_retrieval = if index_freshness.as_ref().is_some_and(|status| status.stale) {
+        stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
+    } else {
+        None
+    };
+    trace.record_elapsed("search::liveSnapshotRetrieval", live_snapshot_start);
     let source_mode_start = Instant::now();
-    let source_mode = resolve_source_mode(
-        options,
-        &index_dir,
-        &mut degraded,
-        fast_embedder_override.as_deref(),
-    )?;
+    let source_mode = if live_snapshot_retrieval.is_some() {
+        SourceModeResolution {
+            applied: SearchSourceMode::LexicalOnly,
+            fallback_applied: options.source_mode != SearchSourceMode::LexicalOnly,
+            unavailable_no_results: false,
+        }
+    } else {
+        resolve_source_mode(
+            options,
+            &index_dir,
+            &mut degraded,
+            fast_embedder_override.as_deref(),
+        )?
+    };
     let embed_backend = if source_mode.applied.uses_embeddings() {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
@@ -9389,17 +9440,21 @@ async fn run_search_inner_with_performance(
     let rerank_resolve_start = Instant::now();
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
-    let rerank_runtime = resolve_search_rerank_runtime(
-        options,
-        cx.blocking_pool_handle(),
-        // Applied lexical-only WITHOUT a fallback means the operator asked
-        // for lexical; a fallback means hybrid was requested and degraded.
-        source_mode.applied == SearchSourceMode::LexicalOnly && !source_mode.fallback_applied,
-        read_connection,
-        rerank_configured_mode,
-        rerank_configured_top_k,
-        &mut degraded,
-    );
+    let rerank_runtime = if live_snapshot_retrieval.is_some() {
+        SearchRerankRuntime::disabled()
+    } else {
+        resolve_search_rerank_runtime(
+            options,
+            cx.blocking_pool_handle(),
+            // Applied lexical-only WITHOUT a fallback means the operator asked
+            // for lexical; a fallback means hybrid was requested and degraded.
+            source_mode.applied == SearchSourceMode::LexicalOnly && !source_mode.fallback_applied,
+            read_connection,
+            rerank_configured_mode,
+            rerank_configured_top_k,
+            &mut degraded,
+        )
+    };
     let rerank_runtime_available = rerank_runtime.is_enabled();
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
@@ -9444,21 +9499,25 @@ async fn run_search_inner_with_performance(
         });
     }
     let retrieve_start = Instant::now();
-    let search_result = search_sync_with_performance(
-        cx,
-        &index_dir,
-        &options.query,
-        effective_limit as usize,
-        options.two_tier_config_for_limit(effective_limit),
-        options.explain,
-        source_mode.applied,
-        rerank_seed,
-        rerank_runtime,
-        fusion_weights,
-        fast_embedder_override,
-        &mut trace,
-    )
-    .await;
+    let search_result = if let Some(retrieval) = live_snapshot_retrieval {
+        Ok(retrieval)
+    } else {
+        search_sync_with_performance(
+            cx,
+            &index_dir,
+            &options.query,
+            effective_limit as usize,
+            options.two_tier_config_for_limit(effective_limit),
+            options.explain,
+            source_mode.applied,
+            rerank_seed,
+            rerank_runtime,
+            fusion_weights,
+            fast_embedder_override,
+            &mut trace,
+        )
+        .await
+    };
     trace.record_elapsed("search::retrieve", retrieve_start);
     // No local index handles are used after collection. Release before the
     // optional global lane can reconcile a sibling index under the same parent.
@@ -9468,7 +9527,7 @@ async fn run_search_inner_with_performance(
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    match search_result {
+    let result = match search_result {
         Ok(retrieval) => {
             let source_mode = retrieval.resolve_mode(
                 options.source_mode,
@@ -9839,7 +9898,16 @@ async fn run_search_inner_with_performance(
                 performance: trace,
             })
         }
+    };
+    if let Some(snapshot) = source_snapshot {
+        let released = snapshot.finish();
+        if result.is_ok() {
+            released.map_err(|error| {
+                SearchError::Index(format!("Failed to release search source snapshot: {error}"))
+            })?;
+        }
     }
+    result
 }
 
 pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport, SearchError> {
@@ -10867,6 +10935,125 @@ fn cached_index_status_for_search(
     }
 
     Ok(index_status)
+}
+
+/// Replace a stale local generation with one complete, current lexical
+/// execution. Every result still passes the ordinary live evidence, revision,
+/// rule, validity, scope and relevance admission below. This never merges
+/// independently scored stale and fresh local pools.
+async fn stale_index_live_snapshot_retrieval(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    connection: Option<&DbConnection>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Result<Option<runtime_fallback::Retrieval>, SearchError> {
+    let unavailable = |reason: &str| SearchDegradation {
+        code: "search_live_snapshot_unavailable".to_owned(),
+        severity: "warning".to_owned(),
+        message: format!(
+            "The search index is stale and complete live lexical retrieval was unavailable: {reason}. Newly committed content may be absent from this response."
+        ),
+        repair: Some("ee index rebuild --workspace .".to_owned()),
+    };
+    if options.strict_source_mode && options.source_mode != SearchSourceMode::LexicalOnly {
+        degraded.push(unavailable(
+            "strict source mode does not permit lexical fallback",
+        ));
+        return Ok(None);
+    }
+    if options.include_tombstoned || options.as_of.is_some() {
+        degraded.push(unavailable(
+            "explicit historical/reference-time retrieval retains its indexed view",
+        ));
+        return Ok(None);
+    }
+    let Some(connection) =
+        connection.filter(|connection| connection.mode() == crate::db::DatabaseOpenMode::ReadOnly)
+    else {
+        degraded.push(unavailable("no caller-owned read-only source snapshot"));
+        return Ok(None);
+    };
+    search_checkpoint(cx)?;
+    #[cfg(not(feature = "lexical-bm25"))]
+    {
+        let _ = connection;
+        degraded.push(unavailable("this build has no lexical backend"));
+        Ok(None)
+    }
+    #[cfg(feature = "lexical-bm25")]
+    {
+        use crate::search::LexicalWrite;
+        let workspace_id = bound_search_workspace_id(
+            &options.workspace_path,
+            options.database_path.as_deref(),
+            Some(connection),
+        );
+        let documents = match crate::core::index::read_only_documents_in_current_snapshot(
+            cx,
+            connection,
+            &workspace_id,
+            SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS,
+            SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES,
+        ) {
+            Ok(Some(documents)) => documents,
+            Ok(None) => {
+                degraded.push(unavailable(&format!(
+                    "the complete corpus exceeds {SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS} source rows or {SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES} bytes"
+                )));
+                return Ok(None);
+            }
+            Err(error) => {
+                search_checkpoint(cx)?;
+                tracing::warn!(target: "ee::search::index_freshness", error = %error, "live source projection failed");
+                degraded.push(unavailable(
+                    "the complete source corpus could not be projected",
+                ));
+                return Ok(None);
+            }
+        };
+        search_checkpoint(cx)?;
+        let results = async {
+            let index = TantivyIndex::in_memory()?;
+            for chunk in documents.chunks(32) {
+                index.index_documents(cx, chunk).await?;
+            }
+            index.commit(cx).await?;
+            // Collect the bounded whole pool before live admission. Otherwise
+            // stale/ineligible rows could occupy top-k and conceal a new hit.
+            index
+                .search(cx, &options.query, documents.len().max(1))
+                .await
+        }
+        .await;
+        search_checkpoint(cx)?;
+        let results = match results {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(target: "ee::search::index_freshness", error = %error, "live lexical execution failed");
+                degraded.push(unavailable(
+                    "the in-memory lexical engine could not serve the query",
+                ));
+                return Ok(None);
+            }
+        };
+        let mut hits = search_hits_from_scored_results(
+            results,
+            options.explain,
+            FrankensearchFinalScoreScale::Native,
+        );
+        sort_search_hits_by_score_order(&mut hits);
+        degraded.push(SearchDegradation {
+            code: "search_live_snapshot_lexical".to_owned(),
+            severity: "warning".to_owned(),
+            message: format!("The persisted search index is stale. This response searched the complete current source snapshot ({0} documents) with in-memory Frankensearch lexical retrieval; semantic retrieval and reranking were not used, and the persisted index was not changed.", documents.len()),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        });
+        Ok(Some(runtime_fallback::Retrieval {
+            hits,
+            degraded: Vec::new(),
+            applied: SearchSourceMode::LexicalOnly,
+        }))
+    }
 }
 
 /// Reconcile a small, known generation gap before opening a read snapshot.
@@ -14749,6 +14936,411 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn stale_read_only_search_retrieves_current_memory_and_rule_corpus_without_writes() -> TestResult
+    {
+        const WORKSPACE: &str = "wsp_00000000000000000000000871";
+        const OLD: &str = "mem_00000000000000000000000871";
+        const REMOVED: &str = "mem_00000000000000000000000872";
+        const FRESH: &str = "mem_00000000000000000000000873";
+        const REVISION: &str = "mem_00000000000000000000000874";
+        const RULE: &str = "rule_00000000000000000000000871";
+        const REMOVED_RULE: &str = "rule_00000000000000000000000872";
+        const FRESH_RULE: &str = "rule_00000000000000000000000873";
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = root.join("ee.db");
+        let index_dir = root.join("index");
+        std::fs::create_dir(root.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            root.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: root.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, content) in [
+            (OLD, "oldmemorycanary prior policy"),
+            (REMOVED, "removedmemorycanary retired policy"),
+        ] {
+            connection
+                .insert_memory(id, &test_memory_input(WORKSPACE, content))
+                .map_err(|error| error.to_string())?;
+        }
+        let rule_input = |content: &str| crate::db::CreateProceduralRuleInput {
+            workspace_id: WORKSPACE.to_owned(),
+            content: content.to_owned(),
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.8,
+            trust_class: "human_explicit".to_owned(),
+            scope: "workspace".to_owned(),
+            scope_pattern: None,
+            maturity: "validated".to_owned(),
+            protected: true,
+            source_memory_ids: vec![OLD.to_owned()],
+            tags: vec!["freshness".to_owned()],
+        };
+        for (id, content) in [
+            (RULE, "oldrulecanary prior native rule"),
+            (REMOVED_RULE, "removedrulecanary retired native rule"),
+        ] {
+            connection
+                .insert_procedural_rule(id, &rule_input(content))
+                .map_err(|error| error.to_string())?;
+        }
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(WORKSPACE);
+        let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: root.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(rebuild.errors.is_empty());
+        let mut options = SearchOptions {
+            workspace_path: root.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            query: "oldmemorycanary".to_owned(),
+            memory_scope: MemoryScope::Workspace,
+            limit: 1,
+            ..source_mode_test_options(SearchSourceMode::LexicalOnly, false)
+        };
+        let baseline = run_pack_search(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            baseline
+                .report
+                .results
+                .first()
+                .map(|hit| hit.doc_id.as_str()),
+            Some(OLD)
+        );
+        assert!(
+            !baseline
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_lexical")
+        );
+        let reference_before_update = Utc::now();
+        connection
+            .insert_memory(
+                FRESH,
+                &test_memory_input(WORKSPACE, "freshmemorycanary newly committed policy"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_revision(
+                REVISION,
+                OLD,
+                &test_memory_input(WORKSPACE, "revisedmemorycanary replacement policy"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .mark_memory_superseded(OLD, &Utc::now().to_rfc3339())
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory(REMOVED)
+            .map_err(|error| error.to_string())?;
+        connection
+            .update_procedural_rule_metadata(
+                RULE,
+                &crate::db::UpdateProceduralRuleInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    content: "updatedrulecanary replacement native policy".to_owned(),
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    protected: true,
+                    source_memory_ids: Some(vec![REVISION.to_owned()]),
+                    tags: None,
+                    updated_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_procedural_rule(
+                FRESH_RULE,
+                &rule_input("freshnativecanary newly committed native rule"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.execute_raw(&format!("UPDATE procedural_rules SET tombstoned_at = '2020-01-01T00:00:00Z' WHERE id = '{REMOVED_RULE}'")).map_err(|error| error.to_string())?;
+        let mut future = test_memory_input(WORKSPACE, "futurememorycanary not yet valid");
+        future.valid_from = Some("2100-01-01T00:00:00Z".to_owned());
+        connection
+            .insert_memory("mem_00000000000000000000000875", &future)
+            .map_err(|error| error.to_string())?;
+        let other_workspace = "wsp_00000000000000000000000872";
+        connection
+            .insert_workspace(
+                other_workspace,
+                &CreateWorkspaceInput {
+                    path: root.join("other").display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000876",
+                &test_memory_input(
+                    other_workspace,
+                    "foreignmemorycanary outside addressed workspace",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        let queued_id = "sidx_00000000000000000000000871";
+        connection
+            .insert_search_index_job(
+                queued_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    job_type: crate::db::SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(FRESH.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let before_job = connection
+            .get_search_index_job(queued_id)
+            .map_err(|error| error.to_string())?;
+        let before_generation = connection
+            .get_workspace_generation(WORKSPACE)
+            .map_err(|error| error.to_string())?;
+        let before_database = std::fs::read(&database).map_err(|error| error.to_string())?;
+        let before_metadata =
+            std::fs::read(index_dir.join("meta.json")).map_err(|error| error.to_string())?;
+        for (query, expected) in [
+            ("freshmemorycanary", Some(FRESH)),
+            ("revisedmemorycanary", Some(REVISION)),
+            ("updatedrulecanary", Some(RULE)),
+            ("freshnativecanary", Some(FRESH_RULE)),
+            ("oldmemorycanary", None),
+            ("removedmemorycanary", None),
+            ("oldrulecanary", None),
+            ("removedrulecanary", None),
+            ("futurememorycanary", None),
+            ("foreignmemorycanary", None),
+        ] {
+            options.query = query.to_owned();
+            let handoff = run_pack_search(&options).map_err(|error| error.to_string())?;
+            assert_eq!(
+                handoff
+                    .report
+                    .results
+                    .first()
+                    .map(|hit| hit.doc_id.as_str()),
+                expected,
+                "query {query}"
+            );
+            assert!(handoff.report.results.len() <= 1);
+            assert!(
+                handoff
+                    .report
+                    .index_freshness
+                    .as_ref()
+                    .is_some_and(|status| status.stale)
+            );
+            assert!(
+                handoff
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_lexical")
+            );
+            assert!(!handoff.report.rerank_runtime_available);
+            assert!(handoff.can_reuse_for_pack());
+            assert_eq!(
+                handoff.report.source_mode_applied,
+                SearchSourceMode::LexicalOnly
+            );
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .all(|hit| hit.lexical_score.is_some_and(|score| score > 0.0))
+            );
+        }
+        options.query = "removedmemorycanary".to_owned();
+        options.include_tombstoned = true;
+        let historical = run_pack_search(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            historical
+                .report
+                .results
+                .first()
+                .map(|hit| hit.doc_id.as_str()),
+            Some(REMOVED)
+        );
+        assert!(
+            historical
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_unavailable")
+        );
+        options.include_tombstoned = false;
+        options.query = "oldmemorycanary".to_owned();
+        options.as_of = Some(reference_before_update);
+        let historical = run_pack_search(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            historical
+                .report
+                .results
+                .first()
+                .map(|hit| hit.doc_id.as_str()),
+            Some(OLD)
+        );
+        assert!(
+            !historical
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_lexical")
+        );
+        options.as_of = None;
+        options.query = "freshmemorycanary".to_owned();
+        options.source_mode = SearchSourceMode::Hybrid;
+        let hybrid = run_pack_search(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            hybrid.report.results.first().map(|hit| hit.doc_id.as_str()),
+            Some(FRESH)
+        );
+        assert!(hybrid.report.source_mode_fallback);
+        assert_eq!(
+            hybrid.report.source_mode_applied,
+            SearchSourceMode::LexicalOnly
+        );
+        assert_eq!(hybrid.report.embed_backend, EmbedBackend::HashFallback);
+        let read =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        options.source_mode = SearchSourceMode::LexicalOnly;
+        for borrowed in [false, true] {
+            if borrowed {
+                read.begin_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+            }
+            let result = run_context_search_with_preloaded_memories(
+                &options,
+                &read,
+                None,
+                &Deterministic::from_seed(7),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                result.report.results.first().map(|hit| hit.doc_id.as_str()),
+                Some(FRESH)
+            );
+            if borrowed {
+                read.commit_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+            } else {
+                // A successful own-snapshot search must release its transaction.
+                read.begin_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                read.rollback_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let mut missing = options.clone();
+        missing.index_dir = Some(root.join("absent-index"));
+        assert!(matches!(
+            run_context_search_with_preloaded_memories(
+                &missing,
+                &read,
+                None,
+                &Deterministic::from_seed(7),
+                None,
+            ),
+            Err(SearchError::NoIndex)
+        ));
+        // Early error/drop owns only its own pin, too.
+        read.begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        read.rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_search_index_job(queued_id)
+                .map_err(|error| error.to_string())?,
+            before_job
+        );
+        assert_eq!(
+            connection
+                .get_workspace_generation(WORKSPACE)
+                .map_err(|error| error.to_string())?,
+            before_generation
+        );
+        assert_eq!(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            before_database
+        );
+        assert_eq!(
+            std::fs::read(index_dir.join("meta.json")).map_err(|error| error.to_string())?,
+            before_metadata
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_snapshot_fallback_preserves_strict_source_mode_and_cancellation() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::SemanticOnly, true);
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let mut degraded = Vec::new();
+            assert!(
+                stale_index_live_snapshot_retrieval(&cx, &options, None, &mut degraded)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+            assert!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_unavailable"
+                        && entry.message.contains("strict source mode"))
+            );
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let path = root.path().join("cancel.db");
+            let writer = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+            writer.migrate().map_err(|error| error.to_string())?;
+            let read =
+                DbConnection::open_file_read_only(&path).map_err(|error| error.to_string())?;
+            cx.set_cancel_reason(
+                asupersync::CancelReason::deadline().with_message("stop live corpus projection"),
+            );
+            let mut options = options;
+            options.strict_source_mode = false;
+            assert!(matches!(
+                stale_index_live_snapshot_retrieval(&cx, &options, Some(&read), &mut degraded)
+                    .await,
+                Err(SearchError::Cancelled(_))
+            ));
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
     }
 
     fn fixture_hash_embedding_posture_for_search() -> EmbeddingPosture {

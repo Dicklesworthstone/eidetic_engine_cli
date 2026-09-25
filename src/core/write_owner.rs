@@ -1208,6 +1208,9 @@ pub fn build_write_immune_quarantine_input(
 pub enum WriteResult {
     /// Operation succeeded with optional ID of created entity.
     Success { entity_id: Option<String> },
+    /// The memory and its audit/index job committed. Derived work may still
+    /// need repair; callers must not retry the source write in that case.
+    MemoryCommitted { memory: Box<CommittedMemoryWrite> },
     /// Operation failed with domain error.
     Failed { error: DomainError },
     /// Write owner is shutting down.
@@ -1218,7 +1221,7 @@ impl WriteResult {
     /// Returns true if the operation succeeded.
     #[must_use]
     pub const fn is_success(&self) -> bool {
-        matches!(self, Self::Success { .. })
+        matches!(self, Self::Success { .. } | Self::MemoryCommitted { .. })
     }
 
     /// Returns the entity ID if present.
@@ -1226,9 +1229,28 @@ impl WriteResult {
     pub fn entity_id(&self) -> Option<&str> {
         match self {
             Self::Success { entity_id } => entity_id.as_deref(),
+            Self::MemoryCommitted { memory } => Some(&memory.memory_id),
             _ => None,
         }
     }
+}
+
+/// Acknowledgement of a committed memory, separate from optional post-commit
+/// housekeeping and index publication. IDs are captured before finishing work
+/// so an audit-stream or index failure cannot turn COMMIT into a retryable
+/// source failure.
+#[derive(Clone, Debug)]
+pub struct CommittedMemoryWrite {
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub workspace_path: PathBuf,
+    pub index_job_id: String,
+    pub index_status: String,
+    /// Full canonical remember report when post-commit reporting completed.
+    /// `None` is explicit: reconstructing missing side-effect results would
+    /// invent a report about work that may not have run.
+    pub report: Option<Box<super::memory::RememberMemoryReport>>,
+    pub degraded: Vec<super::memory::RememberSuggestedLinkDegradation>,
 }
 
 /// Breakdown of group-commit fallback reasons.
@@ -4260,6 +4282,23 @@ mod tests {
         };
         assert!(success.is_success());
         assert_eq!(success.entity_id(), Some("id-123"));
+
+        let committed = WriteResult::MemoryCommitted {
+            memory: Box::new(CommittedMemoryWrite {
+                memory_id: "mem-committed".to_owned(),
+                workspace_id: "workspace".to_owned(),
+                workspace_path: PathBuf::from("/workspace"),
+                index_job_id: "index-job".to_owned(),
+                index_status: "failed".to_owned(),
+                report: None,
+                degraded: Vec::new(),
+            }),
+        };
+        assert!(
+            committed.is_success(),
+            "derived failure does not undo a committed source"
+        );
+        assert_eq!(committed.entity_id(), Some("mem-committed"));
 
         let failed = WriteResult::Failed {
             error: DomainError::Storage {

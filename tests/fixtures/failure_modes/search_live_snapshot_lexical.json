@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_live_snapshot_lexical",
+  "introduced_by": {"bead": "bd-l2271", "epic_letter": "I"},
+  "surfaces": ["search", "context", "pack"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A read-only request observes a stale usable index. The entire live source corpus fits the 4096-row and 16-MiB ceilings and is searched through an ephemeral Frankensearch lexical index before ordinary live admission. The persisted index and pending jobs remain unchanged.",
+    "setup_commands": ["# Build an index, then commit a memory or native rule without processing its index job."],
+    "invocation": "ee pack freshmemorycanary --read-only --source-mode lexical-only --json"
+  },
+  "expected_emission": {
+    "code": "search_live_snapshot_lexical",
+    "severity": "warning",
+    "message_contains": ["complete current source snapshot", "semantic retrieval and reranking were not used", "persisted index was not changed"],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace ."
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_live_snapshot_unavailable",
+  "introduced_by": {"bead": "bd-l2271", "epic_letter": "I"},
+  "surfaces": ["search", "context", "pack"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A stale index cannot be replaced by complete current-source lexical retrieval: the source exceeds a row/byte ceiling, strict source mode prohibits lexical fallback, explicit reference-time or tombstone inspection retains the indexed view, the lexical backend is unavailable, or source projection fails. No partial corpus is presented as fresh and the old generation remains explicitly stale.",
+    "setup_commands": ["# Build an index, then leave new content unindexed in a corpus exceeding the live lexical ceiling."],
+    "invocation": "ee pack pendingcontent --read-only --json"
+  },
+  "expected_emission": {
+    "code": "search_live_snapshot_unavailable",
+    "severity": "warning",
+    "message_contains": ["complete live lexical retrieval was unavailable", "Newly committed content may be absent"],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace ."
+  }
+}

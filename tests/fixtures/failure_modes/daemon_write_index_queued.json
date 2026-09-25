@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_write_index_queued",
+  "introduced_by": { "bead": "bd-wx6ou.3", "epic_letter": "L" },
+  "surfaces": ["ee.daemon.write"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A live publisher retains the drain lease, or final durable job/generation inspection cannot establish freshness after a committed daemon memory write. The response remains success:true and persisted:true with the real memory and job IDs, indexStatus:queued, and the complete remember report when available.",
+    "setup_commands": [
+      "# Hold the workspace index-drain leader lease with a live process while submitting a daemon remember.",
+      "# Covered by daemon_remember_reports_queued_publication_without_failing_committed_write."
+    ],
+    "invocation": "ee.daemon.write with a supported memory payload addressed to that workspace"
+  },
+  "expected_emission": {
+    "code": "daemon_write_index_queued",
+    "severity": "low",
+    "message_contains": ["is stored", "search indexing is queued", "Do not repeat the source write"],
+    "repair_contains": "index rebuild --json"
+  }
+}

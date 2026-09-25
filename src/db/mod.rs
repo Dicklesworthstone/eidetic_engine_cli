@@ -2647,7 +2647,7 @@ fn namespace_sidecar_admission_message_is_retryable(message: &str) -> bool {
 /// caller already holds a transaction opened via `begin()`/`begin_transaction()`
 /// directly — those do not register in `FILE_WRITE_OWNER_DEPTHS`, but the outer
 /// transaction already provides atomicity for the audit hash-read + insert.
-fn db_error_is_nested_transaction(error: &DbError) -> bool {
+pub(crate) fn db_error_is_nested_transaction(error: &DbError) -> bool {
     let DbError::SqlModel { source, .. } = error else {
         return false;
     };

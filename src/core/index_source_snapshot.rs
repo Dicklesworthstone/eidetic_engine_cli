@@ -8,6 +8,119 @@ use super::{DbConnection, IndexRebuildError};
 use crate::db::DatabaseOpenMode;
 use crate::models::{MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors};
 
+/// Project the same complete corpus as publication, while borrowing the
+/// retrieval caller's snapshot. No nested transaction, anchor backfill, job
+/// transition, model load or on-disk index is permitted on this path.
+#[cfg(feature = "lexical-bm25")]
+pub(crate) fn read_only_documents_in_current_snapshot(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    max_documents: u32,
+    max_body_bytes: u64,
+) -> Result<Option<Vec<crate::search::IndexableDocument>>, IndexRebuildError> {
+    super::index_checkpoint(cx)?;
+    if db.mode() != DatabaseOpenMode::ReadOnly {
+        return Err(IndexRebuildError::Index(
+            "live retrieval projection requires a read-only source connection".to_owned(),
+        ));
+    }
+    if !super::workspace_index_source_rows_fit(db, workspace_id, max_documents)? {
+        return Ok(None);
+    }
+    // Bound large bodies before materializing them. The memory predicate must
+    // include the same global/house-rule rows as the canonical collector.
+    let mut body_bytes = 0_u64;
+    for (table, content, scope) in [
+        (
+            "memories",
+            "content",
+            "(workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id AND lower(replace(trim(mt.tag), '-', '_')) IN ('global', 'house_rule'))) AND tombstoned_at IS NULL",
+        ),
+        (
+            "sessions",
+            "coalesce(metadata_json, '') || coalesce(agent_name, '') || coalesce(model, '')",
+            "workspace_id = ?1",
+        ),
+        (
+            "artifacts",
+            "coalesce(snippet, '') || metadata_json",
+            "workspace_id = ?1",
+        ),
+        ("procedural_rules", "content", "workspace_id = ?1"),
+        ("evidence_spans", "excerpt", "workspace_id = ?1"),
+    ] {
+        super::index_checkpoint(cx)?;
+        let rows = db.query(
+            &format!("SELECT coalesce(SUM(length(CAST(({content}) AS BLOB))), 0) FROM {table} WHERE {scope}"),
+            &[sqlmodel_core::Value::Text(workspace_id.to_owned())],
+        )?;
+        let count = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(sqlmodel_core::Value::as_i64)
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or_else(|| {
+                IndexRebuildError::Index("invalid live retrieval body size".to_owned())
+            })?;
+        body_bytes = body_bytes.saturating_add(count);
+        if body_bytes > max_body_bytes {
+            return Ok(None);
+        }
+    }
+    super::index_checkpoint(cx)?;
+    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+    let mut documents = Vec::new();
+    for memories in memories.chunks(16) {
+        super::index_checkpoint(cx)?;
+        documents.extend(super::memory_documents_with_anchors(db, memories)?);
+    }
+    let visitor_checkpoint = || {
+        cx.checkpoint()
+            .map_err(|_| crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Query,
+                message: "live retrieval source projection cancelled".to_owned(),
+            })
+    };
+    db.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |session| {
+        visitor_checkpoint()?;
+        documents.push(super::session_to_document(&session));
+        Ok(())
+    })?;
+    super::index_checkpoint(cx)?;
+    for artifact in db.list_artifacts(workspace_id, None)? {
+        super::index_checkpoint(cx)?;
+        documents.push(super::artifact_to_document(&artifact));
+    }
+    super::index_checkpoint(cx)?;
+    documents.extend(super::rule_documents(db, workspace_id)?);
+    super::index_checkpoint(cx)?;
+    db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
+        visitor_checkpoint()?;
+        documents.push(super::evidence_span_to_document(&span));
+        Ok(())
+    })?;
+    super::index_checkpoint(cx)?;
+    let documents: Vec<_> = documents
+        .into_iter()
+        .map(super::CanonicalSearchDocument::into_indexable)
+        .collect();
+    // Projection adds metadata and labels. Refuse the entire replacement if
+    // those exceed the bound; a truncated corpus must never claim freshness.
+    let projected_bytes = documents.iter().fold(0_u64, |total, document| {
+        total
+            .saturating_add(document.content.len() as u64)
+            .saturating_add(
+                serde_json::to_vec(&document.metadata)
+                    .map_or(u64::MAX, |metadata| metadata.len() as u64),
+            )
+    });
+    if documents.len() > max_documents as usize || projected_bytes > max_body_bytes {
+        return Ok(None);
+    }
+    Ok(Some(documents))
+}
+
 pub(super) fn capture<T>(
     db: &DbConnection,
     collect: impl FnOnce() -> Result<T, IndexRebuildError>,
@@ -216,6 +329,47 @@ mod tests {
                 persisted.into_indexable().metadata
             );
         }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_retrieval_projection_borrows_snapshot_and_refuses_partial_corpora() {
+        let (_root, db, path) = fixture();
+        let read = DbConnection::open_file_read_only(&path).expect("read-only store");
+        read.begin_read_snapshot().expect("caller snapshot");
+        let before = std::fs::read(&path).expect("source bytes");
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            assert!(
+                read_only_documents_in_current_snapshot(&cx, &read, WORKSPACE, 0, 4096)
+                    .expect("row ceiling")
+                    .is_none()
+            );
+            assert!(
+                read_only_documents_in_current_snapshot(&cx, &read, WORKSPACE, 16, 8)
+                    .expect("body ceiling")
+                    .is_none()
+            );
+            let documents =
+                read_only_documents_in_current_snapshot(&cx, &read, WORKSPACE, 16, 16_384)
+                    .expect("complete projection")
+                    .expect("admitted corpus");
+            assert_eq!(documents.len(), 1);
+            assert_eq!(documents[0].id, MEMORY);
+            assert!(
+                read.list_memory_anchors(MEMORY)
+                    .expect("anchors")
+                    .is_empty()
+            );
+            // A nested BEGIN or COMMIT in the collector would either fail the
+            // calls above or release this caller-owned transaction.
+            read.commit_read_snapshot()
+                .expect("caller still owns snapshot");
+            assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+            assert!(
+                read_only_documents_in_current_snapshot(&cx, &db, WORKSPACE, 16, 16_384).is_err()
+            );
+        })
+        .expect("runtime");
     }
 
     #[test]

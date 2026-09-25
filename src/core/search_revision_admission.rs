@@ -226,8 +226,24 @@ impl<'a> RevisionReadSnapshot<'a> {
         })
     }
 
+    /// Canonical retrieval also accepts caller-provided connections. Borrow
+    /// only the recognized already-open transaction; other BEGIN failures do
+    /// not establish a snapshot and must propagate.
+    pub(in crate::core::search) fn begin_or_borrow(
+        connection: &'a DbConnection,
+    ) -> Result<Self, DbError> {
+        let active = match connection.begin_read_snapshot() {
+            Ok(()) => true,
+            Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
+            Err(error) => return Err(error),
+        };
+        Ok(Self { connection, active })
+    }
+
     pub(in crate::core::search) fn finish(mut self) -> Result<(), DbError> {
-        self.connection.rollback_read_snapshot()?;
+        if self.active {
+            self.connection.rollback_read_snapshot()?;
+        }
         self.active = false;
         Ok(())
     }

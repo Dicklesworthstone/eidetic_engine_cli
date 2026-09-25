@@ -76,6 +76,30 @@ re-embed, staged intake, and interrupted-publish recovery verify those counts
 before publishing a current generation; a per-document build failure can never
 be published as a complete corpus.
 
+## Reads Before Deferred Index Publication
+
+When a usable published generation is behind the caller's source snapshot,
+read-only retrieval can search the complete current corpus in an ephemeral
+Frankensearch lexical index. It uses the same memory, session, artifact, native
+rule and admitted-evidence projections as publication, then applies the ordinary
+live revision, seal, validity, rule, workspace and relevance checks. New and
+revised content can therefore be retrieved before its queued job is published.
+The request does not claim or finish jobs, backfill anchors, change the database,
+write an index, or download a model.
+
+This replacement is bounded to 4,096 source rows and 16 MiB of source bodies and
+projected document bytes. It collects the complete bounded result pool before
+live admission and the requested result limit; it never substitutes a truncated
+corpus. Cancellation remains attached to the caller's request. The response
+retains the persisted index's stale status and reports
+`search_live_snapshot_lexical`, lexical-only retrieval, and no semantic or
+reranking execution. Strict source modes that require semantic retrieval,
+explicit reference times, and tombstone inspection keep their existing indexed
+view. If the complete replacement exceeds a bound or cannot
+run, `search_live_snapshot_unavailable` explicitly warns that newly committed
+content may be absent. Background publication or an explicit index rebuild is
+still needed to restore full indexed retrieval.
+
 ## Session Generation Invalidation
 
 `V097_SESSION_INDEX_GENERATIONS` makes the session source family obey the same

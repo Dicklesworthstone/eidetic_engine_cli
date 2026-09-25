@@ -176,10 +176,10 @@ pub const METHOD_TELEMETRY: &str = "ee.daemon.telemetry";
 pub const DAEMON_TELEMETRY_ENCODE_FAILED_CODE: &str = "daemon_telemetry_encode_failed";
 
 /// Method dispatch name for routing a durable memory write through the
-/// daemon. Inc 1 (bd-wx6ou.2) executes the write via the existing direct
-/// `remember_memory` path (no actor yet) so daemon-routed writes are
-/// byte-identical to `ee remember`; later increments coalesce them through a
-/// long-lived group-commit actor. Workspace-scoped (`SameUidWorkspace`) like
+/// daemon. Supported remember inputs share the same commit/report boundary
+/// whether dispatched directly or through the group-commit actor. The response
+/// distinguishes a committed memory from pending or failed indexing.
+/// Workspace-scoped (`SameUidWorkspace`) like
 /// `ee.daemon.context`, because a write mutates one specific workspace.
 pub const METHOD_WRITE: &str = "ee.daemon.write";
 
@@ -4409,8 +4409,8 @@ impl std::fmt::Debug for DaemonWriteRouter {
 }
 
 /// Parsed `ee.daemon.write` params: the inputs `remember_memory` needs, carried
-/// over the socket so the daemon executes a write byte-identical to
-/// `ee remember`. Owns its strings so `RememberMemoryOptions` can borrow them.
+/// over the socket. Owns its strings so `RememberMemoryOptions` can borrow them.
+/// This RPC supports the fields below; it is not automatic CLI remember routing.
 ///
 /// Serde is derived (snake_case) so these params can ride through the
 /// long-lived write-owner actor as a `WriteOperation::Custom` payload (Inc 2,
@@ -4541,9 +4541,38 @@ fn bind_write_workspace_to_authorized(
     Ok(())
 }
 
-/// Dispatch `ee.daemon.write`: execute a durable memory write. Inc 1 routes it
-/// straight through `remember_memory` (no actor), so the result is identical to
-/// `ee remember`. RPC-level failures (bad params) become a `DaemonResponse::err`;
+// The request envelope and exact prepared acknowledgement are admitted
+// separately before COMMIT. Their combined size is therefore bounded even
+// when caller-supplied envelope IDs or a stored workspace ID are unusually long.
+const DAEMON_COMMITTED_MEMORY_ACK_MAX_BYTES: usize = 64 * 1024;
+
+fn daemon_write_response_admission_error(request: &DaemonRequest) -> Option<DaemonResponse> {
+    let envelope = DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        serde_json::Value::Null,
+    )
+    .with_degraded("daemon_write_followup_failed");
+    if daemon_response_fits(
+        &envelope,
+        super::DAEMON_RESPONSE_MAX_BYTES - DAEMON_COMMITTED_MEMORY_ACK_MAX_BYTES,
+    ) {
+        None
+    } else {
+        Some(DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_WRITE_PARAMS_INVALID_CODE,
+            "Write rejected before commit: envelope IDs leave insufficient room for its durable acknowledgement; shorten request_id or agent_id.",
+        ))
+    }
+}
+
+/// Dispatch `ee.daemon.write`: execute a durable memory write. Both direct and
+/// actor paths retain the full write report and distinguish a committed source
+/// row from unfinished derived work. RPC-level failures become a `DaemonResponse::err`;
 /// a domain-level write failure becomes an `ok` response carrying
 /// `{success:false, error:{code,message}}` so the client can distinguish "the
 /// daemon could not accept this" from "the write itself failed". bd-wx6ou.2.
@@ -4572,6 +4601,9 @@ fn dispatch_write(
             message,
         );
     }
+    if let Some(response) = daemon_write_response_admission_error(request) {
+        return response;
+    }
     // When the long-lived write-owner actor is hosted (bound workspace), route
     // the write through it so it can coalesce with siblings (Inc 2 wires the
     // path; real batching is Inc 3). Otherwise fall through to the in-process
@@ -4579,27 +4611,11 @@ fn dispatch_write(
     if let Some(router) = write_router {
         return dispatch_write_via_actor(request, &params, router);
     }
-    let result = match crate::core::memory::remember_memory(&params.options()) {
-        Ok(report) => serde_json::json!({
-            "schema": "ee.daemon.write.v1",
-            "success": true,
-            "entityId": report.memory_id.to_string(),
-        }),
-        Err(error) => serde_json::json!({
-            "schema": "ee.daemon.write.v1",
-            "success": false,
-            "error": {
-                "code": error.code(),
-                "message": error.message(),
-            },
-        }),
+    let operation = crate::core::write_owner::WriteOperation::Custom {
+        operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
+        payload: params.to_payload(),
     };
-    DaemonResponse::ok(
-        request.request_id.clone(),
-        request.agent_id.clone(),
-        request.workspace_id.clone(),
-        result,
-    )
+    daemon_write_response(request, execute_write_operation(&operation))
 }
 
 /// Route a parsed write through the long-lived write-owner actor and block the
@@ -4628,7 +4644,6 @@ fn submit_op_via_actor(
     router: &DaemonWriteRouter,
     operation: crate::core::write_owner::WriteOperation,
 ) -> DaemonResponse {
-    use crate::core::write_owner::WriteResult;
     let Some(mut receiver) = router.handle.try_submit(operation) else {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -4646,24 +4661,7 @@ fn submit_op_via_actor(
         receiver.recv(&cx).await
     });
     let result = match write_result {
-        Ok(WriteResult::Success { entity_id }) => serde_json::json!({
-            "schema": "ee.daemon.write.v1",
-            "success": true,
-            "entityId": entity_id,
-        }),
-        Ok(WriteResult::Failed { error }) => serde_json::json!({
-            "schema": "ee.daemon.write.v1",
-            "success": false,
-            "error": { "code": error.code(), "message": error.message() },
-        }),
-        Ok(WriteResult::Shutdown) => serde_json::json!({
-            "schema": "ee.daemon.write.v1",
-            "success": false,
-            "error": {
-                "code": super::DAEMON_SHUTTING_DOWN_CODE,
-                "message": "write-owner actor is shutting down",
-            },
-        }),
+        Ok(result) => return daemon_write_response(request, result),
         Err(_) => serde_json::json!({
             "schema": "ee.daemon.write.v1",
             "success": false,
@@ -4679,6 +4677,173 @@ fn submit_op_via_actor(
         request.workspace_id.clone(),
         result,
     )
+}
+
+fn daemon_write_response(
+    request: &DaemonRequest,
+    result: crate::core::write_owner::WriteResult,
+) -> DaemonResponse {
+    let compact = match &result {
+        crate::core::write_owner::WriteResult::MemoryCommitted { memory } => {
+            Some(daemon_compact_committed_memory_json(
+                &memory.memory_id,
+                &memory.workspace_id,
+                &memory.workspace_path,
+                &memory.index_job_id,
+                &memory.index_status,
+            ))
+        }
+        _ => None,
+    };
+    let mut response = DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        daemon_write_result_json(result),
+    );
+    if let Some(compact) = compact
+        && !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES)
+    {
+        // Never let an oversized optional report suppress an already-committed
+        // acknowledgement. Drop variable degradation prose as well as the
+        // canonical report: either can exceed the transport frame cap.
+        response.result = Some(compact);
+        response = response.with_degraded("daemon_write_followup_failed");
+        debug_assert!(
+            daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES),
+            "pre-commit envelope and prepared-ack admission guarantee the compact response fits"
+        );
+    }
+    response
+}
+
+fn daemon_compact_committed_memory_json(
+    memory_id: &str,
+    workspace_id: &str,
+    workspace_path: &Path,
+    index_job_id: &str,
+    index_status: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.daemon.write.v1",
+        "success": true,
+        "entityId": memory_id,
+        "workspaceId": workspace_id,
+        "workspacePath": workspace_path,
+        "persisted": true,
+        "indexStatus": index_status,
+        "indexJobId": index_job_id,
+        "reportStatus": "unavailable",
+        "remember": null,
+        "degraded": [{
+            "code": "daemon_write_followup_failed",
+            "severity": "medium",
+            "message": "Memory committed, but its complete write report exceeds the daemon response limit. Inspect the existing memory and index job for unfinished follow-up work. Do not repeat the source write.",
+            "repair": daemon_write_repair_command(
+                workspace_path,
+                &format!("memory show {memory_id} --json"),
+            ),
+        }],
+    })
+}
+
+fn daemon_write_result_json(result: crate::core::write_owner::WriteResult) -> serde_json::Value {
+    use crate::core::write_owner::WriteResult;
+    match result {
+        WriteResult::Success { entity_id } => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": true,
+            "entityId": entity_id,
+        }),
+        WriteResult::MemoryCommitted { memory } => daemon_committed_memory_json(*memory),
+        WriteResult::Failed { error } => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": { "code": error.code(), "message": error.message() },
+        }),
+        WriteResult::Shutdown => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": {
+                "code": super::DAEMON_SHUTTING_DOWN_CODE,
+                "message": "write-owner actor is shutting down",
+            },
+        }),
+    }
+}
+
+fn daemon_committed_memory_json(
+    mut memory: crate::core::write_owner::CommittedMemoryWrite,
+) -> serde_json::Value {
+    // Use the canonical remember renderer rather than duplicating its content,
+    // provenance, validity, link and curation fields in a second serializer.
+    let report = match memory.report.as_deref() {
+        Some(report) => match serde_json::from_str::<serde_json::Value>(&report.json_output()) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                memory.degraded.push(crate::core::memory::RememberSuggestedLinkDegradation {
+                    code: "daemon_write_followup_failed".to_owned(),
+                    severity: "medium".to_owned(),
+                    message: format!(
+                        "Memory {} committed, but its complete report could not be encoded: {error}. Do not repeat the source write.",
+                        memory.memory_id
+                    ),
+                    repair: daemon_write_repair_command(
+                        &memory.workspace_path,
+                        &format!("memory show {} --json", memory.memory_id),
+                    ),
+                });
+                None
+            }
+        },
+        None => None,
+    };
+    let mut degraded = report
+        .as_ref()
+        .and_then(|value| value.get("degraded"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(report) = memory.report.as_deref() {
+        degraded.extend(
+            report
+                .suggested_link_degradations
+                .iter()
+                .chain(&report.auto_link_degradations)
+                .chain(&report.curation_candidate_degradations)
+                .map(daemon_write_degradation_json),
+        );
+    }
+    degraded.extend(memory.degraded.iter().map(daemon_write_degradation_json));
+    serde_json::json!({
+        "schema": "ee.daemon.write.v1",
+        "success": true,
+        "entityId": memory.memory_id,
+        "workspaceId": memory.workspace_id,
+        "workspacePath": memory.workspace_path,
+        "persisted": true,
+        "indexStatus": memory.index_status,
+        "indexJobId": memory.index_job_id,
+        "reportStatus": if report.is_some() { "complete" } else { "unavailable" },
+        "remember": report,
+        "degraded": degraded,
+    })
+}
+
+fn daemon_write_degradation_json(
+    degradation: &crate::core::memory::RememberSuggestedLinkDegradation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": degradation.code,
+        "severity": degradation.severity,
+        "message": degradation.message,
+        "repair": degradation.repair,
+    })
+}
+
+fn daemon_write_repair_command(workspace_path: &Path, command: &str) -> String {
+    let quoted_workspace = workspace_path.display().to_string().replace('\'', "'\\''");
+    format!("ee --workspace '{quoted_workspace}' {command}")
 }
 
 /// Dispatch `ee.daemon.write_journal`: route a journal write through the actor
@@ -4752,18 +4917,13 @@ fn dispatch_journal(
 /// Execute one `WriteOperation` inside the write-owner actor's `process_batch`
 /// (Inc 2, bd-wx6ou.3). Only the `ee.daemon.remember` Custom op is supported —
 /// the daemon write path carries `DaemonWriteParams` in the payload and runs
-/// the same `remember_memory` the direct path uses, so a daemon-routed write is
-/// byte-identical to `ee remember`. Unsupported ops fail that single request
+/// the same transaction boundary the grouped path uses. Unsupported ops fail that single request
 /// (the actor maps a per-op error onto its `WriteResult`).
 fn execute_write_operation(
     operation: &crate::core::write_owner::WriteOperation,
 ) -> crate::core::write_owner::WriteResult {
     use crate::core::write_owner::{WriteOperation, WriteResult};
-    let WriteOperation::Custom {
-        operation_type,
-        payload,
-    } = operation
-    else {
+    let WriteOperation::Custom { operation_type, .. } = operation else {
         return WriteResult::Failed {
             error: crate::models::DomainError::Storage {
                 message: format!(
@@ -4784,21 +4944,13 @@ fn execute_write_operation(
             },
         };
     }
-    let params = match DaemonWriteParams::from_payload(payload) {
-        Ok(params) => params,
-        Err(message) => {
-            return WriteResult::Failed {
-                error: crate::models::DomainError::Storage {
-                    message: format!("daemon write payload decode failed: {message}"),
-                    repair: Some("retry the write".to_string()),
-                },
-            };
-        }
-    };
-    match crate::core::memory::remember_memory(&params.options()) {
-        Ok(report) => WriteResult::Success {
-            entity_id: Some(report.memory_id.to_string()),
-        },
+    match execute_daemon_txn_batch(std::slice::from_ref(operation)) {
+        Ok(mut results) => results.pop().unwrap_or_else(|| WriteResult::Failed {
+            error: crate::models::DomainError::Storage {
+                message: "daemon transaction returned no result".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            },
+        }),
         Err(error) => WriteResult::Failed { error },
     }
 }
@@ -5067,6 +5219,23 @@ fn execute_daemon_txn_batch(
                     &entry.options(),
                     true,
                 )?;
+                // Use the longest reachable status so successful publication
+                // cannot grow a boundary-sized acknowledgement after COMMIT.
+                let compact = daemon_compact_committed_memory_json(
+                    write.memory_id(),
+                    write.workspace_id(),
+                    write.workspace_path(),
+                    write.index_job_id(),
+                    "indexed",
+                );
+                if !serde_json::to_vec(&compact)
+                    .is_ok_and(|encoded| encoded.len() <= DAEMON_COMMITTED_MEMORY_ACK_MAX_BYTES)
+                {
+                    return Err(crate::models::DomainError::Storage {
+                        message: "Write rejected before commit: its exact memory/workspace/job acknowledgement exceeds the daemon response budget.".to_owned(),
+                        repair: Some("inspect the workspace identity with ee doctor --json".to_owned()),
+                    });
+                }
                 prepared_entries.push(PreparedDaemonTxnBatchEntry::Remember(write));
             }
         }
@@ -5138,60 +5307,115 @@ fn execute_daemon_txn_batch(
             repair: Some("retry the write".to_string()),
         })?;
 
-    let mut index_drains: BTreeMap<String, (String, PathBuf)> = BTreeMap::new();
+    let mut index_drains: BTreeMap<String, (PathBuf, PathBuf)> = BTreeMap::new();
     for (index, entry) in prepared_entries.into_iter().enumerate() {
         if let PreparedDaemonTxnBatchEntry::Remember(write) = entry {
-            let index_dir = write.index_dir().to_path_buf();
+            let mut memory = crate::core::write_owner::CommittedMemoryWrite {
+                memory_id: write.memory_id().to_owned(),
+                workspace_id: write.workspace_id().to_owned(),
+                workspace_path: write.workspace_path().to_path_buf(),
+                index_job_id: write.index_job_id().to_owned(),
+                index_status: "queued".to_owned(),
+                report: None,
+                degraded: Vec::new(),
+            };
+            // Register every committed row before optional finishing work.
+            // Failure to append audit.jsonl must not abandon its durable job.
+            index_drains.insert(
+                memory.workspace_id.clone(),
+                (
+                    write.workspace_path().to_path_buf(),
+                    write.index_dir().to_path_buf(),
+                ),
+            );
             match crate::core::memory::finish_prepared_remember_txn_write(&connection, write) {
                 Ok(report) => {
-                    index_drains.insert(
-                        report.workspace_id.clone(),
-                        (report.workspace_id.clone(), index_dir),
-                    );
-                    results[index] = WriteResult::Success {
-                        entity_id: Some(report.memory_id.to_string()),
-                    };
+                    memory.index_status.clone_from(&report.index_status);
+                    memory.report = Some(Box::new(report));
                 }
                 Err(error) => {
-                    results[index] = WriteResult::Failed { error };
+                    memory.degraded.push(crate::core::memory::RememberSuggestedLinkDegradation {
+                        code: "daemon_write_followup_failed".to_owned(),
+                        severity: "medium".to_owned(),
+                        message: format!(
+                            "Memory {} and index job {} committed, but post-commit work did not finish: {}. Do not repeat the source write.",
+                            memory.memory_id, memory.index_job_id, error.message()
+                        ),
+                        repair: daemon_write_repair_command(
+                            &memory.workspace_path,
+                            "doctor --json",
+                        ),
+                    });
                 }
             }
+            results[index] = WriteResult::MemoryCommitted {
+                memory: Box::new(memory),
+            };
         }
     }
-    for (_, (workspace_id, index_dir)) in index_drains {
-        match crate::core::memory::reconcile_pending_remember_index_jobs(
+    for (workspace_id, (workspace_path, index_dir)) in index_drains {
+        let drain = crate::core::memory::reconcile_pending_remember_index_jobs(
             &connection,
             &workspace_id,
             &index_dir,
-        ) {
-            Ok(None) => {}
-            Ok(Some(report))
-                if matches!(
-                    report.outcome.as_str(),
-                    "completed" | "completed_no_documents"
-                ) => {}
-            Ok(Some(report)) => {
-                tracing::warn!(
-                    target: "ee::daemon::write_owner",
-                    workspace_id,
-                    job_id = report.job_id.as_str(),
-                    outcome = report.outcome.as_str(),
-                    processing_mode = report.processing_mode.as_str(),
-                    "daemon remember batch committed source rows while derived index reconciliation remained nonterminal"
-                );
+        );
+        let drain_detail = match &drain {
+            Ok(Some(report)) => report.error.clone().unwrap_or_else(|| {
+                format!(
+                    "index reconciliation reported {} ({})",
+                    report.outcome, report.processing_mode
+                )
+            }),
+            Ok(None) => "no pending index job was observed".to_owned(),
+            Err(error) => format!("index reconciliation could not finish: {error}"),
+        };
+        for result in &mut results {
+            let WriteResult::MemoryCommitted { memory } = result else {
+                continue;
+            };
+            if memory.workspace_id != workspace_id {
+                continue;
             }
-            Err(error) => {
-                // The transaction above is already durable. Rewriting every
-                // successful journal/outcome/remember result as failed would
-                // invite duplicate source writes on retry and falsely blame
-                // unrelated operations for a derived-index problem. The
-                // pending index jobs remain the recovery mechanism.
-                tracing::warn!(
-                    target: "ee::daemon::write_owner",
-                    workspace_id,
-                    error = %error,
-                    "daemon remember batch committed source rows but could not reconcile the derived index; preserving durable write success"
-                );
+            // The drain may describe a peer's job. Check this memory's durable
+            // job and the final source/index generation pair before claiming
+            // searchable freshness, even when the aggregate drain succeeded.
+            let own_job = connection.get_search_index_job(&memory.index_job_id);
+            let provisional_status = match &own_job {
+                Ok(Some(job)) if job.status == "failed" => "failed",
+                _ => "queued",
+            };
+            memory.index_status = crate::core::memory::authoritative_remember_index_status(
+                &workspace_id,
+                &workspace_path,
+                &database_path,
+                &index_dir,
+                std::slice::from_ref(&memory.index_job_id),
+                provisional_status,
+            );
+            if let Some(report) = memory.report.as_mut() {
+                report.index_status.clone_from(&memory.index_status);
+            }
+            if memory.index_status != "indexed" {
+                let failed = memory.index_status == "failed";
+                let detail = match own_job {
+                    Ok(Some(job)) => job.error_message.unwrap_or_else(|| drain_detail.clone()),
+                    Ok(None) => "the committed index job could not be found".to_owned(),
+                    Err(error) => {
+                        format!("the committed index job could not be inspected: {error}")
+                    }
+                };
+                memory.degraded.push(crate::core::memory::RememberSuggestedLinkDegradation {
+                    code: if failed { "daemon_write_index_failed" } else { "daemon_write_index_queued" }.to_owned(),
+                    severity: if failed { "medium" } else { "low" }.to_owned(),
+                    message: format!(
+                        "Memory {} is stored; search indexing is {} for job {}: {detail}. Do not repeat the source write.",
+                        memory.memory_id, memory.index_status, memory.index_job_id
+                    ),
+                    repair: daemon_write_repair_command(
+                        &memory.workspace_path,
+                        "index rebuild --json",
+                    ),
+                });
             }
         }
     }
@@ -9436,6 +9660,18 @@ mod tests {
         initialized
             .migrate()
             .expect("migrate daemon fixture database");
+        let workspace_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        initialized
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("daemon remember report".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
         initialized.close().expect("close daemon fixture database");
 
         let remember_op = |content: &str| crate::core::write_owner::WriteOperation::Custom {
@@ -9462,14 +9698,50 @@ mod tests {
         .expect("remember batch");
         assert_eq!(results.len(), 2);
         let memory_ids = results
-            .into_iter()
+            .iter()
             .map(|result| match result {
-                crate::core::write_owner::WriteResult::Success {
-                    entity_id: Some(id),
-                } => id,
+                crate::core::write_owner::WriteResult::MemoryCommitted { memory } => {
+                    assert_eq!(memory.index_status, "indexed");
+                    let report = memory.report.as_ref().expect("full remember report");
+                    assert!(report.persisted);
+                    assert_eq!(report.index_status, "indexed");
+                    assert_eq!(
+                        report.index_job_id.as_deref(),
+                        Some(memory.index_job_id.as_str())
+                    );
+                    assert_eq!(report.workspace_id, workspace_id);
+                    memory.memory_id.clone()
+                }
                 other => panic!("expected successful memory result, got {other:?}"),
             })
             .collect::<Vec<_>>();
+        for (result, expected_content) in results.into_iter().zip([
+            "Daemon remember batch row one.",
+            "Daemon remember batch row two.",
+        ]) {
+            let wire = daemon_write_result_json(result);
+            assert_eq!(wire["success"], true);
+            assert_eq!(wire["persisted"], true);
+            assert_eq!(wire["indexStatus"], "indexed");
+            assert_eq!(wire["reportStatus"], "complete");
+            assert_eq!(
+                wire.pointer("/remember/data/content")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_content)
+            );
+            assert_eq!(
+                wire.pointer("/remember/data/memoryId"),
+                wire.get("entityId")
+            );
+            assert_eq!(
+                wire.pointer("/remember/data/index_job_id"),
+                wire.get("indexJobId")
+            );
+            assert_eq!(
+                wire.pointer("/remember/data/index_status"),
+                wire.get("indexStatus")
+            );
+        }
 
         let connection = crate::db::DbConnection::open_file(&database_path).expect("open db");
         let mut workspace_id = None;
@@ -9538,6 +9810,562 @@ mod tests {
             actual_ids,
             memory_ids.into_iter().collect(),
             "daemon batch response IDs must be exactly searchable without a manual rebuild"
+        );
+    }
+
+    struct DaemonRememberReportFixture {
+        _directory: tempfile::TempDir,
+        _embedder_guard: crate::core::index::TestWorkspaceEmbedderStackGuard,
+        workspace_path: PathBuf,
+        database_path: PathBuf,
+        workspace_id: String,
+    }
+
+    impl DaemonRememberReportFixture {
+        fn new() -> Self {
+            let directory = private_tempdir();
+            let workspace_path = directory.path().join("workspace 'quoted");
+            fs::create_dir(&workspace_path).expect("workspace directory");
+            let workspace_path = workspace_path.canonicalize().expect("canonical fixture");
+            fs::create_dir(workspace_path.join(".ee")).expect("store directory");
+            let database_path = workspace_path.join(".ee/ee.db");
+            let workspace_id =
+                crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            let connection =
+                crate::db::DbConnection::open_file(&database_path).expect("fixture DB");
+            connection.migrate().expect("migrate fixture");
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: workspace_path.display().to_string(),
+                        name: Some("daemon report fixture".to_owned()),
+                    },
+                )
+                .expect("insert fixture workspace");
+            connection.close().expect("close fixture DB");
+            let embedder_guard =
+                crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+            Self {
+                _directory: directory,
+                _embedder_guard: embedder_guard,
+                workspace_path,
+                database_path,
+                workspace_id,
+            }
+        }
+
+        fn params(&self, content: &str) -> DaemonWriteParams {
+            DaemonWriteParams {
+                workspace_path: self.workspace_path.clone(),
+                content: content.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                tags: Some("daemon-report".to_owned()),
+                confidence: 0.73,
+                source: Some("manual://daemon-report".to_owned()),
+                workflow_id: None,
+                auto_link: false,
+                propose_candidates: false,
+            }
+        }
+
+        fn operation(&self, content: &str) -> crate::core::write_owner::WriteOperation {
+            crate::core::write_owner::WriteOperation::Custom {
+                operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
+                payload: self.params(content).to_payload(),
+            }
+        }
+
+        fn assert_committed(&self, response: &serde_json::Value, content: &str) {
+            assert_eq!(response["success"], true);
+            assert_eq!(response["persisted"], true);
+            assert_eq!(response["workspaceId"], self.workspace_id);
+            assert_eq!(
+                response["workspacePath"],
+                self.workspace_path.display().to_string()
+            );
+            assert!(response.get("error").is_none());
+            let memory_id = response["entityId"].as_str().expect("memory ID");
+            let job_id = response["indexJobId"].as_str().expect("job ID");
+            let connection = crate::db::DbConnection::open_file_read_only(&self.database_path)
+                .expect("inspect DB");
+            let memory = connection
+                .get_memory(memory_id)
+                .expect("query memory")
+                .expect("committed memory");
+            assert_eq!(memory.content, content);
+            assert_eq!(memory.workspace_id, self.workspace_id);
+            let job = connection
+                .get_search_index_job(job_id)
+                .expect("query job")
+                .expect("committed job");
+            assert_eq!(job.document_id.as_deref(), Some(memory_id));
+            assert_eq!(job.workspace_id, self.workspace_id);
+            let memories = connection
+                .list_memories(&self.workspace_id, None, false)
+                .expect("memories");
+            assert_eq!(
+                memories.len(),
+                1,
+                "reporting must never repeat the committed source write"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_remember_reports_queued_publication_without_failing_committed_write() {
+        let fixture = DaemonRememberReportFixture::new();
+        let connection =
+            crate::db::DbConnection::open_file(&fixture.database_path).expect("open DB");
+        let lock_id = crate::db::AdvisoryLockId::new("index_drain_leader", &fixture.workspace_id);
+        let holder = format!("remember:{}:daemon-report-test", std::process::id());
+        assert!(matches!(
+            connection
+                .acquire_advisory_lock(&lock_id, &holder, Some(60), None)
+                .expect("live publisher"),
+            crate::db::AcquireLockResult::Acquired(_)
+        ));
+        let content = "Queued daemon write remains a durable memory.";
+        let result = execute_write_operation(&fixture.operation(content));
+        assert!(result.is_success());
+        let response = daemon_write_result_json(result);
+        fixture.assert_committed(&response, content);
+        assert_eq!(response["indexStatus"], "queued");
+        assert_eq!(response["reportStatus"], "complete");
+        assert_eq!(
+            response
+                .pointer("/remember/data/index_status")
+                .and_then(serde_json::Value::as_str),
+            Some("queued")
+        );
+        let expected_repair = format!(
+            "ee --workspace '{}' index rebuild --json",
+            fixture
+                .workspace_path
+                .display()
+                .to_string()
+                .replace('\'', "'\\''")
+        );
+        assert!(
+            response["degraded"]
+                .as_array()
+                .expect("degraded")
+                .iter()
+                .any(|entry| entry["code"] == "daemon_write_index_queued"
+                    && entry["repair"] == expected_repair)
+        );
+        assert_eq!(
+            connection
+                .get_search_index_job(response["indexJobId"].as_str().expect("job"))
+                .expect("job query")
+                .expect("job")
+                .status,
+            "pending"
+        );
+        assert!(
+            connection
+                .release_advisory_lock(&lock_id, &holder)
+                .expect("release publisher")
+        );
+    }
+
+    #[test]
+    fn daemon_remember_reports_failed_publication_without_failing_committed_write() {
+        let fixture = DaemonRememberReportFixture::new();
+        fs::write(
+            fixture.workspace_path.join(".ee/index"),
+            b"blocked derived-index directory",
+        )
+        .expect("block index path");
+        let content = "A failed derived index must not duplicate this source memory.";
+        let result = execute_write_operation(&fixture.operation(content));
+        assert!(result.is_success());
+        let response = daemon_write_result_json(result);
+        fixture.assert_committed(&response, content);
+        assert_eq!(response["indexStatus"], "failed");
+        assert_eq!(response["reportStatus"], "complete");
+        assert_eq!(
+            response
+                .pointer("/remember/data/index_status")
+                .and_then(serde_json::Value::as_str),
+            Some("failed")
+        );
+        let expected_repair = format!(
+            "ee --workspace '{}' index rebuild --json",
+            fixture
+                .workspace_path
+                .display()
+                .to_string()
+                .replace('\'', "'\\''")
+        );
+        assert!(
+            response["degraded"]
+                .as_array()
+                .expect("degraded")
+                .iter()
+                .any(|entry| entry["code"] == "daemon_write_index_failed"
+                    && entry["repair"] == expected_repair
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("Do not repeat")))
+        );
+    }
+
+    #[test]
+    fn daemon_direct_remember_preserves_commit_when_audit_stream_append_fails() {
+        let fixture = DaemonRememberReportFixture::new();
+        fs::create_dir(fixture.workspace_path.join(".ee/audit.jsonl")).expect("block audit append");
+        let content = "Source commit survives an unavailable audit stream.";
+        let mut request = DaemonRequest::new(
+            "req-report-audit-failure",
+            TEST_AGENT_ID,
+            METHOD_WRITE,
+            fixture.params(content).to_payload(),
+        );
+        request.workspace_id = Some(fixture.workspace_path.display().to_string());
+        let response = dispatch_write(&request, None);
+        assert!(response.error.is_none());
+        let response = response.result.expect("write result");
+        fixture.assert_committed(&response, content);
+        assert_eq!(response["reportStatus"], "unavailable");
+        assert!(response["remember"].is_null());
+        assert_eq!(
+            response["indexStatus"], "indexed",
+            "post-commit reporting failure must not abandon durable index work"
+        );
+        let expected_repair = format!(
+            "ee --workspace '{}' doctor --json",
+            fixture
+                .workspace_path
+                .display()
+                .to_string()
+                .replace('\'', "'\\''")
+        );
+        assert!(
+            response["degraded"]
+                .as_array()
+                .expect("degraded")
+                .iter()
+                .any(|entry| entry["code"] == "daemon_write_followup_failed"
+                    && entry["repair"] == expected_repair
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("audit JSONL")))
+        );
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect committed audit");
+        let audit = connection
+            .list_audit_by_target(
+                "memory",
+                response["entityId"].as_str().expect("memory ID"),
+                None,
+            )
+            .expect("audit rows");
+        assert!(audit.iter().any(|entry| {
+            entry.action == crate::db::audit_actions::MEMORY_CREATE
+                && entry.workspace_id.as_deref() == Some(fixture.workspace_id.as_str())
+        }));
+        assert!(
+            !crate::core::write_owner::workspace_write_replay_required(&fixture.workspace_path),
+            "the uncommitted-write marker must not request replay of a committed source; the response exposes unfinished audit-stream work"
+        );
+    }
+
+    #[test]
+    fn daemon_remember_rejects_oversized_envelope_before_source_write() {
+        let fixture = DaemonRememberReportFixture::new();
+        for oversized_field in ["request_id", "agent_id"] {
+            let mut request = DaemonRequest::new(
+                "req-large-envelope",
+                TEST_AGENT_ID,
+                METHOD_WRITE,
+                fixture
+                    .params("Admission must precede source writes.")
+                    .to_payload(),
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let oversized_id = "x".repeat(super::super::DAEMON_REQUEST_MAX_BYTES - 4096);
+            if oversized_field == "request_id" {
+                request.request_id = oversized_id;
+            } else {
+                request.agent_id = oversized_id;
+            }
+            assert!(
+                serde_json::to_vec(&request).expect("request bytes").len()
+                    < super::super::DAEMON_REQUEST_MAX_BYTES,
+                "the request itself fits the inbound frame"
+            );
+            let response = dispatch_write(&request, None);
+            let error = response.error.as_ref().expect("admission rejection");
+            assert_eq!(error.code, DAEMON_WRITE_PARAMS_INVALID_CODE);
+            assert!(error.message.contains("before commit"));
+            assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.agent_id, request.agent_id);
+            write_response(&mut Vec::new(), &response).expect("rejection fits outbound frame");
+        }
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect rejected writes");
+        assert!(
+            connection
+                .list_memories(&fixture.workspace_id, None, false)
+                .expect("memories")
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_audit_entries(Some(&fixture.workspace_id), None)
+                .expect("audit rows")
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_search_index_jobs(&fixture.workspace_id, None)
+                .expect("index jobs")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn daemon_oversized_committed_report_preserves_direct_and_actor_acknowledgements() {
+        use crate::core::write_owner::{
+            DEFAULT_CHANNEL_CAPACITY, WriteHotPathConfig, WriteOwner, WriteResult,
+        };
+
+        let fixture = DaemonRememberReportFixture::new();
+        let content = "A committed memory remains acknowledged when its report is too large.";
+        let WriteResult::MemoryCommitted { mut memory } =
+            execute_write_operation(&fixture.operation(content))
+        else {
+            panic!("fixture source write must commit");
+        };
+        // Synthetic post-commit metadata exercises the real canonical renderer:
+        // source is repeated as provenance_uri, so its report can exceed the
+        // outbound cap even when an equivalent request fits the inbound cap.
+        let report = memory.report.as_mut().expect("complete report");
+        report.source = Some(format!(
+            "https://example.invalid/{}",
+            "x".repeat(super::super::DAEMON_RESPONSE_MAX_BYTES / 2 + 1024)
+        ));
+        assert!(report.json_output().len() > super::super::DAEMON_RESPONSE_MAX_BYTES);
+        let mut request = DaemonRequest::new(
+            "req-large-report",
+            TEST_AGENT_ID,
+            METHOD_WRITE,
+            fixture.params(content).to_payload(),
+        );
+        request.workspace_id = Some(fixture.workspace_path.display().to_string());
+        assert!(daemon_write_response_admission_error(&request).is_none());
+        let direct_response = daemon_write_response(
+            &request,
+            WriteResult::MemoryCommitted {
+                memory: memory.clone(),
+            },
+        );
+
+        // Inject the same committed result at the actor executor seam, then
+        // exercise real dispatch -> submit -> oneshot -> bounded serialization.
+        let runtime = Arc::new(crate::core::build_cli_runtime().expect("runtime"));
+        let (owner, handle) = WriteOwner::new(DEFAULT_CHANNEL_CAPACITY);
+        let actor_memory = memory.clone();
+        let task = runtime
+            .handle()
+            .try_spawn(async move {
+                let cx = asupersync::Cx::current().expect("actor Cx");
+                let _ = owner
+                    .run_group_commit(&cx, WriteHotPathConfig::default(), |operations| {
+                        Ok(operations
+                            .iter()
+                            .map(|_| WriteResult::MemoryCommitted {
+                                memory: actor_memory.clone(),
+                            })
+                            .collect())
+                    })
+                    .await;
+            })
+            .expect("spawn actor");
+        let router = DaemonWriteRouter {
+            runtime: Arc::clone(&runtime),
+            handle,
+        };
+        let actor_response = dispatch_write(&request, Some(&router));
+        drop(router);
+        runtime.block_on(task);
+        assert_eq!(actor_response, direct_response);
+
+        for response in [direct_response, actor_response] {
+            assert!(response.error.is_none());
+            assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.agent_id, request.agent_id);
+            assert_eq!(response.workspace_id, request.workspace_id);
+            let payload = response.result.as_ref().expect("committed acknowledgement");
+            fixture.assert_committed(payload, content);
+            assert_eq!(payload["entityId"], memory.memory_id);
+            assert_eq!(payload["indexJobId"], memory.index_job_id);
+            assert_eq!(payload["indexStatus"], memory.index_status);
+            assert_eq!(payload["reportStatus"], "unavailable");
+            assert!(payload["remember"].is_null());
+            let degraded = payload["degraded"].as_array().expect("degraded");
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0]["code"], "daemon_write_followup_failed");
+            assert!(
+                degraded[0]["message"]
+                    .as_str()
+                    .expect("message")
+                    .contains("Do not repeat")
+            );
+            let quoted_workspace = fixture
+                .workspace_path
+                .display()
+                .to_string()
+                .replace('\'', "'\\''");
+            assert_eq!(
+                degraded[0]["repair"],
+                format!(
+                    "ee --workspace '{quoted_workspace}' memory show {} --json",
+                    memory.memory_id
+                )
+            );
+            let mut frame = Vec::new();
+            write_response(&mut frame, &response).expect("committed acknowledgement fits frame");
+            assert!(frame.len() <= super::super::DAEMON_RESPONSE_MAX_BYTES + 4);
+            assert_eq!(
+                serde_json::from_slice::<DaemonResponse>(&frame[4..]).expect("decode frame"),
+                response
+            );
+        }
+
+        // Reporting may already be unavailable while an underlying error
+        // carries enormous prose; that must not suppress the ACK either.
+        memory.report = None;
+        memory
+            .degraded
+            .push(crate::core::memory::RememberSuggestedLinkDegradation {
+                code: "daemon_write_followup_failed".to_owned(),
+                severity: "medium".to_owned(),
+                message: "x".repeat(super::super::DAEMON_RESPONSE_MAX_BYTES),
+                repair: "x".repeat(super::super::DAEMON_RESPONSE_MAX_BYTES),
+            });
+        let response = daemon_write_response(&request, WriteResult::MemoryCommitted { memory });
+        fixture.assert_committed(response.result.as_ref().expect("acknowledgement"), content);
+        write_response(&mut Vec::new(), &response)
+            .expect("unavailable-report acknowledgement fits");
+    }
+
+    #[test]
+    fn daemon_derived_failure_preserves_sibling_journal_and_outcome_success() {
+        let fixture = DaemonRememberReportFixture::new();
+        let connection = crate::db::DbConnection::open_file(&fixture.database_path).expect("DB");
+        let target_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        connection
+            .insert_memory(
+                &target_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "The sibling outcome has its own durable target.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.6,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://daemon-sibling".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("outcome target");
+        let journal_id = crate::core::journal::generate_journal_entry_id();
+        let journal = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonJournalParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: serde_json::to_value(DaemonJournalParams {
+                workspace_path: fixture.workspace_path.clone(),
+                workspace_id: fixture.workspace_id.clone(),
+                entry_id: Some(journal_id.clone()),
+                agent_name: Some("daemon-test".to_owned()),
+                session_key: None,
+                kind: "note".to_owned(),
+                source: "manual".to_owned(),
+                body: "Journal success survives unrelated index failure.".to_owned(),
+                structured: None,
+                redaction_report: "{}".to_owned(),
+                instruction_risk: "none".to_owned(),
+            })
+            .expect("journal payload"),
+        };
+        let mut feedback_uuid = uuid::Uuid::now_v7().simple().to_string();
+        feedback_uuid.truncate(26);
+        let feedback_id = format!("fb_{feedback_uuid}");
+        let outcome = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonOutcomeParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: serde_json::to_value(DaemonOutcomeParams {
+                workspace_path: fixture.workspace_path.clone(),
+                event_id: feedback_id.clone(),
+                workspace_id: fixture.workspace_id.clone(),
+                target_type: "memory".to_owned(),
+                target_id,
+                signal: "helpful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: Some("daemon-test".to_owned()),
+                reason: Some("independent durable feedback".to_owned()),
+                evidence_json: None,
+                session_id: None,
+                actor: Some("daemon-test".to_owned()),
+                audit_id: crate::db::generate_audit_id(),
+                details: None,
+            })
+            .expect("outcome payload"),
+        };
+        fs::write(
+            fixture.workspace_path.join(".ee/index"),
+            b"blocked index path",
+        )
+        .expect("block index");
+        let results = execute_daemon_txn_batch(&[
+            fixture.operation("Memory source commits alongside journal and outcome."),
+            journal,
+            outcome,
+        ])
+        .expect("source batch commits");
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(crate::core::write_owner::WriteResult::is_success)
+        );
+        let mut wire = results.into_iter().map(daemon_write_result_json);
+        let memory = wire.next().expect("memory result");
+        assert_eq!(memory["indexStatus"], "failed");
+        for expected_id in [journal_id, feedback_id.clone()] {
+            assert_eq!(
+                wire.next().expect("sibling result"),
+                serde_json::json!({
+                    "schema": "ee.daemon.write.v1", "success": true, "entityId": expected_id,
+                })
+            );
+        }
+        assert_eq!(
+            connection
+                .list_journal_entries(
+                    &fixture.workspace_id,
+                    &crate::db::JournalEntryListFilter {
+                        limit: 10,
+                        ..Default::default()
+                    }
+                )
+                .expect("journals")
+                .len(),
+            1
+        );
+        assert!(
+            connection
+                .get_feedback_event(&feedback_id)
+                .expect("feedback query")
+                .is_some()
         );
     }
 
