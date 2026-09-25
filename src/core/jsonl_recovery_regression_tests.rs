@@ -107,8 +107,8 @@ impl Fixture {
         .map_err(|error| error.to_string())?;
         db.close().map_err(|error| error.to_string())?;
         fs::write(&options.source_path, source_text(records)).map_err(|error| error.to_string())?;
-        let report =
-            import_verified_backup_jsonl_records(&options).map_err(|error| error.to_string())?;
+        let report = import_verified_backup_jsonl_records(&options, None)
+            .map_err(|error| error.to_string())?;
         assert_eq!(report.status, "completed", "{:?}", report.issues);
         assert_eq!(
             report.memories_imported as usize,
@@ -265,8 +265,8 @@ fn explicit_head_expiry_cannot_become_supersession_under_clock_skew() -> TestRes
             BTreeSet::from([head.clone()])
         );
         fixture.verify().map_err(|e| e.to_string())?;
-        let repeated =
-            import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        let repeated = import_verified_backup_jsonl_records(&fixture.options, None)
+            .map_err(|e| e.to_string())?;
         assert_eq!(repeated.status, "completed", "{:?}", repeated.issues);
         assert_eq!(repeated.memories_imported, 0);
         assert_eq!(repeated.memories_skipped_duplicate, 2);
@@ -304,7 +304,7 @@ fn recovery_rejects_an_unexpected_supersession_even_with_identical_rows() -> Tes
         .list_audit_entries(Some(&fixture.workspace), None)
         .map_err(|e| e.to_string())?;
     let repeated =
-        import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        import_verified_backup_jsonl_records(&fixture.options, None).map_err(|e| e.to_string())?;
     assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
     assert!(
         repeated
@@ -364,8 +364,8 @@ fn reimport_rejects_corrupted_edge_declared_head_before_any_write() -> TestResul
                 .restore_imported_memory_supersession(&head, "2026-05-04T00:00:00Z")
                 .map_err(|e| e.to_string())?
         );
-        let repeated =
-            import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        let repeated = import_verified_backup_jsonl_records(&fixture.options, None)
+            .map_err(|e| e.to_string())?;
         assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
         assert!(
             repeated
@@ -447,7 +447,7 @@ fn expiring_edge_head_cannot_hide_a_disconnected_current_revision() -> TestResul
                     };
                     fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
                     let report = if verified_backup {
-                        import_verified_backup_jsonl_records(&options)
+                        import_verified_backup_jsonl_records(&options, None)
                     } else {
                         import_jsonl_records(&options)
                     }
@@ -584,7 +584,7 @@ fn explicit_null_keeps_expiring_head_while_omission_retains_legacy_inference() -
                 "expiry must not retire a modern head because a later tombstoned sibling exists"
             );
             fixture.verify().map_err(|e| e.to_string())?;
-            let repeated = import_verified_backup_jsonl_records(&fixture.options)
+            let repeated = import_verified_backup_jsonl_records(&fixture.options, None)
                 .map_err(|e| e.to_string())?;
             assert_eq!(repeated.status, "completed", "{:?}", repeated.issues);
             assert_eq!(repeated.memories_imported, 0);
@@ -628,7 +628,7 @@ fn explicit_null_expiry_rejects_corrupt_headship_in_verification_and_reimport() 
     assert!(error.message().contains("revision supersession differs"));
     assert!(!error.message().contains(head));
     let repeated =
-        import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        import_verified_backup_jsonl_records(&fixture.options, None).map_err(|e| e.to_string())?;
     assert_eq!(repeated.status, "rejected", "{:?}", repeated.issues);
     assert_eq!(
         (repeated.memories_imported, repeated.links_imported),
@@ -690,7 +690,7 @@ fn explicit_null_conflicts_are_rejected_before_destination_creation() -> TestRes
             let source = source_text(&records);
             fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
             let report =
-                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+                import_verified_backup_jsonl_records(&options, None).map_err(|e| e.to_string())?;
             assert_eq!(
                 report.status, "rejected",
                 "{case}, dry_run={dry_run}: {:?}",
@@ -844,7 +844,7 @@ fn incomplete_backup_streams_are_rejected_before_creating_any_destination() -> T
             let source = source_text(&records);
             fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
             let report =
-                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+                import_verified_backup_jsonl_records(&options, None).map_err(|e| e.to_string())?;
             assert_eq!(report.status, "rejected", "case {case}, dry_run={dry_run}");
             let issue = report
                 .issues

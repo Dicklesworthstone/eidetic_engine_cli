@@ -246,11 +246,15 @@ impl BackupRecordsExpectation {
         records_path: &Path,
         workspace_path: &Path,
         workspace_id: &str,
+        source_auth: Option<&StoreAuthRoot>,
     ) -> Result<Self, DomainError> {
         ensure_import_source_path_is_regular_file(records_path).map_err(unreadable)?;
         let source = read_jsonl_source_bounded(records_path).map_err(unreadable)?;
         let parsed = parse_jsonl_source(&source);
-        let auth = native_import_auth_state(&parsed, workspace_path, workspace_id);
+        let auth = match source_auth {
+            Some(root) => native_import_auth_state_with_root(&parsed, root, workspace_id),
+            None => native_import_auth_state(&parsed, workspace_path, workspace_id),
+        };
         Ok(Self {
             workspace_id: workspace_id.to_owned(),
             records: ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?,
@@ -276,7 +280,7 @@ pub(crate) fn verify_backup_records(
     workspace_path: &Path,
     workspace_id: &str,
 ) -> Result<(), DomainError> {
-    BackupRecordsExpectation::capture(records_path, workspace_path, workspace_id)?
+    BackupRecordsExpectation::capture(records_path, workspace_path, workspace_id, None)?
         .verify_database(database_path)
 }
 
@@ -397,7 +401,7 @@ mod tests {
             db.close().map_err(|e| e.to_string())?;
             fs::write(&options.source_path, text(records)).map_err(|e| e.to_string())?;
             let report =
-                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+                import_verified_backup_jsonl_records(&options, None).map_err(|e| e.to_string())?;
             assert_eq!(report.status, "completed", "{:?}", report.issues);
             assert_eq!(report.memories_imported, 2);
             assert_eq!(report.links_imported, 1);
@@ -675,8 +679,8 @@ mod tests {
             .db
             .list_memories(&fixture.workspace, None, true)
             .map_err(|e| e.to_string())?;
-        let repeat =
-            import_verified_backup_jsonl_records(&fixture.options).map_err(|e| e.to_string())?;
+        let repeat = import_verified_backup_jsonl_records(&fixture.options, None)
+            .map_err(|e| e.to_string())?;
         assert_eq!(repeat.status, "completed", "{:?}", repeat.issues);
         assert_eq!(repeat.memories_imported, 0);
         assert_eq!(repeat.memories_skipped_duplicate, 2);
@@ -745,7 +749,7 @@ mod tests {
             };
             fs::write(&options.source_path, text(&rows)).map_err(|e| e.to_string())?;
             let report =
-                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+                import_verified_backup_jsonl_records(&options, None).map_err(|e| e.to_string())?;
             assert_eq!(report.status, "rejected", "case {case}");
             assert!(!options.workspace_path.exists(), "case {case}");
         }

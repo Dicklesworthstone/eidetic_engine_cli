@@ -76,7 +76,7 @@ fn ambiguous_explicit_heads_are_rejected_before_any_destination_write() -> TestR
                 };
                 std::fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
                 let report = if backup {
-                    import_verified_backup_jsonl_records(&options)
+                    import_verified_backup_jsonl_records(&options, None)
                 } else {
                     import_jsonl_records(&options)
                 }

@@ -1501,14 +1501,25 @@ downgrade performed halfway through a native import.
 
 "Same-store reimport" and "disaster restore" are distinct. A normal export
 does not make a lost store key recoverable, and the current redacted
-`ee backup` format deliberately contains no private keyring. Restoring those
-records on another store therefore follows foreign/external handling and
-requires explicit local re-attestation; it never regains native trust merely
-because the backup manifest or store UUID matches. If an operator separately
-restores the complete user-data key directory through an external protected
-system backup, ee may recognize the original key ID only after hardened
-owner/type/path checks and a known-answer MAC self-check. That external
-recovery is not represented as an `ee backup` capability. Rotation retains a
+`ee backup` format deliberately contains no private keyring. A restore never
+regains native trust merely because the backup manifest or store UUID matches.
+The operator must hold the source authentication keys, either in the selected
+source workspace or recovered separately through `ee backup keys import` or
+an external protected system backup. Keys are accepted only after hardened
+owner/type/path checks and a known-answer MAC self-check.
+
+An authenticated backup restore may preserve native trust at a new side path
+when both the manifest and the actual JSONL records authenticate under those
+caller-selected source keys and the original workspace binding. The manifest
+cannot select a key path. The importer and immutable recovery projection each
+verify the received ordered records root/count under the same loaded source
+key root; both publication fences enforce that projection. This recovers the
+source lineage without copying its keys into the restored data directory.
+Missing or invalid manifest authentication refuses the restore before staging.
+The internal verified-record importer retains an explicit, reported trust cap
+when source authentication is absent or fails; ordinary JSONL import still
+requires the destination's local authentication and refuses unsupported native
+trust. Rotation retains a
 bounded verification window for same-store artifacts and rejects retired key
 IDs outside it. Consent-preview tokens deliberately accept only the current
 key: key rotation invalidates every outstanding approval and requires a fresh
@@ -1840,10 +1851,11 @@ not an ordinary member slot with manifest authority.
   is refused; context-matched same-store reimport restores missing rows or
   no-ops on byte-identical rows, while divergent revisions and dominating
   tombstones/withdrawals conflict without overwrite/resurrection; current
-  `ee backup` artifacts
-  contain no keyring and restore only with external trust plus local
-  re-attestation. A separately restored user-data key directory is accepted
-  only after path/owner/type and known-answer MAC checks. Snapshot mutation,
+  `ee backup` artifacts contain no keyring. Side-path recovery preserves native
+  trust only when the manifest and received records independently authenticate
+  under caller-selected source keys with the original workspace binding. A
+  separately recovered key directory is accepted only after path/owner/type
+  and known-answer MAC checks. Snapshot mutation,
   truncated, reordered, duplicated, wrong-count, and final ordered-root
   mismatch artifacts leave zero native-trust rows, audit entries, or index
   jobs; the authenticated preamble stays constant-size.

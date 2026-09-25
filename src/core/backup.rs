@@ -2843,7 +2843,7 @@ fn authenticate_backup_manifest(
 fn verify_backup_manifest_authentication(
     workspace_path: &Path,
     manifest: &JsonValue,
-) -> Result<(), BackupVerificationIssue> {
+) -> Result<StoreAuthRoot, BackupVerificationIssue> {
     let issue = |code, message| {
         BackupVerificationIssue::error(code, message).with_path(MANIFEST_FILE.to_owned())
     };
@@ -2890,7 +2890,7 @@ fn verify_backup_manifest_authentication(
             "backup manifest did not authenticate under the selected source workspace keys; its identity, inventory or contents may have changed",
         ));
     }
-    Ok(())
+    Ok(root)
 }
 
 /// List backup manifests under a backup root.
@@ -3619,6 +3619,22 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         });
     }
 
+    // Keep the key material that authenticates this exact manifest snapshot.
+    // The JSONL importer and its frozen recovery projection independently
+    // verify the records MAC under this source root, never destination keys or
+    // a key path from the manifest. Rechecking here also refuses a key change
+    // between the general verification pass and recovery admission.
+    let source_auth =
+        verify_backup_manifest_authentication(&workspace_path, &manifest).map_err(|issue| {
+            DomainError::Import {
+            message: issue.message,
+            repair: Some(
+                "select the source workspace with --workspace and recover its authentication keys"
+                    .to_owned(),
+            ),
+        }
+        })?;
+
     // Authentication establishes the bytes, not recovery completeness. Check
     // the binary-owned durable obligations before a dry-run can report success
     // or a real restore creates any staged files.
@@ -3727,7 +3743,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         repair: Some("choose a writable --side-path".to_owned()),
     })?;
 
-    let restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
     if restore_degraded
         .iter()
         .any(|entry| entry.code == "mesh_restore_requires_repair")
@@ -3778,13 +3794,17 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         &restore_records_path,
         &side_path,
         &restored_workspace.id,
+        Some(&source_auth),
     )?;
-    let import_report = import_verified_backup_jsonl_records(&JsonlImportOptions {
-        workspace_path: side_path.clone(),
-        database_path: Some(restored_database_path.clone()),
-        source_path: restore_records_path,
-        dry_run: false,
-    })
+    let import_report = import_verified_backup_jsonl_records(
+        &JsonlImportOptions {
+            workspace_path: side_path.clone(),
+            database_path: Some(restored_database_path.clone()),
+            source_path: restore_records_path,
+            dry_run: false,
+        },
+        Some(&source_auth),
+    )
     .map_err(|error| DomainError::Import {
         message: format!(
             "failed importing backup '{}' records into side path '{}': {error}",
@@ -3814,6 +3834,22 @@ fn restore_backup_to_side_path_with_recovery_hooks(
                 "inspect the staged records and retry with a fresh --side-path".to_owned(),
             ),
         });
+    }
+    let trust_downgrades = import_report
+        .issues
+        .iter()
+        .filter(|issue| {
+            issue.code == crate::core::jsonl_import::VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE
+        })
+        .count();
+    if trust_downgrades > 0 {
+        restore_degraded.push(BackupDegradation::warning(
+            crate::core::jsonl_import::VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE,
+            format!(
+                "{trust_downgrades} restored memory record(s) could not authenticate native trust under the selected source keys; human_explicit trust was capped at the export header's trust level"
+            ),
+            "recover source keys with ee backup keys import, recreate a fully authenticated backup, or explicitly re-attest the restored memories",
+        ));
     }
     let restored_task_episode_count =
         restore_task_episode_assets(&restored_database_path, &restored_derived)?;

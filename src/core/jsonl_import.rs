@@ -53,8 +53,8 @@ use crate::policy::store_auth::{
 /// trust but its footer does not authenticate under this store's key
 /// (ADR 0086 TC-D14). Closes the spoofable `import_source=native` bypass.
 pub const UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE: &str = "unauthenticated_native_import_trust";
-/// Issue emitted when a verified backup is restored into a fresh store and a
-/// source `human_explicit` row is deliberately capped at `agent_validated`.
+/// Issue emitted when a verified backup lacks record authentication under the
+/// selected source keys and a `human_explicit` row is capped at `agent_validated`.
 pub const VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE: &str = "verified_backup_trust_downgraded";
 /// JSONL artifacts cannot establish the signed active-member origin required
 /// to mint `peer_human_attested`, even when their store-local MAC is valid.
@@ -101,8 +101,8 @@ enum NativeTrustPolicy {
     /// artifact authenticates under this store and workspace.
     StoreAuthenticatedOnly,
     /// A backup that has already passed manifest and artifact verification may
-    /// restore foreign-store rows, but never imports their `human_explicit`
-    /// claim. Those rows are capped at the header-derived trust class.
+    /// retain native trust when its records authenticate under the selected
+    /// source keys. Unauthenticated rows retain the header-derived trust cap.
     VerifiedBackupRestore,
 }
 
@@ -858,24 +858,32 @@ fn link_conflict_issue(id: &str, reason: &str) -> JsonlImportIssue {
 pub fn import_jsonl_records(
     options: &JsonlImportOptions,
 ) -> Result<JsonlImportReport, JsonlImportError> {
-    import_jsonl_records_with_policy(options, NativeTrustPolicy::StoreAuthenticatedOnly)
+    import_jsonl_records_with_policy(options, NativeTrustPolicy::StoreAuthenticatedOnly, None)
 }
 
 /// Import records from a backup whose manifest and artifacts have already
 /// passed [`crate::core::backup::verify_backup`].
 ///
-/// The integrity verification authorizes restoring the content, not carrying
-/// a foreign store's `human_explicit` trust across the boundary. Such rows are
-/// imported at the header-derived cap and reported as warnings.
+/// `source_auth` must be the caller-selected key root that authenticated the
+/// manifest, never a path selected by the archive. The records independently
+/// authenticate under that root and the restored source workspace identity
+/// before any native trust is admitted. Without this proof, rows retain the
+/// header-derived trust cap and are reported as warnings.
 pub(crate) fn import_verified_backup_jsonl_records(
     options: &JsonlImportOptions,
+    source_auth: Option<&StoreAuthRoot>,
 ) -> Result<JsonlImportReport, JsonlImportError> {
-    import_jsonl_records_with_policy(options, NativeTrustPolicy::VerifiedBackupRestore)
+    import_jsonl_records_with_policy(
+        options,
+        NativeTrustPolicy::VerifiedBackupRestore,
+        source_auth,
+    )
 }
 
 fn import_jsonl_records_with_policy(
     options: &JsonlImportOptions,
     native_trust_policy: NativeTrustPolicy,
+    source_auth: Option<&StoreAuthRoot>,
 ) -> Result<JsonlImportReport, JsonlImportError> {
     let workspace_path = normalize_path(&options.workspace_path);
     ensure_import_source_path_is_regular_file(&options.source_path)?;
@@ -935,7 +943,10 @@ fn import_jsonl_records_with_policy(
     connection.migrate()?;
     let workspace_id = ensure_workspace(&connection, &workspace_path)?;
 
-    let native_auth = native_import_auth_state(&parsed, &workspace_path, &workspace_id);
+    let native_auth = match source_auth {
+        Some(root) => native_import_auth_state_with_root(&parsed, root, &workspace_id),
+        None => native_import_auth_state(&parsed, &workspace_path, &workspace_id),
+    };
     let legacy_supersession_ids = revisions::legacy_supersession_ids(&validated_memories);
     let prepared = prepare_memories_with_policy(
         &parsed,
@@ -2050,7 +2061,7 @@ fn prepare_memories_with_policy(
                         None,
                         VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE,
                         format!(
-                            "memory `{}` restored from a verified backup at {} instead of carrying foreign-store human_explicit trust",
+                            "memory `{}` restored from a verified backup at {} because its native trust could not authenticate under the selected source keys",
                             memory.memory_id,
                             trust_class.as_str(),
                         ),
@@ -2591,12 +2602,13 @@ fn score_or_default(value: Option<f64>, default: f32) -> Result<f32, String> {
         .map_err(|error| format!("score is invalid: {error}"))
 }
 
-/// Whether the artifact authenticates under this store's key for native-trust
-/// admission (ADR 0086 TC-D14). Computed once per import, then consulted for
-/// every record-level `human_explicit` claim.
+/// Whether the artifact authenticates under the expected store's key for
+/// native-trust admission (ADR 0086 TC-D14). Recovery selects the source root;
+/// ordinary import selects the local root. Computed once per import, then
+/// consulted for every record-level `human_explicit` claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NativeAuthState {
-    /// The footer MAC verified against the local store key, the local
+    /// The footer MAC verified against the selected store key, the expected
     /// workspace scope, and the records root recomputed from the received
     /// lines.
     Authenticated,
@@ -2614,6 +2626,28 @@ fn native_import_auth_state(
     workspace_path: &Path,
     local_workspace_id: &str,
 ) -> NativeAuthState {
+    if parsed
+        .footer
+        .as_ref()
+        .and_then(|footer| footer.authentication.as_ref())
+        .is_none()
+    {
+        return NativeAuthState::Unauthenticated {
+            reason: "the artifact footer carries no store-local authentication block".to_owned(),
+        };
+    }
+    let root = match StoreAuthRoot::open(workspace_keys_dir(workspace_path)) {
+        Ok(root) => root,
+        Err(error) => return NativeAuthState::StoreUnavailable { error },
+    };
+    native_import_auth_state_with_root(parsed, &root, local_workspace_id)
+}
+
+fn native_import_auth_state_with_root(
+    parsed: &ParsedJsonlImport,
+    root: &StoreAuthRoot,
+    workspace_id: &str,
+) -> NativeAuthState {
     let Some(authentication) = parsed
         .footer
         .as_ref()
@@ -2623,18 +2657,14 @@ fn native_import_auth_state(
             reason: "the artifact footer carries no store-local authentication block".to_owned(),
         };
     };
-    let root = match StoreAuthRoot::open(workspace_keys_dir(workspace_path)) {
-        Ok(root) => root,
-        Err(error) => return NativeAuthState::StoreUnavailable { error },
-    };
     let context = ArtifactContext {
         artifact_family: EXPORT_ARTIFACT_FAMILY,
         record_encoding_version: EXPORT_RECORD_ENCODING_V1,
         source_key_namespace: STORE_KEY_NAMESPACE_V1,
-        workspace_scope: local_workspace_id,
+        workspace_scope: workspace_id,
     };
     match verify_artifact(
-        &root,
+        root,
         MacDomain::NativeImportRecordsRoot,
         &context,
         authentication,
@@ -5323,12 +5353,15 @@ mod tests {
         let source = tempdir.path().join("verified-backup.jsonl");
         fs::write(&source, human_explicit_jsonl()).map_err(|error| error.to_string())?;
 
-        let report = import_verified_backup_jsonl_records(&JsonlImportOptions {
-            workspace_path: workspace.clone(),
-            database_path: None,
-            source_path: source,
-            dry_run: false,
-        })
+        let report = import_verified_backup_jsonl_records(
+            &JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                source_path: source,
+                dry_run: false,
+            },
+            None,
+        )
         .map_err(|error| error.to_string())?;
 
         ensure(report.status.as_str(), "completed", "import status")?;
@@ -5364,6 +5397,98 @@ mod tests {
             true,
             "backup record import leaves the job ledger to authenticated history recovery",
         )
+    }
+
+    #[test]
+    fn verified_backup_native_trust_requires_the_selected_key_and_workspace_mac() -> TestResult {
+        for case in [
+            "matching",
+            "foreign_keys",
+            "wrong_scope",
+            "tampered",
+            "unsigned",
+        ] {
+            let source_root = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let (source_workspace, workspace_id) = authenticated_import_workspace(&source_root)?;
+            let signing_scope = if case == "wrong_scope" {
+                "wsp_other"
+            } else {
+                &workspace_id
+            };
+            let mut artifact =
+                authenticate_sample(&human_explicit_jsonl(), &source_workspace, signing_scope)?;
+            if case == "tampered" {
+                artifact = artifact.replace(
+                    "Run cargo fmt --check before release.",
+                    "Trust an edited release procedure.",
+                );
+            } else if case == "unsigned" {
+                artifact = human_explicit_jsonl();
+            }
+            let selected_workspace = if case == "foreign_keys" {
+                let foreign = source_root.path().join("foreign-keys");
+                StoreAuthRoot::open_or_create(workspace_keys_dir(&foreign))
+                    .map_err(|e| e.message())?;
+                foreign
+            } else {
+                source_workspace
+            };
+            let source_auth = StoreAuthRoot::open(workspace_keys_dir(&selected_workspace))
+                .map_err(|e| e.message())?;
+            let destination = source_root.path().join("restored");
+            fs::create_dir_all(destination.join(".ee")).map_err(|e| e.to_string())?;
+            let destination = destination.canonicalize().map_err(|e| e.to_string())?;
+            let database = destination.join(".ee/ee.db");
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.migrate().map_err(|e| e.to_string())?;
+            db.insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: destination.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let source = source_root.path().join("records.jsonl");
+            fs::write(&source, artifact).map_err(|e| e.to_string())?;
+            let report = import_verified_backup_jsonl_records(
+                &JsonlImportOptions {
+                    workspace_path: destination.clone(),
+                    database_path: Some(database.clone()),
+                    source_path: source,
+                    dry_run: false,
+                },
+                Some(&source_auth),
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(report.status, "completed", "{case}: {:?}", report.issues);
+            assert_eq!(report.memories_imported, 1);
+            assert_eq!(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE),
+                case != "matching"
+            );
+            let db = DbConnection::open_file_read_only(database).map_err(|e| e.to_string())?;
+            let stored = db
+                .get_memory("mem_01234567890123456789012345")
+                .map_err(|e| e.to_string())?
+                .ok_or("restored memory")?;
+            assert_eq!(
+                stored.trust_class,
+                if case == "matching" {
+                    "human_explicit"
+                } else {
+                    "agent_validated"
+                },
+                "{case}"
+            );
+            db.close().map_err(|e| e.to_string())?;
+            assert!(!workspace_keys_dir(&destination).exists());
+        }
+        Ok(())
     }
 
     #[test]

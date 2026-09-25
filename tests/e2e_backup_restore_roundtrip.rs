@@ -916,18 +916,9 @@ fn workspace_id_from_db(conn: &DbConnection, workspace_path: &Path) -> Result<St
         .ok_or_else(|| "no workspace row present in database".to_owned())
 }
 
-/// Content-bearing fields of a memory that must round-trip identically.
-///
-/// Intentionally excluded fields, all "modulo IDs that legitimately differ"
-/// per the bead's acceptance text:
-/// - `created_at` / `updated_at` move forward when records.jsonl is re-imported.
-/// - Workspace / memory ids are regenerated against the restore side-path.
-/// - `trust_class` is rewritten by `core::jsonl_import::trust_class_for_header`,
-///   which derives the class from the export header's `import_source` +
-///   `trust_level` rather than reading the per-memory class. This means a
-///   `human_explicit` memory comes back as `agent_validated` after a Native
-///   export. That's a documented property of the JSONL transit format, not a
-///   regression we can fix at the e2e layer.
+/// Memory fields that must survive authenticated, unredacted backup recovery,
+/// including the original chronology, provenance and trust decisions. The
+/// recovery audit is separate evidence and must not rewrite these fields.
 #[derive(Clone, Debug, PartialEq)]
 struct MemoryContent {
     level: String,
@@ -936,6 +927,11 @@ struct MemoryContent {
     confidence_milli: i64, // milli units to compare floats deterministically
     utility_milli: i64,
     importance_milli: i64,
+    created_at: String,
+    updated_at: String,
+    provenance_uri: Option<String>,
+    trust_class: String,
+    trust_subclass: Option<String>,
     tombstoned: bool,
     tombstoned_at: Option<String>,
     valid_from: Option<String>,
@@ -955,6 +951,11 @@ impl From<&StoredMemory> for MemoryContent {
             confidence_milli: milli(memory.confidence),
             utility_milli: milli(memory.utility),
             importance_milli: milli(memory.importance),
+            created_at: memory.created_at.clone(),
+            updated_at: memory.updated_at.clone(),
+            provenance_uri: memory.provenance_uri.clone(),
+            trust_class: memory.trust_class.clone(),
+            trust_subclass: memory.trust_subclass.clone(),
             tombstoned: memory.tombstoned_at.is_some(),
             tombstoned_at: memory.tombstoned_at.clone(),
             valid_from: memory.valid_from.clone(),
@@ -1942,19 +1943,6 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
             ttl_seconds: 3600,
         })
         .map_err(|error| format!("insert graph result cache: {error}"))?;
-    let ppr_cache_memory_id = seeded_memory_ids
-        .first()
-        .ok_or_else(|| "missing memory id for ppr cache fixture".to_owned())?;
-    // Backup restore transits through records.jsonl and currently restores
-    // native memories with the JSONL import provenance marker. Align the source
-    // fixture before taking the context snapshot so the byte-identity assertion
-    // isolates graph-cache restoration instead of that transport rewrite.
-    src_conn
-        .execute_raw(&format!(
-            "UPDATE memories SET provenance_uri = 'jsonl-import://unknown' WHERE id = '{}'",
-            ppr_cache_memory_id
-        ))
-        .map_err(|error| format!("align source provenance with JSONL restore marker: {error}"))?;
     let src_memories = src_conn
         .list_memories(&src_workspace_id, None, true)
         .map_err(|error| format!("src list_memories: {error}"))?;
@@ -2983,8 +2971,9 @@ impl KindRoundTrip {
     }
 
     /// `backup create --redaction minimal`, then restore to the side path.
-    /// Minimal keeps memory IDs; the default re-mints them (bd-cjt23), which
-    /// would leave nothing to join a restored row to its source row on.
+    /// Minimal keeps memory IDs, as does the default backup policy. The
+    /// explicit level keeps these focused recovery fixtures independent of
+    /// configured workspace redaction defaults.
     fn backup_minimal_and_restore(&self) -> Result<JsonValue, String> {
         let ws = self.ws();
         let backup_dir = self.backup_dir.to_string_lossy().into_owned();
@@ -3418,21 +3407,15 @@ fn attest_omissions(attest: &JsonValue) -> Vec<String> {
 
 /// bd-1n0np.23.2: attestation bundles are not stored; `ee attest memory` builds
 /// one on read from the memory, its links, anchors, audit rows and seal. The
-/// bundle attests CUSTODY as well as content, and a restored memory's custody
-/// genuinely differs, so the oracle (orchestrator ruling, option a) is split:
+/// bundle includes recovery history as well as the original memory evidence:
 ///
-/// - CONTENT is equal: the subject, the redacted content and links hashes, the
-///   memory's own evidence hash, and the anchors' ids and redacted values.
-/// - CUSTODY differs in exactly the intended ways: the import gives the memory
-///   a provenance URI (jsonl-import://..) that the public bundle omits, the
-///   re-extracted anchors carry that URI as their provenance, restore adds
-///   exactly one audit row for the memory, and so the provenance chain hash
-///   moves.
-/// - NOT ASSERTED in either direction: `memory.trust_validity`. A side-path
-///   restore currently downgrades trust (bd-cjt23 item 2, awaiting a ruling);
-///   pinning either value would red the day that is decided. The aggregate
-///   `memory.anchors` / `memory.audit` hashes and the bundle hash are not
-///   asserted separately: they are derived from the custody facts above.
+/// - The subject, content, links, trust/validity and memory provenance chain
+///   remain equal. Recovery preserves absent provenance, and the re-extracted
+///   anchors retain their original provenance and redacted values.
+/// - Recovery adds exactly one audit row for the memory while preserving every
+///   source audit. The audit manifest and aggregate bundle therefore change.
+/// - Anchor timestamps can reflect re-extraction, so the aggregate anchor
+///   hash is not a content-identity oracle.
 ///
 /// `--redaction minimal` keeps the memory ID the bundle names.
 #[test]
@@ -3488,7 +3471,16 @@ fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestRe
             pointer,
         )?;
     }
-    for label in ["memory.redacted_content", "memory.links"] {
+    for label in [
+        "memory.redacted_content",
+        "memory.links",
+        "memory.trust_validity",
+        "memory.provenance_chain",
+    ] {
+        ensure(
+            attest_manifest_hash(&source, label).is_some(),
+            format!("source attestation has no {label} hash"),
+        )?;
         ensure_equal(
             &attest_manifest_hash(&restored, label),
             &attest_manifest_hash(&source, label),
@@ -3523,39 +3515,31 @@ fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestRe
         )?;
     }
 
-    // CUSTODY: the provenance URI the import records, omitted from the public bundle.
+    // Recovery does not invent provenance for the memory or its anchors.
     ensure(
         attest_redaction_hashes(&source, "memory.provenanceUri").is_empty(),
         "the source memory has no provenance URI",
     )?;
-    let restored_uri = attest_redaction_hashes(&restored, "memory.provenanceUri");
     ensure_equal(
-        &restored_uri.len(),
-        &1,
-        "the restored memory carries one provenance URI",
+        &attest_redaction_hashes(&restored, "memory.provenanceUri"),
+        &attest_redaction_hashes(&source, "memory.provenanceUri"),
+        "the restored memory retains absent provenance",
     )?;
     let omission = "publicProjection.provenanceUri".to_owned();
     ensure(
         !attest_omissions(&source).contains(&omission)
-            && attest_omissions(&restored).contains(&omission),
-        "only the restored bundle declares the provenance URI omission",
+            && !attest_omissions(&restored).contains(&omission),
+        "neither bundle invents a provenance URI omission",
     )?;
 
-    // CUSTODY: the re-extracted anchors carry that URI as their provenance.
-    let restored_anchor_provenance =
-        attest_redaction_hashes(&restored, "memoryAnchors[].provenance");
     ensure(
-        !restored_anchor_provenance.is_empty()
-            && restored_anchor_provenance
-                .iter()
-                .all(|hash| *hash == restored_uri[0])
-            && !attest_redaction_hashes(&source, "memoryAnchors[].provenance")
-                .contains(&restored_uri[0]),
-        format!(
-            "restored anchor provenance {restored_anchor_provenance:?} is not the restored \
-             provenance URI {}",
-            restored_uri[0]
-        ),
+        !attest_redaction_hashes(&source, "memoryAnchors[].provenance").is_empty(),
+        "the source has anchor provenance to compare",
+    )?;
+    ensure_equal(
+        &attest_redaction_hashes(&restored, "memoryAnchors[].provenance"),
+        &attest_redaction_hashes(&source, "memoryAnchors[].provenance"),
+        "restored anchor provenance matches the original evidence",
     )?;
 
     // CUSTODY: restore adds exactly one audit row and keeps every source row.
@@ -3567,10 +3551,15 @@ fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestRe
         format!("audit evidence: source {source_audit:?}, restored {restored_audit:?}"),
     )?;
 
-    // CUSTODY: the provenance chain therefore moves.
+    // The recovery event changes the audit manifest and bundle, while the
+    // memory's own provenance chain above remains identical.
     ensure(
-        attest_manifest_hash(&restored, "memory.provenance_chain")
-            != attest_manifest_hash(&source, "memory.provenance_chain"),
-        "the provenance chain hash did not change across restore",
+        attest_manifest_hash(&restored, "memory.audit")
+            != attest_manifest_hash(&source, "memory.audit"),
+        "the audit manifest must include the recovery event",
+    )?;
+    ensure(
+        restored.pointer("/data/bundleHash") != source.pointer("/data/bundleHash"),
+        "the bundle must distinguish the recovered audit history",
     )
 }

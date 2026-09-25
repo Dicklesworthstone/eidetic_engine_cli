@@ -16,9 +16,10 @@
 //!
 //! Both scenarios use the public in-process backup/restore APIs. Restore
 //! authenticates the manifest with the explicitly selected source workspace's
-//! keys before invoking the real JSONL importer. The fresh destination caps
-//! source `human_explicit` claims at `agent_validated`; ordinary unauthenticated
-//! JSONL import must not grant native trust merely because rows came from a backup.
+//! keys before invoking the real JSONL importer. The importer independently
+//! authenticates the records under those same keys and preserves the source's
+//! `human_explicit` class; ordinary unauthenticated JSONL import must not grant
+//! native trust merely because rows came from a backup.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -419,8 +420,9 @@ fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, St
     let dst_db = dst_workspace.join(".ee").join("ee.db");
 
     // A raw JSONL import into this unrelated store correctly refuses native
-    // human trust. The supported restore path authenticates using source keys
-    // and imports the records at the documented foreign-store trust cap.
+    // human trust. The supported restore path authenticates both the manifest
+    // and records using the explicitly selected source keys, retaining the
+    // source's trust even though the recovered store lives at another path.
     let restore_report = restore_backup_to_side_path(&BackupRestoreOptions {
         workspace_path: src_workspace,
         backup_path: PathBuf::from(&backup_report.backup_path),
@@ -453,8 +455,8 @@ fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, St
     assert_eq!(memories.len(), 4, "restored rows match the import report");
     for memory in memories {
         assert_eq!(
-            memory.trust_class, "agent_validated",
-            "foreign human trust must not cross the restore boundary"
+            memory.trust_class, "human_explicit",
+            "authenticated recovery preserves the source memory's trust"
         );
     }
 

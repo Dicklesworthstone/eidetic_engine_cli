@@ -186,6 +186,294 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
 }
 
 #[test]
+fn same_lineage_restore_preserves_native_trust_and_records_root() -> TestResult {
+    for (redaction, rotate) in [
+        (RedactionLevel::Minimal, false),
+        (RedactionLevel::Minimal, true),
+        (RedactionLevel::Standard, false),
+    ] {
+        let (root, workspace, database, workspace_id, prior, _) = source()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.execute_raw("UPDATE memories SET trust_class = 'human_explicit'")
+            .map_err(|e| e.to_string())?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET provenance_uri = NULL WHERE id = '{prior}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        let expected = db
+            .list_memories(&workspace_id, None, true)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|memory| (memory.content.clone(), memory))
+            .collect::<BTreeMap<_, _>>();
+        db.close().map_err(|e| e.to_string())?;
+        let create = |workspace: &Path, database: &Path| {
+            create_backup(&BackupCreateOptions {
+                workspace_path: workspace.to_owned(),
+                database_path: Some(database.to_owned()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.to_string())
+        };
+        let created = create(&workspace, &database)?;
+        if rotate {
+            let mut keys =
+                StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+            let original_key = keys.current_key_id();
+            keys.rotate().map_err(|e| e.message())?;
+            assert_ne!(keys.current_key_id(), original_key);
+            assert!(keys.window_key_ids().contains(&original_key));
+        }
+        // The same JSONL file cannot elevate an unrelated ordinary import.
+        let ordinary_workspace = root.path().join("ordinary-import");
+        let ordinary = crate::core::jsonl_import::import_jsonl_records(&JsonlImportOptions {
+            workspace_path: ordinary_workspace.clone(),
+            database_path: None,
+            source_path: PathBuf::from(&created.records_path),
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        assert_eq!(ordinary.status, "rejected", "{:?}", ordinary.issues);
+        assert_eq!(ordinary.memories_imported, 0);
+
+        let side_path = root.path().join("restored-native");
+        assert!(!workspace_keys_dir(&side_path).exists());
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        assert_eq!(restored.status, "completed", "{:?}", restored.degraded);
+        assert_eq!(restored.imported_memory_count, 2);
+        assert!(restored.degraded.is_empty());
+        // Restoration carries verified rows, never the source's private keys.
+        assert!(!workspace_keys_dir(&side_path).exists());
+        let restored_database = PathBuf::from(&restored.restored_database_path);
+        let db =
+            DbConnection::open_file_read_only(&restored_database).map_err(|e| e.to_string())?;
+        let memories = db
+            .list_memories(&workspace_id, None, true)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(memories.len(), expected.len());
+        for memory in memories {
+            let original = expected
+                .get(&memory.content)
+                .ok_or("unexpected restored body")?;
+            assert_eq!(memory.trust_class, "human_explicit");
+            assert_eq!(memory.trust_subclass, original.trust_subclass);
+            assert_eq!(memory.provenance_uri, original.provenance_uri);
+            assert_eq!(memory.created_at, original.created_at);
+            assert_eq!(memory.updated_at, original.updated_at);
+            assert_eq!(memory.valid_from, original.valid_from);
+            assert_eq!(memory.valid_to, original.valid_to);
+        }
+        db.close().map_err(|e| e.to_string())?;
+        let rebackup = create(&side_path, &restored_database)?;
+        if redaction == RedactionLevel::Minimal {
+            let authenticated_records = |path: &str| -> Result<(String, Vec<String>), String> {
+                let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
+                let mut root = None;
+                let mut records = Vec::new();
+                for line in source.lines() {
+                    let row: JsonValue = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                    match row["schema"].as_str() {
+                        Some(
+                            crate::models::EXPORT_MEMORY_SCHEMA_V1
+                            | crate::models::EXPORT_TAG_SCHEMA_V1
+                            | crate::models::EXPORT_LINK_SCHEMA_V1,
+                        ) => records.push(line.to_owned()),
+                        Some(crate::models::EXPORT_FOOTER_SCHEMA_V1) => {
+                            root = row
+                                .pointer("/authentication/recordsRoot")
+                                .and_then(JsonValue::as_str)
+                                .map(str::to_owned);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok((
+                    root.ok_or("backup has no authenticated records root")?,
+                    records,
+                ))
+            };
+            let original = authenticated_records(&created.records_path)?;
+            assert!(!original.1.is_empty());
+            assert_eq!(
+                authenticated_records(&rebackup.records_path)?,
+                original,
+                "same-lineage recovery preserves every authenticated memory, tag and link byte"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_fences_reject_loss_of_authenticated_native_trust() -> TestResult {
+    for final_fence in [false, true] {
+        let (root, workspace, database, workspace_id, _, _) = source()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.execute_raw("UPDATE memories SET trust_class = 'human_explicit'")
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Minimal,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let mutate = |path: &Path| -> Result<(), DomainError> {
+            let db = DbConnection::open_file(path).map_err(work_history_error)?;
+            let before = db
+                .list_memories(&workspace_id, None, true)
+                .map_err(work_history_error)?;
+            assert_eq!(before.len(), 2);
+            assert!(
+                before
+                    .iter()
+                    .all(|memory| memory.trust_class == "human_explicit")
+            );
+            db.execute_raw("UPDATE memories SET trust_class = 'agent_validated'")
+                .map_err(work_history_error)?;
+            db.close().map_err(work_history_error)?;
+            Ok(())
+        };
+        let side_path = root.path().join("refused-trust-loss");
+        let error = restore_backup_to_side_path_with_recovery_hooks(
+            &BackupRestoreOptions {
+                workspace_path: workspace,
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            },
+            |path| if final_fence { Ok(()) } else { mutate(path) },
+            |path| if final_fence { mutate(path) } else { Ok(()) },
+        )
+        .err()
+        .ok_or("recovery published a trust downgrade after authenticated admission")?;
+        assert!(
+            error.message().contains("Restored memory graph"),
+            "{}",
+            error.message()
+        );
+        assert!(!side_path.join(WORKSPACE_MARKER).exists());
+        let db = DbConnection::open_file_read_only(database).map_err(|e| e.to_string())?;
+        assert!(
+            db.list_memories(&workspace_id, None, true)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .all(|memory| memory.trust_class == "human_explicit")
+        );
+        db.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn verified_manifest_without_record_authentication_reports_trust_downgrade() -> TestResult {
+    let (root, workspace, database, workspace_id, _, _) = source()?;
+    let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+    db.execute_raw("UPDATE memories SET trust_class = 'human_explicit'")
+        .map_err(|e| e.to_string())?;
+    db.close().map_err(|e| e.to_string())?;
+    let created = create_backup(&BackupCreateOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database),
+        output_dir: None,
+        label: None,
+        redaction_level: RedactionLevel::Minimal,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|e| e.to_string())?;
+    let original = fs::read_to_string(&created.records_path).map_err(|e| e.to_string())?;
+    let mut rows = original.lines().map(str::to_owned).collect::<Vec<_>>();
+    let footer_line = rows.last_mut().ok_or("backup footer")?;
+    let mut footer: JsonValue = serde_json::from_str(footer_line).map_err(|e| e.to_string())?;
+    assert_eq!(footer["schema"], crate::models::EXPORT_FOOTER_SCHEMA_V1);
+    assert!(footer["authentication"].is_object());
+    footer["authentication"] = JsonValue::Null;
+    *footer_line = footer.to_string();
+    let changed = rows.join("\n") + "\n";
+    fs::write(&created.records_path, &changed).map_err(|e| e.to_string())?;
+    let (_, mut manifest) =
+        read_backup_manifest(Path::new(&created.backup_path)).map_err(|e| e.to_string())?;
+    let artifact = manifest["artifacts"]
+        .as_array_mut()
+        .ok_or("manifest artifacts")?
+        .iter_mut()
+        .find(|artifact| artifact["path"] == RECORDS_FILE)
+        .ok_or("records artifact")?;
+    artifact["hash"] = serde_json::json!(hash_bytes(changed.as_bytes()));
+    artifact["sizeBytes"] = serde_json::json!(changed.len());
+    let source_auth =
+        StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+    authenticate_backup_manifest(&mut manifest, &source_auth).map_err(|e| e.to_string())?;
+    fs::write(
+        &created.manifest_path,
+        serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let verified = verify_backup(&BackupVerifyOptions {
+        workspace_path: workspace.clone(),
+        backup_path: PathBuf::from(&created.backup_path),
+    })
+    .map_err(|e| e.to_string())?;
+    assert_eq!(verified.status, "verified", "{:?}", verified.issues);
+    // The outer signature proves archive integrity, but cannot replace the
+    // native records MAC. This intentional defence-in-depth fallback is visible.
+    let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+        workspace_path: workspace,
+        backup_path: PathBuf::from(&created.backup_path),
+        side_path: root.path().join("restored-capped"),
+        restore_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|e| e.to_string())?;
+    assert_eq!(restored.status, "degraded");
+    assert_eq!(restored.import_status, "completed");
+    assert_eq!(restored.imported_memory_count, 2);
+    let downgrade = restored
+        .degraded
+        .iter()
+        .find(|entry| {
+            entry.code == crate::core::jsonl_import::VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE
+        })
+        .ok_or("restore hid its native trust downgrade")?;
+    assert_eq!(downgrade.severity, "warning");
+    assert!(downgrade.message.starts_with("2 restored memory record(s)"));
+    assert!(downgrade.next_action.contains("ee backup keys import"));
+    let db = DbConnection::open_file_read_only(&restored.restored_database_path)
+        .map_err(|e| e.to_string())?;
+    let memories = db
+        .list_memories(&workspace_id, None, true)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(memories.len(), 2);
+    assert!(
+        memories
+            .iter()
+            .all(|memory| memory.trust_class == "agent_validated")
+    );
+    db.close().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn backup_successor_hints_use_durable_headship_and_timestamp_instants() -> TestResult {
     let (_root, _workspace, database, workspace_id, prior, head) = source()?;
     let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
