@@ -3673,11 +3673,15 @@ pub fn render_context_response_markdown_with_options(
     response: &ContextResponse,
     include_non_affecting: bool,
 ) -> String {
+    // ADR 0087 §1: `pack.text` is canonical, so non-canonical telemetry
+    // (the elapsed-budget overrun) never reaches it, nor the counts and
+    // banner derived from this slice. It stays in the envelope's `degraded[]`.
     let filtered = response
         .data
         .degraded
         .iter()
-        .filter(|entry| include_non_affecting || entry.category().included_by_default());
+        .filter(|entry| include_non_affecting || entry.category().included_by_default())
+        .filter(|entry| !crate::pack::is_non_canonical_telemetry_degradation_code(&entry.code));
     let degraded = aggregate_context_degraded_as_response(filtered);
     let mut markdown =
         crate::pack::render_context_response_markdown_with_degraded(response, &degraded);

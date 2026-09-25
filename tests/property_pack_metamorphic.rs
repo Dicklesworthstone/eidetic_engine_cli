@@ -453,8 +453,10 @@ fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
         }
     }
 
-    // bd-j1upc: the registered timing degradation, in degraded[] and as its
-    // rendered pack.text bullet, normalizes away at any measured duration.
+    // bd-j1upc: the registered timing degradation normalizes away from
+    // degraded[] at any measured duration. Since ADR 0087 T2, pack.text is
+    // canonical: the product never renders the timing bullet into it, so the
+    // timed envelope ships the same text as the untimed one.
     let timing_entry = |ms: u64| {
         serde_json::json!({
             "code": ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
@@ -472,12 +474,20 @@ fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
         let mut timed = with_text.clone();
         timed["degraded"] = serde_json::json!([timing_entry(ms)]);
         timed["data"]["degraded"] = serde_json::json!([timing_entry(ms)]);
-        timed["data"]["pack"]["text"] = serde_json::json!(format!(
-            "# Context Pack\n- **[low]** Pack assembly took {ms}ms, at or over the standard resource-profile elapsed warning threshold of 500ms. The pack contents are unaffected.\n  - *Repair:* `Re-run when the host is idle`\n## Items\n"
-        ));
         if normalize_pack_envelope(&timed.to_string())? != text_baseline {
             return Err(format!(
-                "the registered timing degradation ({ms}ms) must normalize away from degraded[] and pack.text"
+                "the registered timing degradation ({ms}ms) must normalize away from degraded[]"
+            ));
+        }
+        // A timing bullet in pack.text is a T2 regression even beside its
+        // degraded[] entry, so it must be rejected, never scrubbed into a pass.
+        let mut regressed = timed.clone();
+        regressed["data"]["pack"]["text"] = serde_json::json!(format!(
+            "# Context Pack\n- **[low]** Pack assembly took {ms}ms, at or over the standard resource-profile elapsed warning threshold of 500ms. The pack contents are unaffected.\n  - *Repair:* `Re-run when the host is idle`\n## Items\n"
+        ));
+        if normalize_pack_envelope(&regressed.to_string()).is_ok() {
+            return Err(format!(
+                "a timing bullet in canonical pack.text ({ms}ms) must be rejected"
             ));
         }
     }

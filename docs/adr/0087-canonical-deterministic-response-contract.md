@@ -53,10 +53,22 @@ appears in the envelope's `degraded[]`. Moving it into a dedicated telemetry
 field is a deferred schema decision owned by
 `bd-pack-timing-telemetry-field-2pfzo`.
 
-`pack.text`: ruled T2 on 1azkt.1 (2026-09-24 13:30Z): `pack.text` is canonical
-but not the hashed bytes; the hash binds its inputs. That behavior lands in the
-immediate follow-up commit; until then the shipped text still renders the
-timing bullet. Making the hash bind the shipped bytes (T1) is owned by
+`pack.text` is canonical but not the hashed bytes; the hash binds its
+inputs. The shipped text is rendered without non-canonical telemetry entries,
+so a timing overrun changes neither its degradation bullets nor the counts
+and banner derived from them (`render_context_response_markdown_with_options`,
+`src/output/mod.rs`). The shared timing normalizers
+(`src/obs/volatile_fields.rs`) therefore leave `pack.text` untouched, and a
+timing bullet found there is rejected as a regression rather than scrubbed.
+The JSON `data.pack.advisoryBanner.degradationCount` is a per-run report and
+counts every entry in `degraded[]`, the timing entry included, so when an
+overrun fires `pack.text` counts one fewer degraded signal than the banner
+(ruled 2026-09-25; pinned by
+`shipped_text_and_banner_disagree_by_exactly_the_volatile_entries` in
+`tests/pack_hash_property.rs`). The `rendered_text` component hashes the pack-layer
+rendering, which differs from the shipped text (the shipped text adds the
+embed-backend line, the pack-DNA block and a footer carrying the hash itself).
+Making the hash bind the shipped bytes is owned by
 `bd-pack-hash-shipped-text-8nafb`.
 
 State-creating commands are specified separately, owned by
@@ -216,7 +228,7 @@ comparator is part of v2.
 | Layer | Harness | Asserts |
 |---|---|---|
 | Unit | `src/core/context_test_module.rs` `pack_hash_v2_*` | the flat-feed provenance collision is separated (red first against v1); each differing input moves its own component and the composite only; timing, order and repetition move nothing; evidence scores quantize |
-| Property | `tests/pack_hash_property.rs` (in `integration_property`) | no elapsed reading moves `pack.hash`; degraded order and repetition never do; sub-quantum noise never does and a one-quantum step always does; a pinned v2 digest vector, checked on two RCH workers |
+| Property | `tests/pack_hash_property.rs` (in `integration_property`) | no elapsed reading moves `pack.hash`, nor one byte of the shipped `pack.text` (red first against the phase-1 tip); the timing entry stays in the envelope's `degraded[]`; degraded order and repetition never move the hash; sub-quantum noise never does and a one-quantum step always does; a pinned v2 digest vector, checked on two RCH workers |
 | Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
 
 None of these tests uses a test-side normalizer.

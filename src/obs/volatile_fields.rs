@@ -267,11 +267,19 @@ fn is_timing_degradation(item: &Value) -> bool {
 }
 
 /// Bring every value DERIVED from the degraded list back to its fast-host
-/// reading: the numeric count, the count inside prose, and the markdown bullet.
+/// reading: the numeric count and the count inside prose.
+///
+/// `pack.text` is skipped. It is canonical (ADR 0087 §1): the product renders
+/// it without the timing entry, so its count never included one, and a timing
+/// bullet found there is a regression that
+/// [`normalize_pack_envelope_timing`] must see, not a volatile value to erase.
 fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
     match value {
         Value::Object(object) => {
             for (key, child) in object.iter_mut() {
+                if key == "text" {
+                    continue;
+                }
                 if key == "degradationCount" {
                     if let Some(count) = child.as_u64() {
                         *child = Value::from(count.saturating_sub(dropped as u64));
@@ -680,20 +688,12 @@ mod tests {
             "repair": "Re-run to see whether the overrun is repeatable.",
         });
 
-        let deterministic_md = "## Degradations\n\n\
-            - **[warning]** Embedding model unavailable; semantic similarity is disabled.\n  \
-            - *Repair:* `ee index reembed`\n";
-        let slow_md = format!(
-            "{deterministic_md}\
-             - **[low]** Pack assembly took 812ms, at or over the standard \
-             resource-profile elapsed warning threshold of 500ms. The pack \
-             contents are unaffected.\n  \
-             - *Repair:* `Re-run to see whether the overrun is repeatable.`\n"
-        );
-
         // `degraded` is serialized at BOTH `.degraded` and `.data.degraded`,
         // which is what the "largest, not total" rule in the stripper exists for.
-        let document = |entries: serde_json::Value, count: u64, md: &str| {
+        // `pack.text` is canonical (ADR 0087 §1): the product renders it from
+        // the deterministic degradations only, so it reads the same on both
+        // hosts. The banner still counts the timing entry.
+        let document = |entries: serde_json::Value, count: u64| {
             let sentence =
                 format!("Context includes {count} degraded signals; semantic embedding is off.");
             serde_json::json!({
@@ -702,15 +702,45 @@ mod tests {
                     "degraded": entries,
                     "pack": {
                         "advisoryBanner": { "degradationCount": count, "summary": sentence },
-                        "text": format!("{sentence}\n\n{md}"),
+                        "text": canonical_pack_text(),
                     }
                 }
             })
         };
 
         (
-            document(serde_json::json!([embed, freshness]), 2, deterministic_md),
-            document(serde_json::json!([embed, freshness, timing]), 3, &slow_md),
+            document(serde_json::json!([embed, freshness]), 2),
+            document(serde_json::json!([embed, freshness, timing]), 3),
+        )
+    }
+
+    /// The shipped `pack.text` of the `timing_pair` request: two deterministic
+    /// degradations, no timing bullet.
+    fn canonical_pack_text() -> String {
+        format!(
+            "Context includes 2 degraded signals; semantic embedding is off.\n\n{}",
+            deterministic_markdown()
+        )
+    }
+
+    fn deterministic_markdown() -> &'static str {
+        "## Degradations\n\n\
+         - **[warning]** Embedding model unavailable; semantic similarity is disabled.\n  \
+         - *Repair:* `ee index reembed`\n"
+    }
+
+    /// A pre-ADR-0087-T2 markdown body, which rendered the timing bullet and
+    /// counted it. The product no longer emits this; it is the input
+    /// `normalize_pack_timing_markdown` exists for and the regression the
+    /// envelope guard must reject.
+    fn markdown_with_timing_bullet() -> String {
+        format!(
+            "Context includes 3 degraded signals; semantic embedding is off.\n\n{}\
+             - **[low]** Pack assembly took 812ms, at or over the standard \
+             resource-profile elapsed warning threshold of 500ms. The pack \
+             contents are unaffected.\n  \
+             - *Repair:* `Re-run to see whether the overrun is repeatable.`\n",
+            deterministic_markdown()
         )
     }
 
@@ -881,6 +911,9 @@ mod tests {
     fn envelope_timing_rejects_a_bullet_left_without_its_entry() -> TestResult {
         let (_, slow) = timing_pair();
         let mut orphaned = slow;
+        if let Some(text) = orphaned.pointer_mut("/data/pack/text") {
+            *text = serde_json::Value::String(markdown_with_timing_bullet());
+        }
         for pointer in ["/degraded", "/data/degraded"] {
             if let Some(entries) = orphaned
                 .pointer_mut(pointer)
@@ -900,24 +933,34 @@ mod tests {
         }
     }
 
+    /// ADR 0087 T2: `pack.text` is canonical, so a timing bullet there is a
+    /// product regression even when its `degraded[]` entry is present. The
+    /// envelope helper must reject it rather than scrub it into a pass.
+    #[test]
+    fn envelope_timing_rejects_a_timing_bullet_in_canonical_pack_text() -> TestResult {
+        let (_, slow) = timing_pair();
+        let mut regressed = slow;
+        if let Some(text) = regressed.pointer_mut("/data/pack/text") {
+            *text = serde_json::Value::String(markdown_with_timing_bullet());
+        }
+        match normalize_pack_envelope_timing(&mut regressed) {
+            Err(message) if message.contains("timing bullet") => Ok(()),
+            other => Err(format!(
+                "a timing bullet in pack.text must be rejected, got {other:?}"
+            )),
+        }
+    }
+
     /// The same convergence for a pack rendered as markdown, which has no
     /// `degraded[]` to count and so must take the count from the bullets.
     ///
-    /// The bodies are the ones `timing_pair` embeds in `/data/pack/text`: the
-    /// renderer produces the same markdown for `--format markdown`, so the two
-    /// normalizers are held to the same fixtures.
+    /// Since ADR 0087 T2 the product renders no timing bullet, so the slow body
+    /// here is the pre-T2 shape, and the normalized result must equal the
+    /// canonical body `timing_pair` embeds in `/data/pack/text`.
     #[test]
     fn timing_markdown_reads_the_same_on_a_fast_and_a_slow_host() -> TestResult {
-        let (fast, slow) = timing_pair();
-        let body = |document: &serde_json::Value| {
-            document
-                .pointer("/data/pack/text")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .ok_or("fixture lost /data/pack/text")
-        };
-        let fast_md = body(&fast)?;
-        let slow_md = body(&slow)?;
+        let fast_md = canonical_pack_text();
+        let slow_md = markdown_with_timing_bullet();
         if fast_md == slow_md {
             return Err("markdown fixtures are identical; the test proves nothing".into());
         }

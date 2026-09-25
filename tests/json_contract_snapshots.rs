@@ -734,6 +734,12 @@ fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
     match value {
         Value::Object(object) => {
             for (key, child) in object.iter_mut() {
+                // `pack.text` is canonical (ADR 0087 §1): rendered without the
+                // timing entry, so there is nothing to strip or renumber, and
+                // renumbering it would under-count.
+                if key == "text" {
+                    continue;
+                }
                 if key == "degradationCount" {
                     if let Some(count) = child.as_u64() {
                         *child = json!(count.saturating_sub(dropped as u64));
@@ -1357,8 +1363,9 @@ fn is_profile_budget_key(key: &str) -> bool {
 /// The slow-host fixture is the shape `pack_assembly_elapsed_degradation`
 /// actually emits: a `pack_assembly_elapsed_over_budget` entry carrying a raw
 /// millisecond reading in its message, appended to the response `degraded[]`
-/// after the pack hash is computed, with every derived count one higher and
-/// the bullet rendered into the markdown body.
+/// after the pack hash is computed, with the advisory banner's count one
+/// higher. Since ADR 0087 T2 the bullet is NOT rendered into `pack.text`, which
+/// reads the same on both hosts.
 ///
 /// Two deterministic degradations, not one: the renderer pluralizes "signal"
 /// from the same count it prints, so a one-entry fixture would compare
@@ -1391,15 +1398,15 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
         - *Repair:* `ee index reembed`\n\
         - **[low]** Memory evidence freshness is missing_source.\n  \
         - *Repair:* `Reinstate the file.`\n";
-    let slow_markdown = format!(
-        "{deterministic_markdown}\
-         - **[low]** Pack assembly took 812ms, at or over the standard \
-         resource-profile elapsed warning threshold of 500ms. The pack contents \
-         are unaffected.\n  \
-         - *Repair:* `Re-run to see whether the overrun is repeatable.`\n"
+    // `pack.text` is canonical (ADR 0087 §1): the product renders it without
+    // the timing entry, so both hosts ship the same body. Only the envelope's
+    // `degraded[]` and the advisory banner carry the timing entry.
+    let canonical_text = format!(
+        "Context includes 2 degraded signals; semantic embedding is unavailable.\n\n\
+         {deterministic_markdown}"
     );
 
-    let document = |entries: Value, count: u64, markdown: &str| {
+    let document = |entries: Value, count: u64| {
         let sentence = format!(
             "Context includes {count} degraded signals; semantic embedding is unavailable."
         );
@@ -1412,14 +1419,14 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
                         "degradationCount": count,
                         "summary": sentence,
                     },
-                    "text": format!("{sentence}\n\n{markdown}"),
+                    "text": canonical_text,
                 }
             }
         })
     };
 
-    let fast = document(json!([embed, freshness]), 2, deterministic_markdown);
-    let slow = document(json!([embed, freshness, timing]), 3, &slow_markdown);
+    let fast = document(json!([embed, freshness]), 2);
+    let slow = document(json!([embed, freshness, timing]), 3);
 
     // The fixtures must actually differ, or this test would pass against a
     // normalization that does nothing at all.

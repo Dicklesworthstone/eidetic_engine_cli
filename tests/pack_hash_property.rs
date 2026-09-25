@@ -10,10 +10,11 @@ use std::str::FromStr;
 
 use ee::core::context::compute_pack_hash;
 use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
+use ee::output::render_context_response_json;
 use ee::pack::{
-    ContextRequest, ContextResponseDegradation, ContextResponseSeverity, PackAssemblySlo,
-    PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackDraft, PackProvenance,
-    PackResourceProfile, PackSection, PackTrustSignal, TokenBudget, assemble_draft,
+    ContextRequest, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+    PackAssemblySlo, PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackDraft,
+    PackProvenance, PackResourceProfile, PackSection, PackTrustSignal, TokenBudget, assemble_draft,
 };
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -158,8 +159,141 @@ fn timing_fixture_emits_a_timing_entry_when_slow() {
     }
 }
 
+/// The shipped JSON envelope of one pack, hashed the way the product hashes
+/// it, with `extra` appended to the response degradations.
+fn shipped_envelope(extra: Vec<ContextResponseDegradation>) -> Result<serde_json::Value, String> {
+    let (request, mut draft) = fixture(0.9)?;
+    let mut degraded = canonical_degraded()?;
+    draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
+    degraded.extend(extra);
+    let response =
+        ContextResponse::new(request, draft, degraded).map_err(|error| error.to_string())?;
+    serde_json::from_str(&render_context_response_json(&response))
+        .map_err(|error| error.to_string())
+}
+
+fn shipped_text(envelope: &serde_json::Value) -> Result<String, String> {
+    envelope
+        .pointer("/data/pack/text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "shipped envelope has no data.pack.text".to_owned())
+}
+
+/// Guard for the text property: the timing entry must still reach the
+/// envelope's `degraded[]` as telemetry, or "timing never moves pack.text"
+/// could pass because timing was dropped everywhere.
+#[test]
+fn timing_stays_visible_as_telemetry_in_the_envelope() -> Result<(), String> {
+    let envelope = shipped_envelope(timing_degradations(PackResourceProfile::Lean, 600_000))?;
+    let carries_timing = envelope
+        .pointer("/degraded")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str)
+                    == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+            })
+        });
+    if !carries_timing {
+        return Err("the timing entry must stay in the envelope's degraded[]".to_owned());
+    }
+    Ok(())
+}
+
+/// The N in the shipped text's advisory sentence. The renderer words it two
+/// ways ("Context includes N degraded signal(s)" when semantic embedding is
+/// the operative degradation, "This pack invocation had N degraded retrieval
+/// signal(s)" otherwise); both put the count right before the noun.
+fn text_degraded_signal_count(text: &str) -> Result<usize, String> {
+    for noun in [" degraded signal", " degraded retrieval signal"] {
+        let Some(at) = text.find(noun) else {
+            continue;
+        };
+        let digits: String = text[..at]
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_digit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !digits.is_empty() {
+            return digits
+                .parse()
+                .map_err(|error| format!("{error}: {digits:?}"));
+        }
+    }
+    Err(format!(
+        "shipped text has no degraded-signal sentence:\n{text}"
+    ))
+}
+
+/// ADR 0087 T2 banner ruling (2026-09-25): the JSON banner is a per-run report
+/// and counts every entry in `degraded[]`; canonical `pack.text` omits the
+/// volatile timing entry. With a forced overrun the two differ by exactly the
+/// volatile entries, so this fails if either side changes silently.
+#[test]
+fn shipped_text_and_banner_disagree_by_exactly_the_volatile_entries() -> Result<(), String> {
+    let envelope = shipped_envelope(timing_degradations(PackResourceProfile::Lean, 600_000))?;
+    let degraded = envelope
+        .pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("shipped envelope has no data.degraded")?;
+    let volatile = degraded
+        .iter()
+        .filter(|entry| {
+            entry.get("code").and_then(serde_json::Value::as_str)
+                == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+        })
+        .count();
+    let banner = envelope
+        .pointer("/data/pack/advisoryBanner/degradationCount")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("shipped envelope has no advisoryBanner.degradationCount")?;
+    let banner = usize::try_from(banner).map_err(|error| error.to_string())?;
+    let text_count = text_degraded_signal_count(&shipped_text(&envelope)?)?;
+    println!(
+        "degraded[] {} (volatile {volatile}), banner {banner}, pack.text {text_count}",
+        degraded.len()
+    );
+    if volatile == 0 {
+        return Err("the forced overrun must put a timing entry in degraded[]".to_owned());
+    }
+    if banner != degraded.len() {
+        return Err(format!(
+            "the banner must count every degraded[] entry: banner {banner}, degraded[] {}",
+            degraded.len()
+        ));
+    }
+    if text_count != banner - volatile {
+        return Err(format!(
+            "pack.text must count the banner minus the volatile entries: text {text_count}, \
+             banner {banner}, volatile {volatile}"
+        ));
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// ADR 0087 §1 (T2): `pack.text` is canonical. No elapsed reading, on any
+    /// resource profile, changes one byte of the shipped text, its degraded
+    /// counts or its banner. Compared raw: no normalizer.
+    #[test]
+    fn timing_never_moves_shipped_pack_text(
+        profile in resource_profiles(),
+        elapsed_ms in 0_u64..600_000,
+    ) {
+        let quiet = shipped_envelope(Vec::new()).map_err(TestCaseError::fail)?;
+        let timed = shipped_envelope(timing_degradations(profile, elapsed_ms))
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(
+            shipped_text(&quiet).map_err(TestCaseError::fail)?,
+            shipped_text(&timed).map_err(TestCaseError::fail)?
+        );
+    }
 
     /// ADR 0087 §5: no elapsed reading, on any resource profile, and at any
     /// position in the slice, moves `pack.hash`.

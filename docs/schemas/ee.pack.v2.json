@@ -75,7 +75,10 @@
           "properties": {
             "schema": { "type": "string", "const": "ee.pack.v2" },
             "query": { "type": "string" },
-            "text": { "type": "string" },
+            "text": {
+              "type": "string",
+              "description": "Canonical rendered pack (ADR 0087). Excludes the volatile timing degradation (pack_assembly_elapsed_over_budget) from its degradation bullets and counts, so it can count one fewer signal than advisoryBanner.degradationCount."
+            },
             "meta": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
             "slo": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
             "budget": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
@@ -245,6 +248,7 @@
             },
             "advisoryBanner": {
               "type": "object",
+              "description": "Per-run advisory. degradationCount counts every entry in degraded[], including the volatile timing degradation (pack_assembly_elapsed_over_budget) that the canonical text omits (ADR 0087).",
               "additionalProperties": { "$ref": "#/$defs/jsonValue" }
             }
           }
