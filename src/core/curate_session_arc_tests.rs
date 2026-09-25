@@ -247,6 +247,96 @@ fn session_arc_does_not_join_unrelated_topics_or_foreign_windows() {
     assert!(session_arc::inline_candidates(&session.workspace_id, &session, &[foreign]).is_empty());
 }
 
+#[test]
+fn session_arc_inline_keeps_interleaved_file_failures_and_repairs_separate() {
+    let session = synthetic_stored_session();
+    let clauses = [
+        "cargo test src/api.rs failed.",
+        "cargo test src/ui.rs failed.",
+        "Fixed src/api.rs by adding the missing guard.",
+        "Fixed src/ui.rs by retaining the expected state.",
+        "Fixed src/api.rs again by retaining the guard.",
+    ];
+    let body = clauses.join(" ");
+    let span = synthetic_span("ev_inline_files", None, &body);
+    let rows = super::super::build_session_arc_candidates(
+        &session.workspace_id,
+        &session,
+        std::slice::from_ref(&span),
+        0.0,
+    );
+    let rules: Vec<_> = rows
+        .iter()
+        .filter(|row| row.candidate_kind == "session_arc_rule")
+        .collect();
+    assert_eq!(rows.len(), 4, "a consumed failure must not be reused");
+    for (rule, (failure, repair)) in rules.iter().zip([(0, 2), (1, 3)]) {
+        let arc = rule.session_arc.as_ref().unwrap();
+        assert_eq!(arc.failure_span.excerpt, clauses[failure]);
+        assert_eq!(arc.resolution_span.excerpt, clauses[repair]);
+        assert_eq!(arc.failure_span.evidence_span_id, span.id);
+        assert_eq!(arc.resolution_span.evidence_span_id, span.id);
+        assert_eq!(arc.failure_span.content_hash, span.content_hash);
+        assert_eq!(arc.resolution_span.content_hash, span.content_hash);
+        assert_eq!(arc.failure_span.start_line, span.start_line);
+        assert_eq!(arc.resolution_span.end_line, span.end_line);
+    }
+
+    // Structured CASS messages use their decoded body, never JSON metadata,
+    // and retain the complete original source hash and locator.
+    let record = serde_json::json!({
+        "role": "assistant",
+        "content": body,
+        "metadata": {"content": "Failure arc: unrelated failed. Fix: unrelated repaired."}
+    })
+    .to_string();
+    let json_span = synthetic_span("ev_inline_json_files", None, &record);
+    let json_rows = super::super::build_session_arc_candidates(
+        &session.workspace_id,
+        &session,
+        std::slice::from_ref(&json_span),
+        0.0,
+    );
+    assert_eq!(json_rows.len(), 4);
+    for row in json_rows {
+        assert!(!row.proposed_content.contains("unrelated"));
+        let arc = row.session_arc.unwrap();
+        assert_eq!(arc.failure_span.content_hash, json_span.content_hash);
+        assert_eq!(arc.resolution_span.content_hash, json_span.content_hash);
+    }
+}
+
+#[test]
+fn session_arc_inline_refuses_ambiguous_or_nonadjacent_repairs() {
+    let session = synthetic_stored_session();
+    for body in [
+        "cargo fmt src/main.rs failed. cargo clippy src/main.rs failed. Fixed src/main.rs by changing the imports.",
+        "The worker failed while opening Cargo.lock. We inspected the release schedule. We fixed it by restoring pinned versions.",
+        "The worker failed while opening Cargo.lock. cargo clippy failed. We fixed it by restoring pinned versions.",
+        "The worker failed while opening Cargo.lock. We fixed it by replacing Another.lock.",
+        "The build failed in src/parser.rs. We will fix src/parser.rs by importing the missing type.",
+        "The build failed in src/parser.rs. Fixed src/parser.rs but the retry failed.",
+    ] {
+        let span = synthetic_span("ev_inline_ambiguous", None, body);
+        assert!(
+            session_arc::inline_candidates(&session.workspace_id, &session, &[span]).is_empty(),
+            "{body}"
+        );
+    }
+    let span = synthetic_span(
+        "ev_inline_disambiguated",
+        None,
+        "cargo fmt src/main.rs failed. cargo clippy src/main.rs failed. Fixed src/main.rs by changing the imports. cargo fmt src/main.rs passed.",
+    );
+    let rows = session_arc::inline_candidates(&session.workspace_id, &session, &[span]);
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        let arc = row.session_arc.unwrap();
+        assert_eq!(arc.failure_span.excerpt, "cargo fmt src/main.rs failed.");
+        assert_eq!(arc.resolution_span.excerpt, "cargo fmt src/main.rs passed.");
+    }
+}
+
 // bd-6br0o: the capture fixture's two halves arrive as SEPARATE transcript
 // lines, so inline_pair never sees them together. They key to different topics
 // ("failure" vs "accept"), so the grouped pass never compares them either, and

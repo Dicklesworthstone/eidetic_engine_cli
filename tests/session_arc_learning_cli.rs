@@ -51,7 +51,7 @@ fn run(workspace: &Path, args: &[&str]) -> TestResult<Value> {
     Ok(result["data"].clone())
 }
 
-fn exercise(single_window: bool) -> TestResult {
+fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
     // Normalize only the trusted temporary root, not product descendant paths.
     let temporary = tempfile::Builder::new()
         .prefix("ee-session-arc-cli-")
@@ -66,16 +66,7 @@ fn exercise(single_window: bool) -> TestResult {
         .id;
     let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x91a_0001)).to_string();
     let transcript = workspace.join("failed-to-fixed.jsonl");
-    let combined = format!("{FAILURE}\n{REPAIR}");
-    let distinct = [
-        "The capture hook cargo test failed with red error output.",
-        "Fixed the capture hook and cargo test passed green.",
-    ];
-    let messages = if single_window {
-        [FAILURE, REPAIR]
-    } else {
-        distinct
-    };
+    let combined = messages.join("\n");
     fs::write(
         &transcript,
         format!(
@@ -103,8 +94,7 @@ fn exercise(single_window: bool) -> TestResult {
     let excerpts: Vec<&str> = if single_window {
         vec![&combined]
     } else {
-        // Separate evidence windows share the same concrete test-command topic.
-        distinct.to_vec()
+        messages.to_vec()
     };
     let mut evidence_ids = Vec::new();
     for (index, excerpt) in excerpts.iter().enumerate() {
@@ -262,14 +252,15 @@ fn exercise(single_window: bool) -> TestResult {
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].action, audit_actions::MEMORY_LINK_CREATE);
     assert_eq!(audits[0].actor.as_deref(), Some("ArcCli"));
-    for id in evidence_ids {
+    for (id, excerpt) in evidence_ids.iter().zip(&excerpts) {
+        let evidence = connection
+            .get_evidence_span(id)?
+            .ok_or("source disappeared")?;
+        assert_eq!(evidence.memory_id.as_ref(), Some(&memories[0]));
+        assert_eq!(evidence.excerpt.as_str(), *excerpt);
         assert_eq!(
-            connection
-                .get_evidence_span(&id)?
-                .ok_or("source disappeared")?
-                .memory_id
-                .as_ref(),
-            Some(&memories[0])
+            evidence.content_hash,
+            format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex())
         );
     }
     connection.close()?;
@@ -278,12 +269,29 @@ fn exercise(single_window: bool) -> TestResult {
 
 #[test]
 fn public_cli_applies_same_window_failure_repair_pair() -> TestResult {
-    exercise(true)
+    exercise(true, [FAILURE, REPAIR])
 }
 
 #[test]
 fn public_cli_applies_distinct_failure_repair_windows() -> TestResult {
-    exercise(false)
+    exercise(
+        false,
+        [
+            "The capture hook cargo test failed with red error output.",
+            "Fixed the capture hook and cargo test passed green.",
+        ],
+    )
+}
+
+#[test]
+fn public_cli_applies_ordinary_same_window_failure_repair_pair() -> TestResult {
+    exercise(
+        true,
+        [
+            "The build failed in src/parser.rs.",
+            "Fixed src/parser.rs by importing the missing type.",
+        ],
+    )
 }
 
 const LATER_FAILURE: &str =

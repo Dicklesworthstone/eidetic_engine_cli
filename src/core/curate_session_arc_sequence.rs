@@ -110,7 +110,7 @@ pub(super) fn candidates(
 /// A topic is only a coarse hint. Concrete source identities keep interleaved
 /// failures in the same subsystem separate and can connect a repair whose
 /// wording no longer contains the failure's subsystem keyword.
-type FailureKey = (String, BTreeSet<String>);
+pub(super) type FailureKey = (String, BTreeSet<String>);
 
 fn matching_failure(
     pending: &BTreeMap<FailureKey, PendingFailure<'_>>,
@@ -134,33 +134,9 @@ fn matching_failure(
         .iter()
         .filter(|(_, failure)| precedes(failure.source, repair))
         .collect();
-    let anchored: Vec<_> = eligible
-        .iter()
-        .copied()
-        .filter(|(key, _)| !resources.is_disjoint(&key.1))
-        .collect();
-    if !anchored.is_empty() {
-        let topical: Vec<_> = anchored
-            .iter()
-            .copied()
-            .filter(|(key, _)| key.0 == topic)
-            .collect();
-        let choices = if topical.is_empty() {
-            &anchored
-        } else {
-            &topical
-        };
-        // Two unresolved failures naming the same resource are ambiguous. Do
-        // not manufacture a causal relation merely by choosing the nearest.
-        return (choices.len() == 1).then(|| choices[0].0.clone());
-    }
-    let topical: Vec<_> = eligible
-        .iter()
-        .copied()
-        .filter(|(key, _)| key.0 == topic && (resources.is_empty() || key.1.is_empty()))
-        .collect();
-    if topical.len() == 1 {
-        return Some(topical[0].0.clone());
+    let subjects: Vec<_> = eligible.iter().map(|(key, _)| *key).collect();
+    if let Some(key) = matching_subject(&subjects, topic, resources) {
+        return Some(key);
     }
     // "Fixed it by ..." explicitly refers back without repeating the topic.
     // Accept this narrow form only for one unresolved, physically adjacent
@@ -177,7 +153,44 @@ fn matching_failure(
     None
 }
 
-fn refers_to_previous_failure(message: &str) -> bool {
+/// Match the subject independently of whether CASS stored one message window
+/// or several. Both callers supply only temporally preceding failures. Exact
+/// resources override coarse topics; an ambiguous resource never picks the
+/// newest failure merely because it was nearby.
+pub(super) fn matching_subject(
+    eligible: &[&FailureKey],
+    topic: &str,
+    resources: &BTreeSet<String>,
+) -> Option<FailureKey> {
+    let anchored: Vec<_> = eligible
+        .iter()
+        .copied()
+        .filter(|key| !resources.is_disjoint(&key.1))
+        .collect();
+    if !anchored.is_empty() {
+        let topical: Vec<_> = anchored
+            .iter()
+            .copied()
+            .filter(|key| key.0 == topic)
+            .collect();
+        let choices = if topical.is_empty() {
+            &anchored
+        } else {
+            &topical
+        };
+        // Two unresolved failures naming the same resource are ambiguous. Do
+        // not manufacture a causal relation merely by choosing the nearest.
+        return (choices.len() == 1).then(|| choices[0].clone());
+    }
+    let topical: Vec<_> = eligible
+        .iter()
+        .copied()
+        .filter(|key| key.0 == topic && (resources.is_empty() || key.1.is_empty()))
+        .collect();
+    (topical.len() == 1).then(|| topical[0].clone())
+}
+
+pub(super) fn refers_to_previous_failure(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     let words: Vec<_> = lower
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -199,7 +212,7 @@ fn refers_to_previous_failure(message: &str) -> bool {
 /// turn a basename, wildcard, URL, shell expression, or generic prose noun into
 /// an alias for another resource. Quoting and sentence punctuation are wrappers;
 /// the spelling inside the resource is the identity used for comparison.
-fn resource_keys(message: &str) -> BTreeSet<String> {
+pub(super) fn resource_keys(message: &str) -> BTreeSet<String> {
     message
         .split_whitespace()
         .filter_map(|raw| {
@@ -432,6 +445,22 @@ mod tests {
             }
             let reversed = [spans[1].clone(), spans[0].clone()];
             assert_eq!(mine(&reversed), rows);
+
+            // The same lesson must survive when CASS puts both observations
+            // in one message window rather than two separate spans.
+            let body = format!("{failure}\n{repair}");
+            let combined = span("combined", 10, &body);
+            let inline = mine(std::slice::from_ref(&combined));
+            assert_eq!(inline.len(), 2, "single window: {body}");
+            assert_eq!(endpoints(&inline), [("combined", "combined")]);
+            for row in &inline {
+                let arc = row.session_arc.as_ref().unwrap();
+                assert_eq!(row.source_ids, [combined.id.clone()]);
+                assert_eq!(arc.failure_span.excerpt, failure);
+                assert_eq!(arc.resolution_span.excerpt, repair);
+                assert_eq!(arc.failure_span.content_hash, combined.content_hash);
+                assert_eq!(arc.resolution_span.content_hash, combined.content_hash);
+            }
         }
     }
 
@@ -492,6 +521,10 @@ mod tests {
             assert!(
                 mine(&[span("failure", 1, failure), span("repair", 2, repair)]).is_empty(),
                 "{failure} / {repair}"
+            );
+            assert!(
+                mine(&[span("combined", 1, &format!("{failure} {repair}"))]).is_empty(),
+                "same-topic different-resource clauses must not pair: {failure} / {repair}"
             );
         }
     }

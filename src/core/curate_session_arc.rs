@@ -65,38 +65,65 @@ pub(super) fn inline_candidates(
     candidates
 }
 
-/// Walk the complete admitted message without combining independent episodes.
-/// A successful repair consumes its failure; further successes cannot reuse
-/// it. A later failure replaces an unresolved one, preserving the existing
-/// nearest-failure rule rather than inventing links between interleaved tasks.
-/// Each yielded half borrows one exact technical clause from the source text.
+/// Walk the complete admitted message using the same subject identities as
+/// cross-window learning. CASS window boundaries must not hide ordinary repairs
+/// or turn two unrelated files into a lesson because both mention "test".
+/// A repair consumes its failure; another failure replaces only an unresolved
+/// observation of the same subject. Each half borrows an exact source clause.
 fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
-    let mut failure: Option<&str> = None;
+    struct PendingClause<'a> {
+        text: &'a str,
+        position: usize,
+        explicitly_marked: bool,
+    }
+    let mut pending = BTreeMap::<sequence::FailureKey, PendingClause<'_>>::new();
     // Technical tokens and quoted commands stay intact. A bare occurrence of
     // both keywords in a single clause is not evidence of temporal ordering.
-    clauses::split(excerpt).filter_map(move |part| {
-        let part = part.trim();
-        if part.is_empty() {
-            return None;
-        }
-        if let Some(previous) = failure
-            && resolution_signal(part)
-        {
-            let explicit_pair = previous.to_ascii_lowercase().contains("failure arc:")
-                && part.to_ascii_lowercase().contains("fix:");
-            let previous_topic = review_topic_key(previous);
-            if explicit_pair
-                || (previous_topic != "noise" && previous_topic == review_topic_key(part))
-            {
-                failure = None;
-                return Some((previous, part));
+    clauses::split(excerpt)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .enumerate()
+        .filter_map(move |(position, part)| {
+            let topic = review_topic_key(part);
+            let resources = sequence::resource_keys(part);
+            if resolution_signal(part) {
+                let explicitly_linked = if part.to_ascii_lowercase().contains("fix:") {
+                    pending
+                        .iter()
+                        .filter(|(_, failure)| failure.explicitly_marked)
+                        .max_by_key(|(_, failure)| failure.position)
+                        .map(|(key, _)| key.clone())
+                } else {
+                    None
+                };
+                let key = explicitly_linked.or_else(|| {
+                    let subjects: Vec<_> = pending.keys().collect();
+                    sequence::matching_subject(&subjects, &topic, &resources)
+                });
+                let key = key.or_else(|| {
+                    if pending.len() != 1 || !sequence::refers_to_previous_failure(part) {
+                        return None;
+                    }
+                    let (key, failure) = pending.first_key_value()?;
+                    (failure.position.checked_add(1) == Some(position)
+                        && (resources.is_empty() || key.1.is_empty()))
+                    .then(|| key.clone())
+                });
+                return key
+                    .and_then(|key| pending.remove(&key).map(|failure| (failure.text, part)));
             }
-        }
-        if session_arc_failure_signal(part) {
-            failure = Some(part);
-        }
-        None
-    })
+            if topic != "noise" && session_arc_failure_signal(part) {
+                pending.insert(
+                    (topic, resources),
+                    PendingClause {
+                        text: part,
+                        position,
+                        explicitly_marked: part.to_ascii_lowercase().contains("failure arc:"),
+                    },
+                );
+            }
+            None
+        })
 }
 
 // Existing clause-boundary tests also pin the historical first-pair behavior.
