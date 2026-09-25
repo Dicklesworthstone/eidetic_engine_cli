@@ -14,6 +14,9 @@ struct Fixture {
     _root: tempfile::TempDir,
     database: PathBuf,
     db: DbConnection,
+    /// The trust class the memory was seeded with; a rolled-back outcome must
+    /// leave exactly this class in place.
+    seeded_trust: std::cell::Cell<&'static str>,
 }
 
 impl Fixture {
@@ -56,7 +59,22 @@ impl Fixture {
             _root: root,
             database,
             db,
+            seeded_trust: std::cell::Cell::new("agent_assertion"),
         }
+    }
+
+    /// ADR 0032: `human_explicit` is reachable only from `agent_validated`, by
+    /// explicit operator promotion; one human outcome cannot lift an
+    /// `agent_assertion` memory past the sample-size gate. A test that needs a
+    /// real human promotion therefore seeds that predecessor (bd-g66ja).
+    fn seed_agent_validated(&self) {
+        assert!(
+            self.db
+                .update_memory_trust_class_if(MEMORY, "agent_assertion", "agent_validated")
+                .unwrap(),
+            "the fixture memory must start as agent_assertion"
+        );
+        self.seeded_trust.set("agent_validated");
     }
 
     fn options(&self) -> OutcomeRecordOptions<'_> {
@@ -118,7 +136,7 @@ impl Fixture {
         assert_eq!(self.posterior(), posterior);
         assert_eq!(
             self.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
-            Some("agent_assertion")
+            Some(self.seeded_trust.get())
         );
         assert_eq!(
             self.db
@@ -145,6 +163,7 @@ fn posterior_audit_failure_rolls_back_the_feedback_idempotency_key() {
 #[test]
 fn trust_audit_failure_rolls_back_posterior_event_and_all_new_audits() {
     let fixture = Fixture::new();
+    fixture.seed_agent_validated();
     fixture.collide_audit(3);
     let prior = fixture.posterior();
     let audits = fixture.audit_count();
@@ -284,6 +303,7 @@ fn quarantine_does_not_learn_or_install_a_live_feedback_event() {
 #[test]
 fn successful_human_promotion_and_its_feedback_commit_together() {
     let fixture = Fixture::new();
+    fixture.seed_agent_validated();
     let mut options = fixture.options();
     options.source_type = "human_explicit".to_owned();
     let report = record_outcome(&options).unwrap();
