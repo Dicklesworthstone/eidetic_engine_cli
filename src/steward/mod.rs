@@ -3652,7 +3652,11 @@ impl ManualRunner {
 
         let started = Instant::now();
         let workspace_path = self.normalized_workspace_path();
-        let job_limit = match self.options.item_limit {
+        let job_limit = match self
+            .options
+            .item_limit
+            .or_else(|| budget.remaining(ResourceType::Items))
+        {
             Some(limit) => match u32::try_from(limit) {
                 Ok(limit) => Some(limit),
                 Err(_) => {
@@ -3695,11 +3699,19 @@ impl ManualRunner {
         let preflight_elapsed_ms = millis_to_u64(started.elapsed());
         budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
 
-        if budget_cancels_before_mutation(budget) {
+        let cancellation_requested = self.cancellation_requested();
+        if cancellation_requested || budget_cancels_before_mutation(budget) {
             return (
                 RunOutcome::Cancelled,
                 Some(u64::from(preflight.pending_jobs)),
-                Some("Budget exceeded before durable index job processing".to_owned()),
+                Some(
+                    if cancellation_requested {
+                        "Daemon shutdown requested before durable index job processing"
+                    } else {
+                        "Budget exceeded before durable index job processing"
+                    }
+                    .to_owned(),
+                ),
                 Some(index_coalesce_job_details(
                     &preflight,
                     None,
@@ -7697,14 +7709,75 @@ const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
 /// → next tick rebuilds → [`crate::core::index::mark_index_rebuild_request_satisfied`]
 /// clears it → subsequent packs are served semantically.
 ///
-/// An unreadable or already-satisfied marker yields the base set, so a corrupt
-/// `.ee/` can never conscript the daemon into rebuild loops.
+/// Otherwise a bounded, read-only queue probe schedules `IndexCoalesce` when
+/// the addressed workspace has pending or retryable document jobs. Deferred
+/// writes and interrupted publications can therefore recover on the next tick
+/// without a foreground reader. The processor checks live publisher ownership
+/// before re-arming running jobs; this probe never claims or retries anything.
+/// An explicit rebuild takes precedence, avoiding two publications in one tick.
+/// An unreadable queue is reported and retried on a later tick; it never
+/// authorizes a rebuild or adopts another workspace's jobs.
 fn background_scheduler_job_types(workspace: &str) -> Vec<JobType> {
     let mut job_types = BACKGROUND_SCHEDULER_JOB_TYPES.to_vec();
     if crate::core::index::pending_index_rebuild_request(Path::new(workspace)).is_some() {
         job_types.push(JobType::IndexRebuild);
+    } else {
+        match background_index_jobs_need_processing(Path::new(workspace)) {
+            Ok(true) => job_types.push(JobType::IndexCoalesce),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                target: "ee::steward",
+                %error,
+                "Background index queue inspection failed; retrying on the next tick"
+            ),
+        }
     }
     job_types
+}
+
+fn background_index_jobs_need_processing(workspace: &Path) -> Result<bool, String> {
+    let workspace = normalize_runner_workspace_path(workspace);
+    let database_path = workspace.join(".ee").join("ee.db");
+    match fs::symlink_metadata(&database_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Failed to inspect background index store: {error}")),
+        Ok(_) => {}
+    }
+    let connection = DbConnection::open_file_read_only(&database_path)
+        .map_err(|error| format!("Failed to open background index store: {error}"))?;
+    let workspace =
+        crate::core::workspace::addressed_workspace_row(&connection, &workspace, &database_path)
+            .map_err(|error| error.message().to_owned())?;
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
+    connection
+        .query(
+            "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'failed', 'cancelled') LIMIT 1",
+            &[sqlmodel_core::Value::Text(workspace.id)],
+        )
+        .map(|jobs| !jobs.is_empty())
+        .map_err(|error| format!("Failed to inspect pending background index jobs: {error}"))
+}
+
+fn background_scheduler_tick_options(
+    workspace: &str,
+    shutdown: Arc<AtomicBool>,
+) -> DaemonForegroundOptions {
+    DaemonForegroundOptions {
+        workspace: workspace.to_owned(),
+        tick_limit: 1,
+        interval_ms: 0,
+        dry_run: false,
+        job_types: background_scheduler_job_types(workspace),
+        runner_options: RunnerOptions {
+            // These maintenance jobs are independent. A failed team sync or
+            // decay sweep must not starve queued index work on every tick.
+            // run_pending still stops unconditionally on cancellation.
+            continue_on_error: true,
+            ..RunnerOptions::new().with_cancellation_flag(shutdown)
+        },
+    }
 }
 
 /// Run the steward scheduler indefinitely on a background cadence.
@@ -7730,14 +7803,7 @@ pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool
             break;
         }
 
-        let options = DaemonForegroundOptions {
-            workspace: workspace.to_owned(),
-            tick_limit: 1,
-            interval_ms: 0,
-            dry_run: false,
-            job_types: background_scheduler_job_types(workspace),
-            runner_options: RunnerOptions::new().with_cancellation_flag(Arc::clone(&shutdown)),
-        };
+        let options = background_scheduler_tick_options(workspace, Arc::clone(&shutdown));
         let _ = run_daemon_foreground(&options);
     }
 }
@@ -8248,6 +8314,477 @@ mod tests {
             BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
             "a corrupt marker keeps the base job set",
         )
+    }
+
+    struct BackgroundIndexFixture {
+        _temporary: tempfile::TempDir,
+        workspace: PathBuf,
+        database: PathBuf,
+        workspace_id: String,
+    }
+
+    impl BackgroundIndexFixture {
+        fn new() -> Result<Self, String> {
+            let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temporary
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let database = workspace.join(".ee/ee.db");
+            // Deliberately not path-derived: restored/rebound stores retain
+            // their durable workspace identity at a new filesystem address.
+            let workspace_id =
+                crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            connection.migrate().map_err(|e| e.to_string())?;
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.to_string_lossy().into_owned(),
+                        name: Some("background-index".to_owned()),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            connection.close().map_err(|e| e.to_string())?;
+            Ok(Self {
+                _temporary: temporary,
+                workspace,
+                database,
+                workspace_id,
+            })
+        }
+
+        fn queue(&self, job_id: &str, workspace_id: &str) -> TestResult {
+            let connection = DbConnection::open_file(&self.database).map_err(|e| e.to_string())?;
+            connection
+                .insert_search_index_job(
+                    job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.to_owned(),
+                        job_type: crate::db::SearchIndexJobType::FullRebuild,
+                        document_source: None,
+                        document_id: None,
+                        documents_total: 0,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            connection.close().map_err(|e| e.to_string())
+        }
+
+        fn scheduled(&self) -> Vec<JobType> {
+            background_scheduler_job_types(&self.workspace.to_string_lossy())
+        }
+    }
+
+    #[test]
+    fn background_index_queue_probe_is_idle_and_does_not_initialize_or_write() -> TestResult {
+        let missing = tempfile::tempdir().map_err(|error| error.to_string())?;
+        assert!(!background_index_jobs_need_processing(missing.path())?);
+        assert!(!missing.path().join(".ee").exists());
+
+        let fixture = BackgroundIndexFixture::new()?;
+        let before = fs::read(&fixture.database).map_err(|error| error.to_string())?;
+        let files = || -> Result<BTreeSet<_>, String> {
+            fs::read_dir(fixture.workspace.join(".ee"))
+                .map_err(|error| error.to_string())?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name())
+                        .map_err(|error| error.to_string())
+                })
+                .collect()
+        };
+        let before_files = files()?;
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        assert_eq!(
+            fs::read(&fixture.database).map_err(|e| e.to_string())?,
+            before
+        );
+        assert_eq!(
+            files()?,
+            before_files,
+            "probing must not create store assets"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_queue_uses_stored_workspace_and_explicit_rebuild_precedence() -> TestResult
+    {
+        let fixture = BackgroundIndexFixture::new()?;
+        assert_ne!(
+            fixture.workspace_id,
+            crate::core::workspace::stable_workspace_id(&fixture.workspace)
+        );
+        let foreign_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        let connection = DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                &foreign_id,
+                &CreateWorkspaceInput {
+                    path: fixture
+                        .workspace
+                        .join("other-workspace")
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+        fixture.queue("sidx_background_foreign", &foreign_id)?;
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        fixture.queue("sidx_background_owned", &fixture.workspace_id)?;
+        let scheduled = fixture.scheduled();
+        assert!(scheduled.contains(&JobType::IndexCoalesce));
+        assert!(!scheduled.contains(&JobType::IndexRebuild));
+        assert_eq!(scheduled.len(), BACKGROUND_SCHEDULER_JOB_TYPES.len() + 1);
+
+        crate::core::index::record_index_rebuild_request(
+            &fixture.workspace,
+            crate::core::index::IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-25T12:00:00Z",
+            crate::core::index::DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        let scheduled = fixture.scheduled();
+        assert!(scheduled.contains(&JobType::IndexRebuild));
+        assert!(!scheduled.contains(&JobType::IndexCoalesce));
+        crate::core::index::mark_index_rebuild_request_satisfied(
+            &fixture.workspace,
+            "2026-09-25T12:01:00Z",
+        )?;
+        assert!(fixture.scheduled().contains(&JobType::IndexCoalesce));
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        for (id, workspace_id) in [
+            ("sidx_background_owned", &fixture.workspace_id),
+            ("sidx_background_foreign", &foreign_id),
+        ] {
+            let job = connection
+                .get_search_index_job(id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "queued job disappeared during scheduling".to_owned())?;
+            assert_eq!(&job.workspace_id, workspace_id);
+            assert_eq!(job.status, "pending");
+            assert!(job.started_at.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_queue_does_not_reschedule_completed_history() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        fixture.queue("sidx_background_done", &fixture.workspace_id)?;
+        let connection = DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+        assert!(
+            connection
+                .start_search_index_job("sidx_background_done")
+                .map_err(|e| e.to_string())?
+        );
+        assert!(
+            connection
+                .complete_search_index_job("sidx_background_done", 0)
+                .map_err(|e| e.to_string())?
+        );
+        let before = connection
+            .list_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        assert_eq!(
+            connection
+                .list_search_index_jobs(&fixture.workspace_id, None)
+                .map_err(|e| e.to_string())?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_preflight_obeys_remaining_item_budget() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        fixture.queue("sidx_background_budget_one", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_budget_two", &fixture.workspace_id)?;
+        let runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(&fixture.workspace)
+                .with_dry_run(true),
+        );
+        let mut budget = JobBudgetState::new("budgeted-index", "2026-09-25T12:00:00Z");
+        budget.add_budget(ResourceBudget::item_limit(2));
+        budget.record(ResourceType::Items, 1);
+        let (outcome, items, error, details) = runner.execute_index_coalesce(&mut budget);
+        assert_eq!(outcome, RunOutcome::Success, "{error:?}");
+        assert_eq!(items, Some(1));
+        assert_eq!(budget.remaining(ResourceType::Items), Some(0));
+        let details = details.ok_or_else(|| "missing index preflight details".to_owned())?;
+        assert_eq!(details["preflight"]["pending_jobs"], 1);
+        assert_eq!(details["preflight"]["job_limit"], 1);
+        assert_eq!(details["durableMutation"], false);
+        assert!(details["result"].is_null());
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        let pending = connection
+            .list_pending_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|job| job.started_at.is_none()));
+        assert!(!fixture.workspace.join(".ee/index").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_checks_shutdown_after_preflight_before_claiming() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        fixture.queue("sidx_background_shutdown", &fixture.workspace_id)?;
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(&fixture.workspace)
+                .with_cancellation_flag(shutdown),
+        );
+        let mut budget = JobBudgetState::new("cancelled-index", "2026-09-25T12:00:00Z");
+        budget.add_budget(ResourceBudget::item_limit(1));
+        // Exercise the handler's own checkpoint, independently of run_job's
+        // earlier cancellation check. A cancellation observed here must not
+        // claim any of the preflight-selected durable jobs.
+        let (outcome, items, error, details) = runner.execute_index_coalesce(&mut budget);
+        assert_eq!(outcome, RunOutcome::Cancelled);
+        assert_eq!(items, Some(1));
+        assert_eq!(
+            error.as_deref(),
+            Some("Daemon shutdown requested before durable index job processing")
+        );
+        assert_eq!(
+            details.ok_or_else(|| "missing cancellation details".to_owned())?["durableMutation"],
+            false
+        );
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        let pending = connection
+            .list_pending_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].started_at.is_none());
+        assert!(!fixture.workspace.join(".ee/index").exists());
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn background_index_coalesce_publishes_searchable_memory_and_finishes_queued_job() -> TestResult
+    {
+        use crate::search::LexicalRead;
+
+        let fixture = BackgroundIndexFixture::new()?;
+        let _embedder =
+            crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        let connection = DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "zirconqueue deferred ingestion becomes searchable during maintenance"
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://background-index-test".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+        fixture.queue("sidx_background_publish", &fixture.workspace_id)?;
+        let mut options = background_scheduler_tick_options(
+            &fixture.workspace.to_string_lossy(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(options.job_types.contains(&JobType::IndexCoalesce));
+        assert!(options.runner_options.continue_on_error);
+        // Fail the earlier decay job deterministically. Independent maintenance
+        // failures must not prevent this tick from publishing queued memories.
+        options.runner_options.as_of = Some("invalid decay reference".to_owned());
+        let tick = run_daemon_foreground(&options)?;
+        assert_eq!(tick.ticks.len(), 1);
+        let decay = tick.ticks[0]
+            .report
+            .results
+            .iter()
+            .find(|result| result.job_type == JobType::DecaySweep)
+            .ok_or_else(|| "background tick did not execute decay work".to_owned())?;
+        assert_eq!(decay.outcome, RunOutcome::Failed, "{decay:?}");
+        assert!(
+            decay
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("as_of"))
+        );
+        let result = tick
+            .ticks
+            .into_iter()
+            .flat_map(|tick| tick.report.results)
+            .find(|result| result.job_type == JobType::IndexCoalesce)
+            .ok_or_else(|| "background tick did not execute queued index work".to_owned())?;
+        assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+        assert_eq!(result.items_processed, Some(1));
+        let details = result
+            .details
+            .ok_or_else(|| "missing coalesce report".to_owned())?;
+        assert_eq!(details["durableMutation"], true);
+        assert_eq!(details["result"]["completed_jobs"], 1);
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        let stored = connection
+            .get_search_index_job("sidx_background_publish")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "completed durable job disappeared".to_owned())?;
+        assert_eq!(stored.status, "completed");
+        assert!(stored.started_at.is_some() && stored.completed_at.is_some());
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        let lexical = crate::search::TantivyIndex::open_read_only(
+            &fixture.workspace.join(".ee/index/lexical"),
+        )
+        .map_err(|e| e.to_string())?;
+        let found = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            lexical
+                .search(&cx, "zirconqueue", 10)
+                .await
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|hit| hit.doc_id.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.to_string())??;
+        assert_eq!(found, [memory_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_recovers_sole_interrupted_job_without_changing_its_id()
+    -> TestResult {
+        for status in ["failed", "cancelled", "running"] {
+            let fixture = BackgroundIndexFixture::new()?;
+            let _embedder =
+                crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+            let job_id = "sidx_background_retry";
+            fixture.queue(job_id, &fixture.workspace_id)?;
+            let connection =
+                DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+            if status == "cancelled" {
+                assert!(
+                    connection
+                        .cancel_search_index_job(job_id)
+                        .map_err(|e| e.to_string())?
+                );
+            } else {
+                assert!(
+                    connection
+                        .start_search_index_job(job_id)
+                        .map_err(|e| e.to_string())?
+                );
+                if status == "failed" {
+                    assert!(
+                        connection
+                            .fail_search_index_job(job_id, "interrupted publication")
+                            .map_err(|e| e.to_string())?
+                    );
+                }
+            }
+            assert!(
+                connection
+                    .list_pending_search_index_jobs(&fixture.workspace_id, None)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            );
+            connection.close().map_err(|e| e.to_string())?;
+            assert!(
+                fixture.scheduled().contains(&JobType::IndexCoalesce),
+                "sole {status} job must trigger recovery"
+            );
+            let mut runner = ManualRunner::new(
+                RunnerOptions::new()
+                    .with_workspace_path(&fixture.workspace)
+                    .with_item_limit(1),
+            );
+            if status == "running" {
+                let connection =
+                    DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+                let lease = crate::db::AdvisoryLockId::index(&fixture.workspace_id);
+                let live_holder = format!("index:{}:background-test", std::process::id());
+                assert!(
+                    connection
+                        .acquire_advisory_lock(
+                            &lease,
+                            &live_holder,
+                            Some(600),
+                            Some("live publisher regression")
+                        )
+                        .map_err(|e| e.to_string())?
+                        .is_acquired()
+                );
+                let before = connection
+                    .get_search_index_job(job_id)
+                    .map_err(|e| e.to_string())?;
+                let protected = runner.run_job_type(
+                    JobType::IndexCoalesce,
+                    Some("live publisher probe".to_owned()),
+                );
+                assert_eq!(protected.outcome, RunOutcome::Success, "{protected:?}");
+                assert_eq!(protected.items_processed, Some(0));
+                assert_eq!(
+                    connection
+                        .get_search_index_job(job_id)
+                        .map_err(|e| e.to_string())?,
+                    before
+                );
+                assert!(!fixture.workspace.join(".ee/index").exists());
+                assert!(
+                    connection
+                        .release_advisory_lock(&lease, &live_holder)
+                        .map_err(|e| e.to_string())?
+                );
+                connection.close().map_err(|e| e.to_string())?;
+            }
+            let result = runner.run_job_type(
+                JobType::IndexCoalesce,
+                Some("retry interrupted indexing".to_owned()),
+            );
+            assert_eq!(result.outcome, RunOutcome::Success, "{status}: {result:?}");
+            assert_eq!(result.items_processed, Some(1));
+            let details = result
+                .details
+                .ok_or_else(|| "missing retry details".to_owned())?;
+            assert_eq!(details["preflight"]["pending_jobs"], 0);
+            assert_eq!(details["result"]["completed_jobs"], 1);
+            let connection =
+                DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&fixture.workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].id, job_id);
+            assert_eq!(jobs[0].status, "completed");
+            assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        }
+        Ok(())
     }
 
     fn stored_memory_for_consolidation(

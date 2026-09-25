@@ -7,6 +7,7 @@ use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 
 const WORKSPACE: &str = "wsp_00000000000000000000000071";
 const CUTOFF: &str = "2026-09-17T12:00:00Z";
+const FIXTURE_VALID_FROM: &str = "2019-01-01T00:00:00Z";
 const BODY: &str = "Run cargo fmt before release.";
 
 fn at(raw: &str) -> DateTime<Utc> {
@@ -51,7 +52,10 @@ fn seed(db: &DbConnection, index: usize, from: Option<&str>, to: Option<&str>) {
             trust_class: "human_explicit".to_owned(),
             trust_subclass: None,
             tags: Vec::new(),
-            valid_from: from.map(str::to_owned),
+            // These cases query a fixed historical snapshot. An omitted
+            // production bound inherits the real creation time, which would
+            // put every fixture after CUTOFF and invert the expired cases.
+            valid_from: Some(from.unwrap_or(FIXTURE_VALID_FROM).to_owned()),
             valid_to: to.map(str::to_owned),
         },
     )

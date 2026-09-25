@@ -1648,6 +1648,14 @@ keys, just like the other authenticated history above.
 | `ee daemon start` | Start the optional workspace search daemon in the background and load its models once |
 | `ee daemon status [--socket <path>] --json` | Probe the workspace search daemon and report `data.running`, `data.warm.posture`, socket details, and separate durable steward job state |
 
+The background daemon inspects the addressed workspace's index queue on its
+60-second maintenance cadence. It coalesces pending work and retries interrupted
+jobs while respecting live publisher ownership; completed history does not
+trigger another build. An explicit rebuild request takes precedence. This
+provides eventual indexing for deferred ingestion and learning writes. Job
+selection is bounded by the steward's item budget, although a coalesced
+publication may rebuild the full corpus.
+
 Use pack-quality evaluation when a canonical task should keep selecting specific
 memories across retrieval or packing changes. The report is a deterministic
 `ee.eval.pack_quality_report.v1` result with selected and omitted memory IDs,
