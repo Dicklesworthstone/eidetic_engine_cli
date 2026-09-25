@@ -161,7 +161,9 @@ fn verified_restore_preserves_missing_provenance_even_with_a_source_agent() -> T
     // manufactures evidence after admission, including for absent provenance.
     fixture
         .db
-        .execute_raw("UPDATE memories SET provenance_uri = 'jsonl-import://unknown' WHERE provenance_uri IS NULL")
+        .execute_raw(
+            "UPDATE memories SET provenance_uri = 'jsonl-import://unknown' WHERE provenance_uri IS NULL",
+        )
         .map_err(|error| error.to_string())?;
     assert!(fixture.verify().is_err());
     Ok(())

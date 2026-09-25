@@ -5439,7 +5439,8 @@ pub fn show_curation_candidate(
 
     let planned_application = match CandidateType::from_str(&stored.candidate_type) {
         Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
-            let decision = evaluate_link_candidate_for_apply(&connection, &stored);
+            let decision =
+                evaluate_link_candidate_for_apply(&connection, &stored, &Utc::now().to_rfc3339());
             Some(planned_application_from_decision(&stored, &decision))
         }
         Ok(CandidateType::CreateDerivedMemory) => {
@@ -5718,7 +5719,7 @@ fn apply_curation_candidate_with_recipe(
     );
     let mut decision = match parsed_candidate_type {
         Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
-            evaluate_link_candidate_for_apply(&connection, &stored)
+            evaluate_link_candidate_for_apply(&connection, &stored, &now)
         }
         Ok(CandidateType::CreateDerivedMemory) => {
             let prompt_injection_guard = crate::core::config_surface::get_config(
@@ -13609,6 +13610,7 @@ fn parse_suggested_link_payload(
 fn evaluate_link_candidate_for_apply(
     connection: &DbConnection,
     stored: &StoredCurationCandidate,
+    now_rfc3339: &str,
 ) -> ApplyDecision {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -13686,6 +13688,34 @@ fn evaluate_link_candidate_for_apply(
         }
     }
 
+    if let Some(expires_at) = &stored.ttl_expires_at {
+        match timestamp_has_expired(expires_at, now_rfc3339) {
+            Ok(true) => errors.push(validation_issue(
+                CandidateValidationError::CandidateExpired.code(),
+                "Candidate TTL has expired.",
+                "Create or review a fresh curation candidate.",
+            )),
+            Ok(false) => {}
+            Err(message) => errors.push(validation_issue(
+                "invalid_ttl_timestamp",
+                message,
+                "Store ttl_expires_at as an RFC 3339 timestamp.",
+            )),
+        }
+    }
+    if let Some(issue) = peer_evidence_promotion_issue(stored) {
+        errors.push(issue);
+    }
+    if !errors.is_empty() {
+        return blocked_apply(
+            stored,
+            None,
+            errors,
+            warnings,
+            "ee curate candidates --json".to_owned(),
+        );
+    }
+
     let payload = match parse_suggested_link_payload(stored) {
         Ok(payload) => payload,
         Err(issue) => {
@@ -13731,6 +13761,20 @@ fn evaluate_link_candidate_for_apply(
     }
     for memory_id in [payload.memory_a.as_str(), payload.memory_b.as_str()] {
         match connection.get_memory(memory_id) {
+            Ok(Some(memory)) if memory.workspace_id != stored.workspace_id => {
+                errors.push(validation_issue(
+                    "target_memory_workspace_mismatch",
+                    "Both link endpoints must belong to the candidate workspace.",
+                    "Regenerate the candidate for the correct workspace.",
+                ));
+                return blocked_apply(
+                    stored,
+                    None,
+                    errors,
+                    warnings,
+                    "ee graph suggest-links --workspace . --json".to_owned(),
+                );
+            }
             Ok(Some(memory)) if memory.tombstoned_at.is_none() => {}
             Ok(_) => {
                 errors.push(validation_issue(
@@ -13762,14 +13806,27 @@ fn evaluate_link_candidate_for_apply(
             }
         }
     }
-    let already_linked = connection
+    let already_linked = match connection
         .list_memory_links_for_memory(&payload.memory_a, Some(payload.relation))
-        .map(|links| {
-            links.iter().any(|link| {
-                link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
-            })
-        })
-        .unwrap_or(false);
+    {
+        Ok(links) => links.iter().any(|link| {
+            link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
+        }),
+        Err(error) => {
+            errors.push(validation_issue(
+                "link_candidate_link_unavailable",
+                format!("Failed to inspect the proposed link: {error}"),
+                "ee doctor --json",
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "ee doctor --json".to_owned(),
+            );
+        }
+    };
     if already_linked {
         warnings.push(validation_issue(
             "link_candidate_link_exists",
@@ -14241,20 +14298,55 @@ fn persist_candidate_application_inner(
     // Link candidates create their typed link here (idempotent: an existing
     // identical link is a no-op) and fall through to the standard candidate
     // status/audit bookkeeping with no target-memory mutation.
+    let mut applied_link_id = None;
     if matches!(
         CandidateType::from_str(&stored.candidate_type),
         Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview)
-    ) && let Ok(payload) = parse_suggested_link_payload(stored)
-    {
-        let already_linked = connection
+    ) {
+        // Planning happens before acquiring the writer fence. Recheck the
+        // approved proposal and both live endpoints inside this transaction.
+        let current = connection
+            .get_curation_candidate(workspace_id, &stored.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to recheck suggested-link candidate: {error}"),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            })?;
+        if current.as_ref() != Some(stored) {
+            return Err(DomainError::Usage {
+                message: "Link candidate changed during preparation; inspect and retry."
+                    .to_owned(),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            });
+        }
+        // The command may have waited for the writer fence after planning.
+        // Keep its audit timestamp, but authorize against the clock now held
+        // inside the transaction so an expired proposal cannot slip through.
+        let current_decision =
+            evaluate_link_candidate_for_apply(connection, stored, &Utc::now().to_rfc3339());
+        if !current_decision.should_persist || !current_decision.application.errors.is_empty() {
+            return Err(DomainError::Usage {
+                message: "Link candidate is no longer applicable; apply rolled back with no mutation."
+                    .to_owned(),
+                repair: Some(format!("ee curate show {} --json", stored.id)),
+            });
+        }
+        let payload = parse_suggested_link_payload(stored).map_err(|issue| DomainError::Usage {
+            message: issue.message,
+            repair: Some(issue.repair),
+        })?;
+        let existing_link = connection
             .list_memory_links_for_memory(&payload.memory_a, Some(payload.relation))
-            .map(|links| {
-                links.iter().any(|link| {
-                    link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
-                })
-            })
-            .unwrap_or(false);
-        if !already_linked {
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to inspect the existing suggested link: {error}"),
+                repair: Some("ee graph explain-link <a> <b> --json".to_owned()),
+            })?
+            .into_iter()
+            .find(|link| {
+                link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
+            });
+        if let Some(link) = existing_link {
+            applied_link_id = Some(link.id);
+        } else {
             let link_id = generate_suggested_link_id(
                 &payload.memory_a,
                 &payload.memory_b,
@@ -14281,6 +14373,7 @@ fn persist_candidate_application_inner(
                     message: format!("Failed to create suggested memory link: {error}"),
                     repair: Some("ee graph explain-link <a> <b> --json".to_owned()),
                 })?;
+            applied_link_id = Some(link_id);
         }
     }
     let memory_changed = if decision.tombstone_memory {
@@ -14417,10 +14510,11 @@ fn persist_candidate_application_inner(
         && created_rule_id.is_none()
         && created_procedure_id.is_none()
         && recipe.is_none()
+        && applied_link_id.is_none()
     {
         return Err(DomainError::Storage {
             message: format!(
-                "Curation candidate {} did not mutate target memory {} or create a rule/procedure.",
+                "Curation candidate {} did not mutate target memory {} or apply a rule, procedure, recipe, or link.",
                 stored.id, target_memory_id
             ),
             repair: Some("ee curate candidates --json".to_owned()),
@@ -14444,7 +14538,7 @@ fn persist_candidate_application_inner(
     }
 
     let audit_id = generate_audit_id();
-    let details = serde_json::json!({
+    let mut details = serde_json::json!({
         "candidateId": stored.id.as_str(),
         "candidateType": decision.application.candidate_type.as_str(),
         "fromStatus": stored.status.as_str(),
@@ -14454,9 +14548,13 @@ fn persist_candidate_application_inner(
         "createdProcedureId": created_procedure_id.as_deref(),
         "createdRecipeId": recipe.map(|recipe| recipe.id.as_str()),
         "changes": &decision.application.changes,
-    })
-    .to_string();
-    let target_type = if recipe.is_some() {
+    });
+    if let Some(link_id) = applied_link_id.as_deref() {
+        details["appliedLinkId"] = serde_json::Value::String(link_id.to_owned());
+    }
+    let target_type = if applied_link_id.is_some() {
+        "memory_link"
+    } else if recipe.is_some() {
         "plan_recipe"
     } else if created_rule_id.is_some() {
         "rule"
@@ -14465,8 +14563,9 @@ fn persist_candidate_application_inner(
     } else {
         "memory"
     };
-    let target_id = created_rule_id
+    let target_id = applied_link_id
         .as_deref()
+        .or(created_rule_id.as_deref())
         .or(created_procedure_id.as_deref())
         .or(recipe.map(|recipe| recipe.id.as_str()))
         .unwrap_or(target_memory_id);
@@ -14479,7 +14578,7 @@ fn persist_candidate_application_inner(
                 action: audit_actions::CURATION_CANDIDATE_APPLY.to_owned(),
                 target_type: Some(target_type.to_owned()),
                 target_id: Some(target_id.to_owned()),
-                details: Some(details),
+                details: Some(details.to_string()),
             },
         )
         .map_err(|error| DomainError::Storage {
@@ -26866,6 +26965,344 @@ mod tests {
             },
         )?;
         Ok(connection)
+    }
+
+    #[test]
+    fn suggested_link_apply_preserves_memories_and_records_one_audited_link() -> TestResult {
+        for (candidate_type, relation, already_linked) in [
+            ("link_proposal", MemoryLinkRelation::Related, false),
+            ("contradiction_review", MemoryLinkRelation::Contradicts, false),
+            ("link_proposal", MemoryLinkRelation::Supports, true),
+        ] {
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = dir.path().canonicalize().map_err(|error| error.to_string())?;
+            let database = workspace.join("ee.db");
+            let workspace_id = test_workspace_id(&workspace);
+            let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D01)).to_string();
+            let memory_b = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D02)).to_string();
+            let candidate_id = curate_id(0x7D03);
+            let payload = serde_json::json!({
+                "memoryA": memory_a,
+                "memoryB": memory_b,
+                "relation": relation.as_str(),
+            })
+            .to_string();
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_a,
+                &candidate_id,
+                candidate_type,
+                Some("pending"),
+                Some(&payload),
+            )?;
+            insert_consolidate_absorb_memory(
+                &connection,
+                &workspace_id,
+                &memory_b,
+                "A related release convention for the graph proposal.",
+                0.8,
+            )?;
+            let link_id = if already_linked {
+                let link_id = "link_01234567890123456789012345";
+                insert_test_link(&connection, link_id, &memory_b, &memory_a)?;
+                link_id.to_owned()
+            } else {
+                super::generate_suggested_link_id(&memory_a, &memory_b, relation.as_str())
+            };
+            let memories_before = connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            let validation = validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path: &workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("suggested-link-test"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            assert!(validation.validation.errors.is_empty(), "{validation:?}");
+            let options = super::CurateApplyOptions {
+                workspace_path: &workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("suggested-link-test"),
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            };
+            let preview = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(preview.application.status, "would_apply");
+            assert!(!preview.durable_mutation);
+            assert_eq!(
+                connection
+                    .list_memory_links_for_memory(&memory_a, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                usize::from(already_linked),
+            );
+            let options = super::CurateApplyOptions {
+                dry_run: false,
+                ..options
+            };
+            let applied = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(applied.application.status, "applied");
+            assert!(applied.durable_mutation);
+            let links = connection
+                .list_memory_links_for_memory(&memory_a, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                links.len(),
+                1,
+                "{candidate_type} must create or reuse one link"
+            );
+            assert_eq!(links[0].id, link_id);
+            assert_eq!(links[0].relation, relation.as_str());
+            assert_eq!(
+                connection
+                    .list_memories(&workspace_id, None, true)
+                    .map_err(|error| error.to_string())?,
+                memories_before,
+                "link approval must not rewrite either endpoint",
+            );
+            let audits = connection
+                .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].target_type.as_deref(), Some("memory_link"));
+            assert_eq!(audits[0].target_id.as_deref(), Some(link_id.as_str()));
+            let details: serde_json::Value = serde_json::from_str(
+                audits[0]
+                    .details
+                    .as_deref()
+                    .ok_or("apply audit details missing")?,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(details["candidateId"], candidate_id);
+            assert_eq!(details["appliedLinkId"], link_id);
+
+            let replay = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(replay.application.status, "already_applied");
+            assert!(!replay.durable_mutation);
+            assert_eq!(
+                connection
+                    .list_memory_links_for_memory(&memory_a, None)
+                    .map_err(|error| error.to_string())?,
+                links,
+            );
+            assert_eq!(
+                connection
+                    .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                1,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn suggested_link_apply_rechecks_candidate_and_endpoints_before_writing() -> TestResult {
+        for interleave in [
+            "candidate_changed",
+            "endpoint_tombstoned",
+            "expired_during_wait",
+            "audit_failure",
+        ] {
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let database = dir.path().join("ee.db");
+            let workspace_id = test_workspace_id(dir.path());
+            let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D11)).to_string();
+            let memory_b = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D12)).to_string();
+            let candidate_id = curate_id(0x7D13);
+            let payload = serde_json::json!({
+                "memoryA": memory_a,
+                "memoryB": memory_b,
+                "relation": "related",
+            })
+            .to_string();
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_a,
+                &candidate_id,
+                "link_proposal",
+                Some("approved"),
+                Some(&payload),
+            )?;
+            insert_consolidate_absorb_memory(
+                &connection,
+                &workspace_id,
+                &memory_b,
+                "A second memory supporting the release policy.",
+                0.8,
+            )?;
+            // Model a previously captured planning clock without sleeping.
+            // In the expiry case the stored candidate stays byte-identical;
+            // only elapsed time invalidates its authorization to apply.
+            let planned_clock = Utc::now() - chrono::Duration::days(2);
+            let now = planned_clock.to_rfc3339();
+            if interleave == "expired_during_wait" {
+                let expires_at = (planned_clock + chrono::Duration::days(1)).to_rfc3339();
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE curation_candidates SET ttl_expires_at = '{expires_at}' WHERE id = '{candidate_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("link candidate missing")?;
+            let decision = super::evaluate_link_candidate_for_apply(&connection, &stored, &now);
+            assert!(decision.should_persist);
+            assert!(decision.application.errors.is_empty());
+            match interleave {
+                "candidate_changed" => connection
+                    .execute_raw(&format!(
+                        "UPDATE curation_candidates SET reason = 'changed after planning' WHERE id = '{candidate_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?,
+                "endpoint_tombstoned" => {
+                    assert!(
+                        connection
+                            .tombstone_memory(&memory_b)
+                            .map_err(|error| error.to_string())?
+                    );
+                }
+                "audit_failure" => connection
+                    .execute_raw("CREATE TRIGGER block_link_apply_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'link audit failure'); END")
+                    .map_err(|error| error.to_string())?,
+                "expired_during_wait" => {}
+                _ => return Err("unknown test interleaving".to_owned()),
+            }
+            let memories_before = connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            let candidate_before = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?;
+            let result = super::persist_candidate_application(
+                &connection,
+                &workspace_id,
+                &stored,
+                &decision,
+                None,
+                &now,
+                "suggested-link-test",
+            );
+            assert!(result.is_err(), "{interleave} must refuse or roll back apply");
+            assert!(
+                connection
+                    .list_memory_links_for_memory(&memory_a, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert_eq!(
+                connection
+                    .list_memories(&workspace_id, None, true)
+                    .map_err(|error| error.to_string())?,
+                memories_before,
+            );
+            assert_eq!(
+                connection
+                    .get_curation_candidate(&workspace_id, &candidate_id)
+                    .map_err(|error| error.to_string())?,
+                candidate_before,
+            );
+            assert!(
+                connection
+                    .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn suggested_link_apply_rejects_foreign_endpoints_and_expired_proposals() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012346";
+        let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D21)).to_string();
+        let memory_b = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D22)).to_string();
+        for (workspace_id, memory_id) in [(workspace_a, &memory_a), (workspace_b, &memory_b)] {
+            connection
+                .insert_workspace(
+                    workspace_id,
+                    &CreateWorkspaceInput {
+                        path: format!("/test/{workspace_id}"),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            insert_consolidate_absorb_memory(
+                &connection,
+                workspace_id,
+                memory_id,
+                "Release policy.",
+                0.8,
+            )?;
+        }
+        let candidate_id = curate_id(0x7D23);
+        let payload = serde_json::json!({
+            "memoryA": memory_a,
+            "memoryB": memory_b,
+            "relation": "related",
+        })
+        .to_string();
+        insert_test_candidate(
+            &connection,
+            TestCandidateInput {
+                workspace_id: workspace_a,
+                memory_id: &memory_a,
+                candidate_id: &candidate_id,
+                source_id: "fb_01234567890123456789012345",
+                candidate_type: "link_proposal",
+                status: Some("approved"),
+                proposed_content: Some(&payload),
+            },
+        )?;
+        let mut stored = connection
+            .get_curation_candidate(workspace_a, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("link candidate missing")?;
+        let now = "2026-09-25T12:00:00Z";
+        let decision = super::evaluate_link_candidate_for_apply(&connection, &stored, now);
+        assert!(!decision.should_persist);
+        assert!(
+            decision
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "target_memory_workspace_mismatch")
+        );
+        for (expires_at, expected_code) in [
+            (
+                "2026-09-24T00:00:00Z",
+                crate::curate::CandidateValidationError::CandidateExpired.code(),
+            ),
+            ("invalid timestamp", "invalid_ttl_timestamp"),
+        ] {
+            stored.ttl_expires_at = Some(expires_at.to_owned());
+            let decision = super::evaluate_link_candidate_for_apply(&connection, &stored, now);
+            assert!(!decision.should_persist);
+            assert!(
+                decision
+                    .application
+                    .errors
+                    .iter()
+                    .any(|issue| issue.code == expected_code)
+            );
+        }
+        assert!(
+            connection
+                .list_memory_links_for_memory(&memory_a, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

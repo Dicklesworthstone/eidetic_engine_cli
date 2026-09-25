@@ -136,7 +136,7 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
             })
             .map_err(|error| error.to_string())
         };
-        let export_provenance = |backup: &Path| -> Result<BTreeMap<String, Option<String>>, String> {
+        let exported = |backup: &Path| -> Result<BTreeMap<String, Option<String>>, String> {
             let text = fs::read_to_string(backup.join(RECORDS_FILE))
                 .map_err(|error| error.to_string())?;
             text.lines()
@@ -154,7 +154,7 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
         };
         let created = create(&workspace, &database)?;
         assert_eq!(
-            export_provenance(Path::new(&created.backup_path))?,
+            exported(Path::new(&created.backup_path))?,
             source_provenance
         );
         let side_path = root.path().join("restored");
@@ -179,7 +179,7 @@ fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> Test
         db.close().map_err(|error| error.to_string())?;
         let rebackup = create(&side_path, &restored_database)?;
         assert_eq!(
-            export_provenance(Path::new(&rebackup.backup_path))?,
+            exported(Path::new(&rebackup.backup_path))?,
             source_provenance
         );
     }
