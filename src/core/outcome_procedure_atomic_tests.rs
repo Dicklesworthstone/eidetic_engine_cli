@@ -265,12 +265,14 @@ fn procedure_signal_aliases_keep_weights_and_neutral_history_semantics() {
         assert_eq!(report.confidence_before, None);
         assert_eq!(report.confidence_after, None);
         let after = fixture.procedure();
-        let (helpful, harmful, confidence, utility, history) =
-            match FeedbackSignal::from_signal_str(signal) {
-                FeedbackSignal::Helpful => (1, 0, 0.52, 0.54, 1),
-                FeedbackSignal::Harmful => (0, 1, 0.45, 0.44, 1),
-                FeedbackSignal::Neutral => (0, 0, 0.5, 0.5, 0),
-            };
+        // Procedures classify signals themselves: staleness is neutral here,
+        // unlike the memory posterior's FeedbackSignal (bd-g66ja ruling).
+        let (helpful, harmful, confidence, utility, history) = match signal {
+            "helpful" | "positive" | "confirmation" => (1, 0, 0.52, 0.54, 1),
+            "harmful" | "negative" | "contradiction" | "inaccurate" => (0, 1, 0.45, 0.44, 1),
+            "neutral" | "stale" | "outdated" => (0, 0, 0.5, 0.5, 0),
+            other => panic!("unclassified procedure signal {other}"),
+        };
         assert_eq!(after.helpful_count, helpful, "{signal}");
         assert_eq!(after.harmful_count, harmful, "{signal}");
         assert!((after.confidence - confidence).abs() < 1e-6, "{signal}");
