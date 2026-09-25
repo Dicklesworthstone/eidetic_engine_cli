@@ -355,9 +355,9 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
         .filter(|entry| entry.action == audit_actions::MEMORY_DECAY_TOMBSTONE)
         .count() as u32;
     let memories_created = snapshot
-        .memories
-        .values()
-        .filter(|memory| timestamp_at_or_after(&memory.created_at, since.as_ref()))
+        .memory_creation_times
+        .iter()
+        .filter(|created_at| timestamp_at_or_after(created_at, since.as_ref()))
         .count() as u32;
     let candidates = snapshot
         .curation_candidates
@@ -1066,7 +1066,8 @@ fn learn_gap_cluster(
     let (status, covered_by, covered_by_created_at) = match &top_hit {
         Some((memory_id, created_at, similarity))
             if *similarity >= LIKELY_COVERED_SIMILARITY
-                && created_at.as_str() > cluster.last_seen_raw.as_str() =>
+                && DateTime::parse_from_rfc3339(created_at)
+                    .is_ok_and(|created| created.with_timezone(&Utc) > cluster.last_seen_at) =>
         {
             (
                 "likely_covered".to_owned(),
@@ -2303,9 +2304,13 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
 }
 
 fn learning_database_path(database_path: Option<&Path>, workspace: &Path) -> PathBuf {
-    database_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"))
+    database_path.map(Path::to_path_buf).unwrap_or_else(|| {
+        workspace
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_workspace_path(workspace))
+            .join(".ee")
+            .join("ee.db")
+    })
 }
 
 fn ensure_learning_workspace(
@@ -2344,37 +2349,14 @@ fn ensure_learning_workspace(
 
 /// Normalize a workspace path for DB lookup.
 ///
-/// Returns an absolute path WITHOUT canonicalizing symlinks. The
-/// canonicalization step happens at lookup time via
-/// `resolve_workspace_id_with_fallback` so test fixtures that store
-/// workspaces under non-canonical paths (e.g. `/var/folders/...` on
-/// macOS where the canonical form is `/private/var/folders/...`)
-/// still match.
+/// Mutable capture binding retains the caller's spelling alongside its
+/// canonical path, so registered system aliases still resolve to their row.
 fn normalize_workspace_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     }
-}
-
-/// Resolve a workspace path to its stored row id.
-///
-/// Bead bd-17c65.7.1 (G1): `--workspace /tmp/foo` must find a row
-/// registered as `/private/tmp/foo`. Path-keyed ids win over a fresh
-/// hash so learn/summary see the same memories as `ee remember`.
-fn resolve_workspace_id_with_fallback(
-    connection: &DbConnection,
-    workspace_path: &Path,
-) -> Result<String, DomainError> {
-    let canonical = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    crate::core::workspace::bound_workspace_id_or_hash(
-        connection,
-        &crate::core::workspace::stable_workspace_id(&canonical),
-        &[workspace_path, canonical.as_path()],
-    )
 }
 
 fn stable_workspace_id(path: &str) -> String {
@@ -2993,12 +2975,20 @@ impl LearnExperimentRunReport {
 pub fn propose_experiments(
     options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
+    propose_experiments_with_boundary(options, || Ok(()))
+}
+
+fn propose_experiments_with_boundary(
+    options: &LearnExperimentProposeOptions,
+    before_persist: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<LearnExperimentProposalReport, DomainError> {
     let snapshot = load_learning_snapshot(&options.workspace)?;
     let clusters = build_learning_clusters(
         &snapshot,
         options.topic.as_deref(),
         &snapshot.feedback_events,
     );
+    before_persist()?;
     let database_path = learning_database_path(None, &options.workspace);
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
@@ -3018,14 +3008,7 @@ pub fn propose_experiments(
         let candidate_id = cluster.curation_candidate_id();
         let proposed_content = cluster.proposed_rule_content();
         let source_ids = cluster.sample_ids_vec();
-        let already_exists = connection
-            .get_curation_candidate(&snapshot.workspace_id, &candidate_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to check learning curation candidate: {error}"),
-                repair: Some("ee curate candidates --json".to_string()),
-            })?
-            .is_some();
-        if !already_exists {
+        {
             let uses_peer_evidence = source_ids.iter().any(|id| is_peer_evidence_source_ref(id));
             // The trust validator accepts one canonical feedback-event ID,
             // not a comma-separated sample. Keep the aggregate evidence in
@@ -3121,13 +3104,34 @@ pub fn propose_experiments(
                 "sourceRefs": source_refs,
                 "learningEvidenceIds": cluster.sample_ids,
             });
-            connection
+            let sources_still_current = connection
                 .with_transaction(|| {
-                    if connection
-                        .get_curation_candidate(&snapshot.workspace_id, &candidate_id)?
-                        .is_some()
+                    // The report snapshot is released before acquiring the
+                    // writer. Recheck its exact sources while holding the
+                    // same transaction that persists the proposal and audit;
+                    // a seal, hold, expiry or revision must not publish an old
+                    // body or derivation hash into a new candidate.
+                    let memory_rows = connection.list_recent_current_memories_for_retrieval(
+                        &snapshot.workspace_id,
+                        &crate::core::memory::normalize_row_timestamp(Utc::now()),
+                        u32::MAX,
+                    )?;
+                    let current_memories = admit_learning_memory_rows(
+                        &connection,
+                        &snapshot.workspace_id,
+                        memory_rows,
+                    )?;
+                    if cluster
+                        .memory_ids
+                        .iter()
+                        .any(|id| current_memories.get(id) != snapshot.memories.get(id))
                     {
-                        return Ok(());
+                        return Ok(false);
+                    }
+                    if let Some(candidate) =
+                        connection.get_curation_candidate(&snapshot.workspace_id, &candidate_id)?
+                    {
+                        return Ok(cluster.matches_candidate_definition(&candidate));
                     }
                     connection.insert_curation_candidate(&candidate_id, &input)?;
                     connection.insert_audit(
@@ -3141,7 +3145,7 @@ pub fn propose_experiments(
                             details: Some(details.to_string()),
                         },
                     )?;
-                    Ok(())
+                    Ok(true)
                 })
                 .map_err(|error| DomainError::Storage {
                     message: format!(
@@ -3149,6 +3153,9 @@ pub fn propose_experiments(
                     ),
                     repair: Some("ee curate candidates --json".to_string()),
                 })?;
+            if !sources_still_current {
+                continue;
+            }
         }
         durable_proposals.push(cluster.experiment_proposal(
             options.max_attention_tokens,
@@ -3232,10 +3239,11 @@ fn registered_experiment_proposal(
                 return None;
             }
             let candidate_id = cluster.curation_candidate_id();
-            let registered = snapshot
-                .curation_candidates
-                .iter()
-                .any(|candidate| candidate.id == candidate_id && candidate.status == "pending");
+            let registered = snapshot.curation_candidates.iter().any(|candidate| {
+                candidate.id == candidate_id
+                    && candidate.status == "pending"
+                    && cluster.matches_candidate_definition(candidate)
+            });
             registered.then(|| {
                 cluster.experiment_proposal(1_200, 300, ExperimentSafetyBoundary::DryRunOnly)
             })
@@ -3372,6 +3380,9 @@ fn stable_learning_generated_at() -> String {
 #[derive(Clone, Debug)]
 struct LearningSnapshot {
     workspace_id: String,
+    // Inventory counts describe past writes, even when their bodies are no
+    // longer eligible to satisfy a gap or seed a new learning proposal.
+    memory_creation_times: Vec<String>,
     memories: BTreeMap<String, StoredMemory>,
     memory_tags: BTreeMap<String, Vec<String>>,
     feedback_events: Vec<StoredFeedbackEvent>,
@@ -3467,10 +3478,8 @@ impl LearningCluster {
             }
         }
         self.sample_ids.insert(event.id.clone());
-        self.sample_ids.insert(event.target_id.clone());
-        if let Some(source_id) = &event.source_id {
-            self.sample_ids.insert(source_id.clone());
-        }
+        // Target/source references are already included in the caller's
+        // admitted evidence set; reinserting raw references bypasses it.
         self.sample_ids.extend(evidence_ids);
         self.memory_ids.extend(memory_ids);
         self.source_types.insert(event.source_type.clone());
@@ -3635,6 +3644,15 @@ impl LearningCluster {
             "curate_{}",
             stable_suffix("learn_candidate", &self.topic, 26)
         )
+    }
+
+    fn matches_candidate_definition(&self, candidate: &StoredCurationCandidate) -> bool {
+        // IDs identify a topic, not a particular body or source. A historical
+        // candidate must not silently register a different current proposal;
+        // leave its original content and review state intact for review.
+        candidate.candidate_type == "rule"
+            && candidate.target_memory_id == self.target_memory_id()
+            && candidate.proposed_content.as_deref() == Some(self.proposed_rule_content().as_str())
     }
 
     fn target_memory_id(&self) -> Option<String> {
@@ -3822,30 +3840,79 @@ fn load_learning_clusters(
 }
 
 fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainError> {
-    let database_path = learning_database_path(None, workspace);
+    load_learning_snapshot_with_boundary(workspace, || Ok(()))
+}
+
+// A real-writer boundary for snapshot regressions, matching the resume loader.
+// Production supplies no callback work; admission always uses the owned view.
+fn load_learning_snapshot_with_boundary(
+    workspace: &Path,
+    after_memories: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<LearningSnapshot, DomainError> {
+    // Resolve the addressed root, not the database leaf: system symlink
+    // ancestors are aliases, while a symlinked .ee directory or database still
+    // fails the database opener's existing confinement checks.
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_workspace_path(workspace));
+    let database_path = learning_database_path(None, &canonical_workspace);
     if !database_path.exists() {
         return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+        DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_string()),
-        })?;
-    let normalized_workspace = normalize_workspace_path(workspace);
-    // G1: try both raw and canonical forms before falling back to a
-    // synthetic id. See resolve_workspace_id_with_fallback for rationale.
-    let workspace_id = resolve_workspace_id_with_fallback(&connection, &normalized_workspace)?;
+        }
+    })?;
+    let snapshot = LearningReadSnapshot::begin(&connection)?;
+    if connection
+        .needs_migration()
+        .map_err(|_| learning_snapshot_error("inspect schema"))?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "The addressed workspace database requires migration before learning."
+                .to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    let workspace_id =
+        crate::core::workspace::addressed_workspace_row(&connection, workspace, &database_path)?
+            .map_or_else(
+                || crate::core::workspace::stable_workspace_id(&canonical_workspace),
+                |row| row.id,
+            );
+    let memory_creation_times = connection
+        .query(
+            "SELECT created_at FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id",
+            &[sqlmodel_core::Value::Text(workspace_id.clone())],
+        )
+        .map_err(|_| learning_snapshot_error("read memory inventory"))?
+        .iter()
+        .map(|row| {
+            row.get(0)
+                .and_then(sqlmodel_core::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| learning_snapshot_error("decode memory inventory"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Use the same exact-instant current-revision reader as resume. It keeps
+    // expired, future, malformed and superseded sources out before hydration;
+    // neither a matching body nor old feedback can make them usable again.
     let memory_rows = connection
-        .list_memories(&workspace_id, None, false)
+        .list_recent_current_memories_for_retrieval(
+            &workspace_id,
+            &crate::core::memory::normalize_row_timestamp(Utc::now()),
+            u32::MAX,
+        )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list learning memories: {error}"),
             repair: Some("ee remember --workspace . --json".to_string()),
         })?;
-    let memories = memory_rows
-        .into_iter()
-        .map(|memory| (memory.id.clone(), memory))
-        .collect::<BTreeMap<_, _>>();
+    after_memories()?;
+    let memories = admit_learning_memory_rows(&connection, &workspace_id, memory_rows)
+        .map_err(|_| learning_snapshot_error("verify current memory admission"))?;
     let memory_ids = memories.keys().map(String::as_str).collect::<Vec<_>>();
     let memory_tags = connection
         .get_memory_tags_batch(&memory_ids)
@@ -3877,6 +3944,7 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
             message: format!("Failed to list curation candidates: {error}"),
             repair: Some("ee curate candidates --json".to_string()),
         })?;
+    snapshot.finish()?;
     connection.close().map_err(|error| DomainError::Storage {
         message: format!("Failed to close database: {error}"),
         repair: Some("ee doctor".to_string()),
@@ -3884,6 +3952,7 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
 
     Ok(LearningSnapshot {
         workspace_id,
+        memory_creation_times,
         memories,
         memory_tags,
         feedback_events,
@@ -3891,6 +3960,86 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
         learning_observations,
         curation_candidates,
     })
+}
+
+// Both report reads and proposal writes call this with their transaction held.
+// Temporal admission is supplied by the canonical exact-instant reader above.
+fn admit_learning_memory_rows(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_rows: Vec<StoredMemory>,
+) -> crate::db::Result<BTreeMap<String, StoredMemory>> {
+    let closed_seals: BTreeSet<_> =
+        crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)?
+            .into_iter()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id)
+            .collect();
+    // Share curation's pending-quarantine disqualifier: a held memory cannot
+    // cover demand or acquire a new rule proposal while its review is pending.
+    let quarantined: BTreeSet<_> = connection
+        .list_feedback_quarantine(workspace_id, Some("pending"))?
+        .into_iter()
+        .filter(|row| row.target_type == "memory")
+        .map(|row| row.target_id)
+        .collect();
+    Ok(memory_rows
+        .into_iter()
+        .filter(|memory| {
+            memory.workspace_id == workspace_id
+                && !closed_seals.contains(&memory.id)
+                && !quarantined.contains(&memory.id)
+                && memory
+                    .trust_class
+                    .parse::<crate::models::TrustClass>()
+                    .is_ok()
+                && memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+                && crate::policy::redact_secret_like_content(&memory.content)
+                    .redacted_reasons
+                    .is_empty()
+        })
+        .map(|memory| (memory.id.clone(), memory))
+        .collect())
+}
+
+fn learning_snapshot_error(operation: &str) -> DomainError {
+    DomainError::Storage {
+        message: format!("Could not {operation} in the learning source snapshot; report withheld"),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    }
+}
+
+struct LearningReadSnapshot<'a> {
+    connection: &'a DbConnection,
+    active: bool,
+}
+
+impl<'a> LearningReadSnapshot<'a> {
+    fn begin(connection: &'a DbConnection) -> Result<Self, DomainError> {
+        connection
+            .begin_read_snapshot()
+            .map_err(|_| learning_snapshot_error("begin"))?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    fn finish(mut self) -> Result<(), DomainError> {
+        self.connection
+            .commit_read_snapshot()
+            .map_err(|_| learning_snapshot_error("finish"))?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for LearningReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active && self.connection.rollback_read_snapshot().is_err() {
+            tracing::error!("Failed to release learning read snapshot");
+        }
+    }
 }
 
 fn persist_learning_observation(
@@ -3958,8 +4107,25 @@ fn build_learning_clusters(
     let normalized_filter = topic_filter.map(normalize_topic);
     let mut clusters = BTreeMap::new();
     for event in events {
-        let evidence_ids = evidence_ids_for_event(event);
+        // Historical feedback remains in summary totals. It is not current
+        // evidence for an active agenda, cluster or experiment when its target
+        // memory is withheld. In particular, do not fall back to the feedback
+        // reason and recreate a preview of a sealed or quarantined source.
+        if event.target_type == "memory" && !snapshot.memories.contains_key(&event.target_id) {
+            continue;
+        }
+        let raw_evidence_ids = evidence_ids_for_event(event);
+        let has_memory_evidence = raw_evidence_ids.iter().any(|id| id.starts_with("mem_"));
+        let evidence_ids = raw_evidence_ids
+            .into_iter()
+            .filter(|id| !id.starts_with("mem_") || snapshot.memories.contains_key(id))
+            .collect();
         let memory_ids = memory_ids_for_event(snapshot, event, &evidence_ids);
+        if has_memory_evidence && memory_ids.is_empty() {
+            // Indirect observations can quote source bodies in their reason.
+            // With no admitted source, that fallback must not recreate them.
+            continue;
+        }
         let topic = topic_for_event(snapshot, event, &memory_ids);
         if normalized_filter
             .as_ref()
@@ -4348,6 +4514,513 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    fn learning_database_bytes(database: &Path) -> Result<Vec<Option<Vec<u8>>>, String> {
+        [
+            database.to_path_buf(),
+            database.with_extension("db-wal"),
+            database.with_extension("db-shm"),
+        ]
+        .into_iter()
+        .map(|path| match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn learning_reports_and_proposals_require_current_visible_unquarantined_sources() -> TestResult
+    {
+        const BODY: &str = "Zebra hovercraft docking protocol";
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-admission")?;
+        for index in 0..3 {
+            insert_query_miss_audit(
+                &database,
+                &workspace_id,
+                &format!("audit_{index:026}"),
+                "hash_live_admission",
+                "weak_query_recall",
+                Some("search"),
+                Some(BODY),
+            )?;
+        }
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        // Each source would independently satisfy the gap and, with its two
+        // feedback rows, seed an experiment if live admission were absent.
+        for (index, state) in [
+            "expired",
+            "future",
+            "superseded",
+            "sealed",
+            "quarantined",
+            "secret",
+            "malformed",
+            "tombstoned",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("mem_{index:026}");
+            seed_memory(&db, &workspace_id, &id, "docking", BODY)?;
+            for feedback in 0..2 {
+                seed_feedback(
+                    &db,
+                    &workspace_id,
+                    &format!("fb_{:026}", index * 2 + feedback),
+                    &id,
+                    "confirmation",
+                )?;
+            }
+            match state {
+                "expired" => db.execute_raw(&format!("UPDATE memories SET valid_from = '2019-01-01T00:00:00Z', valid_to = '2020-01-01T00:00:00Z' WHERE id = '{id}'")),
+                "future" => db.execute_raw(&format!("UPDATE memories SET valid_from = '2999-01-01T00:00:00Z' WHERE id = '{id}'")),
+                "superseded" => db.execute_raw(&format!("UPDATE memories SET superseded_at = '2020-01-01T00:00:00Z' WHERE id = '{id}'")),
+                "tombstoned" => db.execute_raw(&format!("UPDATE memories SET tombstoned_at = '2020-01-01T00:00:00Z' WHERE id = '{id}'")),
+                "malformed" => db.execute_raw(&format!("UPDATE memories SET valid_from = 'not-an-instant' WHERE id = '{id}'")),
+                "secret" => db.execute_raw(&format!("UPDATE memories SET content = '{BODY} ghp_0123456789abcdef0123456789abcdef01234567' WHERE id = '{id}'")),
+                "sealed" => {
+                    // Leave a full body behind a closed seal intentionally;
+                    // placeholder-only filtering must not grant visibility.
+                    db.insert_memory_seal(&id, &crate::models::memory_seal_commitment(BODY.as_bytes()), "2020-01-01T00:00:00Z")
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                }
+                "quarantined" => {
+                    db.insert_feedback_quarantine("fq_00000000000000000000000704", &crate::db::CreateFeedbackQuarantineInput {
+                        workspace_id: workspace_id.clone(),
+                        source_id: "learning-source-test".to_owned(),
+                        target_type: "memory".to_owned(),
+                        target_id: id,
+                        signal: "negative".to_owned(),
+                        weight: 1.0,
+                        source_type: "agent_inference".to_owned(),
+                        proposed_event_id: None,
+                        recorded_at: "2020-01-01T00:00:00Z".to_owned(),
+                        reason: "Pending source review".to_owned(),
+                        event_reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        raw_event_hash: "blake3:learning-source-admission".to_owned(),
+                    }).map_err(|error| error.to_string())?;
+                    continue;
+                }
+                _ => unreachable!(),
+            }.map_err(|error| error.to_string())?;
+        }
+        db.close().map_err(|error| error.to_string())?;
+        let before = learning_database_bytes(&database)?;
+        let gap_options = LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        };
+        let gaps = show_gaps(&gap_options).map_err(|error| error.to_string())?;
+        assert_eq!(gaps.gaps.len(), 1);
+        assert_eq!(gaps.gaps[0].status, "open");
+        assert!(gaps.gaps[0].covered_by.is_none());
+        assert!(gaps.gaps[0].nearest_existing_evidence.is_empty());
+        let cluster_options = LearnClusterOptions {
+            workspace: workspace.path().to_path_buf(),
+            min_cluster_size: 1,
+            include_singletons: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            analyze_clusters(&cluster_options)
+                .map_err(|error| error.to_string())?
+                .memory_count,
+            0
+        );
+        let agenda = show_agenda(&LearnAgendaOptions {
+            workspace: workspace.path().to_path_buf(),
+            include_resolved: true,
+            limit: 20,
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(
+            agenda.items.is_empty(),
+            "withheld targets must not resurface through feedback"
+        );
+        let summary = show_summary(&LearnSummaryOptions {
+            workspace: workspace.path().to_path_buf(),
+            period: "all".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            summary.summary.memories_created, 6,
+            "preserve historical inventory, except the previously excluded tombstones/revisions"
+        );
+        assert_eq!(
+            summary.summary.observations_recorded, 16,
+            "historical feedback is still counted"
+        );
+        assert_eq!(
+            learning_database_bytes(&database)?,
+            before,
+            "read-only learning reports must not change DB/WAL/SHM"
+        );
+        let proposal_options = LearnExperimentProposeOptions {
+            workspace: workspace.path().to_path_buf(),
+            limit: 10,
+            topic: Some("docking".to_owned()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+        };
+        assert!(
+            propose_experiments(&proposal_options)
+                .map_err(|error| error.to_string())?
+                .proposals
+                .is_empty()
+        );
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert!(
+            db.list_curation_candidates(&workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        let live_id = "mem_00000000000000000000000999";
+        seed_memory(&db, &workspace_id, live_id, "docking", BODY)?;
+        for index in 0..2 {
+            seed_feedback(
+                &db,
+                &workspace_id,
+                &format!("fb_{:026}", 900 + index),
+                live_id,
+                "confirmation",
+            )?;
+        }
+        db.execute_raw("UPDATE feedback_events SET evidence_json = '{\"evidenceIds\":[\"mem_00000000000000000000000999\",\"mem_00000000000000000000000000\"]}' WHERE target_id = 'mem_00000000000000000000000999'")
+            .map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let gaps = show_gaps(&gap_options).map_err(|error| error.to_string())?;
+        assert_eq!(gaps.gaps[0].status, "likely_covered");
+        assert_eq!(gaps.gaps[0].covered_by.as_deref(), Some(live_id));
+        assert_eq!(gaps.gaps[0].nearest_existing_evidence.len(), 1);
+        assert_eq!(gaps.gaps[0].nearest_existing_evidence[0].memory_id, live_id);
+        assert_eq!(
+            analyze_clusters(&cluster_options)
+                .map_err(|error| error.to_string())?
+                .memory_count,
+            1
+        );
+        let proposals =
+            propose_experiments(&proposal_options).map_err(|error| error.to_string())?;
+        assert_eq!(proposals.proposals.len(), 1);
+        assert!(
+            proposals.proposals[0]
+                .evidence_ids
+                .contains(&live_id.to_owned())
+        );
+        for index in 0..8 {
+            assert!(
+                !proposals.proposals[0]
+                    .evidence_ids
+                    .contains(&format!("mem_{index:026}"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_snapshot_keeps_body_seal_and_feedback_in_one_view() -> TestResult {
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-snapshot")?;
+        let memory_id = "mem_00000000000000000000000701";
+        let writer = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(
+            &writer,
+            &workspace_id,
+            memory_id,
+            "docking",
+            "Docking guidance before sealing",
+        )?;
+        seed_feedback(
+            &writer,
+            &workspace_id,
+            "fb_00000000000000000000000701",
+            memory_id,
+            "confirmation",
+        )?;
+        let old = load_learning_snapshot_with_boundary(workspace.path(), || {
+            writer.insert_memory_seal(memory_id, &crate::models::memory_seal_commitment(b"Docking guidance before sealing"), "2020-01-01T00:00:00Z")
+                .map_err(|_| learning_snapshot_error("write concurrent seal"))?;
+            writer.execute_raw("UPDATE feedback_events SET reason = 'Changed after the read began' WHERE id = 'fb_00000000000000000000000701'")
+                .map_err(|_| learning_snapshot_error("write concurrent feedback"))?;
+            Ok(())
+        }).map_err(|error| error.to_string())?;
+        assert!(old.memories.contains_key(memory_id));
+        assert_ne!(
+            old.feedback_events[0].reason.as_deref(),
+            Some("Changed after the read began")
+        );
+        let current =
+            load_learning_snapshot(workspace.path()).map_err(|error| error.to_string())?;
+        assert!(
+            !current.memories.contains_key(memory_id),
+            "the next snapshot must honor the new seal"
+        );
+        assert_eq!(
+            current.feedback_events[0].reason.as_deref(),
+            Some("Changed after the read began")
+        );
+        writer.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learning_proposals_revalidate_sources_after_the_report_snapshot() -> TestResult {
+        const BODY: &str = "Recheck the docking protocol before promoting guidance.";
+        let memory_id = "mem_00000000000000000000000705";
+        for transition in ["sealed", "quarantined", "expired", "revised"] {
+            let (workspace, database, workspace_id) =
+                seed_learning_workspace("ee-learn-proposal-race")?;
+            let writer = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_memory(&writer, &workspace_id, memory_id, "docking", BODY)?;
+            for index in 0..2 {
+                seed_feedback(
+                    &writer,
+                    &workspace_id,
+                    &format!("fb_{:026}", 705 + index),
+                    memory_id,
+                    "confirmation",
+                )?;
+            }
+            let options = LearnExperimentProposeOptions {
+                workspace: workspace.path().to_path_buf(),
+                limit: 10,
+                topic: Some("docking".to_owned()),
+                min_expected_value: 0.0,
+                max_attention_tokens: 900,
+                max_runtime_seconds: 180,
+                safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+            };
+            let snapshot =
+                load_learning_snapshot(workspace.path()).map_err(|error| error.to_string())?;
+            let clusters = build_learning_clusters(&snapshot, None, &snapshot.feedback_events);
+            assert_eq!(clusters.len(), 1);
+            assert!(clusters[0].is_non_trivial());
+
+            let report = propose_experiments_with_boundary(&options, || {
+                match transition {
+                    "sealed" => writer.insert_memory_seal(
+                        memory_id,
+                        &crate::models::memory_seal_commitment(BODY.as_bytes()),
+                        "2020-01-01T00:00:00Z",
+                    ).map(|_| ()),
+                    "quarantined" => writer.insert_feedback_quarantine(
+                        "fq_00000000000000000000000705",
+                        &crate::db::CreateFeedbackQuarantineInput {
+                            workspace_id: workspace_id.clone(),
+                            source_id: "learning-proposal-race".to_owned(),
+                            target_type: "memory".to_owned(),
+                            target_id: memory_id.to_owned(),
+                            signal: "negative".to_owned(),
+                            weight: 1.0,
+                            source_type: "agent_inference".to_owned(),
+                            proposed_event_id: None,
+                            recorded_at: "2020-01-01T00:00:00Z".to_owned(),
+                            reason: "Concurrent source review".to_owned(),
+                            event_reason: None,
+                            evidence_json: None,
+                            session_id: None,
+                            raw_event_hash: "blake3:learning-proposal-race".to_owned(),
+                        },
+                    ).map(|_| ()),
+                    "expired" => writer.execute_raw(&format!(
+                        "UPDATE memories SET valid_to = '2020-01-01T00:00:00Z' WHERE id = '{memory_id}'"
+                    )),
+                    "revised" => writer.execute_raw(&format!(
+                        "UPDATE memories SET content = 'Revised docking guidance with different conclusions.' WHERE id = '{memory_id}'"
+                    )),
+                    _ => unreachable!(),
+                }.map_err(|_| learning_snapshot_error("commit concurrent source transition"))
+            }).map_err(|error| error.to_string())?;
+            assert!(report.proposals.is_empty(), "stale {transition} proposal");
+            assert_eq!(report.total_candidates, 0);
+            assert!(
+                writer
+                    .list_curation_candidates(&workspace_id, None, None, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                !writer
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .any(|entry| entry.action == audit_actions::CURATION_CANDIDATE_CREATE)
+            );
+            writer.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_agenda_withholds_indirect_observation_previews_after_source_sealing() -> TestResult
+    {
+        const BODY: &str = "Private docking guidance quoted by an experiment observation.";
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-indirect")?;
+        let memory_id = "mem_00000000000000000000000706";
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(&db, &workspace_id, memory_id, "docking", BODY)?;
+        db.close().map_err(|error| error.to_string())?;
+        let observed = observe_experiment(&LearnObserveOptions {
+            workspace: workspace.path().to_path_buf(),
+            database_path: None,
+            workspace_id: None,
+            experiment_id: "exp_docking_observation".to_owned(),
+            observation_id: Some("lobs_docking_observation".to_owned()),
+            observed_at: None,
+            observer: None,
+            signal: LearningObservationSignal::Positive,
+            measurement_name: "docking_check".to_owned(),
+            measurement_value: Some(1.0),
+            evidence_ids: vec![memory_id.to_owned()],
+            note: Some(BODY.to_owned()),
+            redaction_status: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000706".to_owned()),
+            actor: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            observed
+                .feedback
+                .as_ref()
+                .map(|event| event.target_type.as_str()),
+            Some("candidate")
+        );
+        let agenda_options = LearnAgendaOptions {
+            workspace: workspace.path().to_path_buf(),
+            include_resolved: true,
+            limit: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            show_agenda(&agenda_options)
+                .map_err(|error| error.to_string())?
+                .items
+                .len(),
+            1
+        );
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.insert_memory_seal(
+            memory_id,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            "2020-01-01T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let before = learning_database_bytes(&database)?;
+        let agenda = show_agenda(&agenda_options).map_err(|error| error.to_string())?;
+        assert!(agenda.items.is_empty());
+        assert!(!agenda.to_json().contains(BODY));
+        let uncertainty = show_uncertainty(&LearnUncertaintyOptions {
+            workspace: workspace.path().to_path_buf(),
+            limit: 20,
+            min_uncertainty: 0.0,
+            kind: None,
+            low_confidence: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(uncertainty.items.is_empty());
+        let summary = show_summary(&LearnSummaryOptions {
+            workspace: workspace.path().to_path_buf(),
+            period: "all".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(summary.summary.observations_recorded, 1);
+        assert_eq!(learning_database_bytes(&database)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn learning_reads_refuse_foreign_bindings_and_unmigrated_stores_without_writes() -> TestResult {
+        let (workspace, database) = seed_learning_database("ee-learn-foreign-binding")?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            "wsp_00000000000000000000000702",
+            &CreateWorkspaceInput {
+                path: "/foreign-learning-workspace".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let before = learning_database_bytes(&database)?;
+        assert!(load_learning_snapshot(workspace.path()).is_err());
+        assert_eq!(learning_database_bytes(&database)?, before);
+
+        let bare = tempfile::tempdir().map_err(|error| error.to_string())?;
+        assert!(load_learning_snapshot(bare.path()).is_err());
+        assert!(!bare.path().join(".ee").exists());
+        let database = bare.path().join(".ee/ee.db");
+        fs::create_dir_all(database.parent().ok_or("database parent")?)
+            .map_err(|error| error.to_string())?;
+        DbConnection::open_file(&database)
+            .map_err(|error| error.to_string())?
+            .close()
+            .map_err(|error| error.to_string())?;
+        let before = learning_database_bytes(&database)?;
+        assert!(matches!(
+            load_learning_snapshot(bare.path()),
+            Err(DomainError::MigrationRequired { .. })
+        ));
+        assert_eq!(learning_database_bytes(&database)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learning_accepts_workspace_aliases_but_refuses_symlinked_store_boundaries() -> TestResult {
+        let (workspace, database) = seed_learning_database("ee-learn-alias")?;
+        let workspace_id = "wsp_00000000000000000000000703";
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let alias_parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let alias = alias_parent.path().join("workspace");
+        std::os::unix::fs::symlink(workspace.path(), &alias).map_err(|error| error.to_string())?;
+        let before = learning_database_bytes(&database)?;
+        assert_eq!(
+            load_learning_snapshot(&alias)
+                .map_err(|error| error.to_string())?
+                .workspace_id,
+            workspace_id
+        );
+        assert_eq!(
+            show_gaps(&LearnGapsOptions {
+                workspace: alias,
+                since: None,
+                limit: 10,
+            })
+            .map_err(|error| error.to_string())?
+            .workspace_id,
+            workspace_id
+        );
+        let unsafe_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            workspace.path().join(".ee"),
+            unsafe_workspace.path().join(".ee"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(load_learning_snapshot(unsafe_workspace.path()).is_err());
+        assert_eq!(learning_database_bytes(&database)?, before);
+        Ok(())
     }
 
     #[test]
@@ -6172,6 +6845,108 @@ mod tests {
         assert_eq!(explained.maturity.as_deref(), Some("draft"));
         assert_eq!(explained.evidence_uris, recipe_evidence);
         connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn learning_topic_candidate_cannot_register_a_changed_source_or_body() -> TestResult {
+        const BODY: &str = "Verify docking evidence before promoting the guidance.";
+        let original_id = "mem_00000000000000000000000707";
+        let replacement_id = "mem_00000000000000000000000708";
+        for change in ["body", "target"] {
+            let (workspace, database, workspace_id) =
+                seed_learning_workspace("ee-learn-candidate-definition")?;
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_memory(&db, &workspace_id, original_id, "docking", BODY)?;
+            for index in 0..2 {
+                seed_feedback(
+                    &db,
+                    &workspace_id,
+                    &format!("fb_{:026}", 707 + index),
+                    original_id,
+                    "confirmation",
+                )?;
+            }
+            db.close().map_err(|error| error.to_string())?;
+            let options = LearnExperimentProposeOptions {
+                workspace: workspace.path().to_path_buf(),
+                limit: 10,
+                topic: Some("docking".to_owned()),
+                min_expected_value: 0.0,
+                max_attention_tokens: 900,
+                max_runtime_seconds: 180,
+                safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+            };
+            let proposed = propose_experiments(&options).map_err(|error| error.to_string())?;
+            assert_eq!(proposed.proposals.len(), 1);
+            let run_options = LearnExperimentRunOptions {
+                workspace: workspace.path().to_path_buf(),
+                experiment_id: proposed.proposals[0].experiment_id.clone(),
+                max_attention_tokens: 600,
+                max_runtime_seconds: 90,
+                dry_run: true,
+            };
+            assert_eq!(
+                run_experiment(&run_options)
+                    .map_err(|error| error.to_string())?
+                    .status,
+                "dry_run_ready"
+            );
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let candidates = db
+                .list_curation_candidates(&workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(candidates.len(), 1);
+            let original_candidate = candidates[0].clone();
+            if change == "body" {
+                db.execute_raw(&format!(
+                    "UPDATE memories SET content = 'Revised docking conclusions need separate review.' WHERE id = '{original_id}'"
+                )).map_err(|error| error.to_string())?;
+            } else {
+                // Preserve the exact body, observation count and topic while
+                // replacing the original target with a different current row.
+                seed_memory(&db, &workspace_id, replacement_id, "docking", BODY)?;
+                for index in 0..2 {
+                    seed_feedback(
+                        &db,
+                        &workspace_id,
+                        &format!("fb_{:026}", 709 + index),
+                        replacement_id,
+                        "confirmation",
+                    )?;
+                }
+                db.execute_raw(&format!(
+                    "UPDATE memories SET tombstoned_at = '2020-01-01T00:00:00Z' WHERE id = '{original_id}'"
+                )).map_err(|error| error.to_string())?;
+            }
+            db.close().map_err(|error| error.to_string())?;
+
+            let stale = propose_experiments(&options).map_err(|error| error.to_string())?;
+            assert!(
+                stale.proposals.is_empty(),
+                "changed {change} was registered"
+            );
+            assert_eq!(stale.total_candidates, 0);
+            assert!(matches!(
+                run_experiment(&run_options),
+                Err(DomainError::NotFound { .. })
+            ));
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert_eq!(
+                db.list_curation_candidates(&workspace_id, None, None, None)
+                    .map_err(|error| error.to_string())?,
+                vec![original_candidate.clone()],
+                "do not rewrite an earlier candidate or its review state"
+            );
+            assert_eq!(
+                db.list_audit_by_target("curation_candidate", &original_candidate.id, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                1,
+                "do not create another audit for a mismatched definition"
+            );
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     #[test]
