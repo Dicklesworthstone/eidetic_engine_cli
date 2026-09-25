@@ -20,13 +20,15 @@ Per `bd-2oh15`, the fixture lifecycle is:
    holder that `corrupt.sh` wrote (`.fixture_baseline/hold-write-lock.py`: an
    exclusive `flock(2)` on `.ee/ee.write.lock`, then no progress). It stops the
    holder before returning, so no process outlives the fixture. Its
-   independent witness is a second non-blocking flock being refused. It pins
-   defect bd-ixxzq as it is today: `ee doctor` reports posture `blocked` with
-   `database` `EE-E202` ("write lock holder made no progress"), and an unscoped
-   `ee doctor --fix` exits 6, recording `database_corrupted` manual guidance
-   for a store that is not damaged. With the holder stopped, doctor is healthy
-   and the content digest is unchanged. One held doctor run takes about 150 s.
-   The fixture needs `python3` on `PATH`.
+   independent witness is a second non-blocking flock being refused. `ee
+   doctor` must report posture `blocked` with `database` `EE-E201` (locked,
+   "write lock holder made no progress"). It then runs
+   `doctor_fixture_assert_guidance_only` in `lib.sh`: an unscoped
+   `ee doctor --fix` exits 6 recording only `database_locked` manual guidance
+   (never `database_corrupted` or `database_unavailable`), and the lock is
+   still reported afterwards. With the holder stopped, doctor is healthy and
+   the content digest is unchanged. One held doctor run takes about 150 s. The
+   fixture needs `python3` on `PATH`.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -36,19 +38,19 @@ state on disk.
 
 ## Wiring status
 
-Label: **PINNED-DEFECT bd-ixxzq** (NOT coverage; repair spec and
-`manifest.json`). The orphan as named self-heals: the kernel releases a flock
-when its process dies. So the fixture is re-scoped to a LIVE holder that makes
-no progress (bd-2oh15 c9984/c9986). Doctor reports that held lock as database
-corruption. A passing run means the defect is still there; when bd-ixxzq gives
-a held lock its own finding, the fixture goes red on purpose and is relabelled.
+Label: **GUIDANCE-ONLY** (repair spec and `manifest.json`; PINNED-DEFECT
+bd-ixxzq until its classifier fix). The orphan as named self-heals: the kernel
+releases a flock when its process dies. So the fixture is re-scoped to a LIVE
+holder that makes no progress (bd-2oh15 c9984/c9986). Doctor now reports that
+held lock as `EE-E201` and records wait-for-the-writer guidance; nothing is
+repaired, which is correct for an undamaged store.
 There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
 because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`
 when an `ee` binary is on `PATH`; its caller, the `ee doctor Safety Harness`
 stage of `scripts/verify.sh`, is not run by any CI workflow (bd-feftl).
-`scripts/verify-idempotence.sh` and `scripts/verify-metamorphic.sh` run every
-doctor call through `condition.sh`, which starts the holder, confirms the lock
-is held, and stops it afterwards. If the holder cannot take the lock, the run
+`scripts/verify-idempotence.sh`, `scripts/verify-metamorphic.sh` and
+`scripts/verify-concurrency.sh` run every doctor call through `condition.sh`,
+which starts the holder, confirms the lock is held, and stops it afterwards. If the holder cannot take the lock, the run
 counts as `condition_not_applied`: never a pass, and the harness fails. Each of
 those harnesses adds about two held doctor runs (about 150 s each).

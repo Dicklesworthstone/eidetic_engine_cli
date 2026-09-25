@@ -1,4 +1,4 @@
-name: Cached local pack delivery
+name: Resident pack source correction
 
 on:
   push:
@@ -10,19 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  prepare:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: macos-15
-    timeout-minutes: 55
+    timeout-minutes: 10
     permissions:
       contents: write
-    env:
-      RUSTUP_TOOLCHAIN: nightly-2026-08-31
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_TERM_COLOR: never
-      EE_EMBED_DOWNLOAD: 'off'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -30,112 +23,70 @@ jobs:
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
-          components: rustfmt, clippy
-      - name: Admit exact manually authored patches and format changed Rust
+          components: rustfmt
+      - name: Correct and export only the two diagnosed test sources
         env:
           GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: nightly-2026-08-31
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/cached-pack"
           python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cached-pack'
-          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
-          def blob(sha):
-              request = urllib.request.Request(api + '/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  return base64.b64decode(json.load(response)['content'])
-          encoded = blob('a2146d9837c97050f9aee62c5b9df386a64521d5').decode('ascii')
-          # Correct one known transport insertion; original SHA-256 is mandatory.
-          encoded = encoded.replace('EFpyYY8', 'EFpyY8', 1)
-          patches = [
-              ('authored.patch', zlib.decompress(base64.b64decode(encoded, validate=True)), '613f1a92bdd4939063070a0fbcf849e568b72c7e2e2dce92a430a797022f0e29'),
-              ('client-policy.patch', blob('e781ad328172fbaa79ffc71e591548e943d5fabc'), '8ba0a2a785a10c2111ea46b4ed1d1dbce3946501fefbaa5250013c26154a76c9'),
-              ('positive-fixture.patch', blob('e92da03baa3b35a0e88b766cd884822433830ce4'), 'cb87811a221120a593c6e092edc489d405b2c49f362dc7e983b00d7492f4764e'),
+          import base64, hashlib, json, os, pathlib, subprocess, tarfile
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'resident-correction'
+          out.mkdir()
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert base == os.environ['GITHUB_SHA']
+          api = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs'
+          files = [
+              ('src/cli/mod.rs', '17c5d9ef20ab3444fa913e60be15760af4409d81', '04b2ba5fdd30fc631477298c4f6e7a7f83724207', '6ef0757a99cc36f672e1035822bea6c0c08000e4'),
+              ('src/core/index_ask.rs', '1d664bba8e31a714a9dea7dd57f35805f51cc857', '931cfb161bae8411b1419d228cb287a08ec5d72f', 'b307138974560d034928b1f92aa2c6a57a81a238'),
           ]
-          for name, patch, expected in patches:
-              assert hashlib.sha256(patch).hexdigest() == expected, name
-              (out / name).write_bytes(patch)
-              subprocess.run(['git', 'apply', '--check', str(out / name)], check=True)
-              subprocess.run(['git', 'apply', str(out / name)], check=True)
-          PY
-          rustfmt --edition 2024 --config skip_children=true src/core/index_ask.rs src/core/index.rs src/core/search.rs src/core/context.rs src/core/context_test_module.rs src/daemon/server.rs src/cli/mod.rs
-          git diff --check
-          git diff --stat
-          git diff --binary > "$RUNNER_TEMP/cached-pack/formatted.patch"
-      - name: Export exact preimages and product blobs without branch writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess, tarfile, urllib.request
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cached-pack'
-          git = lambda *args: subprocess.check_output(['git', *args], text=True).strip()
-          allowed = {'src/core/index_ask.rs', 'src/core/index.rs', 'src/core/search.rs', 'src/core/context.rs', 'src/core/context_test_module.rs', 'src/daemon/server.rs', 'src/cli/mod.rs', 'docs/schemas/ee.daemon.search.request.v2.json'}
-          paths = git('diff', '--name-only').splitlines()
-          assert set(paths) == allowed, paths
-          manifest = {'base': git('rev-parse', 'HEAD'), 'entries': []}
-          assert manifest['base'] == os.environ['GITHUB_SHA']
-          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs'
-          for name in paths:
-              content = pathlib.Path(name).read_bytes()
-              expected = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(content).decode()}).encode()
-              request = urllib.request.Request(api, data=payload, method='POST', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  sha = json.load(response)['sha']
-              assert sha == expected
-              manifest['entries'].append({'path': name, 'before': git('rev-parse', 'HEAD:' + name), 'sha': sha, 'sha256': hashlib.sha256(content).hexdigest()})
+          manifest = {'base': base, 'entries': []}
+          for name, before, prepared, expected in files:
+              current = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + name], text=True).strip()
+              assert current == before, 'Concurrent product change: ' + name
+              blob = json.loads(subprocess.check_output(['gh', 'api', api + '/' + prepared]))
+              data = base64.b64decode(blob['content'])
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == prepared
+              text = data.decode()
+              if name == 'src/cli/mod.rs':
+                  first = text.index('    fn resident_local_pack_never_sends_a_query_to_unsupported_or_cold_peers()')
+                  end = text.index('    fn pack_daemon_retrieval_preserves_local_pack_budget_provenance_and_writes()', first)
+                  chunk = text[first:end]
+                  old = 'Instant::now() + Duration::from_secs(3)'
+                  assert chunk.count(old) == 1
+                  text = text[:first] + chunk.replace(old, 'std::time::' + old) + text[end:]
+              else:
+                  old = '#[cfg(test)]\nuse frankensearch::Embedder as _;\n'
+                  assert text.count(old) == 1
+                  text = text.replace(old, '')
+                  old = '            fn id(&self) -> &str {\n                self.inner.id()\n            }\n            fn is_semantic(&self) -> bool {'
+                  new = '            fn id(&self) -> &str {\n                self.inner.id()\n            }\n            fn model_name(&self) -> &str {\n                self.inner.model_name()\n            }\n            fn is_semantic(&self) -> bool {'
+                  assert text.count(old) == 1
+                  text = text.replace(old, new)
+              target = out / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_text(text)
+              subprocess.run(['rustfmt', '--edition', '2024', '--config-path', 'rustfmt.toml', '--config', 'skip_children=true', str(target)], check=True)
+              data = target.read_bytes()
+              sha = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert sha == expected, 'Unexpected formatted source: ' + name
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
+              created = json.loads(subprocess.check_output(['gh', 'api', api, '--input', '-'], input=payload))
+              assert created['sha'] == sha
+              manifest['entries'].append({'path': name, 'before': before, 'prepared': prepared, 'sha': sha, 'sha256': hashlib.sha256(data).hexdigest()})
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
           (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           with tarfile.open(out / 'changed-source.tar.gz', 'w:gz') as archive:
-              for name in paths:
-                  archive.add(name, arcname=name)
+              for name, *_ in files:
+                  archive.add(out / name, arcname=name)
           print(json.dumps(manifest, indent=2))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: cached-pack-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/cached-pack/
-          retention-days: 7
-          if-no-files-found: error
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
+          name: resident-pack-correction-${{ github.run_id }}
           path: |
-            ~/.cargo/registry
-            target
-          key: cached-pack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            daemon-search-contract-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            prefetch-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Check production library
-        run: |
-          set -euo pipefail
-          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/cached-pack/check.log"
-      - name: Exercise cached-only admission and pack fallback boundaries
-        run: |
-          set -euo pipefail
-          run_tests() {
-            local filter="$1" name="$2"
-            cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/cached-pack/$name.log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cached-pack/$name.log"
-          }
-          run_tests core::index::ask_model::tests::already_loaded_ admission
-          run_tests core::index::ask_model::tests::cached_local_attestation_ identity
-          run_tests daemon::server::tests::daemon_cached_local_ wire
-          run_tests read_only_semantic_pack_names_cold_daemon_fallback_without_writes read-only-pack
-          run_tests daemon_pack_changed_store_restarts_local_admission freshness
-          run_tests core::index::ask_model::tests::read_only_ read-only-model
-          run_tests cli::tests::pack_daemon_ cli-pack
-      - name: Check strict production Clippy
-        run: |
-          set -euo pipefail
-          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/cached-pack/clippy.log"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ always() }}
-        with:
-          name: cached-pack-validation-${{ github.run_id }}
-          path: ${{ runner.temp }}/cached-pack/
+            ${{ runner.temp }}/resident-correction/manifest.json
+            ${{ runner.temp }}/resident-correction/changed-source.tar.gz
           retention-days: 7
           if-no-files-found: error

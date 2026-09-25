@@ -1,0 +1,37 @@
+name: Live preflight advice formatting
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Source-only check. The behavioral regressions are part of the existing
+# core::preflight_guard::advice::tests library suite; this job does not claim
+# to compile or execute them. No source export or branch write is performed.
+jobs:
+  format:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Check committed preflight and shared admission source formatting
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-08-31
+        run: |
+          set -euo pipefail
+          rustfmt --check --edition 2024 --config-path rustfmt.toml --config skip_children=true \
+            src/cli/mod.rs \
+            src/core/ask.rs \
+            src/core/ask_corpus.rs \
+            src/core/ask_memory_admission.rs \
+            src/core/preflight_guard.rs \
+            src/core/preflight_advice.rs \
+            src/core/preflight_advice_tests.rs
+          git diff --exit-code

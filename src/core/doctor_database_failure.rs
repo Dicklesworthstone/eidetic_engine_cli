@@ -4,22 +4,60 @@
 //! inherit the damaged-file recovery plan. Header-detected corruption remains
 //! the responsibility of `database_unreadable`; an opaque storage error alone
 //! is not sufficient evidence to recommend discarding a store (bd-ixxzq).
+//!
+//! The route is decided from the error's own kind, never from its rendered
+//! text. The first version keyed on message prefixes and missed both real
+//! producers: the flock gate's error is wrapped as "database transaction begin
+//! failed for path '...': database write lock holder made no progress ...",
+//! and drift renders as "EE-E040 migration_drift: applied migration 1
+//! drifted; ...". Both fell through to "unavailable" (measured at 80ed63d5d,
+//! bd-ixxzq c10142).
 
 use std::fmt::Display;
 
+use crate::db::DbError;
+use crate::models::DomainError;
 use crate::models::error_codes::{self, ErrorCode};
 
 use super::CheckResult;
 
-/// Both the DB layer and workspace layer reach this boundary. Do not assume
-/// they have the same error type, or discard the original failure message.
+/// A failed store inspection that can say what kind of failure it is from its
+/// own structure. The DB layer and the workspace layer both reach doctor's
+/// database check with different error types, so each says what it knows.
+pub(super) trait InspectionFailure: Display {
+    /// The typed route for this failure, or `None` when its kind is not known.
+    fn inspection_code(&self) -> Option<ErrorCode>;
+}
+
+impl InspectionFailure for DbError {
+    fn inspection_code(&self) -> Option<ErrorCode> {
+        if self.error_id() == Some(crate::db::MIGRATION_DRIFT_ERROR_ID) {
+            Some(error_codes::MIGRATION_DRIFT)
+        } else if self.is_write_lock_contention() {
+            Some(error_codes::DATABASE_LOCKED)
+        } else {
+            None
+        }
+    }
+}
+
+/// A workspace-layer error carries no typed storage kind, so it is never read
+/// as a lock or as drift. It stays "unavailable", which is also guidance-only.
+impl InspectionFailure for DomainError {
+    fn inspection_code(&self) -> Option<ErrorCode> {
+        None
+    }
+}
+
 /// Unknown failures stay unavailable, not corrupt, and block dependent writes.
-pub(super) fn check(error: &impl Display) -> CheckResult {
-    let message = error.to_string();
-    let code = classify_message(&message);
+/// The original failure message is kept in the check's message.
+pub(super) fn check(error: &impl InspectionFailure) -> CheckResult {
+    let code = error
+        .inspection_code()
+        .unwrap_or(error_codes::DATABASE_UNAVAILABLE);
     let mut result = CheckResult::error(
         "database",
-        format!("Database readiness check failed: {message}"),
+        format!("Database readiness check failed: {error}"),
         code,
     );
     // Fix-plan includes only checks with a repair hint. The shared lock code
@@ -32,38 +70,6 @@ pub(super) fn check(error: &impl Display) -> CheckResult {
     result
 }
 
-fn classify_message(message: &str) -> ErrorCode {
-    if is_lock_failure(message) {
-        error_codes::DATABASE_LOCKED
-    } else if message
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("migration history drifted for version ")
-    {
-        error_codes::MIGRATION_DRIFT
-    } else {
-        // A changed diagnostic, permission failure, or unfamiliar engine error
-        // cannot establish corruption. The safe fallback is guidance-only.
-        error_codes::DATABASE_UNAVAILABLE
-    }
-}
-
-/// The two error layers do not share a typed lock variant. Recognize only a
-/// leading producer diagnostic; an incidental word in a path, quoted SQL or
-/// memory body is not a lock failure.
-/// A changed/unknown producer format safely falls back to unavailable, which
-/// is also guidance-only and suppresses dependent writes.
-fn is_lock_failure(message: &str) -> bool {
-    let message = message.trim_start().to_ascii_lowercase();
-    message.starts_with("database write lock holder made no progress")
-        || message.starts_with("database write lock acquisition timed out")
-        || message.starts_with("database group-commit gate acquisition timed out")
-        || message == "database is locked"
-        || message.starts_with("database is locked:")
-        || message == "database table is locked"
-        || message.starts_with("database table is locked:")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,11 +78,65 @@ mod tests {
         store_unreadable, unresolved_core_checks,
     };
     use crate::core::doctor_runtime::Op;
+    use crate::db::{DbError, DbOperation};
+    use crate::models::DomainError;
     use std::path::Path;
+    use std::time::Duration;
+
+    // Verbatim doctor messages captured on a stamped 80ed63d5d release build
+    // (vmi1227854, 2026-09-24 16:01-16:06Z; bd-ixxzq c10142). The first is a
+    // live python3 flock(2) holder on .ee/ee.write.lock; the second is the
+    // lowest applied migration's checksum set to blake3 zeros. The prefix
+    // classifier sent both to EE-E207. The tests below rebuild each error
+    // through its real producer and assert the rendered message is
+    // byte-identical to the capture, so they cannot drift into invented text.
+    const CAPTURED_LOCK_MESSAGE: &str = "Database readiness check failed: database transaction begin failed for path '/tmp/ee-rl-RustMarten.1vNOjG/lh/.ee/ee.write.lock': database write lock holder made no progress for 38000ms: Resource temporarily unavailable (os error 11)";
+    const CAPTURED_DRIFT_MESSAGE: &str = "Database readiness check failed: EE-E040 migration_drift: applied migration 1 drifted; expected init_schema (blake3:d6c4d1a45780310b2d7cb218f35872c216d77192dc086b8da050d0496c61f449), found init_schema (blake3:0000000000000000000000000000000000000000000000000000000000000000)";
+
+    fn captured_lock_error() -> DbError {
+        crate::db::write_lock_stagnant_error(
+            "/tmp/ee-rl-RustMarten.1vNOjG/lh/.ee/ee.write.lock".into(),
+            Duration::from_secs(38),
+            &"Resource temporarily unavailable (os error 11)",
+        )
+    }
+
+    fn captured_drift_error() -> DbError {
+        DbError::MigrationDrift {
+            version: 1,
+            expected_name: Some("init_schema".to_owned()),
+            actual_name: "init_schema".to_owned(),
+            expected_checksum: Some(
+                "blake3:d6c4d1a45780310b2d7cb218f35872c216d77192dc086b8da050d0496c61f449"
+                    .to_owned(),
+            ),
+            actual_checksum:
+                "blake3:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+        }
+    }
+
+    fn sql_error(kind: sqlmodel_core::error::QueryErrorKind, message: &str) -> DbError {
+        DbError::SqlModel {
+            operation: DbOperation::Query,
+            source: Box::new(sqlmodel_core::Error::Query(
+                sqlmodel_core::error::QueryError {
+                    kind,
+                    sql: None,
+                    sqlstate: None,
+                    message: message.to_owned(),
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    source: None,
+                },
+            )),
+        }
+    }
 
     #[test]
-    fn migration_history_drift_is_not_corruption_or_pending_migration() {
-        let result = check(&"migration history drifted for version 42: expected abc, found def");
+    fn the_captured_migration_drift_routes_to_drift_not_corruption_or_pending() {
+        let result = check(&captured_drift_error());
+        assert_eq!(result.message, CAPTURED_DRIFT_MESSAGE);
         assert_eq!(result.name, "database");
         assert_eq!(result.error_code, Some(error_codes::MIGRATION_DRIFT));
         assert!(!result.is_topline_healthy());
@@ -85,76 +145,119 @@ mod tests {
             (FixMode::AutoGuidance, Some("database_migration_drift"))
         );
         assert_ne!(result.error_code, Some(error_codes::MIGRATION_REQUIRED));
+        assert_ne!(result.error_code, Some(error_codes::DATABASE_CORRUPTED));
     }
 
     #[test]
-    fn known_writer_and_engine_lock_failures_select_wait_only_recovery() {
-        for message in [
-            "database write lock holder made no progress for 38000ms",
-            "database write lock acquisition timed out after 30000ms",
-            "database group-commit gate acquisition timed out after 30000ms",
-            "database is locked",
-            "database is locked: active transaction",
-            "database table is locked",
-            "database table is locked: memories",
-            "  DATABASE IS LOCKED",
+    fn the_captured_held_lock_and_typed_contention_select_wait_only_recovery() {
+        let captured = check(&captured_lock_error());
+        assert_eq!(captured.message, CAPTURED_LOCK_MESSAGE);
+        let deadline = crate::db::write_lock_deadline_error(
+            "/tmp/ws/.ee/ee.write.lock".into(),
+            Duration::from_secs(300),
+            &"Resource temporarily unavailable (os error 11)",
+        );
+        for (label, result) in [
+            ("captured stagnant holder", captured),
+            ("flock wait deadline", check(&deadline)),
+            (
+                "typed busy timeout",
+                check(&sql_error(
+                    sqlmodel_core::error::QueryErrorKind::Timeout,
+                    "database is locked",
+                )),
+            ),
+            (
+                "typed deadlock",
+                check(&sql_error(
+                    sqlmodel_core::error::QueryErrorKind::Deadlock,
+                    "deadlock detected",
+                )),
+            ),
         ] {
-            let result = check(&message);
             assert_eq!(
                 result.error_code,
                 Some(error_codes::DATABASE_LOCKED),
-                "{message}"
+                "{label}"
             );
-            assert!(!result.is_topline_healthy());
-            assert_eq!(
-                fix_mode_for_check(Some("EE-E201"), "database", true),
-                (FixMode::AutoGuidance, Some("database_locked"))
-            );
+            assert!(result.repair.is_some(), "{label}");
+            assert!(!result.is_topline_healthy(), "{label}");
         }
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E201"), "database", true),
+            (FixMode::AutoGuidance, Some("database_locked"))
+        );
     }
 
+    /// Text never manufactures a route: only the error's kind does. Each of
+    /// these carries lock or drift words, or is an unknown failure, and none
+    /// may be read as a lock, as drift, or as corruption.
     #[test]
-    fn unrelated_lock_words_and_unknown_storage_failures_do_not_infer_corruption() {
-        for message in [
-            "permission denied opening the database",
-            "I/O error while reading a page",
-            "failed to open /private/database-is-locked/ee.db",
-            "query contains 'database is locked'",
-            "migration_drift is a user-supplied identifier",
-            "storage engine returned an unrecognized error",
-            "",
-        ] {
-            let result = check(&message);
+    fn words_in_untyped_errors_do_not_infer_a_lock_drift_or_corruption() {
+        let failures: Vec<(&str, CheckResult)> = vec![
+            (
+                "flock failure that is not contention",
+                check(&DbError::InvalidPath {
+                    operation: DbOperation::BeginTransaction,
+                    path: "/tmp/ws/.ee/ee.write.lock".into(),
+                    message: "database write lock acquisition failed: EPERM".to_owned(),
+                }),
+            ),
+            (
+                "lock words on another operation",
+                check(&DbError::InvalidPath {
+                    operation: DbOperation::OpenReadWrite,
+                    path: "/tmp/database write lock holder made no progress/ee.db".into(),
+                    message: "database write lock holder made no progress".to_owned(),
+                }),
+            ),
+            (
+                "lock words under a non-contention query kind",
+                check(&sql_error(
+                    sqlmodel_core::error::QueryErrorKind::Syntax,
+                    "near \"database is locked\": syntax error",
+                )),
+            ),
+            (
+                "malformed row naming drift",
+                check(&DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "EE-E040 migration_drift: applied migration 1 drifted".to_owned(),
+                }),
+            ),
+            (
+                "workspace-layer error quoting both captures",
+                check(&DomainError::Storage {
+                    message: format!("{CAPTURED_LOCK_MESSAGE}; {CAPTURED_DRIFT_MESSAGE}"),
+                    repair: None,
+                }),
+            ),
+        ];
+        for (label, result) in failures {
             assert_eq!(
                 result.error_code,
                 Some(error_codes::DATABASE_UNAVAILABLE),
-                "{message}"
+                "{label}"
             );
-            assert!(!result.is_topline_healthy());
+            assert_ne!(
+                result.error_code,
+                Some(error_codes::DATABASE_CORRUPTED),
+                "{label}"
+            );
+            // CheckResult::error fills repair from the code's default, so an
+            // untyped failure carries the "unavailable" guidance, never the
+            // lock's wait-for-the-writer guidance.
             assert_eq!(
-                fix_mode_for_check(Some("EE-E207"), "database", true),
-                (FixMode::AutoGuidance, Some("database_unavailable"))
+                result.repair,
+                error_codes::DATABASE_UNAVAILABLE.default_repair,
+                "{label}"
             );
+            assert!(!result.is_topline_healthy(), "{label}");
         }
-    }
-
-    #[test]
-    fn display_errors_are_supported_without_an_error_type_conversion() {
-        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
-        let result = check(&error);
-        assert_eq!(result.error_code, Some(error_codes::DATABASE_UNAVAILABLE));
-        assert!(result.message.contains("permission denied"));
-    }
-
-    #[test]
-    fn quoted_or_prefixed_migration_words_do_not_manufacture_a_drift_diagnosis() {
-        for message in [
-            "query contains migration history drifted for version 42",
-            "failed to read /migration-history-drifted/ee.db",
-            "unknown migration engine failure",
-        ] {
-            assert_eq!(classify_message(message), error_codes::DATABASE_UNAVAILABLE);
-        }
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E207"), "database", true),
+            (FixMode::AutoGuidance, Some("database_unavailable"))
+        );
     }
 
     #[test]
@@ -240,10 +343,20 @@ mod tests {
 
     #[test]
     fn unresolved_checks_expose_static_causes_not_private_error_details() {
-        let checks = [
-            check(&"database write lock holder made no progress for PRIVATEms"),
-            check(&"migration history drifted for version 42: PRIVATE-MIGRATION-HISTORY"),
-        ];
+        let private_lock = crate::db::write_lock_stagnant_error(
+            "/tmp/PRIVATE-workspace/.ee/ee.write.lock".into(),
+            Duration::from_secs(38),
+            &"PRIVATE os detail",
+        );
+        let mut private_drift = captured_drift_error();
+        if let DbError::MigrationDrift {
+            actual_checksum, ..
+        } = &mut private_drift
+        {
+            *actual_checksum = "PRIVATE-MIGRATION-HISTORY".to_owned();
+        }
+        let checks = [check(&private_lock), check(&private_drift)];
+        assert!(checks.iter().all(|check| check.message.contains("PRIVATE")));
         let pending = unresolved_core_checks(&checks);
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].fix_finding, Some("database_locked"));
@@ -265,13 +378,17 @@ mod tests {
             gather_qos_posture, singleflight_posture_report,
         };
 
-        for (message, finding) in [
-            ("database is locked", "database_locked"),
-            ("permission denied", "database_unavailable"),
+        for (database_check, finding) in [
+            (check(&captured_lock_error()), "database_locked"),
             (
-                "migration history drifted for version 42: expected abc, found def",
-                "database_migration_drift",
+                check(&DbError::InvalidPath {
+                    operation: DbOperation::OpenReadWrite,
+                    path: "/tmp/ws/.ee/ee.db".into(),
+                    message: "permission denied".to_owned(),
+                }),
+                "database_unavailable",
             ),
+            (check(&captured_drift_error()), "database_migration_drift"),
         ] {
             let report = DoctorReport {
                 version: "test",
@@ -287,7 +404,7 @@ mod tests {
                     Path::new("obs/flight_recorder").to_path_buf(),
                 ),
                 checks: vec![
-                    check(&message),
+                    database_check,
                     CheckResult::warning(
                         "search_index",
                         "inspection failed",

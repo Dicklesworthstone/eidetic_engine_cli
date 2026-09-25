@@ -2950,6 +2950,21 @@ For a syntactically valid check, missing or unhealthy optional memory/token
 storage is reported in `degraded[]` while both `exitCode` and the process status
 remain `0`.
 
+Command checks also retrieve explicit rule memories and live native procedural
+rules, even when no built-in destructive-command pattern matches. Stored
+memories appear in `matchedMemories` with their `memoryId`; native rules appear
+in `matches` with their own `ruleId` and `source.kind: "procedural_rule"`.
+Native lexical matches label `pattern` as `text-overlap:<terms>`, not a shell
+glob. Retired, expired, future-valid, sealed, or non-public memory bodies do not
+become advice. File/directory-scoped rules need explicit task targets and are
+not widened to this command-only surface. This read-only lookup does not load
+embedding models or turn raw session transcripts into instructions.
+
+`ee preflight check --json` deliberately retains its hook-facing
+`ee.preflight.guard.v1` payload rather than wrapping it in `ee.response.v2`.
+Its stable top-level `exitCode`, `matches`, `matchedMemories`, and `degraded`
+fields are advisory context, not an execution permission or denial protocol.
+
 ### A crowded checkout has unknown dirty files
 
 Use the read-only hygiene report before staging anything:

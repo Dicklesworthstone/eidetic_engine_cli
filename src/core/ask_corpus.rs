@@ -18,11 +18,56 @@ use super::{AskCandidate, AskContradiction, AskNativeSource, load_scoped_contrad
 #[path = "ask_admission.rs"]
 mod admission;
 
+#[path = "ask_memory_admission.rs"]
+mod memory_admission;
+
+use memory_admission::load_memory_revisions;
+
 #[derive(Clone, Debug)]
 pub struct AskCorpus {
     pub candidates: Vec<AskCandidate>,
     pub contradictions: Vec<AskContradiction>,
     pub native_sources: BTreeMap<String, AskNativeSource>,
+}
+
+/// Load live, public command advice without searching transcripts or indexes.
+///
+/// Preflight uses the same source authority as answers: current revisions,
+/// author validity, seals, public-body screening, and workspace-owned native
+/// rule lineage. It must not acquire evidence from an index or turn imported
+/// transcript prose into an instruction. File/directory rules require explicit
+/// task targets and are therefore withheld on this command-only surface.
+pub(crate) fn load_command_advice_corpus(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+) -> Result<AskCorpus, DomainError> {
+    let snapshot = AskReadSnapshot::begin(connection)?;
+    let stored =
+        memory_admission::load_command_advice_revisions(connection, workspace_id, reference_time)?;
+    let mut candidates = stored
+        .into_iter()
+        .filter(|memory| {
+            matches!(
+                memory.kind.as_str(),
+                "risk" | "anti-pattern" | "failure" | "rule"
+            )
+        })
+        .filter_map(admission::into_candidate)
+        .collect();
+    let scope = MemoryScopeContext {
+        scope: MemoryScope::Workspace,
+        strict_scope: false,
+        current_agent: None,
+        team_members: BTreeSet::new(),
+    };
+    let native_sources = load_rules(connection, workspace_id, &scope, &[], &mut candidates)?;
+    snapshot.finish()?;
+    Ok(AskCorpus {
+        candidates,
+        contradictions: Vec::new(),
+        native_sources,
+    })
 }
 
 /// Load current evidence for one already-resolved workspace.
@@ -161,18 +206,9 @@ fn load_corpus_with_path_boundary(
 ) -> Result<AskCorpus, DomainError> {
     let snapshot = AskReadSnapshot::begin(connection)?;
     let paths = normalize_ask_targets(connection, workspace_id, paths)?;
-    let stored = load_memory_revisions(connection, workspace_id)?;
+    let stored = load_memory_revisions(connection, workspace_id, reference_time)?;
     let scope = scope_context()?;
     after_memory_read()?;
-    // V123 separates revision identity from author expiry. Neither a future
-    // valid_to nor an unexpectedly populated sealed body grants admission.
-    // Read both authority tables in bulk inside this same body/link snapshot;
-    // never reopen the store or perform one authority query per memory.
-    let withheld = if stored.is_empty() {
-        BTreeSet::new()
-    } else {
-        withheld_memory_ids(connection, workspace_id, reference_time)?
-    };
     let mut tags = std::collections::BTreeMap::new();
     if scope.scope == MemoryScope::Global {
         let ids: Vec<_> = stored.iter().map(|memory| memory.id.as_str()).collect();
@@ -191,7 +227,6 @@ fn load_corpus_with_path_boundary(
             memory.valid_to.as_deref(),
             reference_time,
         )? && memory.workspace_id == workspace_id
-            && !withheld.contains(&memory.id)
             && scope.memory_in_scope_with_tags(
                 &memory,
                 tags.get(&memory.id).map(Vec::as_slice).unwrap_or(&[]),
@@ -223,50 +258,6 @@ fn load_corpus_with_path_boundary(
 }
 
 const ASK_MEMORY_REVISION_PAGE_SIZE: usize = 256;
-
-/// Select non-tombstoned identities, not only the currently unsuperseded heads.
-/// `list_memories(..., false)` applies `superseded_at IS NULL` in storage, which
-/// loses both pre-cutoff history and malformed revision markers before this
-/// reader can validate them. Opening all history instead would unnecessarily
-/// hydrate tombstoned bodies. Load only eligible identities in bind-safe pages,
-/// using the canonical stored-memory decoder inside the caller's one snapshot.
-fn load_memory_revisions(
-    connection: &DbConnection,
-    workspace_id: &str,
-) -> Result<Vec<crate::db::StoredMemory>, DomainError> {
-    use sqlmodel_core::Value;
-
-    let rows = connection
-        .query(
-            "SELECT id FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC",
-            &[Value::Text(workspace_id.to_owned())],
-        )
-        .map_err(|_| corpus_storage_error())?;
-    let ids = rows
-        .iter()
-        .map(|row| match row.get(0) {
-            Some(Value::Text(id)) => Ok(id.as_str()),
-            _ => Err(corpus_storage_error()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut memories = Vec::with_capacity(ids.len());
-    for page in ids.chunks(ASK_MEMORY_REVISION_PAGE_SIZE) {
-        let mut loaded = connection
-            .get_memories_batch(page)
-            .map_err(|_| corpus_storage_error())?;
-        for id in page {
-            let memory = loaded.remove(*id).ok_or_else(corpus_storage_error)?;
-            if memory.id != *id
-                || memory.workspace_id != workspace_id
-                || memory.tombstoned_at.is_some()
-            {
-                return Err(corpus_storage_error());
-            }
-            memories.push(memory);
-        }
-    }
-    Ok(memories)
-}
 
 /// Current source authority is separate from validity, trust, and relevance.
 /// This deliberately uses the repository's seal classifier, not a second
@@ -983,7 +974,7 @@ mod source_authority_tests {
         .unwrap();
         let audits = db.count_table_rows("audit_log").unwrap();
         for reference in ["2021-01-01T00:00:00Z", CUTOFF] {
-            let loaded = load_memory_revisions(&db, WORKSPACE).unwrap();
+            let loaded = load_memory_revisions(&db, WORKSPACE, at(reference)).unwrap();
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].id, CURRENT);
             let corpus = load_current_ask_corpus(&db, WORKSPACE, at(reference)).unwrap();
@@ -993,7 +984,7 @@ mod source_authority_tests {
         }
         assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
         assert!(
-            load_memory_revisions(&db, "' OR 1 = 1 --")
+            load_memory_revisions(&db, "' OR 1 = 1 --", at(CUTOFF))
                 .unwrap()
                 .is_empty()
         );

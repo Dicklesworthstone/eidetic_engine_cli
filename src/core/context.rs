@@ -2254,8 +2254,11 @@ pub fn run_context_pack_with_performance(
 /// Optional retrieval adapter; pack policy, budgets, hydration, and all writes
 /// remain in the canonical pipeline. An unavailable adapter returns its actual
 /// degradation and the pipeline performs ordinary in-process retrieval.
+/// The boolean requires an already-loaded local model for a read-only semantic
+/// request; a provider must not initialize or download a model when it is true.
 pub(crate) type ContextSearchProvider<'a> = dyn Fn(
         &SearchOptions,
+        bool,
     )
         -> Result<crate::core::search::PackSearchHandoff, crate::core::search::SearchDegradation>
     + Sync
@@ -2903,26 +2906,36 @@ async fn run_context_pack_with_performance_inner(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
     };
-    // The daemon handoff has no cached-only model capability. A read-only
-    // semantic request must prepare its own local model so a worker cannot
-    // trigger first-use downloads or submit the query to a remote embedder.
+    // A read-only semantic handoff is allowed only through an explicit
+    // already-loaded local-model capability. Readiness alone is not proof:
+    // the provider must request it and the returned handoff must attest it.
     let read_only_embeddings = !options.persist_pack && options.source_mode.uses_embeddings();
-    let mut remote_search =
-        if let Some(provider) = search_provider.filter(|_| !read_only_embeddings) {
-            let remote_start = Instant::now();
-            let result = provider(&search_options);
-            trace.record_elapsed("daemonRetrieval", remote_start);
-            control.check()?;
-            match result {
-                Ok(handoff) => Some(handoff),
-                Err(fallback) => {
-                    push_search_degradations(&mut degraded, &[fallback]);
-                    None
-                }
+    let mut remote_search = if let Some(provider) = search_provider {
+        let remote_start = Instant::now();
+        let result = provider(&search_options, read_only_embeddings);
+        trace.record_elapsed("daemonRetrieval", remote_start);
+        control.check()?;
+        match result {
+            Ok(handoff) if !read_only_embeddings || handoff.has_cached_local_embedder() => {
+                Some(handoff)
             }
-        } else {
-            None
-        };
+            Ok(_) => {
+                push_search_degradations(
+                    &mut degraded,
+                    &[crate::core::search::SearchDegradation::daemon_fallback(
+                        "daemon did not attest an already-loaded local semantic model",
+                    )],
+                );
+                None
+            }
+            Err(fallback) => {
+                push_search_degradations(&mut degraded, &[fallback]);
+                None
+            }
+        }
+    } else {
+        None
+    };
     if remote_search.is_none() && options.persist_pack {
         reconcile_search_index_before_read_with_cx(control.cx, &search_options, true).await;
     }

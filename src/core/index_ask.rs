@@ -7,6 +7,161 @@
 use super::*;
 use crate::core::remote_embed::{EmbedBackendSelection, configured_embed_backend};
 
+/// Proof of the concrete, already-loaded local model admitted for one daemon
+/// request. This is model identity, not a cache-hit or a claim that inference
+/// succeeded. Runtime retrieval still owns the executed backend in its report.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CachedLocalEmbedderAttestation {
+    backend: EmbedBackend,
+    model_id: String,
+    model_hash: String,
+    dimension: u32,
+}
+
+impl CachedLocalEmbedderAttestation {
+    pub(crate) fn matches_client_configuration(&self) -> bool {
+        self.is_valid()
+            && cached_daemon_model_allowed(
+                &default_embedder_settings(),
+                configured_embed_backend() == EmbedBackendSelection::Remote,
+            )
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        let descriptor = EmbedderDescriptor::potion();
+        self.backend == EmbedBackend::NeuralLocal
+            && self.model_id == descriptor.id
+            && Some(self.dimension) == u32::try_from(descriptor.dimension).ok()
+            && self.model_hash
+                == descriptor_content_hash(
+                    &descriptor,
+                    ModelProvider::Model2Vec,
+                    Some(&ModelManifest::potion_128m()),
+                )
+    }
+
+    fn for_loaded(embedder: &dyn crate::search::Embedder) -> Option<Self> {
+        if !embedder.is_ready()
+            || !embedder.is_semantic()
+            || embedder.category() != ModelCategory::StaticEmbedder
+            || embedder.tier() != ModelTier::Fast
+        {
+            return None;
+        }
+        let attestation = Self {
+            backend: EmbedBackend::NeuralLocal,
+            model_id: embedder.id().to_owned(),
+            model_hash: active_embedder_fingerprint(embedder, ModelProvider::Model2Vec)
+                .content_hash,
+            dimension: u32::try_from(embedder.dimension()).ok()?,
+        };
+        attestation.is_valid().then_some(attestation)
+    }
+}
+
+pub(crate) struct CachedLocalEmbedder {
+    pub(crate) embedder: Arc<dyn crate::search::Embedder>,
+    pub(crate) attestation: CachedLocalEmbedderAttestation,
+}
+
+/// Unlike cached-on-disk preparation below, this never loads weights, creates
+/// a lazy model, downloads, initializes a process cache, or contacts a remote
+/// service. An unavailable/busy cache is a refusal, not an invitation to warm.
+pub(crate) fn already_loaded_local_embedder_for_workspace(
+    workspace_path: &Path,
+    database_path: &Path,
+) -> Result<Option<CachedLocalEmbedder>, DbError> {
+    if configured_embed_backend() == EmbedBackendSelection::Remote {
+        return Ok(None);
+    }
+    let connection = DbConnection::open_file_read_only(database_path)?;
+    let Some(workspace_id) = workspace_id_for_index_status(&connection, workspace_path)? else {
+        return Ok(None);
+    };
+    already_loaded_local_selection(
+        Some((&connection, &workspace_id)),
+        &default_embedder_settings(),
+        false,
+        &DEFAULT_SEARCH_EMBEDDER,
+        &REGISTERED_MODEL2VEC_CACHE,
+    )
+}
+
+fn already_loaded_local_selection(
+    registry: Option<(&DbConnection, &str)>,
+    settings: &EeEmbedderSettings,
+    remote_selected: bool,
+    default: &OnceLock<DefaultSearchEmbedder>,
+    registered: &OnceLock<RegisteredModel2VecCache>,
+) -> Result<Option<CachedLocalEmbedder>, DbError> {
+    if remote_selected {
+        return Ok(None);
+    }
+    if settings.local_source != EmbedModelSource::Configured
+        && let Some((connection, workspace_id)) = registry
+    {
+        // Run the same live registry/path/hash/dimension admission as ordinary
+        // retrieval, but replace its loader with an exact-identity cache probe.
+        // A replaced registration must never inherit the previous model.
+        match resolve_registered_model2vec(connection, workspace_id, |identity| {
+            Ok(already_loaded_registered(registered, &identity))
+        })? {
+            RegisteredModel2VecResolution::Ready(embedder) => {
+                return Ok(embedder.and_then(attest_loaded_local));
+            }
+            RegisteredModel2VecResolution::Rejected(_) => return Ok(None),
+            RegisteredModel2VecResolution::NotRegistered
+            | RegisteredModel2VecResolution::BundledDefaultDeclared => {}
+        }
+    }
+    let Some(selection) = default.get() else {
+        return Ok(None);
+    };
+    let source_matches = selection.model_resolution.source == settings.local_source
+        || (settings.local_source == EmbedModelSource::Cache
+            && selection.model_resolution.source == EmbedModelSource::Downloaded);
+    if !source_matches || selection.local_model_load_failed() {
+        return Ok(None);
+    }
+    let Some(loaded) = attest_loaded_local(selection.stack.fast_arc()) else {
+        return Ok(None);
+    };
+    // Keep the current local artifact admissibility gate. Verification may
+    // read a stale receipt's files, but it cannot load a model or write one.
+    Ok(verified_default_model_dir(settings).map(|_| loaded))
+}
+
+fn attest_loaded_local(embedder: Arc<dyn crate::search::Embedder>) -> Option<CachedLocalEmbedder> {
+    let attestation = CachedLocalEmbedderAttestation::for_loaded(embedder.as_ref())?;
+    Some(CachedLocalEmbedder {
+        embedder,
+        attestation,
+    })
+}
+
+fn already_loaded_registered(
+    registered: &OnceLock<RegisteredModel2VecCache>,
+    identity: &RegisteredModel2VecIdentity,
+) -> Option<Arc<dyn crate::search::Embedder>> {
+    registered
+        .get()
+        .and_then(|cache| cache.current.try_lock().ok())
+        .and_then(|entry| {
+            entry.as_ref().and_then(|entry| {
+                (&entry.identity == identity).then(|| Arc::clone(&entry.embedder))
+            })
+        })
+}
+
+fn cached_daemon_model_allowed(settings: &EeEmbedderSettings, remote_selected: bool) -> bool {
+    // A warm peer must not override the invoking process's explicit remote or
+    // invalid local-model choice. This verifies files only, never loads them.
+    !remote_selected
+        && (settings.local_source != EmbedModelSource::Configured
+            || verified_default_model_dir(settings).is_some())
+}
+
 pub(crate) fn local_read_only_embedder(
     connection: &DbConnection,
     workspace_id: &str,
@@ -167,6 +322,207 @@ mod tests {
     #[test]
     fn hash_fallback_is_not_a_semantic_model() {
         assert!(semantic_only(hash_fallback_embedder_stack().fast_arc()).is_none());
+    }
+
+    #[test]
+    fn already_loaded_probe_does_not_initialize_either_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = EeEmbedderSettings {
+            model_root: root.path().join("absent"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
+        };
+        let default = OnceLock::new();
+        let registered = OnceLock::new();
+        assert!(
+            already_loaded_local_selection(None, &settings, false, &default, &registered)
+                .unwrap()
+                .is_none()
+        );
+        assert!(default.get().is_none());
+        assert!(registered.get().is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn already_loaded_registered_probe_is_exact_nonblocking_and_noninitializing() {
+        let registered = OnceLock::new();
+        let identity = RegisteredModel2VecIdentity {
+            canonical_source: PathBuf::from("/verified/model"),
+            content_hash: "blake3:cache-identity".to_owned(),
+            dimension: 256,
+            distance_metric: "cosine",
+        };
+        assert!(already_loaded_registered(&registered, &identity).is_none());
+        assert!(registered.get().is_none());
+        let cache = registered.get_or_init(RegisteredModel2VecCache::default);
+        let expected = cache
+            .get_or_try_insert_with(identity.clone(), || {
+                Some(hash_fallback_embedder_stack().fast_arc())
+            })
+            .unwrap();
+        // Exercise the real cache, not semantic admission: a ready hash model
+        // is still rejected separately by attest_loaded_local.
+        let cached = already_loaded_registered(&registered, &identity).unwrap();
+        assert!(Arc::ptr_eq(&expected, &cached));
+        let mut replaced = identity.clone();
+        replaced.canonical_source = PathBuf::from("/replacement/model");
+        assert!(already_loaded_registered(&registered, &replaced).is_none());
+        let mut changed_dimension = identity.clone();
+        changed_dimension.dimension = 128;
+        assert!(already_loaded_registered(&registered, &changed_dimension).is_none());
+        let _loading = cache.current.lock().unwrap();
+        assert!(already_loaded_registered(&registered, &identity).is_none());
+    }
+
+    #[test]
+    fn already_loaded_client_policy_preserves_explicit_model_choices() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = EeEmbedderSettings {
+            model_root: root.path().join("absent"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
+        };
+        assert!(cached_daemon_model_allowed(&settings, false));
+        assert!(!cached_daemon_model_allowed(&settings, true));
+        settings.local_source = EmbedModelSource::Configured;
+        assert!(!cached_daemon_model_allowed(&settings, false));
+        assert!(!cached_daemon_model_allowed(&settings, true));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn already_loaded_probe_refuses_remote_before_registry_or_cache_access() {
+        let database = DbConnection::open_memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let settings = EeEmbedderSettings {
+            model_root: root.path().join("absent"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
+        };
+        let default = OnceLock::new();
+        let registered = OnceLock::new();
+        // This database has no schema: even reading the registry would fail.
+        assert!(
+            already_loaded_local_selection(
+                Some((&database, "workspace")),
+                &settings,
+                true,
+                &default,
+                &registered,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(default.get().is_none());
+        assert!(registered.get().is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn already_loaded_probe_refuses_ready_hash_and_pending_lazy_models() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = EeEmbedderSettings {
+            model_root: root.path().join("absent"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
+        };
+        let hash = hash_fallback_embedder_stack().fast_arc();
+        assert!(hash.is_ready());
+        assert!(attest_loaded_local(hash).is_none());
+        let default = OnceLock::new();
+        assert!(
+            default
+                .set(ee_auto_download_embedder(settings.model_root.clone()))
+                .is_ok()
+        );
+        assert!(
+            already_loaded_local_selection(None, &settings, false, &default, &OnceLock::new())
+                .unwrap()
+                .is_none()
+        );
+        let lazy = default.get().unwrap().lazy_model2vec.as_ref().unwrap();
+        assert!(!lazy.is_ready());
+        assert!(!lazy.failed());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cached_local_attestation_rejects_model_identity_drift() {
+        let descriptor = EmbedderDescriptor::potion();
+        let value = serde_json::json!({
+            "backend": "neural_local",
+            "modelId": descriptor.id,
+            "modelHash": descriptor_content_hash(
+                &descriptor, ModelProvider::Model2Vec, Some(&ModelManifest::potion_128m()),
+            ),
+            "dimension": descriptor.dimension,
+        });
+        let attestation: CachedLocalEmbedderAttestation =
+            serde_json::from_value(value.clone()).unwrap();
+        assert!(attestation.is_valid());
+        for (key, wrong) in [
+            ("backend", serde_json::json!("hash_fallback")),
+            ("modelId", serde_json::json!("other-model")),
+            ("modelHash", serde_json::json!("blake3:wrong")),
+            ("dimension", serde_json::json!(0)),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = wrong;
+            let changed: CachedLocalEmbedderAttestation = serde_json::from_value(changed).unwrap();
+            assert!(!changed.is_valid(), "accepted changed {key}");
+        }
+        let mut extra = value;
+        extra["untrustedClaim"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<CachedLocalEmbedderAttestation>(extra).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the real potion-multilingual-128M fixture"]
+    fn real_potion_cached_daemon_model_reuses_the_loaded_allocation() {
+        let root = crate::config::env_registry::read_os(
+            crate::config::env_registry::EnvVar::EmbedModelFixtureDir,
+        )
+        .map(PathBuf::from)
+        .expect("EE_EMBED_MODEL_FIXTURE_DIR must name the real model");
+        let settings = EeEmbedderSettings {
+            model_root: root,
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Configured,
+        };
+        let directory = verified_default_model_dir(&settings).expect("verified fixture");
+        let expected: Arc<dyn crate::search::Embedder> =
+            Model2VecEmbedder::load_shared_with_name(&directory, POTION_MODEL_NAME).unwrap();
+        let default = OnceLock::new();
+        assert!(
+            default
+                .set(DefaultSearchEmbedder::ready(
+                    EmbedderStack::from_parts(Arc::clone(&expected), None),
+                    EmbedModelResolution::ready(EmbedModelSource::Configured),
+                ))
+                .is_ok()
+        );
+        let registered = OnceLock::new();
+        let admitted =
+            already_loaded_local_selection(None, &settings, false, &default, &registered)
+                .unwrap()
+                .expect("warm local model");
+        assert!(Arc::ptr_eq(&expected, &admitted.embedder));
+        assert!(admitted.attestation.is_valid());
+        assert!(registered.get().is_none());
+        let cx = asupersync::Cx::for_testing();
+        let (direct, delegated) = crate::core::run_cli_future(async {
+            (
+                expected.embed(&cx, "durable agent memory").await.unwrap(),
+                admitted
+                    .embedder
+                    .embed(&cx, "durable agent memory")
+                    .await
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+        assert_eq!(direct, delegated);
     }
 
     #[test]

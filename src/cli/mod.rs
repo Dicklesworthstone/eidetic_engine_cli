@@ -222,8 +222,8 @@ use crate::core::preflight::{
 };
 use crate::core::preflight_guard::{
     PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport, PreflightGuardRule,
-    RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
-    preflight_patterns_unavailable_degradation, run_preflight_guard,
+    RuleSource, no_risk_memories_degradation, preflight_patterns_unavailable_degradation,
+    run_preflight_guard,
 };
 use crate::core::profile::{
     HostProfileProbeOptions, HostResourceProbeReport, MemoryProbe, OperatingProfile,
@@ -26694,9 +26694,6 @@ fn attach_preflight_memory_matches(
     database: Option<&Path>,
     report: &mut PreflightGuardReport,
 ) {
-    if report.matches.is_empty() {
-        return;
-    }
     let (connection, workspace_id) =
         match open_preflight_memory_database_for_read(workspace, database) {
             Ok(opened) => opened,
@@ -26710,17 +26707,24 @@ fn attach_preflight_memory_matches(
                 return;
             }
         };
-    let memories = match connection.list_memories(&workspace_id, None, false) {
-        Ok(memories) => memories,
-        Err(error) => {
+    let advice = match crate::core::preflight_guard::load_preflight_advice(
+        &connection,
+        &workspace_id,
+        &report.command,
+        chrono::Utc::now(),
+    ) {
+        Ok(advice) => advice,
+        Err(_) => {
             let mut degraded = no_risk_memories_degradation();
-            degraded.message = format!("Failed to query preflight risk memories: {error}");
+            degraded.message = "Live preflight memory and rule advice is unavailable; built-in advisory matches remain available.".to_owned();
             report.degraded.push(degraded);
             return;
         }
     };
-    report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
-    if report.matched_memories.is_empty() {
+    let has_advice = !advice.memories.is_empty() || !advice.rules.is_empty();
+    report.matched_memories = advice.memories;
+    report.matches.extend(advice.rules);
+    if !has_advice && !report.matches.is_empty() {
         report.degraded.push(no_risk_memories_degradation());
     }
 }
@@ -48995,6 +48999,7 @@ enum DaemonSearchFallbackReason {
     CapabilityMethodMissing,
     /// The daemon advertises search but is still loading its search stack.
     DaemonWarming,
+    CachedLocalEmbedderUnavailable,
     CapabilityAuthorizationDrift,
     CapabilityMethodSchemaDrift,
     RequestEncodingFailed,
@@ -49019,6 +49024,9 @@ impl DaemonSearchFallbackReason {
             Self::CapabilityMethodMissing => "search method not advertised",
             Self::DaemonWarming => {
                 "daemon is still warming its search stack; retry once `ee daemon status` reports it ready"
+            }
+            Self::CachedLocalEmbedderUnavailable => {
+                "daemon has no matching already-loaded local semantic model; using read-only local retrieval"
             }
             Self::CapabilityAuthorizationDrift => "search authorization drift",
             Self::CapabilityMethodSchemaDrift => "search method schema drift",
@@ -49186,6 +49194,7 @@ fn search_via_daemon_before(
         field_filters,
         explain_performance,
         false,
+        false,
         deadline,
     )?;
     let renderings = DaemonSearchResult::from_value(result)
@@ -49198,6 +49207,7 @@ fn search_via_daemon_before(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn search_daemon_response_before(
     socket_path: &std::path::Path,
     options: &SearchOptions,
@@ -49205,6 +49215,7 @@ fn search_daemon_response_before(
     field_filters: &[String],
     explain_performance: bool,
     pack_retrieval: bool,
+    require_cached_local: bool,
     deadline: std::time::Instant,
 ) -> Result<serde_json::Value, DaemonSearchFallbackReason> {
     use crate::daemon::protocol::DaemonRequest;
@@ -49265,7 +49276,8 @@ fn search_daemon_response_before(
         kind_filter,
         field_filters,
         explain_performance,
-    );
+    )
+    .requiring_cached_local_embedder(require_cached_local);
     let params = serde_json::to_value(params)
         .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
     let workspace_id = options.workspace_path.display().to_string();
@@ -49285,8 +49297,14 @@ fn search_daemon_response_before(
             ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
             _ => DaemonSearchFallbackReason::SearchRoundTripFailed,
         })?;
-    if response.error.is_some() {
-        return Err(DaemonSearchFallbackReason::SearchMethodError);
+    if let Some(error) = response.error {
+        return Err(
+            if error.code == crate::daemon::server::DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE {
+                DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable
+            } else {
+                DaemonSearchFallbackReason::SearchMethodError
+            },
+        );
     }
     response
         .result
@@ -49303,7 +49321,7 @@ fn run_context_pack_with_daemon_retrieval(
     if !use_daemon {
         return run_context_pack_with_performance(options, command);
     }
-    let provider = |search_options: &SearchOptions| {
+    let provider = |search_options: &SearchOptions, require_cached_local: bool| {
         if !options.filters.filters.is_empty() {
             return Err(daemon_search_fallback_degradation(
                 DaemonSearchFallbackReason::UnsupportedCliOption(
@@ -49316,7 +49334,8 @@ fn run_context_pack_with_daemon_retrieval(
                 DaemonSearchFallbackReason::UnsupportedCliOption("--mesh remains in-process"),
             ));
         }
-        pack_search_via_daemon(search_options, socket).map_err(daemon_search_fallback_degradation)
+        pack_search_via_daemon(search_options, socket, require_cached_local)
+            .map_err(daemon_search_fallback_degradation)
     };
     crate::core::context::run_context_pack_with_search_provider(options, command, &provider)
 }
@@ -49325,7 +49344,14 @@ fn run_context_pack_with_daemon_retrieval(
 fn pack_search_via_daemon(
     options: &SearchOptions,
     socket: Option<&Path>,
+    require_cached_local: bool,
 ) -> Result<crate::core::search::PackSearchHandoff, DaemonSearchFallbackReason> {
+    if require_cached_local
+        && crate::core::remote_embed::configured_embed_backend()
+            == crate::core::remote_embed::EmbedBackendSelection::Remote
+    {
+        return Err(DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable);
+    }
     if matches!(
         options.memory_scope,
         MemoryScope::SelfOnly | MemoryScope::Team
@@ -49345,45 +49371,56 @@ fn pack_search_via_daemon(
     let deadline = std::time::Instant::now() + timeout;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result =
-            search_daemon_response_before(&socket, &options, None, &[], false, true, deadline)
-                .and_then(|value| {
-                    if value.get("schema").and_then(serde_json::Value::as_str)
-                        != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1)
-                        || value.as_object().is_none_or(|object| object.len() != 2)
-                    {
-                        return Err(DaemonSearchFallbackReason::SearchResponseDrift);
-                    }
-                    let handoff = value
-                        .get("handoff")
-                        .cloned()
-                        .ok_or(DaemonSearchFallbackReason::SearchResponseDrift)?;
-                    let handoff = crate::core::search::PackSearchHandoff::from_value(handoff)
-                        .map_err(DaemonSearchFallbackReason::search_response_drift)?;
-                    if !handoff.matches_request(&options) {
-                        return Err(DaemonSearchFallbackReason::SearchResponseDrift);
-                    }
-                    if !handoff.can_reuse_for_pack() {
-                        return Err(DaemonSearchFallbackReason::UnsupportedCliOption(
-                            "daemon index needs canonical in-process freshness checks",
-                        ));
-                    }
-                    // Global hits are hydrated from a separate source-of-truth
-                    // store by the in-process search path. Do not substitute
-                    // daemon-supplied bodies for that canonical admission step.
-                    if handoff.report.results.iter().any(|hit| {
-                        hit.metadata
-                            .as_ref()
-                            .and_then(|meta| meta.get("storeLane"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
-                    }) {
-                        return Err(DaemonSearchFallbackReason::UnsupportedCliOption(
-                            "global-store hit hydration remains in-process",
-                        ));
-                    }
-                    Ok(handoff)
-                });
+        let result = search_daemon_response_before(
+            &socket,
+            &options,
+            None,
+            &[],
+            false,
+            true,
+            require_cached_local,
+            deadline,
+        )
+        .and_then(|value| {
+            if value.get("schema").and_then(serde_json::Value::as_str)
+                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1)
+                || value.as_object().is_none_or(|object| object.len() != 2)
+            {
+                return Err(DaemonSearchFallbackReason::SearchResponseDrift);
+            }
+            let handoff = value
+                .get("handoff")
+                .cloned()
+                .ok_or(DaemonSearchFallbackReason::SearchResponseDrift)?;
+            let handoff = crate::core::search::PackSearchHandoff::from_value(handoff)
+                .map_err(DaemonSearchFallbackReason::search_response_drift)?;
+            if !handoff.matches_request(&options) {
+                return Err(DaemonSearchFallbackReason::SearchResponseDrift);
+            }
+            if require_cached_local && !handoff.has_cached_local_embedder() {
+                return Err(DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable);
+            }
+            if !handoff.can_reuse_for_pack() {
+                return Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                    "daemon index needs canonical in-process freshness checks",
+                ));
+            }
+            // Global hits are hydrated from a separate source-of-truth
+            // store by the in-process search path. Do not substitute
+            // daemon-supplied bodies for that canonical admission step.
+            if handoff.report.results.iter().any(|hit| {
+                hit.metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("storeLane"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
+            }) {
+                return Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                    "global-store hit hydration remains in-process",
+                ));
+            }
+            Ok(handoff)
+        });
         let _ = sender.send(result);
     });
     receiver
@@ -49395,6 +49432,7 @@ fn pack_search_via_daemon(
 fn pack_search_via_daemon(
     _options: &SearchOptions,
     _socket: Option<&Path>,
+    _require_cached_local: bool,
 ) -> Result<crate::core::search::PackSearchHandoff, DaemonSearchFallbackReason> {
     Err(DaemonSearchFallbackReason::PlatformUnsupported)
 }
@@ -92117,6 +92155,10 @@ mod tests {
             drop(connection);
             let mut readonly_hash = None;
             for read_only in [true, false] {
+                // This fixture deliberately installs the deterministic hash
+                // model. Exercise lexical daemon delegation explicitly rather
+                // than letting a read-only hybrid request silently stay local.
+                // Cached semantic admission has its own model-identity tests.
                 let mut args = vec![
                     "ee",
                     "--json",
@@ -92127,6 +92169,8 @@ mod tests {
                     "--use-daemon",
                     "--daemon-socket",
                     socket_arg,
+                    "--source-mode",
+                    "lexical-only",
                     "--max-tokens",
                     "800",
                     "--no-lod",
@@ -92258,35 +92302,40 @@ mod tests {
         server.shutdown().map_err(|error| error.to_string())?;
         result?;
         let missing = root.join(".ee/missing-pack.sock");
-        let (exit, stdout, stderr) = invoke(&[
-            "ee",
-            "--json",
-            "--workspace",
-            &workspace,
-            "pack",
-            "quasar release checksums",
-            "--use-daemon",
-            "--daemon-socket",
-            missing.to_str().ok_or("UTF-8 missing socket")?,
-            "--read-only",
-            "--source-mode",
-            "lexical-only",
-            "--max-tokens",
-            "800",
-        ]);
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::Success,
-            &format!("missing daemon fallback: {stderr}"),
-        )?;
-        ensure(
-            stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
-            "missing socket fallback disclosed",
-        )?;
-        ensure(
-            stdout.contains(content),
-            "missing socket retains canonical local memory",
-        )
+        // Both read-only source modes must disclose the unavailable daemon;
+        // hybrid used to skip the provider altogether and silently load locally.
+        for source_mode in ["lexical-only", "hybrid"] {
+            let (exit, stdout, stderr) = invoke(&[
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace,
+                "pack",
+                "quasar release checksums",
+                "--use-daemon",
+                "--daemon-socket",
+                missing.to_str().ok_or("UTF-8 missing socket")?,
+                "--read-only",
+                "--source-mode",
+                source_mode,
+                "--max-tokens",
+                "800",
+            ]);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("missing daemon fallback: {stderr}"),
+            )?;
+            ensure(
+                stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
+                "missing socket fallback disclosed",
+            )?;
+            ensure(
+                stdout.contains(content),
+                "missing socket retains canonical local memory",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

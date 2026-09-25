@@ -6,7 +6,9 @@
 # persistent doctor lock with the platform `flock` primitive, then launches
 # `ee doctor --fix` against the same workspace. Asserts the CLI refuses with
 # its typed concurrency error (doctor_concurrency_lost, phase start, nonzero
-# exit) and that the refused run changed no workspace byte.
+# exit) and that the refused run changed no workspace byte. A fixture whose
+# damage is outside the store's bytes runs its --fix through its condition.sh;
+# a condition that could not be applied fails the fixture, never passes it.
 #
 # Vacuity guard (bd-2oh15 strand 4, ruling c9954): the number of fixtures
 # exercised is announced, and zero fails the run -- including when flock is
@@ -86,7 +88,12 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
         flock -n 9
         printf 'verify-concurrency-holder\n%d\n' "$$" >&9
         : > "$ready_path"
-        sleep 30
+        # Hold until stop_holder, not for a fixed time: under a condition that
+        # keeps ee.write.lock held, the report --fix gathers before it takes
+        # this lock waits out the write gate's stagnant-holder window (38 s per
+        # open), and a fixed hold would expire first. exec makes the sleep the
+        # process stop_holder kills, so the kill closes fd 9 and frees the lock.
+        exec sleep 900
     ) &
     holder_pid=$!
     for _attempt in {1..100}; do
@@ -103,12 +110,21 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     fi
 
     doctor_fixture_content_digest "$target" > "$work/conc-before.sha256"
+    # A fixture whose damage lives outside the store's bytes runs under its
+    # condition.sh (bd-2oh15 ruling t2250 R2); a run without it is not a pass.
     set +e
-    "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/conc-run.json" 2>&1
+    doctor_fixture_under_condition "$fm_dir" "$target" \
+        "$EE_BIN" doctor --workspace "$target" --fix --json > "$work/conc-run.json" 2>&1
     rc=$?
     set -e
     doctor_fixture_content_digest "$target" > "$work/conc-after.sha256"
     stop_holder
+    if [ "$rc" -eq "$DOCTOR_FIXTURE_CONDITION_NOT_APPLIED" ]; then
+        FAIL=$((FAIL + 1))
+        FAILED_FMS="$FAILED_FMS $fm_id(condition_not_applied)"
+        echo "verify-concurrency[$fm_id]: condition not applied; not a pass: $(grep -m1 'condition:' "$work/conc-run.json" || true)" >&2
+        continue
+    fi
     EXERCISED=$((EXERCISED + 1))
 
     # The machine contract is authoritative; the nonzero exit is independently
