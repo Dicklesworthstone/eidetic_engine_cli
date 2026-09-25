@@ -6198,7 +6198,9 @@ fn verify_published_tier_counts(
 mod ask_model;
 
 pub(crate) use ask_model::{
-    local_read_only_embedder, prepare_read_only_search_embedder_for_workspace,
+    CachedLocalEmbedder, CachedLocalEmbedderAttestation,
+    already_loaded_local_embedder_for_workspace, local_read_only_embedder,
+    prepare_read_only_search_embedder_for_workspace,
 };
 // Doctor index staging (bd-65jem) reuses the cached-only resolution.
 use ask_model::cached_local_selection;

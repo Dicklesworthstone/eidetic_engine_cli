@@ -1115,21 +1115,23 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
-    fn read_only_semantic_pack_keeps_embedding_preparation_local() -> TestResult {
+    fn read_only_semantic_pack_names_cold_daemon_fallback_without_writes() -> TestResult {
         let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         options.source_mode = crate::core::search::SearchSourceMode::Hybrid;
         let database = options.database_path.as_ref().ok_or("fixture database")?;
         let before = std::fs::read(database).map_err(|error| error.to_string())?;
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let provider = |_: &SearchOptions| -> Result<_, SearchDegradation> {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(SearchDegradation::daemon_fallback(
-                "read-only semantic retrieval must not delegate model initialization",
-            ))
-        };
+        let provider =
+            |_: &SearchOptions, require_cached_local: bool| -> Result<_, SearchDegradation> {
+                assert!(require_cached_local);
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(SearchDegradation::daemon_fallback(
+                    "read-only semantic retrieval must not delegate model initialization",
+                ))
+            };
         let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
             .map_err(|error| error.to_string())?;
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
             run.response
                 .data
@@ -1151,7 +1153,7 @@ mod tests {
                 .data
                 .degraded
                 .iter()
-                .all(|entry| { entry.code != "daemon_search_fallback" })
+                .any(|entry| { entry.code == "daemon_search_fallback" })
         );
         assert_eq!(
             std::fs::read(database).map_err(|error| error.to_string())?,
@@ -1185,7 +1187,10 @@ mod tests {
         let (options, _, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         let database = options.database_path.as_ref().ok_or("fixture database")?;
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let provider = |search_options: &SearchOptions| -> Result<_, SearchDegradation> {
+        let provider = |search_options: &SearchOptions,
+                        require_cached_local: bool|
+         -> Result<_, SearchDegradation> {
+            assert!(!require_cached_local);
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let handoff = crate::core::search::run_pack_search(search_options)
                 .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;

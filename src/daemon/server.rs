@@ -106,6 +106,10 @@ pub const DAEMON_SEARCH_PARAMS_INVALID_CODE: &str = "daemon_search_params_invali
 /// Error code returned when canonical search execution or response encoding fails.
 pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_failed";
 
+/// A read-only pack must never make a cold or remote daemon load a model.
+pub(crate) const DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE: &str =
+    "daemon_cached_local_embedder_unavailable";
+
 /// Warm-up posture of the daemon's process-cached search stack (GH #37).
 ///
 /// The semantic arm builds a ~500k-piece Unigram tokenizer and materialises a
@@ -2539,6 +2543,11 @@ pub struct DaemonSearchParams {
     explain: bool,
     #[serde(default)]
     explain_performance: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "daemon_search_cached_local_not_required"
+    )]
+    require_cached_local_embedder: bool,
     #[serde(default)]
     include_tombstoned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2586,6 +2595,7 @@ impl DaemonSearchParams {
             speed: options.speed.as_str().to_owned(),
             explain: options.explain,
             explain_performance,
+            require_cached_local_embedder: false,
             include_tombstoned: options.include_tombstoned,
             as_of: options.as_of.as_ref().map(chrono::DateTime::to_rfc3339),
             include_expired: options.include_expired,
@@ -2600,6 +2610,12 @@ impl DaemonSearchParams {
             memory_scope: options.memory_scope.as_str().to_owned(),
             strict_scope: options.strict_scope,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn requiring_cached_local_embedder(mut self, required: bool) -> Self {
+        self.require_cached_local_embedder = required;
+        self
     }
 
     fn from_value(value: &serde_json::Value) -> Result<Self, String> {
@@ -2708,6 +2724,10 @@ impl DaemonSearchParams {
             self.explain_performance,
         ))
     }
+}
+
+fn daemon_search_cached_local_not_required(required: &bool) -> bool {
+    !*required
 }
 
 fn canonical_workspace_path(path: &Path, field: &str) -> Result<PathBuf, String> {
@@ -4176,6 +4196,7 @@ fn dispatch_pack_search(request: &DaemonRequest, shutdown: &AtomicBool) -> Daemo
     let Some(workspace_id) = request.workspace_id.as_deref() else {
         return daemon_search_params_error(request, "authorized workspace_id is missing");
     };
+    let require_cached_local = params.require_cached_local_embedder;
     let (options, kind, filters, _) = match params.into_search_parts(workspace_id) {
         Ok(parts) => parts,
         Err(message) => return daemon_search_params_error(request, &message),
@@ -4192,7 +4213,32 @@ fn dispatch_pack_search(request: &DaemonRequest, shutdown: &AtomicBool) -> Daemo
             "pack filters and agent-specific scope remain local",
         );
     }
-    match crate::core::search::run_pack_search(&options) {
+    let loaded = if require_cached_local && options.source_mode.uses_embeddings() {
+        match crate::core::index::already_loaded_local_embedder_for_workspace(
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        ) {
+            Ok(Some(loaded)) => Some(loaded),
+            _ => {
+                return DaemonResponse::err(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE,
+                    "Read-only pack requires an already-loaded verified local semantic model; use canonical local retrieval or warm the daemon first.",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let retrieval = match loaded {
+        Some(loaded) => {
+            crate::core::search::run_pack_search_with_cached_local_embedder(&options, Some(loaded))
+        }
+        None => crate::core::search::run_pack_search(&options),
+    };
+    match retrieval {
         Ok(handoff) => {
             let response = DaemonResponse::ok(
                 request.request_id.clone(),
@@ -4234,6 +4280,12 @@ fn dispatch_search(
         Ok(params) => params,
         Err(message) => return daemon_search_params_error(request, &message),
     };
+    if params.require_cached_local_embedder {
+        return daemon_search_params_error(
+            request,
+            "requireCachedLocalEmbedder is supported only by pack retrieval",
+        );
+    }
     let Some(authorized_workspace_id) = request.workspace_id.as_deref() else {
         return daemon_search_params_error(
             request,
@@ -7616,6 +7668,73 @@ mod tests {
             explain_performance,
             "performance request bit must survive strict wire decoding"
         );
+    }
+
+    #[test]
+    fn daemon_cached_local_capability_is_optional_and_strictly_boolean() {
+        let base = serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release", "workspacePath": "/tmp/ee-daemon-search-contract"
+        });
+        let params = DaemonSearchParams::from_value(&base).expect("compatible request");
+        assert!(!params.require_cached_local_embedder);
+        assert!(
+            serde_json::to_value(&params)
+                .unwrap()
+                .get("requireCachedLocalEmbedder")
+                .is_none()
+        );
+        let required = params.requiring_cached_local_embedder(true);
+        assert_eq!(
+            serde_json::to_value(required).unwrap()["requireCachedLocalEmbedder"],
+            true
+        );
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!("true"),
+        ] {
+            let mut value = base.clone();
+            value["requireCachedLocalEmbedder"] = invalid;
+            assert!(DaemonSearchParams::from_value(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn daemon_cached_local_capability_is_rejected_by_ordinary_search() {
+        let response = dispatch(&search_request(serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release", "workspacePath": "/tmp/ee-daemon-search-contract",
+            "requireCachedLocalEmbedder": true,
+        })));
+        assert!(response.result.is_none());
+        assert_eq!(
+            response.error.unwrap().code,
+            DAEMON_SEARCH_PARAMS_INVALID_CODE
+        );
+    }
+
+    #[test]
+    fn daemon_cached_local_pack_refusal_does_not_create_a_store() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut request = DaemonRequest::new(
+            "cached-only",
+            TEST_AGENT_ID,
+            METHOD_PACK_SEARCH,
+            serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "release", "workspacePath": workspace.path(),
+                "sourceMode": "hybrid", "requireCachedLocalEmbedder": true,
+            }),
+        );
+        request.workspace_id = Some(workspace.path().display().to_string());
+        let response = dispatch_pack_search(&request, &AtomicBool::new(false));
+        assert!(response.result.is_none());
+        assert_eq!(
+            response.error.unwrap().code,
+            DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE
+        );
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
     }
 
     #[test]

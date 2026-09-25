@@ -16,6 +16,11 @@
     "speed": { "type": "string", "enum": ["instant", "default", "quality"] },
     "explain": { "type": "boolean" },
     "explainPerformance": { "type": "boolean" },
+    "requireCachedLocalEmbedder": {
+      "type": "boolean",
+      "default": false,
+      "description": "Pack-retrieval-only capability. Semantic requests must use an already-loaded verified local static model; cold, remote, mismatched or unavailable models are refused without loading or downloading. Ordinary ee.daemon.search rejects true."
+    },
     "includeTombstoned": { "type": "boolean" },
     "asOf": { "type": "string", "format": "date-time" },
     "includeExpired": { "type": "boolean" },

@@ -899,7 +899,7 @@ impl SearchOptions {
         Ok(())
     }
 
-    fn resolve_database_path(&self) -> PathBuf {
+    pub(crate) fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
             .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
@@ -1670,6 +1670,8 @@ pub struct SearchPerformanceRun {
 pub(crate) struct PackSearchHandoff {
     pub report: SearchReport,
     pub audit_facts: Option<SearchAuditFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cached_local_embedder: Option<crate::core::index::CachedLocalEmbedderAttestation>,
     snapshot: PackSearchSnapshot,
 }
 
@@ -1680,6 +1682,14 @@ struct PackSearchSnapshot {
 }
 
 impl PackSearchHandoff {
+    /// Read-only semantic packs admit only an explicit, validated local-model
+    /// attestation. Never infer this capability from daemon readiness alone.
+    pub(crate) fn has_cached_local_embedder(&self) -> bool {
+        self.cached_local_embedder.as_ref().is_some_and(
+            crate::core::index::CachedLocalEmbedderAttestation::matches_client_configuration,
+        ) && self.report.embed_backend == EmbedBackend::NeuralLocal
+    }
+
     pub(crate) fn snapshot_matches(
         &self,
         options: &SearchOptions,
@@ -7642,6 +7652,14 @@ pub fn run_search_with_performance(
 /// Run canonical retrieval without a writer. The daemon may finish this after
 /// a disconnected client; only the receiving pack process can persist it.
 pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHandoff, SearchError> {
+    run_pack_search_with_cached_local_embedder(options, None)
+}
+
+pub(crate) fn run_pack_search_with_cached_local_embedder(
+    options: &SearchOptions,
+    loaded: Option<crate::core::index::CachedLocalEmbedder>,
+) -> Result<PackSearchHandoff, SearchError> {
+    let attestation = loaded.as_ref().map(|loaded| loaded.attestation.clone());
     let timeout = search_request_timeout();
     let run = crate::core::run_cli_with_cx(timeout, |cx| async move {
         run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
@@ -7651,7 +7669,7 @@ pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHando
             &[],
             Duration::ZERO,
             timeout,
-            None,
+            loaded.map(|loaded| loaded.embedder),
             true,
             // Pack path: the context writer records these facts against its own
             // write connection (context.rs), so recording here would double-count.
@@ -7688,6 +7706,7 @@ pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHando
     Ok(PackSearchHandoff {
         report,
         audit_facts: run.audit_facts,
+        cached_local_embedder: attestation,
         snapshot,
     })
 }
