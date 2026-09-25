@@ -6782,17 +6782,17 @@ pub enum SearchError {
     },
 }
 
+/// An empty directory has no derived assets to admit, so it keeps the
+/// established missing-index fallback. Rejected published bytes and an
+/// unreadable/symlink directory are never treated as an empty index.
+fn index_dir_is_plain_empty(index_dir: &Path) -> bool {
+    crate::core::index::ensure_index_path_has_no_symlinks(index_dir, "inspect missing search index")
+        .is_ok()
+        && std::fs::read_dir(index_dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 fn index_compatibility_search_error(index_dir: &Path, reason: String) -> SearchError {
-    // An empty directory has no derived assets to admit. Keep its established
-    // missing-index fallback, but never treat rejected published bytes or an
-    // unreadable/symlink directory as an empty index.
-    let empty_directory = crate::core::index::ensure_index_path_has_no_symlinks(
-        index_dir,
-        "inspect missing search index",
-    )
-    .is_ok()
-        && std::fs::read_dir(index_dir).is_ok_and(|mut entries| entries.next().is_none());
-    if empty_directory {
+    if index_dir_is_plain_empty(index_dir) {
         SearchError::NoIndex
     } else {
         SearchError::IndexIncompatible(reason)
@@ -9308,8 +9308,10 @@ async fn run_search_inner_with_performance(
     // lookup; the shared lease excludes publication and rollback until collect.
     #[cfg(unix)]
     let generation_lease = pin_search_generation(cx, &index_dir).await?;
+    // An empty live directory is as missing as an absent one; a retained
+    // generation still wins over both.
     #[cfg(unix)]
-    if !index_dir.exists()
+    if (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
         && !generation_lease
             .has_retained_generation_directory(cx, &index_dir)
             .map_err(map_index_generation_error)?
@@ -9997,7 +9999,7 @@ async fn run_diag_search_in_snapshot(
     #[cfg(unix)]
     let generation_lease = pin_search_generation(cx, &index_dir).await?;
     #[cfg(unix)]
-    if !index_dir.exists()
+    if (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
         && !generation_lease
             .has_retained_generation_directory(cx, &index_dir)
             .map_err(map_index_generation_error)?
@@ -19103,6 +19105,100 @@ mod tests {
         assert!(
             matches!(run_search(&options), Err(SearchError::IndexIncompatible(reason)) if reason.contains("incompatible corpus revision")),
             "pre-security-epoch index must fail closed before retrieval"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_index_directory_keeps_missing_index_fallback_under_source_snapshot() -> TestResult {
+        // bd-2q8hn: with a real store the source snapshot routes an existing
+        // live directory through generation selection, which must not turn an
+        // empty directory into a hard index error.
+        let workspace = unique_test_dir("empty-index-source-snapshot");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let index_dir = workspace.join("index");
+        let workspace_id = "wsp_49000000000000000000000002".to_owned();
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: default_workspace_root(&workspace).display().to_string(),
+                    name: Some("empty-index-source-snapshot".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_40000000000000000000000002",
+                &test_memory_input(&workspace_id, "Run cargo fmt --check before release."),
+            )
+            .map_err(|error| error.to_string())?;
+        // Without a generation the search never reaches snapshot selection,
+        // and this test would pass vacuously.
+        connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "fixture omitted workspace generation".to_owned())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path),
+            index_dir: Some(index_dir.clone()),
+            query: "fmt before release".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+
+        let absent = run_search(&options);
+        assert!(
+            matches!(absent, Err(SearchError::NoIndex)),
+            "an absent index directory is the missing-index baseline, got {absent:?}"
+        );
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let empty = run_search(&options);
+        assert!(
+            matches!(empty, Err(SearchError::NoIndex)),
+            "an empty index directory must match the absent one, got {empty:?}"
+        );
+        let diag = super::run_diag_search(&options);
+        assert!(
+            matches!(diag, Err(SearchError::NoIndex)),
+            "diagnostic search must match ordinary search, got {diag:?}"
+        );
+        #[cfg(unix)]
+        {
+            let link = workspace.join("index-link");
+            std::os::unix::fs::symlink(&index_dir, &link).map_err(|error| error.to_string())?;
+            let mut linked_options = options.clone();
+            linked_options.index_dir = Some(link);
+            let linked = run_search(&linked_options);
+            assert!(
+                linked.is_err() && !matches!(linked, Err(SearchError::NoIndex)),
+                "a symlink must not authorize the empty-directory fallback, got {linked:?}"
+            );
+        }
+        std::fs::write(index_dir.join("fast.idx"), b"unadmitted index bytes")
+            .map_err(|error| error.to_string())?;
+        let orphaned = run_search(&options);
+        assert!(
+            orphaned.is_err() && !matches!(orphaned, Err(SearchError::NoIndex)),
+            "published bytes without metadata must not become a missing index, got {orphaned:?}"
         );
         Ok(())
     }
