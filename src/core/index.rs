@@ -2193,7 +2193,11 @@ async fn process_index_jobs_with_drain(
     let (effective_job_limit, _job_limit_capped) =
         runtime_profile.cap_index_job_limit(options.job_limit);
 
-    let db = DbConnection::open_file(&database_path)?;
+    let db = if options.dry_run {
+        DbConnection::open_file_read_only(&database_path)?
+    } else {
+        DbConnection::open_file(&database_path)?
+    };
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     if !options.dry_run {
         requeue_cancelled_search_index_jobs(&db, &workspace_id)?;
@@ -4700,9 +4704,10 @@ fn rollback_published_index(
     finish_index_rollback(index_dir, rollback_errors, sync_index_directory)
 }
 
-/// Once an exchange has restored the accepted generation, quarantine failure
-/// must not bypass the persistence barrier for that restoration. Keep both
-/// errors when quarantine and the barrier fail; neither failure is success.
+/// Move the accepted directory out of the unconditional retained namespace
+/// before reverse exchange. Its new name attests the accepted inode: it is
+/// recoverable before exchange, while the rejected inode cannot qualify after
+/// exchange even if quarantine fails. No rejected bytes may occupy `.previous`.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn rollback_index_by_exchange_with(
     index_dir: &Path,
@@ -4710,13 +4715,80 @@ fn rollback_index_by_exchange_with(
     quarantine: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
     sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
 ) -> Result<(), IndexRebuildError> {
+    let recovery_dir = allocate_displaced_index_dir(index_dir, retained_dir)?;
+    rollback_index_by_exchange_at(
+        index_dir,
+        retained_dir,
+        &recovery_dir,
+        quarantine,
+        sync_directory,
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn rollback_index_by_exchange_at(
+    index_dir: &Path,
+    retained_dir: &Path,
+    recovery_dir: &Path,
+    quarantine: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
+    mut sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+) -> Result<(), IndexRebuildError> {
     let rejected_dir = allocate_rejected_index_dir(index_dir)?;
-    exchange_index_directories(index_dir, retained_dir)?;
+    rename_index_dir(
+        retained_dir,
+        recovery_dir,
+        "prepare retained generation for atomic rollback",
+    )?;
     let mut rollback_errors = Vec::new();
-    if let Err(error) = quarantine(retained_dir, &rejected_dir) {
+    // Persist the old directory's safe recovery name before exchanging. Even
+    // when this barrier fails, try to restore the accepted live generation;
+    // retain the durability error rather than claiming a successful rollback.
+    if let Err(error) = sync_directory(index_parent(index_dir)) {
+        rollback_errors.push(format!("failed to persist rollback preparation: {error}"));
+    }
+    if let Err(error) = exchange_index_directories(index_dir, recovery_dir) {
+        rollback_errors.push(error.to_string());
+        return finish_index_rollback(index_dir, rollback_errors, sync_directory);
+    }
+    if let Err(error) = quarantine(recovery_dir, &rejected_dir) {
         rollback_errors.push(error.to_string());
     }
     finish_index_rollback(index_dir, rollback_errors, sync_directory)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn allocate_displaced_index_dir(
+    index_dir: &Path,
+    retained_dir: &Path,
+) -> Result<PathBuf, IndexRebuildError> {
+    use std::os::unix::fs::MetadataExt;
+
+    ensure_index_path_has_no_symlinks(retained_dir, "identify retained rollback generation")?;
+    ensure_index_publish_source_is_directory(
+        retained_dir,
+        "identify retained rollback generation",
+    )?;
+    let metadata = std::fs::symlink_metadata(retained_dir).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to identify retained rollback generation: {error}"
+        ))
+    })?;
+    let parent = index_parent(index_dir);
+    let base = index_base_name(index_dir)?;
+    let stamp = monotonicish_stamp();
+    for sequence in 0_u32..1000 {
+        let candidate = parent.join(format!(
+            ".{base}{INDEX_STAGING_PREFIX}{stamp}-{sequence:03}-displaced-{:016x}-{:016x}",
+            metadata.dev(),
+            metadata.ino(),
+        ));
+        if !path_exists_no_follow(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(IndexRebuildError::Index(
+        "Failed to allocate an attested index rollback directory".to_owned(),
+    ))
 }
 
 /// Failed cleanup or restoration can follow successful namespace mutations.
@@ -18755,6 +18827,7 @@ mod tests {
         let index_dir = workspace.join(".ee").join("index");
         seed_reembed_database(&workspace, &database)?;
         queue_pending_index_job(&database, "sidx_processdryrun0000000000000")?;
+        let before = index_regular_file_snapshot(&root)?;
 
         let report = process_index_jobs(&IndexProcessingOptions {
             workspace_path: workspace,
@@ -18775,6 +18848,10 @@ mod tests {
             !index_dir.join(INDEX_METADATA_FILE).exists(),
             "dry-run must not publish index metadata",
         )?;
+        ensure(
+            index_regular_file_snapshot(&root)? == before,
+            "dry-run must leave database files and sidecars unchanged",
+        )?;
 
         let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
         let job = connection
@@ -18794,6 +18871,7 @@ mod tests {
         let index_dir = workspace.join(".ee").join("index");
         seed_reembed_database(&workspace, &database)?;
         queue_pending_index_job(&database, "sidx_coalesceddryrun00000000000")?;
+        let before = index_regular_file_snapshot(&root)?;
 
         let report = process_index_jobs_coalesced(&IndexProcessingOptions {
             workspace_path: workspace,
@@ -18822,7 +18900,40 @@ mod tests {
         ensure(
             !index_dir.join(INDEX_METADATA_FILE).exists(),
             "coalesced dry-run must not publish index metadata",
+        )?;
+        ensure(
+            index_regular_file_snapshot(&root)? == before,
+            "coalesced dry-run must leave database files and sidecars unchanged",
         )
+    }
+
+    #[test]
+    fn index_processing_dry_run_does_not_create_a_missing_store() -> TestResult {
+        let root = unique_test_dir("process-dry-run-missing-store");
+        let workspace = root.join("workspace");
+        let store = workspace.join(".ee");
+        std::fs::create_dir_all(&store).map_err(|error| error.to_string())?;
+        let options = IndexProcessingOptions {
+            workspace_path: workspace,
+            database_path: Some(store.join("ee.db")),
+            index_dir: Some(store.join("index")),
+            dry_run: true,
+            job_limit: Some(1),
+        };
+        let before = index_regular_file_snapshot(&root)?;
+        for coalesced in [false, true] {
+            let result = if coalesced {
+                process_index_jobs_coalesced(&options)
+            } else {
+                process_index_jobs(&options)
+            };
+            ensure(result.is_err(), "a missing store must be reported")?;
+            ensure(
+                !store.join("ee.db").exists() && index_regular_file_snapshot(&root)? == before,
+                "dry-run must not initialize a missing database or its sidecars",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -20488,6 +20599,70 @@ mod tests {
             !index_dir.exists() && rejected[0].is_dir(),
             "recovery must keep active absent and preserve the rejected generation",
         )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn failed_quarantine_never_makes_rejected_generation_recoverable() -> TestResult {
+        let root = unique_test_dir("rollback-failed-quarantine-admission");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            8,
+            vec![test_indexable_doc("mem_accepted", "accepted generation")],
+        )?;
+        let accepted_bytes = index_regular_file_snapshot(&index_dir)?;
+        let staging = create_publish_staging_dir(&index_dir).map_err(|error| error.to_string())?;
+        build_current_test_index(
+            &staging,
+            9,
+            vec![test_indexable_doc("mem_rejected", "rejected generation")],
+        )?;
+        publish_staged_index(&index_dir, &staging).map_err(|error| error.to_string())?;
+        let retained = root.join("index.previous");
+        let mut failed_quarantine = None;
+        let error = rollback_index_by_exchange_with(
+            &index_dir,
+            &retained,
+            |from, _| {
+                failed_quarantine = Some(from.to_path_buf());
+                Err(IndexRebuildError::Index(
+                    "injected quarantine failure".to_owned(),
+                ))
+            },
+            sync_index_directory,
+        )
+        .expect_err("failed quarantine must be reported");
+        assert!(error.to_string().contains("injected quarantine failure"));
+        assert_eq!(index_regular_file_snapshot(&index_dir)?, accepted_bytes);
+        let rejected =
+            failed_quarantine.ok_or_else(|| "quarantine was not attempted".to_owned())?;
+        assert_eq!(validated_index_generation(&rejected)?, 9);
+        assert!(!retained.exists());
+
+        // If the accepted active generation is subsequently unavailable,
+        // neither read-only snapshot selection nor repair may resurrect the
+        // rejected generation just because its tiers and manifest are valid.
+        std::fs::rename(&index_dir, root.join("accepted-preserved"))
+            .map_err(|error| error.to_string())?;
+        let before = index_regular_file_snapshot(&root)?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
+            let index_dir = &index_dir;
+            async move {
+                let lease = IndexGenerationLease::read(&cx, index_dir).await?;
+                assert!(!lease.has_retained_generation_directory(&cx, index_dir)?);
+                assert!(lease.index_for_snapshot(&cx, index_dir, 9).is_err());
+                Ok::<(), IndexRebuildError>(())
+            }
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?,
+            IndexPublishRecoveryAction::NoRecoverableGeneration
+        );
+        assert_eq!(index_regular_file_snapshot(&root)?, before);
+        Ok(())
     }
 
     #[test]
@@ -22465,7 +22640,7 @@ mod rollback_durability_tests {
     fn generations(root: &Path) -> Result<(PathBuf, PathBuf), String> {
         let root = root.canonicalize().map_err(|error| error.to_string())?;
         let active = root.join("index");
-        let retained = root.join("retained");
+        let retained = root.join("index.previous");
         std::fs::create_dir(&active).map_err(|error| error.to_string())?;
         std::fs::create_dir(&retained).map_err(|error| error.to_string())?;
         std::fs::write(active.join("identity"), "rejected").map_err(|error| error.to_string())?;
@@ -22479,10 +22654,12 @@ mod rollback_durability_tests {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
         let (active, retained) = generations(root.path())?;
         let flushes = Cell::new(0);
+        let mut failed_quarantine = None;
         let error = rollback_index_by_exchange_with(
             &active,
             &retained,
-            |_, _| {
+            |from, _| {
+                failed_quarantine = Some(from.to_path_buf());
                 Err(IndexRebuildError::Index(
                     "injected quarantine failure".to_owned(),
                 ))
@@ -22491,7 +22668,11 @@ mod rollback_durability_tests {
                 assert_eq!(parent, active.parent().expect("active parent"));
                 assert_eq!(
                     std::fs::read_to_string(active.join("identity")).expect("restored identity"),
-                    "accepted"
+                    if flushes.get() == 0 {
+                        "rejected"
+                    } else {
+                        "accepted"
+                    }
                 );
                 flushes.set(flushes.get() + 1);
                 sync_index_directory(parent)
@@ -22500,11 +22681,17 @@ mod rollback_durability_tests {
         .expect_err("quarantine failure must remain visible")
         .to_string();
         assert!(error.contains("injected quarantine failure"));
-        assert_eq!(flushes.get(), 1);
-        // Preserve rejected bytes for diagnosis; this patch does not claim
-        // to make failed quarantine safe for later recovery admission.
+        assert_eq!(flushes.get(), 2);
+        let rejected =
+            failed_quarantine.ok_or_else(|| "quarantine was not attempted".to_owned())?;
+        assert!(!retained.exists());
+        assert!(
+            displaced_generation_sequence(&active, &rejected)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
         assert_eq!(
-            std::fs::read_to_string(retained.join("identity")).map_err(|error| error.to_string())?,
+            std::fs::read_to_string(rejected.join("identity")).map_err(|error| error.to_string())?,
             "rejected"
         );
         Ok(())
@@ -22552,7 +22739,7 @@ mod rollback_durability_tests {
             },
         )
         .map_err(|error| error.to_string())?;
-        assert_eq!(flushes.get(), 1);
+        assert_eq!(flushes.get(), 2);
         assert_eq!(
             std::fs::read_to_string(active.join("identity")).map_err(|error| error.to_string())?,
             "accepted"
@@ -22563,6 +22750,37 @@ mod rollback_durability_tests {
             "rejected"
         );
         assert!(!path_exists_no_follow(&retained));
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn exchange_rollback_preparation_collision_preserves_both_generations() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (active, retained) = generations(root.path())?;
+        let recovery =
+            allocate_displaced_index_dir(&active, &retained).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&recovery).map_err(|error| error.to_string())?;
+        std::fs::write(recovery.join("identity"), "collision")
+            .map_err(|error| error.to_string())?;
+        let result = rollback_index_by_exchange_at(
+            &active,
+            &retained,
+            &recovery,
+            |_, _| panic!("quarantine must not run when preparation fails"),
+            |_| panic!("failed no-clobber rename made no namespace mutation"),
+        );
+        assert!(result.is_err());
+        for (path, expected) in [
+            (&active, "rejected"),
+            (&retained, "accepted"),
+            (&recovery, "collision"),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(path.join("identity")).map_err(|error| error.to_string())?,
+                expected
+            );
+        }
         Ok(())
     }
 }
