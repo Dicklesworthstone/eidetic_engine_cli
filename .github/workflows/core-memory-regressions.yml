@@ -102,6 +102,7 @@ jobs:
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
+          ask-long-evidence core::ask::corpus::admission::long_evidence_tests::
           search-producer-integrity core::search::runtime_fallback::tests::
           ask-semantic-runtime core::ask::semantic::
           global-promotion core::global_promotion::
