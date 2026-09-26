@@ -1406,14 +1406,29 @@ Outcome signal vocabulary:
 | `positive` | Useful but weaker than `helpful` |
 | `negative` | Unhelpful but weaker than `harmful` |
 
-Targets can be memories, packs, or curation candidates:
+Targets can be memories, native rules, packs, or curation candidates:
 
 ```bash
 ee outcome <memory-id> --signal helpful --reason "Caught a release gate omission" --workspace .
+ee outcome <rule-id> --target-type rule --signal helpful --reason "Prevented an unsafe release" --workspace .
 ee outcome <pack-id> --target-type pack --signal helpful --reason "Included the missing RCH rule" --workspace .
 ee outcome --pack <pack-id> --item 2 --signal harmful --reason "Selected stale advice" --workspace .
 ee outcome <candidate-id> --target-type candidate --signal negative --reason "Too vague after review" --workspace .
 ```
+
+Native rule feedback verifies the target's workspace and active lifecycle in
+single-event and JSONL batch commands, including explicit database overrides. Each
+nonzero helpful observation (`helpful`, `positive`, or `confirmation`) adjusts
+confidence by +0.04 and utility by +0.08; a harmful observation (`harmful`,
+`negative`, `contradiction`, or `inaccurate`) adjusts them by -0.10 and -0.12.
+Scores stay within 0–1. The native counter, feedback event, audit record, and
+rule index job commit together. `--event-id` retries do not apply learning twice,
+and `--dry-run` leaves the rule unchanged. Feedback does not alter the rule's
+source memories, protection, trust, or maturity; lifecycle changes still use
+explicit rule curation. Weights remain in the event ledger, while each nonzero
+event supplies one observation. Zero-weight, neutral, `stale`, and `outdated`
+events are recorded without changing native scores or counters. Quarantined
+feedback changes the rule only after an explicit successful release.
 
 Native rules can be inspected with `ee why <rule-id> --workspace . --json` or
 `ee why result:<rule-id> --workspace . --json`. The explanation includes the

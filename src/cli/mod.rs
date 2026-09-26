@@ -11025,7 +11025,7 @@ pub struct OutcomeArgs {
     #[command(subcommand)]
     pub command: Option<OutcomeCommand>,
 
-    /// Target ID to receive feedback. Memory IDs are verified by default.
+    /// Target ID to receive feedback. Memory and native rule targets are verified.
     /// Required unless --batch --stdin is given.
     #[arg(value_name = "TARGET_ID")]
     pub target_id: Option<String>,
@@ -11055,7 +11055,7 @@ pub struct OutcomeArgs {
     #[arg(long, default_value = "memory")]
     pub target_type: String,
 
-    /// Workspace ID for non-memory targets.
+    /// Workspace ID for other targets; native rule ownership is resolved from --workspace.
     #[arg(long)]
     pub workspace_id: Option<String>,
 
@@ -50906,7 +50906,11 @@ where
         .map(|c| c.value == "true")
         .unwrap_or(true),
     };
-    match crate::core::outcome::record_outcome_batch_stdin(&options, &input) {
+    match crate::core::outcome::record_outcome_batch_stdin_for_workspace(
+        &options,
+        &input,
+        &workspace_path,
+    ) {
         Ok(report) if report.all_failed() => {
             let details = serde_json::json!({ "results": report.results });
             let error = DomainError::ImportWithDetails {
@@ -51015,7 +51019,7 @@ where
         || args.target_type.clone(),
         |target| target.target_type.clone(),
     );
-    let workspace_id = resolved_pack_target
+    let mut workspace_id = resolved_pack_target
         .as_ref()
         .map(|target| target.workspace_id.clone())
         .or_else(|| args.workspace_id.clone());
@@ -51024,6 +51028,16 @@ where
         .database
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if target_type.trim().eq_ignore_ascii_case("rule") {
+        match crate::core::outcome::outcome_native_rule_workspace(
+            &database_path,
+            &workspace_path,
+            workspace_id.as_deref(),
+        ) {
+            Ok(bound_id) => workspace_id = Some(bound_id),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        }
+    }
     let options = OutcomeRecordOptions {
         database_path: &database_path,
         target_type,

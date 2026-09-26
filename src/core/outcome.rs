@@ -881,8 +881,9 @@ fn outcome_public_path_boundary(c: char) -> bool {
 
 /// Record observed feedback about a memory or related target.
 ///
-/// The command verifies memory targets, validates machine-facing fields,
-/// supports dry-run, and writes the feedback event with an audit log entry.
+/// The command verifies memory and native rule targets, validates machine-facing
+/// fields, supports dry-run, and commits feedback with its required learning and
+/// audit records.
 pub fn record_outcome(
     options: &OutcomeRecordOptions<'_>,
 ) -> Result<OutcomeRecordReport, DomainError> {
@@ -997,8 +998,8 @@ fn record_outcome_inner(
 
     let target = resolve_target_workspace(
         &connection,
-        &options.target_type,
-        &options.target_id,
+        &target_type,
+        &target_id,
         options.workspace_id.as_deref(),
         options.prompt_injection_guard,
     )?;
@@ -1430,6 +1431,133 @@ fn apply_procedure_outcome_in_txn(
     {
         return Err(missing_target());
     }
+    Ok(())
+}
+
+/// Apply one admitted native-rule observation in the event's transaction.
+/// Source memories are evidence, not the target of this rule feedback. Each
+/// accepted observation uses the same score policy as `rule mark`; maturity
+/// transitions remain explicit curation decisions, including protected rules.
+fn apply_native_rule_outcome_in_txn(
+    connection: &DbConnection,
+    feedback: &CreateFeedbackEventInput,
+    event_id: &str,
+    actor: Option<&str>,
+) -> crate::db::Result<()> {
+    use crate::models::{RuleId, RuleLifecycleEvidence, RuleLifecycleTrigger, RuleMaturity};
+
+    if feedback.target_type != "rule" {
+        return Ok(());
+    }
+    let invalid_target = || crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Execute,
+        message: "Outcome rule is missing, inactive, malformed, or belongs to another workspace"
+            .to_owned(),
+    };
+    RuleId::from_str(&feedback.target_id).map_err(|_| invalid_target())?;
+    let stored = connection
+        .get_procedural_rule(&feedback.target_id)?
+        .filter(|rule| {
+            rule.workspace_id == feedback.workspace_id
+                && rule.tombstoned_at.is_none()
+                && rule.superseded_by.is_none()
+        })
+        .ok_or_else(invalid_target)?;
+    let maturity = RuleMaturity::from_str(&stored.maturity).map_err(|_| invalid_target())?;
+    if !maturity.is_active() {
+        return Err(invalid_target());
+    }
+    let recorded_at = Utc::now().to_rfc3339();
+    let helpful = HELPFUL_SIGNALS.contains(&feedback.signal.as_str());
+    let harmful = is_harmful_signal(&feedback.signal);
+    if feedback.weight <= 0.0 || (!helpful && !harmful) {
+        connection.apply_feedback_event_at(event_id, &recorded_at)?;
+        return Ok(());
+    }
+    let trigger = if helpful {
+        RuleLifecycleTrigger::OutcomeHelpful
+    } else {
+        RuleLifecycleTrigger::OutcomeHarmful
+    };
+    let evidence = RuleLifecycleEvidence::new()
+        .with_helpful_outcomes(u32::from(helpful))
+        .with_harmful_outcomes(u32::from(harmful), u32::from(harmful))
+        .with_protected_rule(stored.protected);
+    let transition = maturity.evaluate_lifecycle_transition(trigger, &evidence);
+    if !transition.allowed {
+        return Err(invalid_target());
+    }
+    // Match the established single-observation rule-mark policy. Event weights
+    // remain available in the feedback ledger; a weight is not a fabricated
+    // count of independent observations or independent harmful sources.
+    #[allow(clippy::cast_possible_truncation)]
+    let confidence =
+        (f64::from(stored.confidence) + transition.confidence_delta).clamp(0.0, 1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let utility = (f64::from(stored.utility) + transition.utility_delta).clamp(0.0, 1.0) as f32;
+    if !connection.update_procedural_rule_lifecycle(
+        &stored.id,
+        &crate::db::UpdateProceduralRuleLifecycleInput {
+            workspace_id: stored.workspace_id.clone(),
+            maturity: stored.maturity.clone(),
+            confidence,
+            utility,
+            positive_feedback_delta: u32::from(helpful),
+            negative_feedback_delta: u32::from(harmful),
+            validation_passes_delta: 0,
+            validation_contradictions_delta: 0,
+            last_validated_at: None,
+            superseded_by: stored.superseded_by.clone(),
+            updated_at: recorded_at.clone(),
+        },
+    )? {
+        return Err(invalid_target());
+    }
+    // Domain-separated deterministic IDs keep seeded/retried event identity
+    // stable without consuming a second caller-specific ID source.
+    let hash = blake3::hash(format!("ee.outcome.native_rule.v1:{event_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    let audit_id = format!("audit_{}", &hash[..26]);
+    let index_job_id = format!("sidx_{}", &hash[..26]);
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(stored.workspace_id.clone()),
+            actor: actor.map(str::to_owned),
+            action: audit_actions::RULE_MARK.to_owned(),
+            target_type: Some("rule".to_owned()),
+            target_id: Some(stored.id.clone()),
+            details: Some(
+                serde_json::json!({
+                    "feedbackEventId": event_id,
+                    "trigger": trigger.as_str(),
+                    "maturity": stored.maturity,
+                    "protected": stored.protected,
+                    "confidenceBefore": stored.confidence,
+                    "confidenceAfter": confidence,
+                    "utilityBefore": stored.utility,
+                    "utilityAfter": utility,
+                    "positiveFeedbackDelta": u32::from(helpful),
+                    "negativeFeedbackDelta": u32::from(harmful),
+                    "indexJobId": index_job_id,
+                    "sourceMemoriesModified": false,
+                })
+                .to_string(),
+            ),
+        },
+    )?;
+    connection.insert_search_index_job(
+        &index_job_id,
+        &crate::db::CreateSearchIndexJobInput {
+            workspace_id: stored.workspace_id,
+            job_type: crate::db::SearchIndexJobType::SingleDocument,
+            document_source: Some("rule".to_owned()),
+            document_id: Some(stored.id),
+            documents_total: 1,
+        },
+    )?;
+    connection.apply_feedback_event_at(event_id, &recorded_at)?;
     Ok(())
 }
 
@@ -2535,6 +2663,7 @@ fn release_feedback_quarantine_audited(
     connection
         .with_transaction(|| {
             connection.insert_feedback_event(event_id, feedback_input)?;
+            apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             connection.update_feedback_quarantine_status(
                 &row.id,
                 "released",
@@ -2591,6 +2720,51 @@ fn resolve_target_workspace(
     workspace_id: Option<&str>,
     prompt_injection_guard: bool,
 ) -> Result<TargetResolution, DomainError> {
+    if target_type == "rule" {
+        crate::models::RuleId::from_str(target_id).map_err(|error| DomainError::Usage {
+            message: format!("Invalid native rule ID: {error}"),
+            repair: Some("ee rule list --json".to_owned()),
+        })?;
+        let rule = connection
+            .get_procedural_rule(target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query rule target: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "rule".to_owned(),
+                id: target_id.to_owned(),
+                repair: Some("ee rule list --json".to_owned()),
+            })?;
+        if workspace_id.is_some_and(|workspace| workspace != rule.workspace_id) {
+            return Err(DomainError::PolicyDenied {
+                message: "Rule target is not bound to the requested workspace.".to_owned(),
+                repair: Some("Use the workspace that owns the rule.".to_owned()),
+            });
+        }
+        if rule.tombstoned_at.is_some()
+            || rule.superseded_by.is_some()
+            || !crate::models::RuleMaturity::from_str(&rule.maturity)
+                .is_ok_and(|maturity| maturity.is_active())
+        {
+            return Err(DomainError::PolicyDenied {
+                message: "Outcome feedback requires an active native rule.".to_owned(),
+                repair: Some(format!("ee rule show {target_id} --json")),
+            });
+        }
+        if prompt_injection_guard
+            && crate::policy::detect_instruction_like_content(&rule.content).is_instruction_like
+        {
+            return Err(DomainError::PolicyDenied {
+                message: "Rule target requires prompt-injection review before feedback.".to_owned(),
+                repair: Some(format!("ee rule show {target_id} --json")),
+            });
+        }
+        return Ok(TargetResolution {
+            workspace_id: rule.workspace_id,
+            verified: true,
+        });
+    }
     if target_type == "memory" {
         let memory = connection
             .get_memory(target_id)
@@ -3059,8 +3233,9 @@ enum OutcomeRecordInTxn<'a> {
 /// The direct CLI path wraps this in `run_one_shot_write_intake` plus
 /// `DbConnection::with_transaction`; the daemon write-owner can call the same
 /// storage primitive while coalescing heterogeneous journal/outcome batches.
-/// Derived follow-up work (posterior/profile/candidate updates) intentionally
-/// stays outside this primitive to preserve the existing response semantics.
+/// Native rule learning, its audit and publication job are atomic here so
+/// direct and daemon writes share the same behavior. Other target follow-up
+/// work (posterior/profile/candidate updates) remains owned by their callers.
 fn record_outcome_in_txn(
     connection: &DbConnection,
     write: OutcomeRecordInTxn<'_>,
@@ -3078,6 +3253,12 @@ fn record_outcome_in_txn(
             if let Some(sprt_audit) = sprt_audit {
                 insert_sprt_quarantine_decision_audit_in_txn(connection, sprt_audit)?;
             }
+            apply_native_rule_outcome_in_txn(
+                connection,
+                &input.event,
+                event_id,
+                input.actor.as_deref(),
+            )?;
             Ok(audit_id)
         }
         OutcomeRecordInTxn::Quarantine {
@@ -5509,6 +5690,190 @@ mod tests {
     const OUTCOME_TEST_MEMORY_ID: &str = "mem_00000000000000000000000002";
     const OUTCOME_TEST_PROMPT_INJECTION_MEMORY_ID: &str = "mem_00000000000000000000000003";
     const OUTCOME_TEST_SESSION_ID: &str = "sess_00000000000000000000000996";
+    const OUTCOME_TEST_RULE_ID: &str = "rule_00000000000000000000000004";
+
+    fn seed_native_outcome_rule(connection: &DbConnection, workspace_id: &str) -> TestResult {
+        connection
+            .insert_procedural_rule(
+                OUTCOME_TEST_RULE_ID,
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: workspace_id.to_owned(),
+                    content: "Check release evidence before publishing.".to_owned(),
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: true,
+                    source_memory_ids: vec![OUTCOME_TEST_MEMORY_ID.to_owned()],
+                    tags: vec!["release".to_owned()],
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn native_rule_outcome_options<'a>(
+        database: &'a std::path::Path,
+        signal: &str,
+        event_id: &str,
+    ) -> OutcomeRecordOptions<'a> {
+        OutcomeRecordOptions {
+            database_path: database,
+            target_type: "rule".to_owned(),
+            target_id: OUTCOME_TEST_RULE_ID.to_owned(),
+            workspace_id: None,
+            signal: signal.to_owned(),
+            weight: Some(1.0),
+            source_type: "outcome_observed".to_owned(),
+            source_id: Some("native-rule-feedback".to_owned()),
+            reason: Some("Observed the native rule during release validation.".to_owned()),
+            evidence_json: Some(r#"{"check":"release","observed":true}"#.to_owned()),
+            session_id: None,
+            event_id: Some(event_id.to_owned()),
+            actor: Some("native-rule-reviewer".to_owned()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct NativeRuleFeedbackState {
+        rule: crate::db::StoredProceduralRule,
+        source_memory: crate::db::StoredMemory,
+        source_posterior: Option<(f64, f64)>,
+        source_events: Vec<crate::db::StoredFeedbackEvent>,
+        events: Vec<crate::db::StoredFeedbackEvent>,
+        audits: Vec<crate::db::StoredAuditEntry>,
+        jobs: Vec<crate::db::StoredSearchIndexJob>,
+    }
+
+    fn native_rule_feedback_state(
+        database: &std::path::Path,
+    ) -> Result<NativeRuleFeedbackState, String> {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let rule = connection
+            .get_procedural_rule(OUTCOME_TEST_RULE_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or("native rule missing")?;
+        let state = NativeRuleFeedbackState {
+            source_memory: connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .ok_or("source memory missing")?,
+            source_posterior: connection
+                .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            source_events: connection
+                .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            events: connection
+                .list_feedback_events_for_target("rule", OUTCOME_TEST_RULE_ID)
+                .map_err(|error| error.to_string())?,
+            audits: connection
+                .list_audit_entries(Some(&rule.workspace_id), None)
+                .map_err(|error| error.to_string())?,
+            jobs: connection
+                .list_search_index_jobs(&rule.workspace_id, None)
+                .map_err(|error| error.to_string())?,
+            rule,
+        };
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(state)
+    }
+
+    fn assert_native_rule_feedback_effect(
+        before: &NativeRuleFeedbackState,
+        after: &NativeRuleFeedbackState,
+        helpful: bool,
+        event_id: &str,
+    ) -> TestResult {
+        let (confidence_delta, utility_delta) = if helpful {
+            (0.04, 0.08)
+        } else {
+            (-0.10, -0.12)
+        };
+        assert!(
+            (after.rule.confidence - (before.rule.confidence + confidence_delta)).abs() < 0.000_001
+        );
+        assert!((after.rule.utility - (before.rule.utility + utility_delta)).abs() < 0.000_001);
+        assert_eq!(
+            after.rule.positive_feedback_count,
+            before.rule.positive_feedback_count + u32::from(helpful)
+        );
+        assert_eq!(
+            after.rule.negative_feedback_count,
+            before.rule.negative_feedback_count + u32::from(!helpful)
+        );
+        assert_eq!(
+            after.rule.maturity, before.rule.maturity,
+            "outcomes cannot bypass lifecycle review"
+        );
+        assert_eq!(after.rule.protected, before.rule.protected);
+        assert_eq!(after.rule.trust_class, before.rule.trust_class);
+        assert_eq!(after.rule.validation_passes, before.rule.validation_passes);
+        assert_eq!(
+            after.rule.validation_contradictions,
+            before.rule.validation_contradictions
+        );
+        assert_eq!(after.rule.last_validated_at, before.rule.last_validated_at);
+        assert_eq!(after.rule.superseded_by, before.rule.superseded_by);
+        assert_eq!(
+            after.source_memory, before.source_memory,
+            "native rule feedback must not alter its evidence memory"
+        );
+        assert_eq!(after.source_posterior, before.source_posterior);
+        assert_eq!(after.source_events, before.source_events);
+        assert_eq!(after.events.len(), before.events.len() + 1);
+        let event = after
+            .events
+            .iter()
+            .find(|event| event.id == event_id)
+            .ok_or("native outcome event missing")?;
+        assert!(
+            event.applied_at.is_some(),
+            "accepted learning and its applied marker commit together"
+        );
+        let mark_audits = |state: &NativeRuleFeedbackState| {
+            state
+                .audits
+                .iter()
+                .filter(|audit| audit.action == crate::db::audit_actions::RULE_MARK)
+                .count()
+        };
+        assert_eq!(mark_audits(after), mark_audits(before) + 1);
+        let mark = after
+            .audits
+            .iter()
+            .find(|audit| {
+                audit.action == crate::db::audit_actions::RULE_MARK
+                    && audit
+                        .details
+                        .as_deref()
+                        .is_some_and(|details| details.contains(event_id))
+            })
+            .ok_or("rule lifecycle audit does not identify the feedback event")?;
+        assert_eq!(mark.target_type.as_deref(), Some("rule"));
+        assert_eq!(mark.target_id.as_deref(), Some(OUTCOME_TEST_RULE_ID));
+        assert_eq!(after.jobs.len(), before.jobs.len() + 1);
+        let job = after
+            .jobs
+            .iter()
+            .find(|job| !before.jobs.iter().any(|prior| prior.id == job.id))
+            .ok_or("rule outcome publication job missing")?;
+        assert_eq!(
+            job.job_type_enum(),
+            Some(crate::db::SearchIndexJobType::SingleDocument)
+        );
+        assert_eq!(job.document_source.as_deref(), Some("rule"));
+        assert_eq!(job.document_id.as_deref(), Some(OUTCOME_TEST_RULE_ID));
+        assert_eq!(job.documents_total, 1);
+        Ok(())
+    }
 
     fn seed_outcome_database(
         prefix: &str,
@@ -6249,6 +6614,237 @@ mod tests {
             !rendered_json.contains("redaction-fixture"),
             "query secret does not leak in quarantine JSON",
         )
+    }
+
+    #[test]
+    fn native_rule_outcome_is_verified_dry_run_safe_and_idempotent() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-native-rule-outcome")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = native_rule_feedback_state(&database)?;
+        let event_id = "fb_00000000000000000000000601";
+        let mut options = native_rule_outcome_options(&database, "helpful", event_id);
+        options.dry_run = true;
+        let preview = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.status, OutcomeRecordStatus::DryRun);
+        assert!(preview.target_verified);
+        assert_eq!(preview.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
+        assert_eq!(native_rule_feedback_state(&database)?, before);
+
+        options.dry_run = false;
+        let recorded = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+        assert!(recorded.target_verified);
+        assert_eq!(recorded.feedback.total_count, 1);
+        let after = native_rule_feedback_state(&database)?;
+        assert_native_rule_feedback_effect(&before, &after, true, event_id)?;
+        let retry = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(retry.status, OutcomeRecordStatus::AlreadyRecorded);
+        assert_eq!(
+            native_rule_feedback_state(&database)?,
+            after,
+            "retries cannot double-count learning, rewrite audit, or enqueue another index job"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_outcome_aliases_update_only_the_native_rule() -> TestResult {
+        for (signal, helpful) in [
+            ("helpful", true),
+            ("positive", true),
+            ("confirmation", true),
+            ("harmful", false),
+            ("negative", false),
+            ("contradiction", false),
+            ("inaccurate", false),
+        ] {
+            let (_dir, database) = seed_outcome_database("ee-native-rule-alias")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            connection.close().map_err(|error| error.to_string())?;
+            let before = native_rule_feedback_state(&database)?;
+            let event_id = "fb_00000000000000000000000602";
+            let options = native_rule_outcome_options(&database, signal, event_id);
+            let recorded = record_outcome(&options)
+                .map_err(|error| format!("{signal}: {}", error.message()))?;
+            assert_eq!(recorded.status, OutcomeRecordStatus::Recorded, "{signal}");
+            assert_native_rule_feedback_effect(
+                &before,
+                &native_rule_feedback_state(&database)?,
+                helpful,
+                event_id,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_zero_weight_neutral_and_freshness_feedback_record_without_learning() -> TestResult
+    {
+        let (_dir, database) = seed_outcome_database("ee-native-rule-neutral")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = native_rule_feedback_state(&database)?;
+        for (signal, weight, event_id) in [
+            ("helpful", 0.0, "fb_00000000000000000000000603"),
+            ("harmful", 0.0, "fb_00000000000000000000000604"),
+            ("neutral", 1.0, "fb_00000000000000000000000605"),
+            ("outdated", 1.0, "fb_00000000000000000000000610"),
+            ("stale", 1.0, "fb_00000000000000000000000611"),
+        ] {
+            let mut options = native_rule_outcome_options(&database, signal, event_id);
+            options.weight = Some(weight);
+            let report = record_outcome(&options).map_err(|error| error.message())?;
+            assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+            assert!(report.target_verified);
+        }
+        let after = native_rule_feedback_state(&database)?;
+        assert_eq!(after.events.len(), 5);
+        assert!(after.events.iter().all(|event| event.applied_at.is_some()));
+        assert_eq!(after.rule, before.rule);
+        assert_eq!(after.source_memory, before.source_memory);
+        assert_eq!(after.source_posterior, before.source_posterior);
+        assert_eq!(after.source_events, before.source_events);
+        assert_eq!(after.jobs, before.jobs);
+        assert!(
+            !after
+                .audits
+                .iter()
+                .any(|audit| audit.action == crate::db::audit_actions::RULE_MARK)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_outcome_rejects_missing_foreign_and_retired_targets_without_writes() -> TestResult
+    {
+        for case in [
+            "missing",
+            "invalid_id",
+            "foreign",
+            "tombstoned",
+            "superseded_pointer",
+            "deprecated",
+            "superseded",
+        ] {
+            let (_dir, database) = seed_outcome_database("ee-native-rule-rejected")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            let mut options =
+                native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000606");
+            match case {
+                "missing" => options.target_id = "rule_00000000000000000000000005".to_owned(),
+                "invalid_id" => options.target_id = OUTCOME_TEST_MEMORY_ID.to_owned(),
+                "foreign" => {
+                    let foreign = "wsp_00000000000000000000000009";
+                    connection
+                        .insert_workspace(
+                            foreign,
+                            &CreateWorkspaceInput {
+                                path: database
+                                    .with_extension("foreign")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                name: None,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                    options.workspace_id = Some(foreign.to_owned());
+                }
+                "tombstoned" => connection
+                    .execute_raw(
+                        "UPDATE procedural_rules SET tombstoned_at = '2026-09-25T00:00:00Z'",
+                    )
+                    .map_err(|error| error.to_string())?,
+                "superseded_pointer" => connection
+                    .execute_raw("UPDATE procedural_rules SET superseded_by = id")
+                    .map_err(|error| error.to_string())?,
+                "deprecated" | "superseded" => connection
+                    .execute_raw(&format!("UPDATE procedural_rules SET maturity = '{case}'"))
+                    .map_err(|error| error.to_string())?,
+                _ => return Err("unknown native-rule rejection fixture".to_owned()),
+            }
+            connection.close().map_err(|error| error.to_string())?;
+            let before = native_rule_feedback_state(&database)?;
+            for dry_run in [true, false] {
+                options.dry_run = dry_run;
+                assert!(
+                    record_outcome(&options).is_err(),
+                    "{case}: dry_run={dry_run}"
+                );
+                assert_eq!(native_rule_feedback_state(&database)?, before, "{case}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_common_write_primitive_applies_learning_or_rolls_back_every_effect() -> TestResult
+    {
+        for failure in [None, Some("audit"), Some("index")] {
+            let (_dir, database) = seed_outcome_database("ee-native-rule-atomic")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            match failure {
+                Some("audit") => connection.execute_raw("CREATE TRIGGER fail_native_rule_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'rule.mark' BEGIN SELECT RAISE(ABORT, 'native rule audit blocked'); END")
+                    .map_err(|error| error.to_string())?,
+                Some("index") => connection.execute_raw("CREATE TRIGGER fail_native_rule_index BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule index blocked'); END")
+                    .map_err(|error| error.to_string())?,
+                None => {},
+                _ => return Err("unknown native-rule failure fixture".to_owned()),
+            }
+            let before = native_rule_feedback_state(&database)?;
+            let event_id = "fb_00000000000000000000000607";
+            let input = crate::db::AuditedFeedbackEventInput {
+                event: CreateFeedbackEventInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+                    target_type: "rule".to_owned(),
+                    target_id: OUTCOME_TEST_RULE_ID.to_owned(),
+                    signal: "helpful".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some("daemon-native-rule-batch".to_owned()),
+                    reason: Some("Observed in a coalesced write batch.".to_owned()),
+                    evidence_json: None,
+                    session_id: None,
+                },
+                actor: Some("write-owner-test".to_owned()),
+                details: None,
+            };
+            let recorded = connection.with_transaction(|| {
+                super::record_outcome_feedback_event_in_txn(
+                    &connection,
+                    event_id,
+                    &input,
+                    crate::db::generate_audit_id(),
+                )
+            });
+            connection.close().map_err(|error| error.to_string())?;
+            let after = native_rule_feedback_state(&database)?;
+            if let Some(failure) = failure {
+                let error = recorded
+                    .expect_err("injected failure must execute")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("native rule {failure} blocked")),
+                    "{error}"
+                );
+                assert_eq!(
+                    after, before,
+                    "event, rule, applied marker, audit and index job must roll back together"
+                );
+            } else {
+                recorded.map_err(|error| error.to_string())?;
+                assert_native_rule_feedback_effect(&before, &after, true, event_id)?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -7804,6 +8400,103 @@ mod tests {
     }
 
     #[test]
+    fn native_rule_quarantine_release_applies_once_and_rolls_back_failed_publication() -> TestResult
+    {
+        let (dir, database) = seed_outcome_database("ee-native-rule-quarantine")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+        connection.close().map_err(|error| error.to_string())?;
+        let mut first =
+            native_rule_outcome_options(&database, "harmful", "fb_00000000000000000000000608");
+        first.harmful_per_source_per_hour = 1;
+        let report = record_outcome(&first).map_err(|error| error.message())?;
+        assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+        let admitted = native_rule_feedback_state(&database)?;
+        let event_id = "fb_00000000000000000000000609";
+        let mut second = native_rule_outcome_options(&database, "harmful", event_id);
+        second.harmful_per_source_per_hour = 1;
+        second.weight = Some(7.25);
+        let report = record_outcome(&second).map_err(|error| error.message())?;
+        assert_eq!(report.status, OutcomeRecordStatus::Quarantined);
+        assert!(report.target_verified);
+        let quarantine_id = report
+            .quarantine
+            .and_then(|summary| summary.id)
+            .ok_or("native quarantine id")?;
+        let quarantined = native_rule_feedback_state(&database)?;
+        assert_eq!(quarantined.rule, admitted.rule);
+        assert_eq!(quarantined.source_memory, admitted.source_memory);
+        assert_eq!(quarantined.source_posterior, admitted.source_posterior);
+        assert_eq!(quarantined.source_events, admitted.source_events);
+        assert_eq!(quarantined.events, admitted.events);
+        assert_eq!(quarantined.jobs, admitted.jobs);
+        assert_eq!(quarantined.rule.negative_feedback_count, 1);
+        let mut review = super::OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &quarantine_id,
+            reject: false,
+            actor: Some("native-rule-reviewer"),
+            dry_run: true,
+        };
+        let preview =
+            super::review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        assert_eq!(native_rule_feedback_state(&database)?, quarantined);
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.execute_raw("CREATE TRIGGER fail_native_rule_release BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule release blocked'); END")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        review.dry_run = false;
+        let error = super::review_feedback_quarantine(&review)
+            .expect_err("index failure must abort the release");
+        assert!(
+            error.message().contains("native rule release blocked"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(
+            native_rule_feedback_state(&database)?,
+            quarantined,
+            "failed release must preserve quarantine and undo rule, event, audit and publication work"
+        );
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let pending = connection
+            .get_feedback_quarantine(&quarantine_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("pending native feedback disappeared")?;
+        assert_eq!(pending.status, "pending");
+        assert!(pending.released_feedback_event_id.is_none());
+        connection
+            .execute_raw("DROP TRIGGER fail_native_rule_release")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let released =
+            super::review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(released.status, "released");
+        assert!(released.changed);
+        assert_eq!(released.feedback_event_id.as_deref(), Some(event_id));
+        let after = native_rule_feedback_state(&database)?;
+        assert_native_rule_feedback_effect(&quarantined, &after, false, event_id)?;
+        let event = after
+            .events
+            .iter()
+            .find(|event| event.id == event_id)
+            .ok_or("released native feedback")?;
+        assert!((event.weight - 7.25).abs() < 0.000_001);
+        assert_eq!(event.reason, second.reason);
+        assert_eq!(event.evidence_json, second.evidence_json);
+        let repeated =
+            super::review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(repeated.status, "already_reviewed");
+        assert!(!repeated.changed);
+        assert_eq!(native_rule_feedback_state(&database)?, after);
+        Ok(())
+    }
+
+    #[test]
     fn releasing_quarantined_feedback_preserves_original_payload() -> TestResult {
         let (dir, database) =
             seed_outcome_database_with_workspace_id("ee-outcome-quarantine-release", None)?;
@@ -8233,10 +8926,56 @@ fn parse_outcome_batch_line(line: &str) -> Result<OutcomeBatchLineDraft, String>
     })
 }
 
-/// Record a JSONL batch of outcome events with per-line independence.
+/// Resolve native rule feedback to the workspace addressed by the caller.
+pub(crate) fn outcome_native_rule_workspace(
+    database_path: &Path,
+    workspace_path: &Path,
+    requested_id: Option<&str>,
+) -> Result<String, DomainError> {
+    crate::core::ensure_addressed_database_exists(database_path)?;
+    let connection =
+        DbConnection::open_file_read_only(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect native rule workspace: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let workspace = crate::core::workspace::addressed_workspace_row(
+        &connection,
+        workspace_path,
+        database_path,
+    )?
+    .filter(|workspace| requested_id.is_none_or(|requested| requested == workspace.id))
+    .ok_or_else(|| DomainError::PolicyDenied {
+        message: "Native rule feedback must address the workspace that owns the rule.".to_owned(),
+        repair: Some(
+            "Use --workspace with the rule's workspace and its bound database.".to_owned(),
+        ),
+    })?;
+    Ok(workspace.id)
+}
+
+/// Record a store-scoped JSONL batch of outcome events with per-line independence.
+/// Callers addressing a workspace should use `record_outcome_batch_stdin_for_workspace`.
 pub fn record_outcome_batch_stdin(
     options: &OutcomeBatchOptions<'_>,
     input: &str,
+) -> Result<OutcomeBatchReport, DomainError> {
+    record_outcome_batch_stdin_inner(options, input, None)
+}
+
+/// Record a JSONL batch, binding each native rule target to the addressed workspace.
+/// A workspace mismatch fails only that line, before any feedback is recorded.
+pub fn record_outcome_batch_stdin_for_workspace(
+    options: &OutcomeBatchOptions<'_>,
+    input: &str,
+    workspace_path: &Path,
+) -> Result<OutcomeBatchReport, DomainError> {
+    record_outcome_batch_stdin_inner(options, input, Some(workspace_path))
+}
+
+fn record_outcome_batch_stdin_inner(
+    options: &OutcomeBatchOptions<'_>,
+    input: &str,
+    workspace_path: Option<&Path>,
 ) -> Result<OutcomeBatchReport, DomainError> {
     let lines: Vec<&str> = input
         .lines()
@@ -8285,7 +9024,7 @@ pub fn record_outcome_batch_stdin(
             }
         };
 
-        let line_options = OutcomeRecordOptions {
+        let mut line_options = OutcomeRecordOptions {
             database_path: options.database_path,
             target_type: draft.target_type,
             target_id: draft.target.clone(),
@@ -8305,7 +9044,22 @@ pub fn record_outcome_batch_stdin(
             harmful_burst_window_seconds: options.harmful_burst_window_seconds,
             prompt_injection_guard: options.prompt_injection_guard,
         };
-        match record_outcome(&line_options) {
+        let result = if let Some(workspace_path) = workspace_path
+            && line_options.target_type.trim().eq_ignore_ascii_case("rule")
+        {
+            outcome_native_rule_workspace(
+                options.database_path,
+                workspace_path,
+                line_options.workspace_id.as_deref(),
+            )
+            .and_then(|bound_id| {
+                line_options.workspace_id = Some(bound_id);
+                record_outcome(&line_options)
+            })
+        } else {
+            record_outcome(&line_options)
+        };
+        match result {
             Ok(report) => {
                 let quarantined = report.status == OutcomeRecordStatus::Quarantined
                     || (options.dry_run && report.quarantine.is_some());

@@ -9,7 +9,7 @@ use serde_json::{Value as JsonValue, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
@@ -67,6 +67,7 @@ fn ee_binary_path() -> Result<PathBuf, String> {
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
     Command::new(ee_binary_path()?)
         .current_dir(workspace)
+        .env("EE_EMBED_DOWNLOAD_ENABLED", "false")
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {:?}: {error}", args))
@@ -680,4 +681,346 @@ fn rule_mark_validation_counter_golden_pins_non_interference() -> TestResult {
         events_path.is_file(),
         "validation counter E2E JSONL log exists",
     )
+}
+
+#[test]
+fn native_rule_outcome_changes_rule_once_without_changing_source_memory() -> TestResult {
+    let run_dir = unique_run_dir()?;
+    let workspace = run_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let events_path = run_dir.join("outcome-events.jsonl");
+    let run_json = |step: &str, tail: &[&str]| -> Result<JsonValue, String> {
+        let mut args = workspace_args(&workspace);
+        args.extend(tail.iter().map(|arg| (*arg).to_owned()));
+        let output = run_step(&workspace, &events_path, step, args)?;
+        parse_stdout_json(&output, step)
+    };
+
+    run_json("init", &["init"])?;
+    let remembered = run_json(
+        "remember_source",
+        &[
+            "remember",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "A release smoke test caught an incompatible configuration change.",
+        ],
+    )?;
+    let memory_id = remembered["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember response missing memory_id".to_owned())?;
+    let added = run_json(
+        "rule_add",
+        &[
+            "rule",
+            "add",
+            "--maturity",
+            "candidate",
+            "--scope",
+            "workspace",
+            "--confidence",
+            "0.5",
+            "--source-memory",
+            memory_id,
+            "Run a release smoke test after changing configuration defaults.",
+        ],
+    )?;
+    let rule_id = added["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "rule add response missing ruleId".to_owned())?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection =
+        DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+    let source_before = connection
+        .get_memory(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source memory missing before outcome".to_owned())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let initial_why = run_json("why_before_outcome", &["why", rule_id])?;
+    ensure(
+        initial_why["data"]["entity"]["details"]["feedback"]["positiveCount"] == 0,
+        "native rule starts without positive feedback",
+    )?;
+    let confidence_before = initial_why["data"]["retrieval"]["confidence"]
+        .as_f64()
+        .ok_or_else(|| "native rule why missing initial confidence".to_owned())?;
+    let event_id = "fb_00000000000000000000000711";
+    let outcome_args = [
+        "outcome",
+        rule_id,
+        "--target-type",
+        "rule",
+        "--signal",
+        "helpful",
+        "--event-id",
+        event_id,
+    ];
+    let outcome = run_json("helpful_outcome", &outcome_args)?;
+    ensure(
+        outcome["data"]["status"] == "recorded" && outcome["data"]["event"]["id"] == event_id,
+        "helpful outcome records the caller's event identity",
+    )?;
+    ensure(
+        outcome["data"]["target"]
+            == json!({
+                "type": "rule",
+                "id": rule_id,
+                "workspaceId": source_before.workspace_id,
+                "verified": true,
+            }),
+        "outcome verifies the native rule and its durable workspace owner",
+    )?;
+    let learned_why = run_json("why_after_outcome", &["why", rule_id])?;
+    let learned = &learned_why["data"];
+    ensure(
+        learned["found"] == true
+            && learned["entity"]["kind"] == "rule"
+            && learned["entity"]["id"] == rule_id
+            && learned["memoryId"].is_null(),
+        "why explains the native rule without substituting a memory identity",
+    )?;
+    let feedback = &learned["entity"]["details"]["feedback"];
+    ensure(
+        feedback["target"] == json!({"kind": "rule", "id": rule_id})
+            && feedback["positiveCount"] == 1
+            && feedback["negativeCount"] == 0
+            && feedback["validationPasses"] == 0,
+        "helpful rule feedback increments only the native positive counter",
+    )?;
+    let confidence_after = learned["retrieval"]["confidence"]
+        .as_f64()
+        .ok_or_else(|| "native rule why missing learned confidence".to_owned())?;
+    ensure(
+        confidence_after > confidence_before,
+        "helpful outcome increases the native rule's confidence",
+    )?;
+    let connection =
+        DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+    let learned_rule = connection
+        .get_procedural_rule(rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "native rule missing after helpful outcome".to_owned())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let retry = run_json("retry_helpful_outcome", &outcome_args)?;
+    ensure(
+        retry["data"]["status"] == "already_recorded"
+            && retry["data"]["event"]["id"] == event_id
+            && retry["data"]["target"] == outcome["data"]["target"]
+            && retry["data"]["feedback"]["totalCount"] == 1,
+        "retry recognizes the same verified event without adding feedback",
+    )?;
+    let retry_why = run_json("why_after_retry", &["why", rule_id])?;
+    ensure(
+        retry_why["data"]["entity"]["details"]["feedback"] == *feedback
+            && retry_why["data"]["retrieval"] == learned["retrieval"],
+        "retry leaves native counters, confidence, and utility unchanged",
+    )?;
+
+    // An explicit database path must not authorize another workspace to learn
+    // against this rule, even when the caller knows both its ID and owner ID.
+    let foreign_workspace = run_dir.join("foreign-workspace");
+    fs::create_dir_all(&foreign_workspace).map_err(|error| error.to_string())?;
+    let mut foreign_init = workspace_args(&foreign_workspace);
+    foreign_init.push("init".to_owned());
+    run_step(
+        &foreign_workspace,
+        &events_path,
+        "foreign_init",
+        foreign_init,
+    )?;
+    let foreign_event_id = "fb_00000000000000000000000712";
+    let mut foreign_args = workspace_args(&foreign_workspace);
+    foreign_args.extend([
+        "outcome".to_owned(),
+        rule_id.to_owned(),
+        "--target-type".to_owned(),
+        "rule".to_owned(),
+        "--signal".to_owned(),
+        "helpful".to_owned(),
+        "--event-id".to_owned(),
+        foreign_event_id.to_owned(),
+        "--workspace-id".to_owned(),
+        source_before.workspace_id.clone(),
+        "--database".to_owned(),
+        database_path.to_string_lossy().into_owned(),
+    ]);
+    let foreign = run_ee(&foreign_workspace, &foreign_args)?;
+    append_event(
+        &events_path,
+        "foreign_outcome_refused",
+        &foreign_args,
+        &foreign,
+    )?;
+    ensure(
+        foreign.status.code() == Some(7)
+            && parse_stdout_json(&foreign, "foreign outcome")?["error"]["code"] == "policy_denied",
+        "foreign workspace cannot use an explicit database to update a native rule",
+    )?;
+
+    let foreign_connection =
+        DbConnection::open_file_read_only(foreign_workspace.join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())?;
+    let foreign_workspace_id = foreign_connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?
+        .first()
+        .map(|workspace| workspace.id.clone())
+        .ok_or_else(|| "foreign workspace missing after init".to_owned())?;
+    foreign_connection
+        .close()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        foreign_workspace_id != source_before.workspace_id,
+        "fixture workspaces have distinct durable identities",
+    )?;
+    let check_batch_scope = |step: &str,
+                             addressed: &Path,
+                             owner: &str,
+                             event: &str,
+                             retry_valid_event: bool|
+     -> TestResult {
+        let mut args = workspace_args(addressed);
+        args.extend([
+            "outcome".to_owned(),
+            "--batch".to_owned(),
+            "--stdin".to_owned(),
+            "--database".to_owned(),
+            database_path.to_string_lossy().into_owned(),
+        ]);
+        let line = json!({
+            "target": rule_id,
+            "targetType": "rule",
+            "workspaceId": owner,
+            "signal": "helpful",
+            "eventId": event,
+        });
+        let mut child = Command::new(ee_binary_path()?)
+            .current_dir(addressed)
+            .env("EE_EMBED_DOWNLOAD_ENABLED", "false")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("{step}: failed to start batch: {error}"))?;
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| format!("{step}: missing piped stdin"))?;
+            writeln!(stdin, "{line}")
+                .map_err(|error| format!("{step}: failed to write batch: {error}"))?;
+            if retry_valid_event {
+                let retry_line = json!({
+                    "target": rule_id,
+                    "targetType": "rule",
+                    "signal": "helpful",
+                    "eventId": event_id,
+                });
+                writeln!(stdin, "{retry_line}")
+                    .map_err(|error| format!("{step}: failed to write retry line: {error}"))?;
+            }
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("{step}: failed to collect batch: {error}"))?;
+        append_event(&events_path, step, &args, &output)?;
+        let response = parse_stdout_json(&output, step)?;
+        let results = if retry_valid_event {
+            ensure(
+                output.status.success()
+                    && response["data"]["failedCount"] == 1
+                    && response["data"]["recordedCount"] == 1,
+                format!("{step}: one rejected line must not prevent its valid sibling: {response}"),
+            )?;
+            let results = &response["data"]["results"];
+            ensure(
+                results.as_array().is_some_and(|rows| rows.len() == 2)
+                    && results[1]["status"] == "recorded"
+                    && results[1]["eventId"] == event_id,
+                format!("{step}: scoped batch recognizes the previously applied event: {response}"),
+            )?;
+            results
+        } else {
+            ensure(
+                output.status.code() == Some(5)
+                    && response["error"]["code"] == "import"
+                    && response["error"]["details"]["results"]
+                        .as_array()
+                        .is_some_and(|rows| rows.len() == 1),
+                format!("{step}: wholly rejected batch uses the import error contract: {response}"),
+            )?;
+            &response["error"]["details"]["results"]
+        };
+        ensure(
+            results[0]["targetId"] == rule_id
+                && results[0]["status"] == "failed"
+                && results[0]["errorCode"] == "outcome_batch_line_failed"
+                && results[0]["errorMessage"]
+                    == "Native rule feedback must address the workspace that owns the rule.",
+            format!("{step}: batch must reject the line's workspace claim: {response}"),
+        )
+    };
+    check_batch_scope(
+        "foreign_batch_refused",
+        &foreign_workspace,
+        &source_before.workspace_id,
+        "fb_00000000000000000000000713",
+        false,
+    )?;
+    check_batch_scope(
+        "mismatched_batch_owner_refused",
+        &workspace,
+        &foreign_workspace_id,
+        "fb_00000000000000000000000714",
+        true,
+    )?;
+
+    let connection =
+        DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+    let memories = connection
+        .list_memories(&source_before.workspace_id, None, true)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        memories == vec![source_before],
+        "rule learning preserves its source memory exactly and synthesizes no memory rows",
+    )?;
+    let rule = connection
+        .get_procedural_rule(rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "native rule missing after outcome".to_owned())?;
+    ensure(
+        rule == learned_rule,
+        "retry and all workspace refusals leave the learned native rule unchanged",
+    )?;
+    let events = connection
+        .list_feedback_events_for_target("rule", rule_id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        events.len() == 1 && events[0].id == event_id && events[0].applied_at.is_some(),
+        "exactly one native-rule event is persisted and applied",
+    )?;
+    let source_events = connection
+        .list_feedback_events_for_target("memory", memory_id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        source_events.is_empty(),
+        "source memory receives no rule feedback",
+    )?;
+    let audits = connection
+        .list_audit_by_target("rule", rule_id, None)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        audits
+            .iter()
+            .filter(|audit| audit.action == ee::db::audit_actions::RULE_MARK)
+            .count()
+            == 1,
+        "only the first outcome writes a native rule learning audit",
+    )?;
+    connection.close().map_err(|error| error.to_string())
 }
