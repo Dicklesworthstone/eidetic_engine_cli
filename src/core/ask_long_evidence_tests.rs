@@ -300,7 +300,10 @@ fn long_memory_answers_from_its_tail_without_rewriting_the_stored_body() {
 #[test]
 fn long_source_less_rule_answers_with_its_real_rule_identity_and_revision() {
     let fixture = Fixture::new();
-    let body = long_body(ANSWER);
+    // Native rules have an 8-KiB storage limit, unlike 64-KiB memory/evidence
+    // bodies. Still put the answer beyond the 4-KiB public-metadata boundary.
+    let body = format!("{}\n{ANSWER}", "Ordinary archival context. ".repeat(200));
+    assert!(body.len() > MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES && body.len() <= 8192);
     let id = fixture.rule(&body);
     assert_answer(&fixture.corpus(), &id, &body, "rule");
     assert!(
