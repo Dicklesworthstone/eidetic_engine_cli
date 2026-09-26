@@ -489,6 +489,23 @@ fn unicode_prefixes_have_exact_offsets_and_do_not_rewrite_the_source_revision() 
 }
 
 #[test]
+fn long_excerpts_are_screened_beyond_the_published_prefix() {
+    let fixture = Fixture::new();
+    let session = fixture.session(1, None, None);
+    let private = " /home/private/notes.txt ";
+    assert!(crate::policy::redact_public_replay_text(private).redacted);
+    // Across the first window's end, and far past the published prefix.
+    for (number, offset) in [(2, 4090), (3, 20_000)] {
+        let body = format!("{}{private}{}", "a".repeat(offset), "b".repeat(64));
+        let row = fixture.evidence(&session, number, number as u64, &body, None);
+        assert_eq!(row.search_eligibility, "admitted", "withheld by resume");
+    }
+    let history = fixture.state(3).transcript_history;
+    assert_eq!(history.evidence_total, 0);
+    assert!(history.sessions.is_empty());
+}
+
+#[test]
 fn corrupt_chronology_fails_closed_without_leaking_storage_values_or_leaving_a_snapshot() {
     let fixture = Fixture::new();
     let session = fixture.session(1, None, None);

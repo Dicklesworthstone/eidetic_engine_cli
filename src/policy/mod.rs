@@ -1128,7 +1128,7 @@ pub struct PublicReplayTextRedactionReport {
     pub redacted_reasons: Vec<&'static str>,
 }
 
-const MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES: usize = 4 * 1024;
 
 /// Deterministic guard output for external text before it becomes memory,
 /// curation, fingerprint, or sandbox material.
