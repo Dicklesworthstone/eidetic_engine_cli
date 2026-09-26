@@ -1766,16 +1766,15 @@ pub async fn rebuild_index_with_cx(
     // rebuild that has something to embed.
     //
     // Only the zero-document case changes. Any rebuild with documents resolves
-    // exactly as before, so the embedding path is untouched. Reading an already
-    // resolved selection with `.get()` is free and identical; this file uses
-    // that same non-forcing read at :4293, :4325, :6347 and :7185, for the same
-    // reason — a caller that initialises the global would fix the very identity
-    // it is reporting.
+    // exactly as before, so the embedding path is untouched.
+    //
+    // bd-71a77: the zero-document stack is ALWAYS the hash tier, as in
+    // requested index repair. Reusing a model the process already loaded
+    // registered it as `Available` for a workspace that never embedded with it,
+    // so in a long-lived process one workspace's model leaked into another's
+    // registry. Nothing is embedded here, so there is nothing to prove.
     let registry_stack = if documents_total == 0 {
-        match DEFAULT_SEARCH_EMBEDDER.get() {
-            Some(selection) => selection.stack.clone(),
-            None => hash_fallback_embedder_stack(),
-        }
+        hash_fallback_embedder_stack()
     } else {
         workspace_embedder_stack(&db, &workspace_id)?.0
     };
@@ -12746,6 +12745,100 @@ mod tests {
         ensure(
             matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
             "the real status pipeline must not contact the remote embedding endpoint",
+        )
+    }
+
+    #[test]
+    fn zero_document_rebuild_never_registers_the_process_global_model() -> TestResult {
+        // bd-71a77: a model the process already loaded must not be registered
+        // for a workspace that never embedded with it. Setting the global
+        // would contaminate every later test here, so the scenario runs in an
+        // isolated child of this test binary.
+        const CHILD_WORKSPACE: &str = "EE_TEST_ZERO_DOC_GLOBAL_WORKSPACE";
+        const CHILD_SENTINEL: &str = "bd-71a77 child inspected the zero-document registry";
+        if let Some(workspace) = std::env::var_os(CHILD_WORKSPACE) {
+            let workspace = PathBuf::from(workspace);
+            ensure(
+                DEFAULT_SEARCH_EMBEDDER
+                    .set(DefaultSearchEmbedder::ready(
+                        EmbedderStack::from_parts(
+                            Arc::new(TestSemanticEmbedder::new("zero-doc-global-fixture", 256)),
+                            None,
+                        ),
+                        EmbedModelResolution::deterministic_hash(),
+                    ))
+                    .is_ok(),
+                "isolated child must begin with an unresolved default embedder",
+            )?;
+            ensure(
+                DEFAULT_SEARCH_EMBEDDER.get().is_some_and(|selection| {
+                    selection.stack.fast().is_semantic() && selection.stack.fast().is_ready()
+                }),
+                "the process must hold a loaded semantic model before init",
+            )?;
+            let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+                workspace_path: workspace.clone(),
+                dry_run: false,
+                repair_plan: false,
+                force: false,
+                allow_symlink: false,
+                skip_boilerplate: true,
+            });
+            ensure(
+                !matches!(init.status, crate::core::init::InitStatus::Failed),
+                format!("zero-document init failed: {:?}", init.action_errors),
+            )?;
+            let connection = DbConnection::open_file_read_only(&init.database_path)
+                .map_err(|error| error.to_string())?;
+            let workspace_id = connection
+                .get_workspace_by_path(&workspace.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .ok_or("initialized workspace missing")?
+                .id;
+            let leaked: Vec<String> = connection
+                .list_model_registry_entries(&workspace_id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|entry| {
+                    entry.status == ModelRegistryStatus::Available
+                        && entry.provider != ModelProvider::Hash
+                })
+                .map(|entry| entry.model_name)
+                .collect();
+            ensure(
+                leaked.is_empty(),
+                format!("zero-document init registered the process model: {leaked:?}"),
+            )?;
+            println!("{CHILD_SENTINEL}");
+            return Ok(());
+        }
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let output = std::process::Command::new(
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
+        .args([
+            "--exact",
+            "core::index::tests::zero_document_rebuild_never_registers_the_process_global_model",
+            "--nocapture",
+        ])
+        .env(CHILD_WORKSPACE, &workspace)
+        .output()
+        .map_err(|error| error.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // An exact filter that matches nothing also exits 0; demand proof that
+        // the child reached its assertions.
+        ensure(
+            output.status.success()
+                && stdout.contains(CHILD_SENTINEL)
+                && stdout.contains("1 passed"),
+            format!(
+                "isolated zero-document child failed or never ran:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         )
     }
 
