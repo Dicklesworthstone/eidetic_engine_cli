@@ -11,13 +11,13 @@
 //!
 //! Security contract (TC-D14): the raw root and any derived subkey never enter
 //! the database, command output, logs, audit, support bundles, or the redacted
-//! `ee backup` format. The only durable home for the root is the hardened key
-//! file this module owns (`0700` directory / `0600` file, owner-only, no
-//! symlinked components). The `Secret` newtype has a redacted `Debug` and best-effort
-//! `Drop` zeroization, and no secret bytes are ever serialized except as the
-//! raw-root hex inside that one key file. Explicit key recovery can also seal
-//! that document in a passphrase-encrypted envelope; ordinary data backups
-//! never carry plaintext keys or this recovery envelope.
+//! `ee backup` format. Durable plaintext is confined to the hardened key
+//! directory, including exclusive temporary siblings retained after failed
+//! publication (`0700` directory / `0600` file, owner-only on Unix, no
+//! symlinked components). The `Secret` newtype has a redacted `Debug` and
+//! `Drop` zeroization. Explicit key recovery can also seal the key document
+//! in a passphrase-encrypted envelope; ordinary data backups never carry
+//! plaintext keys or this recovery envelope.
 //!
 //! Availability failures (missing/corrupt/insecure key store, randomness
 //! failure, or a primitive self-test regression) all fail closed with
@@ -42,6 +42,13 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::hex_lower;
+
+#[path = "store_auth_io.rs"]
+mod key_io;
+use key_io::{
+    enforce_owner_only_dir, enforce_owner_only_file, ensure_hardened_dir, open_key_lock_file,
+    read_key_file, reject_symlink_components, sync_key_directory, write_exclusive, write_replace,
+};
 
 /// Length of the root secret and every derived subkey, in bytes.
 const KEY_LEN: usize = 32;
@@ -231,7 +238,7 @@ impl StoreAuthError {
                 format!("Store-authentication key store already exists at {path}")
             }
             Self::NotInitialized { path } => {
-                "Store-authentication key store is not initialized at {path}".replace("{path}", path)
+                format!("Store-authentication key store is not initialized at {path}")
             }
         }
     }
@@ -622,11 +629,17 @@ impl StoreAuthRoot {
         }
         let doc: KeyFileDoc =
             serde_json::from_slice(bytes).map_err(|error| StoreAuthError::Malformed {
-                message: format!("key file JSON: {error}"),
+                // Deserialization errors may quote an invalid field value.
+                // Key-file contents must never enter public diagnostics.
+                message: format!(
+                    "key file JSON is malformed at line {}, column {}",
+                    error.line(),
+                    error.column()
+                ),
             })?;
         if doc.schema != KEY_FILE_SCHEMA {
             return Err(StoreAuthError::SchemaMismatch {
-                found: doc.schema,
+                found: "[unrecognized]".to_owned(),
                 expected: KEY_FILE_SCHEMA.to_owned(),
             });
         }
@@ -1005,198 +1018,34 @@ fn hex_nibble(byte: u8, label: &str) -> Result<u8, StoreAuthError> {
     }
 }
 
-fn read_key_file(path: &Path) -> Result<Vec<u8>, StoreAuthError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })?;
-    if metadata.len() > MAX_KEY_FILE_BYTES {
-        return Err(StoreAuthError::Malformed {
-            message: format!("key file is {} bytes, exceeds cap", metadata.len()),
-        });
-    }
-    std::fs::read(path).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })
-}
-
-fn reject_symlink_components(keys_dir: &Path, path: &Path) -> Result<(), StoreAuthError> {
-    for candidate in [keys_dir, path] {
-        if let Ok(metadata) = std::fs::symlink_metadata(candidate)
-            && metadata.file_type().is_symlink()
-        {
-            return Err(StoreAuthError::SymlinkComponent {
-                path: candidate.display().to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn ensure_hardened_dir(keys_dir: &Path) -> Result<(), StoreAuthError> {
-    std::fs::create_dir_all(keys_dir).map_err(|error| StoreAuthError::Io {
-        path: keys_dir.display().to_string(),
-        message: error.to_string(),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(keys_dir, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| StoreAuthError::Io {
-                path: keys_dir.display().to_string(),
-                message: format!("harden directory permissions: {error}"),
-            },
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn enforce_owner_only_dir(keys_dir: &Path) -> Result<(), StoreAuthError> {
-    enforce_owner_only_mode(keys_dir, "key directory")
-}
-
-#[cfg(unix)]
-fn enforce_owner_only_file(path: &Path) -> Result<(), StoreAuthError> {
-    enforce_owner_only_mode(path, "key file")
-}
-
-#[cfg(unix)]
-fn enforce_owner_only_mode(path: &Path, label: &str) -> Result<(), StoreAuthError> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })?;
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(StoreAuthError::InsecurePermissions {
-            path: path.display().to_string(),
-            detail: format!("{label} mode {mode:04o} grants group/other access"),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn enforce_owner_only_dir(_keys_dir: &Path) -> Result<(), StoreAuthError> {
-    // Non-Unix permission hardening relies on the default per-user profile ACL;
-    // an explicit ACL tightening pass is a documented residual for this slice.
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn enforce_owner_only_file(_path: &Path) -> Result<(), StoreAuthError> {
-    Ok(())
-}
-
-/// Open the persistent owner-only advisory lock file used to serialize key
-/// rotation against approval transactions. The file contains no key material
-/// and is never removed; descriptor close is the crash-safe unlock path.
-fn open_key_lock_file(keys_dir: &Path) -> Result<std::fs::File, StoreAuthError> {
-    ensure_hardened_dir(keys_dir)?;
-    let path = keys_dir.join(KEY_LOCK_FILE_NAME);
-    reject_symlink_components(keys_dir, &path)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(&path).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: format!("open key-store lock: {error}"),
-    })?;
-    enforce_owner_only_file(&path)?;
-    Ok(file)
-}
-
-/// Exclusively create the key file (`O_EXCL`), owner-only on Unix.
-fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            StoreAuthError::AlreadyInitialized {
-                path: path.display().to_string(),
-            }
-        } else {
-            StoreAuthError::Io {
-                path: path.display().to_string(),
-                message: error.to_string(),
-            }
-        }
-    })?;
-    file.write_all(bytes).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })?;
-    file.sync_all().map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })?;
-    Ok(())
-}
-
-/// Atomically replace a key file using a previously absent, owner-only sibling.
-/// Never truncate crash evidence or follow a planted temporary-file link.
-fn write_replace(tmp: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
-    if tmp == path || tmp.parent() != path.parent() {
-        return Err(recovery_error("key replacement requires a distinct sibling temporary"));
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    reject_symlink_components(parent, path)?;
-    reject_symlink_components(parent, tmp)?;
-    write_exclusive(tmp, bytes)?;
-    std::fs::rename(tmp, path).map_err(|error| StoreAuthError::Io {
-        path: path.display().to_string(),
-        message: format!("atomic replace: {error}"),
-    })?;
-    Ok(())
-}
-
-/// A synced file does not persist its new directory entry. Unix supports an
-/// explicit directory barrier; other platforms retain their existing file-sync
-/// guarantee until a platform-specific directory publisher is available.
-fn sync_key_directory(path: &Path) -> Result<(), StoreAuthError> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{Mode, OFlags};
-        let descriptor = rustix::fs::open(
-            path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| StoreAuthError::Io {
-            path: path.display().to_string(),
-            message: format!("open key-directory persistence barrier: {error}"),
-        })?;
-        std::fs::File::from(descriptor)
-            .sync_all()
-            .map_err(|error| StoreAuthError::Io {
-                path: path.display().to_string(),
-                message: format!("persist key-directory entry: {error}"),
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn keys_dir() -> tempfile::TempDir {
-        tempfile::TempDir::new().expect("tempdir")
+        tempfile::tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("physical temporary root"),
+        )
+        .expect("tempdir")
+    }
+
+    #[test]
+    fn malformed_key_fields_never_enter_public_or_debug_errors() {
+        let dir = keys_dir();
+        let root = StoreAuthRoot::create(dir.path()).expect("create");
+        let original: serde_json::Value =
+            serde_json::from_slice(&root.serialize().expect("serialize")).expect("document");
+        let sentinel = "sensitive-key-file-value-must-not-be-rendered";
+        for field in ["schema", "current"] {
+            let mut damaged = original.clone();
+            damaged[field] = serde_json::Value::String(sentinel.to_owned());
+            let bytes = serde_json::to_vec(&damaged).expect("malformed document");
+            let error = StoreAuthRoot::from_serialized(dir.path(), &bytes)
+                .expect_err("reject malformed key document");
+            assert!(!format!("{error} {error:?}").contains(sentinel));
+        }
     }
 
     #[test]
@@ -1205,24 +1054,36 @@ mod tests {
         let mut root = StoreAuthRoot::create(dir.path()).expect("create");
         let before = root.window_key_ids();
         let message = b"survives failed rotation";
-        let mac = root.mac(MacDomain::NativeImportRecordsRoot, message).expect("mac");
+        let mac = root
+            .mac(MacDomain::NativeImportRecordsRoot, message)
+            .expect("mac");
         let path = dir.path().join(KEY_FILE_NAME);
         let bytes = std::fs::read(&path).expect("source bytes");
-        let error = root.rotate_with(
-            |_, _, candidate| {
-                let candidate = StoreAuthRoot::from_serialized(dir.path(), candidate)
-                    .expect("valid proposed rotation");
-                assert_ne!(candidate.current_key_id(), before[0]);
-                Err(recovery_error("injected pre-publication failure"))
-            },
-            |_| panic!("no directory barrier before publication"),
-        ).expect_err("publication fails");
+        let error = root
+            .rotate_with(
+                |_, _, candidate| {
+                    let candidate = StoreAuthRoot::from_serialized(dir.path(), candidate)
+                        .expect("valid proposed rotation");
+                    assert_ne!(candidate.current_key_id(), before[0]);
+                    Err(recovery_error("injected pre-publication failure"))
+                },
+                |_| panic!("no directory barrier before publication"),
+            )
+            .expect_err("publication fails");
         assert!(error.to_string().contains("injected pre-publication failure"));
         assert_eq!(root.window_key_ids(), before);
         assert_eq!(std::fs::read(&path).expect("unchanged bytes"), bytes);
-        assert_eq!(root.mac(MacDomain::NativeImportRecordsRoot, message).expect("mac"), mac);
-        assert!(StoreAuthRoot::open(dir.path()).expect("reopen")
-            .verify(MacDomain::NativeImportRecordsRoot, message, &mac).expect("verify"));
+        assert_eq!(
+            root.mac(MacDomain::NativeImportRecordsRoot, message)
+                .expect("mac"),
+            mac
+        );
+        assert!(
+            StoreAuthRoot::open(dir.path())
+                .expect("reopen")
+                .verify(MacDomain::NativeImportRecordsRoot, message, &mac)
+                .expect("verify")
+        );
         root.rotate().expect("failed preparation releases the lock");
     }
 
@@ -1232,18 +1093,37 @@ mod tests {
         let mut root = StoreAuthRoot::create(dir.path()).expect("create");
         let old_id = root.current_key_id();
         let message = b"post-rename persistence failure";
-        let old_mac = root.mac(MacDomain::NativeImportRecordsRoot, message).expect("mac");
-        let error = root.rotate_with(write_replace, |_| {
-            Err(recovery_error("injected directory barrier failure"))
-        }).expect_err("durability failure is not success");
+        let old_mac = root
+            .mac(MacDomain::NativeImportRecordsRoot, message)
+            .expect("mac");
+        let error = root
+            .rotate_with(write_replace, |_| {
+                Err(recovery_error("injected directory barrier failure"))
+            })
+            .expect_err("durability failure is not success");
         assert!(error.to_string().contains("injected directory barrier failure"));
         let disk = StoreAuthRoot::open(dir.path()).expect("installed key");
         assert_ne!(root.current_key_id(), old_id);
         assert_eq!(root.window_key_ids(), disk.window_key_ids());
-        let new_mac = root.mac(MacDomain::NativeImportRecordsRoot, message).expect("mac");
-        assert!(disk.verify(MacDomain::NativeImportRecordsRoot, message, &new_mac).expect("verify"));
-        assert_eq!(disk.verify_with_key(old_id, MacDomain::NativeImportRecordsRoot, message, &old_mac)
-            .expect("old verification"), KeyVerification::Match { key_class: KeyClass::Retired });
+        let new_mac = root
+            .mac(MacDomain::NativeImportRecordsRoot, message)
+            .expect("mac");
+        assert!(
+            disk.verify(MacDomain::NativeImportRecordsRoot, message, &new_mac)
+                .expect("verify")
+        );
+        assert_eq!(
+            disk.verify_with_key(
+                old_id,
+                MacDomain::NativeImportRecordsRoot,
+                message,
+                &old_mac,
+            )
+            .expect("old verification"),
+            KeyVerification::Match {
+                key_class: KeyClass::Retired
+            }
+        );
     }
 
     #[test]
@@ -1253,16 +1133,29 @@ mod tests {
         let legacy = dir.path().join(KEY_FILE_TMP_NAME);
         std::fs::write(&legacy, b"preserve crash evidence").expect("legacy temporary");
         let mut failed_temporary = None;
-        assert!(root.rotate_with(|tmp, _, bytes| {
-            write_exclusive(tmp, bytes)?;
-            failed_temporary = Some(tmp.to_path_buf());
-            Err(recovery_error("injected failure after temporary flush"))
-        }, sync_key_directory).is_err());
+        assert!(
+            root.rotate_with(
+                |tmp, _, bytes| {
+                    write_exclusive(tmp, bytes)?;
+                    failed_temporary = Some(tmp.to_path_buf());
+                    Err(recovery_error("injected failure after temporary flush"))
+                },
+                sync_key_directory,
+            )
+            .is_err()
+        );
         let failed_temporary = failed_temporary.expect("created temporary");
         let preserved = std::fs::read(&failed_temporary).expect("failed attempt bytes");
-        root.rotate().expect("fresh attempt has a fresh temporary name");
-        assert_eq!(std::fs::read(&failed_temporary).expect("preserved temporary"), preserved);
-        assert_eq!(std::fs::read(&legacy).expect("legacy preserved"), b"preserve crash evidence");
+        root.rotate()
+            .expect("fresh attempt has a fresh temporary name");
+        assert_eq!(
+            std::fs::read(&failed_temporary).expect("preserved temporary"),
+            preserved
+        );
+        assert_eq!(
+            std::fs::read(&legacy).expect("legacy preserved"),
+            b"preserve crash evidence"
+        );
     }
 
     #[test]
@@ -1274,7 +1167,10 @@ mod tests {
         let tmp = dir.path().join(KEY_FILE_TMP_NAME);
         std::fs::write(&tmp, b"unrelated existing bytes").expect("occupied temporary");
         assert!(write_replace(&tmp, &path, b"must not escape").is_err());
-        assert_eq!(std::fs::read(&tmp).expect("preserved"), b"unrelated existing bytes");
+        assert_eq!(
+            std::fs::read(&tmp).expect("preserved"),
+            b"unrelated existing bytes"
+        );
         assert_eq!(std::fs::read(&path).expect("original"), original);
     }
 
@@ -1290,9 +1186,16 @@ mod tests {
         let tmp = dir.path().join(KEY_FILE_TMP_NAME);
         std::os::unix::fs::symlink(&target, &tmp).expect("temporary symlink");
         assert!(write_replace(&tmp, &path, b"must not escape").is_err());
-        assert_eq!(std::fs::read(&target).expect("target preserved"), b"unrelated source");
+        assert_eq!(
+            std::fs::read(&target).expect("target preserved"),
+            b"unrelated source"
+        );
         assert_eq!(std::fs::read(&path).expect("key preserved"), original);
-        assert!(std::fs::symlink_metadata(&tmp).expect("link preserved").is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&tmp)
+                .expect("link preserved")
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -1302,9 +1205,16 @@ mod tests {
         let mut stale = StoreAuthRoot::open(dir.path()).expect("stale handle");
         let original = first.current_key_id();
         let intermediate = first.rotate().expect("first rotation");
-        let newest = stale.rotate().expect("stale handle rotates current disk state");
+        let newest = stale
+            .rotate()
+            .expect("stale handle rotates current disk state");
         assert_eq!(stale.window_key_ids(), vec![newest, intermediate, original]);
-        assert_eq!(StoreAuthRoot::open(dir.path()).expect("reopen").window_key_ids(), stale.window_key_ids());
+        assert_eq!(
+            StoreAuthRoot::open(dir.path())
+                .expect("reopen")
+                .window_key_ids(),
+            stale.window_key_ids()
+        );
     }
 
     #[test]
@@ -1313,9 +1223,13 @@ mod tests {
         let mut root = StoreAuthRoot::create(dir.path()).expect("create");
         root.rotate_with(write_replace, |path| {
             let contender = open_key_lock_file(path)?;
-            assert!(matches!(Fs4FileExt::try_lock(&contender), Err(fs4::TryLockError::WouldBlock)));
+            assert!(matches!(
+                Fs4FileExt::try_lock(&contender),
+                Err(fs4::TryLockError::WouldBlock)
+            ));
             sync_key_directory(path)
-        }).expect("rotate under lock");
+        })
+        .expect("rotate under lock");
         let contender = open_key_lock_file(dir.path()).expect("contender");
         Fs4FileExt::try_lock(&contender).expect("rotation released lock");
         Fs4FileExt::unlock(&contender).expect("unlock");
