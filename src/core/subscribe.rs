@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use sqlmodel_core::Value as SqlValue;
 
-use crate::db::{DbConnection, audit_actions};
+use crate::db::audit_actions;
 use crate::models::{DomainError, MemoryKind, MemoryLevel, Tag, TrustClass};
 
 pub const MEMORY_DELTA_SCHEMA_V1: &str = "ee.memory.delta.v1";
@@ -423,14 +423,10 @@ fn raw_delta_from_row(row: &sqlmodel_core::Row) -> Result<RawAuditDelta, DomainE
     })
 }
 
-fn materialize_delta(
-    connection: &DbConnection,
-    raw: RawAuditDelta,
-) -> Result<MemoryDelta, DomainError> {
-    let tags = memory_tags(connection, &raw.memory_id)?;
+fn materialize_delta(raw: RawAuditDelta, tags: Vec<String>) -> MemoryDelta {
     let levels = raw.level.iter().cloned().collect();
     let kinds = raw.kind.iter().cloned().collect();
-    Ok(MemoryDelta {
+    MemoryDelta {
         schema: MEMORY_DELTA_SCHEMA_V1,
         cursor: raw.cursor,
         kind: classify_delta_kind(&raw.action).to_owned(),
@@ -444,27 +440,7 @@ fn materialize_delta(
         changed_fields: classify_changed_fields(&raw.action),
         audit_id: raw.audit_id,
         occurred_at: raw.occurred_at,
-    })
-}
-
-fn memory_tags(connection: &DbConnection, memory_id: &str) -> Result<Vec<String>, DomainError> {
-    let rows = connection
-        .query(
-            "SELECT tag FROM memory_tags WHERE memory_id = ?1 ORDER BY tag ASC",
-            &[SqlValue::Text(memory_id.to_owned())],
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read memory tags: {error}"),
-            repair: Some("Run `ee doctor --json` for storage diagnostics.".to_owned()),
-        })?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            row.get(0)
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
-        .collect())
+    }
 }
 
 #[must_use]

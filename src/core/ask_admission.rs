@@ -181,6 +181,67 @@ fn public_text(value: &str) -> bool {
 /// The caller still enforces scope, lifecycle, trust and native admission;
 /// nothing here grants execution permission or rewrites the quoted bytes.
 fn public_evidence_body(value: &str) -> bool {
+    use crate::policy::{MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, detect_instruction_like_content};
+
+    // The public-replay limit bounds small metadata fields, not memory or CASS
+    // bodies. Those producers accept 64 KiB. Never replace a long body with a
+    // prefix: the omitted tail can contain the answer, opposition or a secret.
+    if value.len() > crate::models::MAX_CONTENT_BYTES {
+        return false;
+    }
+    if value.len() <= MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES {
+        return public_evidence_window(value);
+    }
+
+    // Contextual credentials, PEM blocks and authority instructions can span
+    // arbitrarily much whitespace. Screen the COMPLETE bounded input before
+    // making the smaller public-egress checks; windowing alone is insufficient.
+    if crate::policy::screen_external_text_for_ingestion(value).redacted {
+        return false;
+    }
+    let instructions = detect_instruction_like_content(value);
+    if instructions.is_instruction_like
+        && instructions.signals.iter().any(|signal| {
+            !matches!(
+                signal.kind,
+                crate::policy::InstructionSignalKind::ToolCoercion
+                    | crate::policy::InstructionSignalKind::DestructiveCommand
+            )
+        })
+    {
+        return false;
+    }
+
+    // Embedded JWT/entropy/label detectors must see complete token
+    // neighborhoods, including their delimiters. Refuse oversized atoms
+    // instead of claiming that fragments have established their safety.
+    let overlap = MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES / 2;
+    if value.split_whitespace().any(|atom| atom.len() > overlap / 2) {
+        return false;
+    }
+    let mut start = 0;
+    loop {
+        let mut end = value.len().min(start + MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        if !public_evidence_window(&value[start..end]) {
+            return false;
+        }
+        if end == value.len() {
+            return true;
+        }
+        start += overlap;
+        while !value.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+}
+
+/// Keep the strict, shared egress policy for each complete bounded window.
+/// Only command-risk findings are advisory; no secret/PII/path finding, unknown
+/// reason or authority signal is excused, and no evidence byte is rewritten.
+fn public_evidence_window(value: &str) -> bool {
     use crate::policy::InstructionSignalKind;
 
     if value
@@ -392,14 +453,19 @@ mod evidence_body_tests {
     }
 
     #[test]
-    fn ordinary_evidence_and_scan_limits_keep_their_existing_policy() {
+    fn ordinary_and_long_evidence_use_the_same_content_policy() {
         assert!(public_evidence_body(
             "Run cargo fmt --check before every release tag."
         ));
-        let oversized = format!("Avoid rm -rf. {}", "ordinary evidence ".repeat(400));
-        assert!(!public_evidence_body(&oversized));
+        let long = format!("Avoid rm -rf. {}", "ordinary evidence ".repeat(400));
+        assert!(redact_public_replay_text(&long).redacted);
+        assert!(public_evidence_body(&long));
     }
 }
+
+#[cfg(test)]
+#[path = "ask_long_evidence_tests.rs"]
+mod long_evidence_tests;
 
 #[cfg(test)]
 mod provenance_tests {
