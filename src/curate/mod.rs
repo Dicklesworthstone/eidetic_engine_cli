@@ -7538,6 +7538,26 @@ pub fn validate_candidate_trust_evidence(
         )
 }
 
+/// Whether `content` is the structured link payload: a JSON object naming two
+/// distinct memories (`memoryA`, `memoryB`) and a supported `relation`, the
+/// shape the curate apply path accepts for link candidates.
+fn is_structured_link_payload(content: &str) -> bool {
+    let Ok(serde_json::Value::Object(payload)) = serde_json::from_str(content) else {
+        return false;
+    };
+    let field = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let (memory_a, memory_b) = (field("memoryA"), field("memoryB"));
+    !memory_a.is_empty()
+        && !memory_b.is_empty()
+        && memory_a != memory_b
+        && matches!(field("relation"), "related" | "supports" | "contradicts")
+}
+
 /// Validate a candidate input and produce a validated candidate.
 pub fn validate_candidate(
     input: CandidateInput,
@@ -7654,8 +7674,19 @@ pub fn validate_candidate(
         }
     }
 
+    // A link or contradiction candidate whose content is the structured link
+    // payload (ee.graph.suggest_links.proposal.v1) carries no memory prose; the
+    // prose specificity gate scores every such payload 0.0 and would reject
+    // them all (bd-glh12). Free text on those types is still gated.
+    let structured_payload = matches!(
+        input.candidate_type,
+        CandidateType::LinkProposal | CandidateType::ContradictionReview
+    ) && proposed_content
+        .as_deref()
+        .is_some_and(is_structured_link_payload);
     let specificity_report = proposed_content
         .as_ref()
+        .filter(|_| !structured_payload)
         .map(|content| specificity_score(content));
     if let Some(report) = &specificity_report
         && !report.passes_threshold
@@ -10681,6 +10712,36 @@ Then update src/policy/mod.rs on main."
             }
             other => Err(format!("expected generic rejection, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn validate_candidate_gates_link_prose_but_not_structured_link_payload() -> TestResult {
+        for candidate_type in [
+            CandidateType::LinkProposal,
+            CandidateType::ContradictionReview,
+        ] {
+            let mut input = valid_input();
+            input.candidate_type = candidate_type;
+            input.proposed_content = Some(
+                r#"{"memoryA":"mem_a","memoryB":"mem_b","relation":"contradicts"}"#.to_string(),
+            );
+            let candidate = validate_candidate(input, "2026-04-29T12:00:00Z", true)
+                .map_err(|error| format!("{candidate_type:?} structured payload: {error:?}"))?;
+            assert!(candidate.specificity_report.is_none());
+
+            let mut input = valid_input();
+            input.candidate_type = candidate_type;
+            input.proposed_content = Some("These memories are related.".to_string());
+            let result = validate_candidate(input, "2026-04-29T12:00:00Z", true);
+            assert!(
+                matches!(
+                    result,
+                    Err(CandidateValidationError::CandidateTooGeneric { .. })
+                ),
+                "{candidate_type:?} free text: {result:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

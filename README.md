@@ -2429,6 +2429,9 @@ ee backup inspect bk_01HQ4… --json
 ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
+Backups preserve identifiers by default; pass `--redaction standard` for a
+shareable backup, which re-mints ids on restore.
+
 The portable record stream currently preserves the workspace, memories, tags,
 memory links, attempt-family lineage, and audit rows. It does **not** yet claim
 lossless recovery of every durable table. Each create/export response and

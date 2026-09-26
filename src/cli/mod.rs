@@ -19366,11 +19366,14 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    // A backup is a recovery point: it preserves identifiers by default
+    // (bd-cjt23). `--redaction standard` makes a shareable backup whose ids are
+    // re-minted on restore. A workspace [redaction.defaults] export still wins.
     let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
         crate::config::RedactionDefaultSurface::Export,
-        RedactionLevel::Standard,
+        RedactionLevel::Minimal,
     );
     let options = BackupCreateOptions {
         workspace_path,

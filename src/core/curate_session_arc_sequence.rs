@@ -455,7 +455,7 @@ mod tests {
             assert_eq!(endpoints(&inline), [("combined", "combined")]);
             for row in &inline {
                 let arc = row.session_arc.as_ref().unwrap();
-                assert_eq!(row.source_ids, [combined.id.clone()]);
+                assert_eq!(row.source_ids, std::slice::from_ref(&combined.id));
                 assert_eq!(arc.failure_span.excerpt, failure);
                 assert_eq!(arc.resolution_span.excerpt, repair);
                 assert_eq!(arc.failure_span.content_hash, combined.content_hash);
