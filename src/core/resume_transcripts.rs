@@ -232,10 +232,7 @@ pub(super) fn load(
     if headers.is_empty() {
         return Ok(ResumeTranscriptHistory::default());
     }
-    let admitted_memories: BTreeSet<_> = all_live
-        .iter()
-        .map(|memory| memory.id.as_str())
-        .collect();
+    let admitted_memories: BTreeSet<_> = all_live.iter().map(|memory| memory.id.as_str()).collect();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut selected: BTreeMap<SessionRank, ResumeTranscriptSession> = BTreeMap::new();
     let limit = limit.min(RESUME_SESSION_CAP);

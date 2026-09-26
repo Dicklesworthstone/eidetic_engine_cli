@@ -134,12 +134,8 @@ fn load_with_boundary(
         .collect();
 
     let typed_decision_fields = load_decision_typed_fields(connection, &all_live)?;
-    let transcript_history = super::transcripts::load(
-        connection,
-        &workspace_id,
-        &all_live,
-        options.sessions,
-    )?;
+    let transcript_history =
+        super::transcripts::load(connection, &workspace_id, &all_live, options.sessions)?;
     snapshot.finish()?;
     Ok(ResumeState {
         workspace_id,
