@@ -5,6 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::{CORROBORATION_CAP, native};
 use super::{AskCandidate, AskRequest, RankedCandidate, SpanScorer, best_span_score};
 
+#[path = "ask_candidate_saturation.rs"]
+mod saturation;
+
 fn support_key<'a>(id: &'a str, groups: &'a BTreeMap<String, String>) -> &'a str {
     groups.get(id).map_or(id, String::as_str)
 }
@@ -31,6 +34,9 @@ pub(super) fn preserve_independent_support<'a>(
     let groups =
         native::candidate_support_groups(unique.values().copied(), &request.native_sources);
     if groups.is_empty() {
+        saturation::preserve_distinct_answers(
+            request, question_terms, unique, ranked, &groups, scorer,
+        );
         return;
     }
     let minimum = request.min_confidence / CORROBORATION_CAP;
@@ -81,6 +87,9 @@ pub(super) fn preserve_independent_support<'a>(
     }
     selected.sort();
     ranked.copy_from_slice(&selected);
+    saturation::preserve_distinct_answers(
+        request, question_terms, unique, ranked, &groups, scorer,
+    );
 }
 
 #[cfg(test)]
@@ -467,5 +476,228 @@ mod tests {
             candidate("opposed", 0.7, "file://three.md#L1"),
         ];
         assert_eq!(ids(&select(&request, &rows, 2)), ["a", "opposed"]);
+    }
+
+    fn duplicate_corpus(count: usize) -> Vec<AskCandidate> {
+        (0..count)
+            .map(|index| candidate(&format!("a-{index:05}"), 0.7, "manual://cli"))
+            .collect()
+    }
+
+    fn distinct_candidate(id: &str, score: f32) -> AskCandidate {
+        let mut row = candidate(id, score, "manual://cli");
+        row.content = format!("Distinct operational evidence for {id}.");
+        row
+    }
+
+    #[test]
+    fn saturated_copies_leave_room_for_distinct_supported_bodies() {
+        let mut rows = duplicate_corpus(80);
+        for index in 0..50 {
+            rows.push(distinct_candidate(&format!("z-{index:05}"), 0.6));
+        }
+        let request = AskRequest::default();
+        let selected = select(&request, &rows, 32);
+        assert_eq!(selected.len(), 32);
+        assert_eq!(selected[0].memory_id, "a-00000");
+        let duplicates: Vec<_> = selected
+            .iter()
+            .copied()
+            .filter(|row| row.memory_id.starts_with("a-"))
+            .collect();
+        // Twenty sources yield 1.29957..., not the full 1.3 multiplier.
+        assert_eq!(duplicates.len(), 21);
+        assert_eq!(
+            ids(&selected[21..]),
+            (0..11).map(|index| format!("z-{index:05}")).collect::<Vec<_>>()
+        );
+        let clusters = clustering::cluster_spans(&spans(&duplicates));
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].score.to_bits(), (0.7 * CORROBORATION_CAP).to_bits());
+    }
+
+    #[test]
+    fn duplicate_budget_counts_independent_lineages_not_row_ids() {
+        for origins in [20, 21] {
+            let mut rows = duplicate_corpus(80);
+            for (index, row) in rows.iter_mut().enumerate() {
+                row.provenance_uri = Some(format!("file://origin-{}.md#L1", index % origins));
+            }
+            let mut alternative = distinct_candidate("z-supported", 0.6);
+            // Reuse an existing lineage so ordinary source diversity cannot
+            // rescue the alternative before the saturated-copy pass runs.
+            alternative.provenance_uri = Some("file://origin-0.md#L2".to_owned());
+            rows.push(alternative);
+            let selected = select(&AskRequest::default(), &rows, 32);
+            assert_eq!(selected.len(), 32);
+            assert_eq!(
+                selected.iter().any(|row| row.memory_id == "z-supported"),
+                origins == 21,
+            );
+            let groups = native::candidate_support_groups(rows.iter(), &BTreeMap::new());
+            let retained_origins: BTreeSet<_> = selected
+                .iter()
+                .filter(|row| row.memory_id.starts_with("a-"))
+                .map(|row| support_key(&row.memory_id, &groups))
+                .collect();
+            assert_eq!(retained_origins.len(), origins);
+        }
+    }
+
+    #[test]
+    fn saturated_selection_does_not_replace_support_with_subthreshold_noise() {
+        let mut rows = duplicate_corpus(80);
+        rows.push(distinct_candidate("z-noise", 0.1));
+        rows.push(distinct_candidate("z-under-floor", 0.54));
+        let selected = select(&AskRequest::default(), &rows, 32);
+        assert_eq!(
+            ids(&selected),
+            (0..32).map(|index| format!("a-{index:05}")).collect::<Vec<_>>()
+        );
+        rows.push(distinct_candidate("z-supported", 0.6));
+        let selected = select(&AskRequest::default(), &rows, 32);
+        assert_eq!(selected.len(), 32);
+        assert_eq!(selected.last().unwrap().memory_id, "z-supported");
+        assert_eq!(selected[30].memory_id, "a-00030");
+    }
+
+    #[test]
+    fn duplicate_identity_requires_the_entire_body_and_span_scoring_inputs() {
+        for variant in 0..3 {
+            let mut rows = duplicate_corpus(80);
+            for (index, row) in rows.iter_mut().enumerate() {
+                match variant {
+                    0 => row.content.push_str(&format!(" Additional context {index}.")),
+                    1 => row.confidence += index as f32 * 0.0001,
+                    _ if index % 2 == 0 => row.trust_class = "cass_evidence".to_owned(),
+                    _ => {}
+                }
+            }
+            rows.push(distinct_candidate("z-alternative", 0.6));
+            let selected = select(&AskRequest::default(), &rows, 32);
+            assert_eq!(selected.len(), 32);
+            assert!(selected.iter().all(|row| row.memory_id.starts_with("a-")));
+        }
+    }
+
+    #[test]
+    fn saturated_alternatives_use_the_complete_scorer_not_stored_confidence() {
+        let mut rows = duplicate_corpus(80);
+        rows.push(distinct_candidate("z-relevant", 0.1));
+        rows.push(distinct_candidate("z-distractor", 1.0));
+        let scorer = |_: &[String], text: &str, _: f32, _: &str| {
+            if text.contains("z-relevant") {
+                0.6
+            } else if text.contains("z-distractor") {
+                0.1
+            } else {
+                0.7
+            }
+        };
+        let selected =
+            select_candidates_with_scorer(&AskRequest::default(), &[], &rows, 32, &scorer)
+                .expect("valid candidates");
+        assert_eq!(selected.len(), 32);
+        assert!(selected.iter().any(|row| row.memory_id == "z-relevant"));
+        assert!(selected.iter().all(|row| row.memory_id != "z-distractor"));
+    }
+
+    #[test]
+    fn saturated_selection_preserves_small_budgets_and_is_permutation_stable() {
+        let mut rows = duplicate_corpus(80);
+        rows.push(distinct_candidate("z-answer", 0.6));
+        let request = AskRequest::default();
+        for limit in [0, 1, 20, 21, 22, 32, 80, 81, 100] {
+            let expected = ids(&select(&request, &rows, limit));
+            assert_eq!(expected.len(), limit.min(rows.len()));
+            assert_eq!(expected.iter().any(|id| id == "z-answer"), limit >= 22);
+            for _ in 0..4 {
+                rows.reverse();
+                assert_eq!(ids(&select(&request, &rows, limit)), expected);
+                rows.rotate_left(7);
+                assert_eq!(ids(&select(&request, &rows, limit)), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn opposing_evidence_reservations_still_run_after_saturation() {
+        let mut rows = duplicate_corpus(80);
+        for index in 0..20 {
+            rows.push(distinct_candidate(&format!("z-{index:05}"), 0.6));
+        }
+        rows.push(distinct_candidate("zz-opposition", 1.0));
+        let mut request = AskRequest::default();
+        request.contradictions.push(AskContradiction {
+            id: "asserted-conflict".to_owned(),
+            src_memory_id: "a-00000".to_owned(),
+            dst_memory_id: "zz-opposition".to_owned(),
+            confidence: 0.9,
+            source: "human".to_owned(),
+        });
+        let scorer = |_: &[String], text: &str, confidence: f32, _: &str| {
+            if text.contains("zz-opposition") {
+                0.1
+            } else {
+                confidence
+            }
+        };
+        let selected = select_candidates_with_scorer(&request, &[], &rows, 32, &scorer)
+            .expect("valid candidates");
+        assert_eq!(selected.len(), 32);
+        assert_eq!(selected[0].memory_id, "a-00000");
+        assert!(selected.iter().any(|row| row.memory_id == "zz-opposition"));
+    }
+
+    #[test]
+    fn crowded_public_answers_retain_distinct_exact_commands_in_both_regimes() {
+        use crate::core::ask::{ask_data_json, evaluate_ask, evaluate_ask_scored};
+
+        const SOFT: &str =
+            "Run git reset --soft HEAD in the workspace before starting the release.";
+        const HARD: &str =
+            "Run git reset --hard HEAD in the workspace before starting the release.";
+        let mut rows = duplicate_corpus(ASK_CANDIDATE_SCAN_CAP + 8);
+        for row in &mut rows {
+            row.content = SOFT.to_owned();
+            row.confidence = 1.0;
+        }
+        let mut alternate = candidate("z-different-command", 1.0, "manual://other-source");
+        alternate.content = HARD.to_owned();
+        rows.push(alternate);
+        let request = AskRequest {
+            question: SOFT.to_owned(),
+            ..AskRequest::default()
+        };
+        let lexical = evaluate_ask(&request, &rows);
+        let controlled = |_: &[String], _: &str, _: f32, _: &str| 0.7;
+        for report in [
+            lexical.clone(),
+            evaluate_ask_scored(&request, &rows, &controlled, false),
+            evaluate_ask_scored(&request, &rows, &controlled, true),
+        ] {
+            assert!(!report.abstained && !report.conflict_detected);
+            assert!(!report.extractiveness_violated);
+            assert_eq!(report.candidates_scanned, rows.len());
+            assert_eq!(report.citations.len(), 2);
+            assert_eq!(report.citations[0].memory_id, "a-00000");
+            assert_eq!(report.citations[1].memory_id, "z-different-command");
+            for citation in &report.citations {
+                let source = rows
+                    .iter()
+                    .find(|row| row.memory_id == citation.memory_id)
+                    .unwrap();
+                assert_eq!(
+                    source.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str()),
+                );
+                assert_eq!(citation.provenance_uri, source.provenance_uri);
+            }
+        }
+        rows.reverse();
+        assert_eq!(
+            ask_data_json(&lexical),
+            ask_data_json(&evaluate_ask(&request, &rows))
+        );
     }
 }
