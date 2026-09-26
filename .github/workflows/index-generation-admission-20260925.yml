@@ -1,0 +1,189 @@
+# Apply the two immutable, reviewed source patches in separate main commits.
+# Source publication performs syntax/format checks; behavioral verification is
+# deliberately separate and must never be inferred from publication success.
+name: Index source generation admission
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/index-generation-admission-20260925.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: index-generation-admission-20260925
+  cancel-in-progress: true
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Install the repository-pinned Rust formatter
+        run: |
+          set -euo pipefail
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          case "$channel" in nightly|nightly-*) ;; *) exit 1 ;; esac
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+            sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain none
+          fi
+          rustup toolchain install "$channel" --profile minimal --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - name: Recover the submitted hand-authored patches
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          path = '.github/workflows/index-generation-admission-20260925.yml'
+          for number, revision in [(1, 'e6e423da6da30e6c3d3cfd34b9c33f6e5db5032e'), (2, 'e8fcfe914f8d4cfe6fc8b9ae5d4bb7ff400198d1')]:
+              text = subprocess.check_output(['git', 'show', f'{revision}:{path}'], text=True)
+              assert text.count("<<'PATCH'\n") == 1
+              body = text.split("<<'PATCH'\n", 1)[1].split('          PATCH\n', 1)[0]
+              lines = body.splitlines(keepends=True)
+              assert all(line.startswith('          ') for line in lines)
+              patch = ''.join(line[10:] for line in lines)
+              assert patch.startswith('diff --git a/src/core/index.rs b/src/core/index.rs\n')
+              pathlib.Path(os.environ['RUNNER_TEMP'], f'generation-stage{number}.patch').write_text(patch)
+          PY
+      - name: Publish strict admission and bounded recovery as separate source commits
+        id: publish
+        run: |
+          set -euo pipefail
+          paths=(src/core/index.rs src/core/index_generation_watermark.rs)
+          test ! -f src/core/index_generation_watermark.rs
+          test "$(git rev-parse HEAD:src/core/index.rs)" = c09fb551d055c1fe90cdbbe63d0c7d1952ca8518
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          push_source() {
+            local pushed=0
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=1; break; fi
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            test "$pushed" -eq 1
+          }
+          base=$(git rev-parse HEAD)
+          echo "$base" | tee "$RUNNER_TEMP/generation-stage1-base.log"
+          git apply --recount --check "$RUNNER_TEMP/generation-stage1.patch"
+          git apply --recount "$RUNNER_TEMP/generation-stage1.patch"
+          cat > "$RUNNER_TEMP/generation-fixture.patch" <<'PATCH'
+          diff --git a/src/core/index_generation_watermark.rs b/src/core/index_generation_watermark.rs
+          --- a/src/core/index_generation_watermark.rs
+          +++ b/src/core/index_generation_watermark.rs
+          @@ -169,5 +169,10 @@
+                   ).map_err(|error| error.to_string())?;
+                   match damage {
+          -            "missing" => { metadata.as_object_mut().expect("manifest").remove("sourceGeneration"); }
+          +            "missing" => {
+          +                let object = metadata.as_object_mut().expect("manifest");
+          +                for field in FIELDS {
+          +                    object.remove(field);
+          +                }
+          +            }
+                       "null" => metadata["sourceGeneration"] = Value::Null,
+                       "conflicting" => metadata["generation"] = Value::from(1_u64),
+          PATCH
+          git apply --recount --check "$RUNNER_TEMP/generation-fixture.patch"
+          git apply --recount "$RUNNER_TEMP/generation-fixture.patch"
+          rustfmt --edition 2024 src/core/index_generation_watermark.rs
+          rustfmt --edition 2024 --config skip_children=true --emit stdout src/core/index.rs > "$RUNNER_TEMP/generation-stage1-syntax.rs"
+          git diff --check
+          git add -- "${paths[@]}"
+          git commit -m 'fix(index): reject missing and conflicting source generation watermarks' -m 'Require unsigned watermarks and agreement among canonical and legacy aliases across shared index admission. Preserve explicit zero and unadmitted bytes. Add ten regressions using actual vector and lexical indexes. Patch application, Rust syntax parsing, and new-module formatting passed. Cargo compilation and behavioral tests are separate verification, not claimed by this commit.'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage1-commit.log"
+          push_source
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage1-published.log"
+          base=$(git rev-parse HEAD)
+          git apply --recount --check "$RUNNER_TEMP/generation-stage2.patch"
+          git apply --recount "$RUNNER_TEMP/generation-stage2.patch"
+          rustfmt --edition 2024 src/core/index_generation_watermark.rs
+          rustfmt --edition 2024 --config skip_children=true --emit stdout src/core/index.rs > "$RUNNER_TEMP/generation-stage2-syntax.rs"
+          git diff --check
+          git add -- "${paths[@]}"
+          git commit -m 'fix(index): bound recovery to the captured source snapshot' -m 'Thread captured generations through rebuild, re-embedding, coalesced jobs, and individual jobs. Do not activate future retained or inode-attested displaced generations. Add four regressions preserving future and uncommitted bytes, including a real directory exchange. Patch application and Rust syntax/format checks passed. Cargo compilation and behavioral tests remain separate verification.'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage2-commit.log"
+          push_source
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage2-published.log"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generation-admission-source-delivery
+          path: |
+            ${{ runner.temp }}/generation-*.log
+            ${{ runner.temp }}/generation*.patch
+            src/core/index_generation_watermark.rs
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - name: Install the repository-pinned nightly
+        run: |
+          set -euo pipefail
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          case "$channel" in nightly|nightly-*) ;; *) exit 1 ;; esac
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: generation-admission-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.integrate.outputs.source_sha }}
+          restore-keys: |
+            generation-admission-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Check the library and run all fourteen admission regressions
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/generation-source-sha.log"
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/generation-check.log"
+          cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-tests.log"
+          grep -Fq 'test result: ok. 14 passed; 0 failed;' "$RUNNER_TEMP/generation-tests.log"
+      - name: Exercise existing reader and rollback recovery behavior
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log"
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log"
+          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-recovery.log"
+      - name: Production lint and module formatting
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/generation-clippy.log"
+          rustfmt --edition 2024 --check src/core/index_generation_watermark.rs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generation-admission-verification
+          path: |
+            ${{ runner.temp }}/generation-*.log
+            src/core/index_generation_watermark.rs
+            src/core/index.rs
+          retention-days: 7

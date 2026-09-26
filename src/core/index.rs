@@ -66,6 +66,9 @@ mod storage;
 #[path = "index_rollback_manifest.rs"]
 mod rollback_manifest;
 
+#[path = "index_generation_watermark.rs"]
+mod generation_watermark;
+
 #[path = "index_source_snapshot.rs"]
 mod source_snapshot;
 #[cfg(feature = "lexical-bm25")]
@@ -1740,7 +1743,9 @@ pub async fn rebuild_index_with_cx(
         IndexRebuildError::Index("index rebuild has no publication lease".to_owned())
     })?;
     let _recovery_action = publish_lock
-        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
+        .with_generation_fence(&index_dir, || {
+            recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
+        })
         .await?;
     // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
     // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
@@ -1992,7 +1997,9 @@ async fn reembed_index_with_cx_and_stack(
         IndexRebuildError::Index("index re-embedding has no publication lease".to_owned())
     })?;
     let _recovery_action = publish_lock
-        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
+        .with_generation_fence(&index_dir, || {
+            recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
+        })
         .await?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
     let embedding = reembed_embedding_summary(
@@ -2672,7 +2679,9 @@ where
     }
 
     let _recovery_action = match _publish_lock
-        .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
+        .with_generation_fence(index_dir, || {
+            recover_interrupted_publish_for_snapshot(index_dir, published_generation)
+        })
         .await
     {
         Ok(action) => action,
@@ -2922,7 +2931,9 @@ where
     // though the job had already applied synchronously. (agent-UX item 5)
     let result = async {
         let _recovery_action = _publish_lock
-            .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
+            .with_generation_fence(index_dir, || {
+                recover_interrupted_publish_for_snapshot(index_dir, published_generation)
+            })
             .await?;
         let fallback_to_full = None;
         let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
@@ -3987,8 +3998,21 @@ enum IndexPublishRecoveryAction {
     NoRecoverableGeneration,
 }
 
+#[cfg(test)]
 fn recover_interrupted_publish(
     index_dir: &Path,
+) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
+    recover_interrupted_publish_for_snapshot(index_dir, u64::MAX)
+}
+
+/// A retained index can outlive the source database that produced it (for
+/// example, after restoring an older backup). Recovery must use the source
+/// snapshot already captured by the publisher, not the greatest watermark
+/// found on disk. Keep future generations for inspection without activating
+/// them while the replacement build is pending or fails.
+fn recover_interrupted_publish_for_snapshot(
+    index_dir: &Path,
+    maximum_generation: u64,
 ) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
     ensure_index_path_has_no_symlinks(index_dir, "recover interrupted index publish")?;
 
@@ -3996,7 +4020,9 @@ fn recover_interrupted_publish(
         return Ok(IndexPublishRecoveryAction::ActivePresent);
     }
 
-    if let Some(retained_dir) = find_latest_recoverable_retained_dir(index_dir)? {
+    if let Some(retained_dir) =
+        find_latest_recoverable_retained_dir_for_snapshot(index_dir, maximum_generation)?
+    {
         sync_index_generation(&retained_dir, || Ok(()))?;
         rename_index_dir(
             &retained_dir,
@@ -5068,11 +5094,7 @@ fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>,
             .get("schema")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
-        generation: object
-            .get("sourceGeneration")
-            .or_else(|| object.get("source_generation"))
-            .or_else(|| object.get("generation"))
-            .and_then(serde_json::Value::as_u64),
+        generation: Some(generation_watermark::parse(object)?),
         last_rebuild_at: object
             .get("lastRebuildAt")
             .or_else(|| object.get("last_rebuild_at"))
@@ -5358,7 +5380,9 @@ fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
         .tier_document_counts
         .ok_or_else(|| "index metadata is missing tierDocumentCounts".to_owned())?;
     verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())?;
-    Ok(metadata.generation.unwrap_or(0))
+    metadata.generation.ok_or_else(|| {
+        "index metadata is missing a source generation watermark; rebuild the index".to_owned()
+    })
 }
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
@@ -5444,8 +5468,16 @@ fn displaced_generation_identity(
     Ok(Some((sequence, device, inode)))
 }
 
+#[cfg(test)]
 fn find_latest_recoverable_retained_dir(
     index_dir: &Path,
+) -> Result<Option<PathBuf>, IndexRebuildError> {
+    find_latest_recoverable_retained_dir_for_snapshot(index_dir, u64::MAX)
+}
+
+fn find_latest_recoverable_retained_dir_for_snapshot(
+    index_dir: &Path,
+    maximum_generation: u64,
 ) -> Result<Option<PathBuf>, IndexRebuildError> {
     let parent = index_parent(index_dir);
     if !path_exists_no_follow(parent) {
@@ -5492,7 +5524,9 @@ fn find_latest_recoverable_retained_dir(
         {
             continue;
         }
-        let Some(generation) = recoverable_index_generation(&candidate) else {
+        let Some(generation) = recoverable_index_generation(&candidate)
+            .filter(|generation| *generation <= maximum_generation)
+        else {
             continue;
         };
         let key = (generation, sequence, candidate);

@@ -72,7 +72,27 @@ pub(crate) fn already_loaded_local_embedder_for_workspace(
     workspace_path: &Path,
     database_path: &Path,
 ) -> Result<Option<CachedLocalEmbedder>, DbError> {
+    already_loaded_local_embedder_with_caches(
+        workspace_path,
+        database_path,
+        &DEFAULT_SEARCH_EMBEDDER,
+        &REGISTERED_MODEL2VEC_CACHE,
+    )
+}
+
+fn already_loaded_local_embedder_with_caches(
+    workspace_path: &Path,
+    database_path: &Path,
+    default: &OnceLock<DefaultSearchEmbedder>,
+    registered: &OnceLock<RegisteredModel2VecCache>,
+) -> Result<Option<CachedLocalEmbedder>, DbError> {
     if configured_embed_backend() == EmbedBackendSelection::Remote {
+        return Ok(None);
+    }
+    // A process that has loaded no semantic model has nothing to lend. Refuse
+    // before opening the store or running registry admission, which reads
+    // model files, so a cold daemon answers at once (bd-snkcp).
+    if !loaded_model_possible(default, registered) {
         return Ok(None);
     }
     let connection = DbConnection::open_file_read_only(database_path)?;
@@ -83,9 +103,32 @@ pub(crate) fn already_loaded_local_embedder_for_workspace(
         Some((&connection, &workspace_id)),
         &default_embedder_settings(),
         false,
-        &DEFAULT_SEARCH_EMBEDDER,
-        &REGISTERED_MODEL2VEC_CACHE,
+        default,
+        registered,
     )
+}
+
+/// Whether either process cache could yield an already-loaded semantic model.
+/// This reads only in-memory state. When it is false,
+/// `already_loaded_local_selection` could only return `None`: the default
+/// branch attests a ready semantic model, and the registered branch returns a
+/// cached entry. A held lock counts as possible, so the nonblocking probe
+/// still decides.
+fn loaded_model_possible(
+    default: &OnceLock<DefaultSearchEmbedder>,
+    registered: &OnceLock<RegisteredModel2VecCache>,
+) -> bool {
+    let default_ready = default.get().is_some_and(|selection| {
+        let fast = selection.stack.fast_arc();
+        fast.is_ready() && fast.is_semantic()
+    });
+    default_ready
+        || registered.get().is_some_and(|cache| {
+            cache
+                .current
+                .try_lock()
+                .map_or(true, |entry| entry.is_some())
+        })
 }
 
 fn already_loaded_local_selection(
@@ -445,6 +488,79 @@ mod tests {
         assert!(!lazy.is_ready());
         assert!(!lazy.failed());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// bd-snkcp: with nothing loaded, the probe refuses before it opens the
+    /// store. The "database" is not a database, so opening it or reading its
+    /// registry would be an error, not a refusal.
+    #[test]
+    fn already_loaded_probe_refuses_before_store_access_when_nothing_is_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("not-a-database.db");
+        std::fs::write(&database, b"this is not a database").unwrap();
+        let default = OnceLock::new();
+        let registered = OnceLock::new();
+        assert!(
+            already_loaded_local_embedder_with_caches(
+                root.path(),
+                &database,
+                &default,
+                &registered
+            )
+            .unwrap()
+            .is_none()
+        );
+        // An unloaded lazy default model is still nothing to lend.
+        assert!(
+            default
+                .set(ee_auto_download_embedder(root.path().join("absent")))
+                .is_ok()
+        );
+        assert!(
+            already_loaded_local_embedder_with_caches(
+                root.path(),
+                &database,
+                &default,
+                &registered
+            )
+            .unwrap()
+            .is_none()
+        );
+        let lazy = default.get().unwrap().lazy_model2vec.as_ref().unwrap();
+        assert!(!lazy.is_ready());
+        assert!(registered.get().is_none());
+        assert_eq!(std::fs::read(&database).unwrap(), b"this is not a database");
+    }
+
+    /// The early refusal is not vacuous: once a model may be loaded, the probe
+    /// goes on to the store, and this store is unreadable.
+    #[test]
+    fn already_loaded_probe_reads_the_store_once_a_model_may_be_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("not-a-database.db");
+        std::fs::write(&database, b"this is not a database").unwrap();
+        let default = OnceLock::new();
+        let registered = OnceLock::new();
+        let cache = registered.get_or_init(RegisteredModel2VecCache::default);
+        let identity = RegisteredModel2VecIdentity {
+            canonical_source: PathBuf::from("/verified/model"),
+            content_hash: "blake3:cache-identity".to_owned(),
+            dimension: 256,
+            distance_metric: "cosine",
+        };
+        cache
+            .get_or_try_insert_with(identity, || Some(hash_fallback_embedder_stack().fast_arc()))
+            .unwrap();
+        assert!(loaded_model_possible(&default, &registered));
+        assert!(
+            already_loaded_local_embedder_with_caches(
+                root.path(),
+                &database,
+                &default,
+                &registered
+            )
+            .is_err()
+        );
     }
 
     #[test]

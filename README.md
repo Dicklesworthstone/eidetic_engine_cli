@@ -120,7 +120,7 @@ ee outcome trace <memory-id> --workspace . --json
 | Starting from a cold agent session | `ee resume --workspace . --json` (read `data.report`, then follow `nextCommands`) |
 | You want the standing workspace charter | `ee primer --workspace . --format markdown` |
 | AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
-| Starting substantive work | `ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown` |
+| Starting substantive work | `ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown` (for repeated packs, add `--use-daemon` once a warm daemon is ready; see the daemon note under Claude Code) |
 | About to edit known files or a diff | `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Capturing raw session observations | `ee journal append "<text>" --workspace . --source manual --json` |
@@ -2285,6 +2285,14 @@ These memory reads remain available while the neural model warms. Use
 `ee hook status --workspace . --json` to inspect the last invocation and its
 degradation messages. Stop an idle daemon with `ee daemon stop --workspace .`;
 a daemon retaining a neural model can use more than 1 GB of RAM.
+
+For repeated read-only packs in one session, start the daemon, wait until
+`ee daemon status --workspace . --json` reports `data.warm.posture` as `ready`,
+then add `--use-daemon` to `ee pack`. On one Linux worker the median pack took
+708 ms with a warm daemon and 3155 ms without, with the same pack hash
+(`bd-5oa5m`). Until the daemon is warm, `--use-daemon` gives no speedup: the
+pack falls back to local retrieval and names the fallback in `degraded`
+(`bd-snkcp`).
 
 ### Codex
 

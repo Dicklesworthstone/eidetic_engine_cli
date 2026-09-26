@@ -20547,6 +20547,9 @@ impl DbConnection {
         let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
             return Ok(None);
         };
+        // Staleness ("stale", "outdated") is deliberately neutral for procedures:
+        // it belongs to revalidation, not to the harmful count that feeds
+        // auto-retirement, unlike the memory posterior (bd-g66ja ruling).
         let helpful = matches!(input.signal, "helpful" | "positive" | "confirmation");
         let harmful = matches!(
             input.signal,
