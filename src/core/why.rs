@@ -3944,7 +3944,7 @@ mod tests {
             },
         )
         .map_err(|error| error.to_string())?;
-        let rule_id = crate::testing::rule("nativewhy");
+        let rule_id = canonical_rule_id(1);
         conn.insert_procedural_rule(
             &rule_id,
             &CreateProceduralRuleInput {
@@ -3972,6 +3972,18 @@ mod tests {
             memory_id: rule_id,
             confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
         }
+    }
+
+    /// Native rule lookup and rule provenance admit only the exact canonical id
+    /// (the uppercase Crockford display form of `RuleId` / `MemoryId`). The
+    /// schema-valid `crate::testing` ids are lowercase and may not even parse,
+    /// so these tests use canonical ids.
+    fn canonical_rule_id(seed: u128) -> String {
+        RuleId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
+    }
+
+    fn canonical_memory_id(seed: u128) -> String {
+        MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
     }
 
     #[test]
@@ -4011,7 +4023,7 @@ mod tests {
         )?;
         for target in [
             "rule_invalid".to_owned(),
-            format!("result:{}", crate::testing::rule("missingwhy")),
+            format!("result:{}", canonical_rule_id(2)),
         ] {
             let absent = explain_memory_with_connection(&native_rule_why_options(&target), &conn);
             ensure(absent.found, false, "malformed or absent native target")?;
@@ -4046,7 +4058,7 @@ mod tests {
             .revision
             .clone();
         conn.execute_raw(&format!(
-            "UPDATE procedural_rules SET scope = 'file', scope_pattern = '../escape.txt' WHERE id = '{rule_id}'"
+            "UPDATE procedural_rules SET scope = 'file_pattern', scope_pattern = '../escape.txt' WHERE id = '{rule_id}'"
         ))
         .map_err(|error| error.to_string())?;
         let invalid_scope = explain_memory_with_connection(&options, &conn);
@@ -4070,7 +4082,7 @@ mod tests {
             Some("invalid"),
             "invalid scope posture",
         )?;
-        let replacement_id = crate::testing::rule("nativewhyreplacement");
+        let replacement_id = canonical_rule_id(3);
         conn.insert_procedural_rule(
             &replacement_id,
             &CreateProceduralRuleInput {
@@ -4143,11 +4155,11 @@ mod tests {
             },
         )
         .map_err(|error| error.to_string())?;
-        let live_id = crate::testing::mem("nativewhysourcelive");
-        let foreign_id = crate::testing::mem("nativewhysourceforeign");
-        let expired_id = crate::testing::mem("nativewhysourceexpired");
-        let replaced_id = crate::testing::mem("nativewhysourcereplaced");
-        let deleted_id = crate::testing::mem("nativewhysourcedeleted");
+        let live_id = canonical_memory_id(11);
+        let foreign_id = canonical_memory_id(12);
+        let expired_id = canonical_memory_id(13);
+        let replaced_id = canonical_memory_id(14);
+        let deleted_id = canonical_memory_id(15);
         for id in [
             &live_id,
             &foreign_id,
