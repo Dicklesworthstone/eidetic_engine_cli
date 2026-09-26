@@ -24598,6 +24598,17 @@ impl DbConnection {
         id: &str,
         typed_fields_json: Option<&str>,
     ) -> Result<bool> {
+        self.set_memory_typed_fields_json_at(id, typed_fields_json, Utc::now())
+    }
+
+    /// Attach typed fields at the enclosing revision's recorded instant.
+    /// This is one atomic revision, not a later edit to the new row.
+    pub(crate) fn set_memory_typed_fields_json_at(
+        &self,
+        id: &str,
+        typed_fields_json: Option<&str>,
+        recorded_at: DateTime<Utc>,
+    ) -> Result<bool> {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT kind FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
@@ -24615,7 +24626,7 @@ impl DbConnection {
                     .map_err(|error| typed_memory_fields_error(DbOperation::Execute, error))
             })
             .transpose()?;
-        let now = Utc::now().to_rfc3339();
+        let now = recorded_at.to_rfc3339();
         let affected = self.execute_for(
             DbOperation::Execute,
             "UPDATE memories SET typed_fields_json = ?1, updated_at = ?2 WHERE id = ?3 AND tombstoned_at IS NULL",
@@ -25769,7 +25780,7 @@ impl DbConnection {
     ///     fields so it reflects the revised content, not the original.
     ///
     /// The caller is responsible for wrapping this call together with
-    /// `expire_memory_valid_to(original_id, now)` and an audit insert
+    /// `mark_memory_superseded(original_id, now)` and an audit insert
     /// inside a single transaction — see `revise_memory` in
     /// `core/memory.rs` for the canonical sequence.
     pub fn insert_memory_revision(
@@ -25778,7 +25789,20 @@ impl DbConnection {
         logical_id: &str,
         input: &CreateMemoryInput,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        self.insert_memory_revision_at(new_id, logical_id, input, Utc::now())
+    }
+
+    /// Record the revision row at the same instant as the chain transition.
+    /// `recorded_at` is transaction bookkeeping, independent of any explicit
+    /// author `valid_from` carried by `input`.
+    pub(crate) fn insert_memory_revision_at(
+        &self,
+        new_id: &str,
+        logical_id: &str,
+        input: &CreateMemoryInput,
+        recorded_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let now = recorded_at.to_rfc3339();
         let provenance_chain_hash =
             compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
                 id: new_id,

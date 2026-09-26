@@ -112,9 +112,14 @@ impl Prepared {
         Ok(())
     }
 
-    pub(super) fn apply(&self, db: &DbConnection, new_id: &str) -> crate::db::Result<()> {
+    pub(super) fn apply(
+        &self,
+        db: &DbConnection,
+        new_id: &str,
+        recorded_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::db::Result<()> {
         if let Some(json) = &self.projected_json
-            && !db.set_memory_typed_fields_json(new_id, Some(json))?
+            && !db.set_memory_typed_fields_json_at(new_id, Some(json), recorded_at)?
         {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Execute,
@@ -249,6 +254,29 @@ mod tests {
         );
         assert!(db.get_memory_superseded_at(&source)?.is_some());
         assert_eq!(db.get_memory_tags(new_id)?, ["reviewed"]);
+        let revised = db.get_memory(new_id)?.ok_or("new revision missing")?;
+        let cutoff = db
+            .get_memory_superseded_at(&source)?
+            .ok_or("revision cutoff missing")?;
+        let cutoff = chrono::DateTime::parse_from_rfc3339(&cutoff)?;
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&revised.created_at)?,
+            cutoff
+        );
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&revised.updated_at)?,
+            cutoff,
+            "inherited typed fields must not turn the revision into a later edit"
+        );
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(
+                revised
+                    .valid_from
+                    .as_deref()
+                    .ok_or("revision start missing")?
+            )?,
+            cutoff
+        );
         Ok(())
     }
 

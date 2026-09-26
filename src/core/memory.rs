@@ -11837,7 +11837,11 @@ where
     let new_id = MemoryId::now().to_string();
     let audit_id = generate_audit_id();
     let index_job_id = generate_search_index_job_id();
-    let revised_at = normalize_validity_timestamp(Utc::now());
+    // The revision boundary and its row/sidecar timestamps describe the same
+    // atomic write. Sampling a later clock during insertion creates a gap in
+    // which exact --as-of retrieval excludes both the prior and the new head.
+    let recorded_at = Utc::now();
+    let revised_at = normalize_validity_timestamp(recorded_at);
     let memory_input = CreateMemoryInput {
         workspace_id: original.workspace_id.clone(),
         level: new_level,
@@ -11885,8 +11889,8 @@ where
     let result: Result<(), String> = conn
         .with_transaction(|| {
             typed_revision.check_source(&conn, &original)?;
-            conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;
-            typed_revision.apply(&conn, &new_id)?;
+            conn.insert_memory_revision_at(&new_id, &logical_id, &memory_input, recorded_at)?;
+            typed_revision.apply(&conn, &new_id, recorded_at)?;
             // bd-multiplicity-aware-trust-p0u7g: the live revision inherits
             // the attempt-family pointer; the slot ledger inherits by
             // logical_id and is never copied.

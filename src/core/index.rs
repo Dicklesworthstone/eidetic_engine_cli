@@ -22376,7 +22376,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_search_index_job(
-                "sidx_moved_store_job",
+                "sidx_00000000000000000000000082",
                 &CreateSearchIndexJobInput {
                     workspace_id: workspace_id.to_owned(),
                     job_type: SearchIndexJobType::FullRebuild,
@@ -22440,7 +22440,7 @@ mod tests {
             .ok_or("workspace missing")?;
         assert_eq!(stored.path, source_path);
         let job = connection
-            .get_search_index_job("sidx_moved_store_job")
+            .get_search_index_job("sidx_00000000000000000000000082")
             .map_err(|error| error.to_string())?
             .ok_or("queued job missing")?;
         assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Pending));
