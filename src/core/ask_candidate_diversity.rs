@@ -35,7 +35,12 @@ pub(super) fn preserve_independent_support<'a>(
         native::candidate_support_groups(unique.values().copied(), &request.native_sources);
     if groups.is_empty() {
         saturation::preserve_distinct_answers(
-            request, question_terms, unique, ranked, &groups, scorer,
+            request,
+            question_terms,
+            unique,
+            ranked,
+            &groups,
+            scorer,
         );
         return;
     }
@@ -87,9 +92,7 @@ pub(super) fn preserve_independent_support<'a>(
     }
     selected.sort();
     ranked.copy_from_slice(&selected);
-    saturation::preserve_distinct_answers(
-        request, question_terms, unique, ranked, &groups, scorer,
-    );
+    saturation::preserve_distinct_answers(request, question_terms, unique, ranked, &groups, scorer);
 }
 
 #[cfg(test)]
@@ -509,11 +512,16 @@ mod tests {
         assert_eq!(duplicates.len(), 21);
         assert_eq!(
             ids(&selected[21..]),
-            (0..11).map(|index| format!("z-{index:05}")).collect::<Vec<_>>()
+            (0..11)
+                .map(|index| format!("z-{index:05}"))
+                .collect::<Vec<_>>()
         );
         let clusters = clustering::cluster_spans(&spans(&duplicates));
         assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].score.to_bits(), (0.7 * CORROBORATION_CAP).to_bits());
+        assert_eq!(
+            clusters[0].score.to_bits(),
+            (0.7 * CORROBORATION_CAP).to_bits()
+        );
     }
 
     #[test]
@@ -552,7 +560,9 @@ mod tests {
         let selected = select(&AskRequest::default(), &rows, 32);
         assert_eq!(
             ids(&selected),
-            (0..32).map(|index| format!("a-{index:05}")).collect::<Vec<_>>()
+            (0..32)
+                .map(|index| format!("a-{index:05}"))
+                .collect::<Vec<_>>()
         );
         rows.push(distinct_candidate("z-supported", 0.6));
         let selected = select(&AskRequest::default(), &rows, 32);
@@ -567,7 +577,9 @@ mod tests {
             let mut rows = duplicate_corpus(80);
             for (index, row) in rows.iter_mut().enumerate() {
                 match variant {
-                    0 => row.content.push_str(&format!(" Additional context {index}.")),
+                    0 => row
+                        .content
+                        .push_str(&format!(" Additional context {index}.")),
                     1 => row.confidence += index as f32 * 0.0001,
                     _ if index % 2 == 0 => row.trust_class = "cass_evidence".to_owned(),
                     _ => {}

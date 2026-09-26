@@ -109,7 +109,14 @@ mod tests {
         assert_eq!(notice.affected_filters, vec!["tags"]);
         let value = serde_json::to_value(&notice).expect("serialize");
         assert_eq!(value["reason"], "prior_filter_membership_unknown");
-        for field in ["tags", "levels", "kinds", "trustClass", "agentName", "content"] {
+        for field in [
+            "tags",
+            "levels",
+            "kinds",
+            "trustClass",
+            "agentName",
+            "content",
+        ] {
             assert!(value.get(field).is_none(), "unexpected metadata: {field}");
         }
         assert!(!value.to_string().contains("new-label"));
@@ -130,9 +137,13 @@ mod tests {
     fn mixed_membership_dimensions_are_not_fabricated_from_partial_history() {
         let filter = parse_subscribe_filter(Some(
             "LEVEL=procedural,KIND=rule,TAG=release,TRUST_CLASS=human_explicit",
-        )).expect("filter");
+        ))
+        .expect("filter");
         let notice = filtered_invalidation(&filter, &delta("updated"), None).expect("notice");
-        assert_eq!(notice.affected_filters, vec!["levels", "kinds", "tags", "trustClass"]);
+        assert_eq!(
+            notice.affected_filters,
+            vec!["levels", "kinds", "tags", "trustClass"]
+        );
     }
 
     #[test]
@@ -147,7 +158,8 @@ mod tests {
         }
         let filter = parse_subscribe_filter(Some("TAG=release")).expect("filter");
         let later = DateTime::parse_from_rfc3339("2026-09-27T00:00:00Z")
-            .expect("timestamp").with_timezone(&Utc);
+            .expect("timestamp")
+            .with_timezone(&Utc);
         assert!(filtered_invalidation(&filter, &event, Some(later)).is_none());
     }
 
@@ -157,7 +169,9 @@ mod tests {
         assert!(filtered_invalidation(&filter, &delta("updated"), None).is_none());
         let other = parse_subscribe_filter(Some("TAG=release")).expect("filter");
         assert!(filtered_invalidation(&other, &delta("created"), None).is_none());
-        assert!(filtered_invalidation(&SubscribeFilter::default(), &delta("updated"), None).is_none());
+        assert!(
+            filtered_invalidation(&SubscribeFilter::default(), &delta("updated"), None).is_none()
+        );
     }
 
     #[test]
