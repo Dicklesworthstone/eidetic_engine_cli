@@ -23,17 +23,38 @@ pub(crate) struct PreparedRepair {
     document_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RepairSourceGeneration {
+    pub(crate) published: u64,
+    pub(crate) current: u64,
+}
+
 impl PreparedRepair {
+    pub(crate) fn published_generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Observe freshness without treating a completed publication as failed.
+    /// Callers before publication must still require equality; after publication
+    /// a mismatch describes a valid replacement that already needs refreshing.
+    pub(crate) fn source_generation(&self) -> Result<RepairSourceGeneration, IndexRebuildError> {
+        let db = DbConnection::open_file_read_only(&self.database_path)?;
+        let current = db
+            .get_workspace_generation(&self.workspace_id)?
+            .unwrap_or_else(|| u64::from(self.document_count));
+        Ok(RepairSourceGeneration {
+            published: self.generation,
+            current,
+        })
+    }
+
     /// A concurrent source change must not be overwritten by an older repair.
     /// Called under the generation publication lease, immediately before the
     /// first live-file mutation. Later source writes naturally make this
     /// captured generation stale, just as they do for an ordinary rebuild.
     pub(crate) fn check_source_generation(&self) -> Result<(), IndexRebuildError> {
-        let db = DbConnection::open_file_read_only(&self.database_path)?;
-        let current = db
-            .get_workspace_generation(&self.workspace_id)?
-            .unwrap_or_else(|| u64::from(self.document_count));
-        if current != self.generation {
+        let observed = self.source_generation()?;
+        if observed.current != observed.published {
             return Err(IndexRebuildError::Index(
                 "source changed while doctor rebuilt the index; retry after active writes finish"
                     .to_owned(),

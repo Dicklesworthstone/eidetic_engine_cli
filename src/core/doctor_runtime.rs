@@ -63,6 +63,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 #[path = "doctor_index_repair.rs"]
 mod index_repair;
+#[cfg(all(test, unix))]
+pub(crate) use index_repair::with_after_publish_hook as with_index_repair_after_publish_hook;
 
 /// Public schema string for the doctor capabilities report. Bump only on a
 /// breaking contract change; additive changes keep `v1`.
@@ -582,6 +584,59 @@ struct DoctorLifecycleHandles {
 #[derive(Debug)]
 struct DoctorLifecycleHandles;
 
+/// Freshness observed after a successfully published index repair.
+// Non-Unix doctor repair refuses before publication; the CLI still consumes
+// the same notice type, but this build has no producer for either variant.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IndexRepairPostcondition {
+    Stale {
+        published_generation: u64,
+        current_generation: u64,
+    },
+    Unverified {
+        published_generation: u64,
+    },
+}
+
+impl IndexRepairPostcondition {
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::Stale {
+                published_generation,
+                current_generation,
+            } => format!(
+                "The index was replaced with generation {published_generation}, but the source is now at generation {current_generation}; the replacement is already stale."
+            ),
+            Self::Unverified {
+                published_generation,
+            } => format!(
+                "The index was replaced with generation {published_generation}, but its freshness could not be checked after publication."
+            ),
+        }
+    }
+
+    pub(crate) const fn repair(self) -> &'static str {
+        match self {
+            Self::Stale { .. } => {
+                "Run ee index rebuild --workspace . --json after active writes finish, then rerun ee doctor."
+            }
+            Self::Unverified { .. } => {
+                "Run ee index status --workspace . --json to check freshness; rebuild a stale index with ee index rebuild --workspace . --json, then rerun ee doctor."
+            }
+        }
+    }
+}
+
+/// A completed index replacement whose observed postcondition needs follow-up.
+/// The original file action remains the authoritative mutation/undo receipt;
+/// this notice does not reclassify that completed replacement as a failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IndexRepairPublicationNotice {
+    pub(crate) action_sequence: u64,
+    pub(crate) postcondition: IndexRepairPostcondition,
+}
+
 /// One `ee doctor --fix` invocation's state. Owns the advisory lock handle and
 /// the `.doctor/runs/<run-id>/` directory.
 #[derive(Debug)]
@@ -601,6 +656,7 @@ pub struct RunContext {
     actions_handle: Option<fs::File>,
     blast_radius_roots: Vec<PathBuf>,
     dry_run: bool,
+    index_repair_notices: Vec<IndexRepairPublicationNotice>,
     // True between successful advisory-lock acquisition and release.
     // `finish()` flips this to false only after explicitly unlocking the
     // retained file handle so the `Drop` impl below can distinguish:
@@ -718,6 +774,7 @@ impl RunContext {
             actions_handle: Some(actions_handle),
             blast_radius_roots,
             dry_run,
+            index_repair_notices: Vec::new(),
             lock_owned: true,
         })
     }
@@ -740,6 +797,12 @@ impl RunContext {
     #[must_use]
     pub const fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    /// Notices can also accompany a later diagnostic-journal failure. Inspect
+    /// them before labeling a completed index replacement as a failed fixer.
+    pub(crate) fn index_repair_notices(&self) -> &[IndexRepairPublicationNotice] {
+        &self.index_repair_notices
     }
 
     /// Mark the run complete. Releases the lock. Updates `state.json` and

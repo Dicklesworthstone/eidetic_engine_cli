@@ -654,7 +654,7 @@ Current top-level groups:
 | `ee outcome --pack <pack-id> --item <n> --signal helpful\|harmful --json` | Grade a specific persisted pack item without manually copying its memory id |
 | `ee outcome trace <memory-id> --json` | Read the feedback events, posterior updates, and trust transitions that affected a memory |
 | `ee audit timeline --target <id> --json` | Inspect the audit rows for a memory, pack, candidate, or other target id in one bounded call |
-| `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
+| `ee why <memory-id\|rule-id> [--json]` | Explain a memory or native rule using its own identity, scores, lifecycle, provenance, and recorded selection |
 | `ee why-not <memory-id> --task "<task>" [--json]` | Counterfactual reverse of `ee why`: explain why a memory was not selected for a task's context pack, with the minimal change that would include it (read-only) |
 | `ee pack build --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
@@ -1414,6 +1414,15 @@ ee outcome <pack-id> --target-type pack --signal helpful --reason "Included the 
 ee outcome --pack <pack-id> --item 2 --signal harmful --reason "Selected stale advice" --workspace .
 ee outcome <candidate-id> --target-type candidate --signal negative --reason "Too vague after review" --workspace .
 ```
+
+Native rules can be inspected with `ee why <rule-id> --workspace . --json` or
+`ee why result:<rule-id> --workspace . --json`. The explanation includes the
+rule's canonical revision, scope, maturity, protection, native feedback counters,
+and admitted source references. Sourceless rules are explainable. Source memories
+remain provenance: their scores, posterior, and pack selections are not inherited
+by the rule. In JSON, native rule identity appears in `data.entity`, while
+`data.memoryId` is null. Human, Markdown, and Mermaid output identify the native
+entity too; stored secrets and private paths are redacted on output.
 
 ### Memory inspection
 

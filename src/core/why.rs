@@ -13,6 +13,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
+    str::FromStr,
     time::Instant,
 };
 
@@ -38,8 +39,8 @@ use crate::db::{
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, RationaleTrace, RationaleTraceVisibility,
-    VerificationEvidenceRecord,
+    AgentContextProfileCounts, MemoryId, RationaleTrace, RationaleTraceVisibility, RuleId,
+    RuleMaturity, TrustClass, VerificationEvidenceRecord,
 };
 use crate::pack::redact_pack_provenance_text;
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -1131,7 +1132,7 @@ impl WhyReport {
 pub struct WhyOptions<'a> {
     /// Database path.
     pub database_path: &'a Path,
-    /// Memory ID or `result:<doc-id>` search result target to explain.
+    /// Memory, rule, evidence, or `result:<doc-id>` search result target to explain.
     pub memory_id: &'a str,
     /// Confidence threshold for selection (default 0.5).
     pub confidence_threshold: f32,
@@ -1278,6 +1279,246 @@ pub fn explain_memory_seeded(
     _determinism: &mut Deterministic<Seed>,
 ) -> WhyReport {
     explain_memory(options)
+}
+
+fn explain_rule_with_connection(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    rule_id: &str,
+    workspace_path: Option<&Path>,
+) -> WhyReport {
+    // Parsing alone accepts normalized aliases. Native lookup and provenance
+    // must both name the exact canonical identifier stored in the source row.
+    if RuleId::from_str(rule_id)
+        .ok()
+        .is_none_or(|id| id.to_string() != rule_id)
+    {
+        return WhyReport::not_found(rule_id.to_owned());
+    }
+    match load_rule_why_report(options, conn, rule_id, workspace_path) {
+        Ok(Some(report)) => report,
+        Ok(None) => WhyReport::not_found(rule_id.to_owned()),
+        Err(message) => WhyReport::error(rule_id.to_owned(), redact_rule_why_text(&message)),
+    }
+}
+
+fn load_rule_why_report(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    rule_id: &str,
+    workspace_path: Option<&Path>,
+) -> Result<Option<WhyReport>, String> {
+    let Some(rule) = conn
+        .get_procedural_rule(rule_id)
+        .map_err(|error| format!("Failed to query native rule: {error}"))?
+    else {
+        return Ok(None);
+    };
+    // Match rule show: ordinary inspection cannot resurrect a deleted body.
+    if rule.id != rule_id || rule.tombstoned_at.is_some() {
+        return Ok(None);
+    }
+    let Some(workspace) = (match workspace_path {
+        Some(path) => {
+            crate::core::workspace::addressed_workspace_row(conn, path, options.database_path)
+                .map_err(|error| error.to_string())?
+        }
+        None => conn
+            .get_workspace(&rule.workspace_id)
+            .map_err(|error| format!("Failed to query rule workspace: {error}"))?,
+    }) else {
+        return Ok(None);
+    };
+    if rule.workspace_id != workspace.id {
+        return Ok(None);
+    }
+    let Ok(maturity) = RuleMaturity::from_str(&rule.maturity) else {
+        return Ok(None);
+    };
+    let tags = conn
+        .get_rule_tags(rule_id)
+        .map_err(|error| format!("Failed to query native rule tags: {error}"))?;
+    let source_ids = conn
+        .get_rule_source_memory_ids(rule_id)
+        .map_err(|error| format!("Failed to query native rule provenance: {error}"))?;
+    let projection =
+        crate::search::RuleIndexProjection::new(rule, &workspace.path, tags, source_ids);
+    let rule = projection.rule();
+    let mut source_memories = Vec::new();
+    let mut lineage_valid = true;
+    for id in projection.source_memory_ids() {
+        if MemoryId::from_str(id)
+            .ok()
+            .is_none_or(|parsed| parsed.to_string() != *id)
+        {
+            lineage_valid = false;
+            continue;
+        }
+        let source = conn
+            .get_memory(id)
+            .map_err(|error| format!("Failed to query rule source memory: {error}"))?;
+        let Some(source) = source.filter(|source| source.workspace_id == workspace.id) else {
+            // A stale or foreign reference is not an authorized provenance URI.
+            // Keep only aggregate availability, never its content/path/identity.
+            lineage_valid = false;
+            continue;
+        };
+        if source.tombstoned_at.is_some()
+            || conn
+                .get_memory_superseded_at(id)
+                .map_err(|error| format!("Failed to query source revision: {error}"))?
+                .is_some()
+            || !matches!(
+                memory_validity(&source.valid_from, &source.valid_to)
+                    .status
+                    .as_str(),
+                "current" | "unknown"
+            )
+        {
+            continue;
+        }
+        source_memories.push(serde_json::json!({
+            "id": id,
+            "uri": format!("ee://memory/{id}"),
+        }));
+    }
+    let declared_source_count = projection.source_memory_ids().len();
+    let admitted_source_count = source_memories.len();
+    let source_status = match (declared_source_count, admitted_source_count) {
+        (0, _) => "unlinked",
+        (_, 0) => "unavailable",
+        (declared, admitted) if declared == admitted => "available",
+        _ => "partial",
+    };
+    let replacement = match rule.superseded_by.as_deref() {
+        Some(id)
+            if RuleId::from_str(id)
+                .ok()
+                .is_some_and(|parsed| parsed.to_string() == id) =>
+        {
+            conn.get_procedural_rule(id)
+                .map_err(|error| format!("Failed to query rule replacement: {error}"))?
+                .filter(|replacement| {
+                    replacement.workspace_id == workspace.id && replacement.tombstoned_at.is_none()
+                })
+                .map(|replacement| replacement.id)
+        }
+        _ => None,
+    };
+    let (latest_selection, selection_degradation) =
+        match latest_pack_selection(conn, &workspace.id, "rule", rule_id) {
+            Ok(selection) => (selection, None),
+            Err(message) => (
+                None,
+                Some(WhyDegradation {
+                    code: "why_pack_selection_unavailable",
+                    severity: "low",
+                    message: redact_rule_why_text(&message),
+                    repair: Some("ee doctor --json".to_owned()),
+                }),
+            ),
+        };
+    let egress = crate::policy::redact_public_replay_text(&rule.content);
+    let content = redact_why_absolute_path_like_segments(&egress.content);
+    let paths_redacted = content != egress.content;
+    let trust_valid = TrustClass::from_str(&rule.trust_class).is_ok();
+    let rule_eligible = projection.is_pack_admissible() && trust_valid && lineage_valid;
+    let selection_score = latest_selection.as_ref().map_or(0.0, |item| item.relevance);
+    let entity = WhyEntityExplanation {
+        kind: "rule".to_owned(),
+        id: rule_id.to_owned(),
+        revision: Some(projection.entity_revision().to_owned()),
+        details: serde_json::json!({
+            "workspaceId": &workspace.id,
+            "maturity": maturity.as_str(),
+            "protected": rule.protected,
+            "scope": {
+                "kind": redact_rule_why_text(&rule.scope),
+                "pattern": projection.normalized_scope_pattern().map(redact_rule_why_text),
+                "patternPosture": projection.scope_pattern_posture(),
+            },
+            "provenance": {
+                "uri": format!("ee://rule/{rule_id}"),
+                "sourceMemories": source_memories,
+                "declaredSourceCount": declared_source_count,
+                "admittedSourceCount": admitted_source_count,
+                "unavailableSourceCount": declared_source_count - admitted_source_count,
+                "status": source_status,
+            },
+            "feedback": {
+                "target": { "kind": "rule", "id": rule_id },
+                "positiveCount": rule.positive_feedback_count,
+                "negativeCount": rule.negative_feedback_count,
+                "validationPasses": rule.validation_passes,
+                "validationContradictions": rule.validation_contradictions,
+                "lastAppliedAt": rule.last_applied_at.as_deref().map(redact_rule_why_text),
+                "lastValidatedAt": rule.last_validated_at.as_deref().map(redact_rule_why_text),
+            },
+            "lifecycle": {
+                "updatedAt": redact_rule_why_text(&rule.updated_at),
+                "superseded": rule.superseded_by.is_some() || maturity == RuleMaturity::Superseded,
+                "supersededBy": replacement,
+            },
+            "admission": {
+                "search": projection.is_search_indexable() && lineage_valid,
+                "ruleEligible": rule_eligible,
+                "trustValid": trust_valid,
+                "lineageValid": lineage_valid,
+                "taskScopeEvaluation": "not_requested",
+                "nativePackSelectionRecorded": latest_selection.is_some(),
+            },
+            "redaction": {
+                "egressRedacted": egress.redacted || paths_redacted,
+                "egressReasons": egress.redacted_reasons,
+                "pathsRedacted": paths_redacted,
+            },
+        }),
+    };
+    let mut report = WhyReport::found(
+        rule_id.to_owned(),
+        StorageExplanation {
+            origin: "Native procedural rule".to_owned(),
+            trust_class: redact_rule_why_text(&rule.trust_class),
+            trust_subclass: None,
+            provenance_uri: Some(format!("ee://rule/{rule_id}")),
+            workflow_id: None,
+            created_at: redact_rule_why_text(&rule.created_at),
+            valid_from: None,
+            valid_to: None,
+            validity_status: "not_applicable".to_owned(),
+            validity_window_kind: "rule_lifecycle".to_owned(),
+        },
+        RetrievalExplanation {
+            confidence: rule.confidence,
+            utility: rule.utility,
+            importance: rule.importance,
+            tags: projection.tags().iter().map(|tag| redact_rule_why_text(tag)).collect(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+        },
+        SelectionExplanation {
+            selection_score,
+            above_confidence_threshold: rule.confidence >= options.confidence_threshold,
+            is_active: rule_eligible,
+            score_breakdown: "Native rule scores and lifecycle come from the rule row. Rule eligibility checks lifecycle, scope validity, trust, and lineage; task-path matching is evaluated during pack hydration. selectionScore is the latest integrity-verified selection recorded under this RuleId, when available; source-memory selections do not apply.".to_owned(),
+            latest_pack_selection: latest_selection,
+        },
+    )
+    .with_content(content)
+    .with_entity(entity)
+    .with_lifecycle(LifecycleExplanation {
+        status: if rule.superseded_by.is_some() { "superseded" } else { maturity.as_str() },
+        tombstoned_at: None,
+        tombstoned_reason: None,
+    });
+    if let Some(degradation) = selection_degradation {
+        report = report.with_degradation(degradation);
+    }
+    Ok(Some(report))
+}
+
+fn redact_rule_why_text(text: &str) -> String {
+    redact_why_absolute_path_like_segments(&crate::policy::redact_public_replay_text(text).content)
 }
 
 fn explain_evidence_with_connection(
@@ -1443,10 +1684,32 @@ fn evidence_why_report(
     })
 }
 
+/// Explain a target from a caller-owned source snapshot, binding native rules to
+/// the explicitly addressed workspace. The legacy entrypoint remains store scoped.
+pub fn explain_memory_for_workspace_with_connection(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    workspace_path: &Path,
+) -> WhyReport {
+    explain_memory_in_scope(options, conn, Some(workspace_path))
+}
+
 pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnection) -> WhyReport {
+    explain_memory_in_scope(options, conn, None)
+}
+
+fn explain_memory_in_scope(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    workspace_path: Option<&Path>,
+) -> WhyReport {
     let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
+
+    if target.result_source == Some(WhyResultDocumentSource::Rule) {
+        return explain_rule_with_connection(options, conn, memory_id, workspace_path);
+    }
 
     if target.result_source == Some(WhyResultDocumentSource::Evidence) {
         return explain_evidence_with_connection(options, conn, memory_id);
@@ -2072,6 +2335,7 @@ fn why_provenance_health_degradation(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WhyResultDocumentSource {
     Memory,
+    Rule,
     Evidence,
     Session,
     Artifact,
@@ -2083,6 +2347,8 @@ impl WhyResultDocumentSource {
     fn from_document_id(document_id: &str) -> Self {
         if document_id.starts_with("mem_") {
             Self::Memory
+        } else if document_id.starts_with("rule_") {
+            Self::Rule
         } else if document_id.starts_with("ev_") {
             Self::Evidence
         } else if document_id.starts_with("sess_") {
@@ -2099,6 +2365,7 @@ impl WhyResultDocumentSource {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Memory => "memory",
+            Self::Rule => "rule",
             Self::Evidence => "evidence_span",
             Self::Session => "session",
             Self::Artifact => "artifact",
@@ -2110,6 +2377,7 @@ impl WhyResultDocumentSource {
     const fn human_label(self) -> &'static str {
         match self {
             Self::Memory => "memory",
+            Self::Rule => "procedural rule",
             Self::Evidence => "CASS evidence span",
             Self::Session => "CASS session",
             Self::Artifact => "artifact",
@@ -2129,6 +2397,7 @@ impl WhyResultDocumentSource {
     const fn repair(self) -> &'static str {
         match self {
             Self::Memory => "ee why --help",
+            Self::Rule => "ee why --help",
             Self::Evidence => "ee why --help",
             Self::Session => "ee import sessions --json",
             Self::Artifact => "ee artifact show --help",
@@ -2147,9 +2416,12 @@ struct WhyTarget<'a> {
 impl WhyTarget<'_> {
     const fn unsupported_result_source(self) -> Option<WhyResultDocumentSource> {
         match self.result_source {
-            Some(WhyResultDocumentSource::Memory | WhyResultDocumentSource::Evidence) | None => {
-                None
-            }
+            Some(
+                WhyResultDocumentSource::Memory
+                | WhyResultDocumentSource::Rule
+                | WhyResultDocumentSource::Evidence,
+            )
+            | None => None,
             Some(source) => Some(source),
         }
     }
@@ -2169,13 +2441,16 @@ fn resolve_why_target(target_id: &str) -> WhyTarget<'_> {
                 result_source: Some(WhyResultDocumentSource::from_document_id(document_id)),
             },
         );
+    let source = WhyResultDocumentSource::from_document_id(resolved.document_id);
     if resolved.result_source.is_none()
-        && WhyResultDocumentSource::from_document_id(resolved.document_id)
-            == WhyResultDocumentSource::Evidence
+        && matches!(
+            source,
+            WhyResultDocumentSource::Rule | WhyResultDocumentSource::Evidence
+        )
     {
         WhyTarget {
             document_id: resolved.document_id,
-            result_source: Some(WhyResultDocumentSource::Evidence),
+            result_source: Some(source),
         }
     } else {
         resolved
@@ -2235,7 +2510,9 @@ fn unsupported_result_target_storage(
         WhyResultDocumentSource::CurationCandidate | WhyResultDocumentSource::Unknown => {
             generic_unsupported_storage(document_id, source)
         }
-        WhyResultDocumentSource::Memory => generic_unsupported_storage(document_id, source),
+        WhyResultDocumentSource::Memory | WhyResultDocumentSource::Rule => {
+            generic_unsupported_storage(document_id, source)
+        }
     }
 }
 
@@ -3653,6 +3930,322 @@ mod tests {
     fn why_report_version_matches_package() -> TestResult {
         let report = WhyReport::not_found("mem_test".to_string());
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    fn native_rule_why_fixture() -> Result<(DbConnection, String, String), String> {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::testing::wsp("nativewhy");
+        conn.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: "/why/native".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let rule_id = crate::testing::rule("nativewhy");
+        conn.insert_procedural_rule(
+            &rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.clone(),
+                content: "Use release checks before publishing a tag.".to_owned(),
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((conn, workspace_id, rule_id))
+    }
+
+    fn native_rule_why_options(rule_id: &str) -> WhyOptions<'_> {
+        WhyOptions {
+            database_path: Path::new(":memory:"),
+            memory_id: rule_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        }
+    }
+
+    #[test]
+    fn why_native_rule_rejects_missing_malformed_deleted_and_foreign_workspace() -> TestResult {
+        let (conn, _, rule_id) = native_rule_why_fixture()?;
+        let options = native_rule_why_options(&rule_id);
+        ensure(
+            explain_memory_for_workspace_with_connection(&options, &conn, Path::new("/why/native"))
+                .found,
+            true,
+            "owning workspace admits native rule",
+        )?;
+        let foreign_id = crate::testing::wsp("nativewhyforeign");
+        conn.insert_workspace(
+            &foreign_id,
+            &CreateWorkspaceInput {
+                path: "/why/foreign".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let denied = explain_memory_for_workspace_with_connection(
+            &options,
+            &conn,
+            Path::new("/why/foreign"),
+        );
+        ensure(
+            denied.found,
+            false,
+            "different workspace withholds native rule",
+        )?;
+        ensure(denied.content.is_none(), true, "foreign rule body withheld")?;
+        ensure(
+            denied.entity.is_none(),
+            true,
+            "foreign rule metadata withheld",
+        )?;
+        for target in [
+            "rule_invalid".to_owned(),
+            format!("result:{}", crate::testing::rule("missingwhy")),
+        ] {
+            let absent = explain_memory_with_connection(&native_rule_why_options(&target), &conn);
+            ensure(absent.found, false, "malformed or absent native target")?;
+            ensure(
+                absent.error.is_none(),
+                true,
+                "absence is not a storage error",
+            )?;
+        }
+        conn.execute(
+            "UPDATE procedural_rules SET tombstoned_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text("2026-09-25T00:00:00Z".to_owned()),
+                Value::Text(rule_id.clone()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let deleted = explain_memory_with_connection(&options, &conn);
+        ensure(deleted.found, false, "deleted rule is not resurrected")?;
+        ensure(
+            deleted.content.is_none(),
+            true,
+            "deleted rule body withheld",
+        )
+    }
+
+    #[test]
+    fn why_native_rule_explains_replacement_and_invalid_scope_without_admission() -> TestResult {
+        let (conn, workspace_id, rule_id) = native_rule_why_fixture()?;
+        let options = native_rule_why_options(&rule_id);
+        let initial = explain_memory_with_connection(&options, &conn);
+        let initial_revision = initial
+            .entity
+            .as_ref()
+            .ok_or("native entity")?
+            .revision
+            .clone();
+        conn.execute(
+            "UPDATE procedural_rules SET scope = 'file', scope_pattern = '../escape.txt' WHERE id = ?1",
+            &[Value::Text(rule_id.clone())],
+        ).map_err(|error| error.to_string())?;
+        let invalid_scope = explain_memory_with_connection(&options, &conn);
+        ensure(
+            invalid_scope.found,
+            true,
+            "invalid scope remains explainable",
+        )?;
+        ensure(
+            invalid_scope
+                .selection
+                .as_ref()
+                .ok_or("rule selection")?
+                .is_active,
+            false,
+            "invalid scope is ineligible",
+        )?;
+        ensure(
+            invalid_scope.entity.as_ref().ok_or("rule entity")?.details["scope"]["patternPosture"]
+                .as_str(),
+            Some("invalid"),
+            "invalid scope posture",
+        )?;
+        let replacement_id = crate::testing::rule("nativewhyreplacement");
+        conn.insert_procedural_rule(
+            &replacement_id,
+            &CreateProceduralRuleInput {
+                workspace_id,
+                content: "Use the updated release checklist.".to_owned(),
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.6,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE procedural_rules SET maturity = 'superseded', superseded_by = ?1 WHERE id = ?2",
+            &[
+                Value::Text(replacement_id.clone()),
+                Value::Text(rule_id.clone()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let replaced = explain_memory_with_connection(&options, &conn);
+        ensure(
+            replaced.found,
+            true,
+            "replacement leaves old rule explainable",
+        )?;
+        ensure(
+            replaced.lifecycle.as_ref().ok_or("rule lifecycle")?.status,
+            "superseded",
+            "superseded lifecycle",
+        )?;
+        ensure(
+            replaced
+                .selection
+                .as_ref()
+                .ok_or("rule selection")?
+                .is_active,
+            false,
+            "replaced rule is ineligible",
+        )?;
+        let entity = replaced.entity.as_ref().ok_or("rule entity")?;
+        ensure(
+            entity.id.as_str(),
+            rule_id.as_str(),
+            "replacement does not change requested identity",
+        )?;
+        ensure(
+            entity.details["lifecycle"]["supersededBy"].as_str(),
+            Some(replacement_id.as_str()),
+            "verified replacement identity",
+        )?;
+        ensure(
+            entity.revision != initial_revision,
+            true,
+            "native lifecycle and scope affect revision",
+        )
+    }
+
+    #[test]
+    fn why_native_rule_provenance_withholds_foreign_and_noncurrent_sources() -> TestResult {
+        let (conn, workspace_id, rule_id) = native_rule_why_fixture()?;
+        let foreign_workspace = crate::testing::wsp("nativewhysourceforeign");
+        conn.insert_workspace(
+            &foreign_workspace,
+            &CreateWorkspaceInput {
+                path: "/why/source-foreign".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let live_id = crate::testing::mem("nativewhysourcelive");
+        let foreign_id = crate::testing::mem("nativewhysourceforeign");
+        let expired_id = crate::testing::mem("nativewhysourceexpired");
+        let replaced_id = crate::testing::mem("nativewhysourcereplaced");
+        let deleted_id = crate::testing::mem("nativewhysourcedeleted");
+        for id in [
+            &live_id,
+            &foreign_id,
+            &expired_id,
+            &replaced_id,
+            &deleted_id,
+        ] {
+            conn.insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: if id == &foreign_id {
+                        foreign_workspace.clone()
+                    } else {
+                        workspace_id.clone()
+                    },
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Never disclose this source body from native rule why.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.7,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("file:/Users/alice/private/source.txt".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                    valid_to: (id == &expired_id).then(|| "2020-01-02T00:00:00Z".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            conn.execute(
+                "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
+                &[Value::Text(rule_id.clone()), Value::Text(id.clone())],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        conn.mark_memory_superseded(&replaced_id, "2020-01-03T00:00:00Z")
+            .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE memories SET tombstoned_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text("2020-01-03T00:00:00Z".to_owned()),
+                Value::Text(deleted_id.clone()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let report = explain_memory_with_connection(&native_rule_why_options(&rule_id), &conn);
+        ensure(
+            report.found,
+            true,
+            "native rule remains explainable with unavailable sources",
+        )?;
+        let entity = report.entity.as_ref().ok_or("native entity")?;
+        ensure(
+            entity.details["provenance"]["sourceMemories"].clone(),
+            serde_json::json!([{ "id": live_id, "uri": format!("ee://memory/{live_id}") }]),
+            "only admitted source metadata",
+        )?;
+        ensure(
+            entity.details["provenance"]["unavailableSourceCount"].as_u64(),
+            Some(4),
+            "unavailable source count",
+        )?;
+        ensure(
+            entity.details["admission"]["lineageValid"].as_bool(),
+            Some(false),
+            "foreign lineage denies admission",
+        )?;
+        ensure(
+            report.selection.as_ref().ok_or("rule selection")?.is_active,
+            false,
+            "foreign lineage cannot authorize rule",
+        )?;
+        let public = format!("{report:?}");
+        for withheld in [
+            foreign_id.as_str(),
+            expired_id.as_str(),
+            replaced_id.as_str(),
+            deleted_id.as_str(),
+            "/Users/alice",
+            "Never disclose this source body",
+        ] {
+            ensure(
+                public.contains(withheld),
+                false,
+                "unavailable source content and metadata withheld",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

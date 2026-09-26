@@ -302,7 +302,7 @@ use crate::core::verify_ledger::{
     audit_rch_topology_closure, ingest_rch_verify_v1, list_rch_verify_blockers,
     list_rch_verify_runs,
 };
-use crate::core::why::{WhyOptions, explain_memory_with_connection};
+use crate::core::why::WhyOptions;
 use crate::core::witness_retention::{
     WITNESS_PRUNE_REPORT_SCHEMA_V1, WitnessAction, WitnessRetentionPolicy,
     classify_witnesses_for_pruning,
@@ -11208,7 +11208,7 @@ pub struct TrustReportArgs {
 /// Arguments for `ee why`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyArgs {
-    /// Memory ID or admitted evidence-span ID to explain.
+    /// Memory, procedural-rule, or admitted evidence-span ID to explain (also result:<ID>).
     #[arg(value_name = "ENTITY_ID")]
     pub memory_id: String,
 
@@ -23469,6 +23469,7 @@ fn doctor_fix_dispatches(
 
     match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
         Ok(mut ctx) => {
+            let mut unresolved = unresolved.to_vec();
             let mut fixer_results = Vec::with_capacity(dispatches.len());
             let mut pending = dispatches.into_iter();
             while let Some(dispatch) = pending.next() {
@@ -23483,14 +23484,23 @@ fn doctor_fix_dispatches(
                 } else {
                     "applied"
                 };
-                match mutate(&mut ctx, &dispatch.path, dispatch.op) {
+                // Publication and its later freshness/journal checks have
+                // different outcomes. Only notices added by this dispatch
+                // can attest that its reversible replacement completed.
+                let notice_count = ctx.index_repair_notices().len();
+                let mutation = mutate(&mut ctx, &dispatch.path, dispatch.op);
+                let publication_notice = ctx.index_repair_notices()[notice_count..].last().copied();
+                if let Some(notice) = publication_notice {
+                    unresolved.push(doctor_index_publication_unresolved(notice));
+                }
+                match mutation {
                     Ok(action) => fixer_results.push(DoctorFixerResult {
                         finding_code,
                         operation,
                         path,
                         outcome,
                         action_sequence: Some(action.sequence),
-                        error: None,
+                        error: publication_notice.map(|notice| notice.postcondition.message()),
                     }),
                     Err(DoctorRuntimeError::NoOpIdempotent) => {
                         fixer_results.push(DoctorFixerResult {
@@ -23503,13 +23513,32 @@ fn doctor_fix_dispatches(
                         });
                     }
                     Err(mutation_error) => {
+                        let phase = if publication_notice.is_some() {
+                            "post_publication"
+                        } else {
+                            "mutate"
+                        };
                         fixer_results.push(DoctorFixerResult {
                             finding_code,
                             operation,
                             path,
-                            outcome: "failed",
-                            action_sequence: None,
-                            error: Some(mutation_error.to_string()),
+                            outcome: if publication_notice.is_some() {
+                                "applied"
+                            } else {
+                                "failed"
+                            },
+                            action_sequence: publication_notice
+                                .map(|notice| notice.action_sequence),
+                            error: Some(publication_notice.map_or_else(
+                                || mutation_error.to_string(),
+                                |notice| {
+                                    format!(
+                                        "{} {} Post-publication journal failed: {mutation_error}",
+                                        notice.postcondition.message(),
+                                        notice.postcondition.repair()
+                                    )
+                                },
+                            )),
                         });
                         fixer_results.extend(pending.map(|skipped| DoctorFixerResult {
                             finding_code: skipped.finding_code,
@@ -23528,7 +23557,7 @@ fn doctor_fix_dispatches(
                                 let run = DoctorFixRunEvidence::from_summary(&summary);
                                 doctor_runtime_error_result(
                                     &mutation_error,
-                                    "mutate",
+                                    phase,
                                     &fixer_results,
                                     Some(&run),
                                     None,
@@ -23546,7 +23575,7 @@ fn doctor_fix_dispatches(
                                     "finish",
                                     &fixer_results,
                                     Some(&run),
-                                    Some(("mutate", &mutation_error)),
+                                    Some((phase, &mutation_error)),
                                 )
                             }
                         };
@@ -23567,7 +23596,7 @@ fn doctor_fix_dispatches(
             };
             match ctx.finish(status) {
                 Ok(summary) => DoctorFixCommandResult {
-                    json: doctor_fix_success_json(workspace, &summary, &fixer_results, unresolved),
+                    json: doctor_fix_success_json(workspace, &summary, &fixer_results, &unresolved),
                     exit_code: if unresolved.is_empty() {
                         ProcessExitCode::Success
                     } else {
@@ -23599,6 +23628,25 @@ fn doctor_fix_dispatches(
                 .collect::<Vec<_>>();
             doctor_runtime_error_result(&error, "start", &fixer_results, None, None)
         }
+    }
+}
+
+fn doctor_index_publication_unresolved(
+    notice: crate::core::doctor_runtime::IndexRepairPublicationNotice,
+) -> crate::core::doctor_fixers::UnresolvedCoreCheck {
+    use crate::core::doctor_runtime::IndexRepairPostcondition;
+    crate::core::doctor_fixers::UnresolvedCoreCheck {
+        name: "index_freshness",
+        severity: "warning",
+        error_code: match notice.postcondition {
+            IndexRepairPostcondition::Stale { .. } => {
+                Some(crate::models::error_codes::INDEX_STALE.id)
+            }
+            IndexRepairPostcondition::Unverified { .. } => None,
+        },
+        repair: Some(notice.postcondition.repair()),
+        fix_mode: "auto_repair",
+        fix_finding: Some("search_index_stale"),
     }
 }
 
@@ -54503,6 +54551,25 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
+    let target_id = args
+        .memory_id
+        .strip_prefix("result:")
+        .unwrap_or(&args.memory_id);
+    let native_rule_target = target_id.starts_with("rule_");
+    if native_rule_target
+        && (args.causal_explain || args.include_sentinel || args.mesh_mode != MeshCommandMode::Off)
+    {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "Memory-only causal, sentinel, and mesh explanation options do not apply to procedural rules.".to_owned(),
+                repair: Some("ee why --help".to_owned()),
+            },
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
+
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
@@ -54587,7 +54654,11 @@ where
         }
     }
 
-    let mut report = explain_memory_with_connection(&options, connection);
+    let mut report = crate::core::why::explain_memory_for_workspace_with_connection(
+        &options,
+        connection,
+        &workspace_path,
+    );
 
     if let Some(ref error) = report.error {
         let domain_error = DomainError::Storage {
@@ -54599,9 +54670,16 @@ where
 
     if !report.found {
         let domain_error = DomainError::NotFound {
-            resource: "memory".to_string(),
+            resource: if native_rule_target { "rule" } else { "memory" }.to_string(),
             id: args.memory_id.clone(),
-            repair: Some("ee memory list".to_string()),
+            repair: Some(
+                if native_rule_target {
+                    "ee rule list"
+                } else {
+                    "ee memory list"
+                }
+                .to_string(),
+            ),
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
@@ -55308,7 +55386,29 @@ fn empty_why_causal_explanation_json(
 }
 
 fn format_why_human(report: &crate::core::why::WhyReport) -> String {
-    let mut output = format!("Memory: {}\n\n", report.memory_id);
+    let mut output = if let Some(entity) = &report.entity {
+        let label = match entity.kind.as_str() {
+            "rule" => "Rule",
+            "evidence_span" => "Evidence span",
+            _ => "Entity",
+        };
+        let mut heading = format!("{label}: {}\n", entity.id);
+        if let Some(revision) = &entity.revision {
+            heading.push_str(&format!("Revision: {revision}\n"));
+        }
+        heading.push('\n');
+        heading
+    } else {
+        format!("Memory: {}\n\n", report.memory_id)
+    };
+
+    if let Some(entity) = &report.entity
+        && let Ok(details) = serde_json::to_string_pretty(&entity.details)
+    {
+        output.push_str("Entity details:\n");
+        output.push_str(&details);
+        output.push_str("\n\n");
+    }
 
     if let Some(ref content) = report.content {
         output.push_str("Content:\n");
@@ -87472,6 +87572,301 @@ mod tests {
         )?;
         ensure_equal(&data["failedFixerCount"], &serde_json::json!(0), "failed")?;
         ensure_persistent_doctor_lock_released(&workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_fix_completed_index_publication_keeps_applied_receipts_and_retry_guidance()
+    -> TestResult {
+        use crate::core::doctor_fixers::{FixerDispatch, fix_search_index_missing};
+        use crate::core::doctor_runtime::{ActionLine, Op, with_index_repair_after_publish_hook};
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+
+        const WORKSPACE: &str = "wsp_00000000000000000000000087";
+
+        fn insert_fact(database: &Path, memory: &str) {
+            let db = DbConnection::open_file(database).expect("source writer");
+            db.insert_memory_revision(
+                memory,
+                memory,
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "A durable fact committed during doctor index repair.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("commit source revision");
+        }
+
+        for scenario in ["stale", "unverified", "journal_failure", "later_failure"] {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let database = workspace.join(".ee/ee.db");
+            let preserved_database = workspace.join(".ee/source-preserved.db");
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            db.insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("doctor publication CLI regression".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            drop(db);
+            insert_fact(&database, "mem_00000000000000000000000087");
+
+            let after_repair = workspace.join(".ee/after-repair");
+            let mut dispatches = vec![fix_search_index_missing(&workspace)];
+            if scenario == "later_failure" {
+                dispatches.push(FixerDispatch {
+                    finding_code: "test_unrelated_failure_after_publication",
+                    severity: "warning",
+                    path: workspace.join("outside-doctor-blast-radius"),
+                    op: Op::WriteFile {
+                        bytes: b"must not be written".to_vec(),
+                    },
+                });
+            }
+            dispatches.push(FixerDispatch {
+                finding_code: "test_dispatch_after_index_repair",
+                severity: "warning",
+                path: after_repair.clone(),
+                op: Op::CreateDirAll,
+            });
+
+            let hook_workspace = workspace.clone();
+            let hook_database = database.clone();
+            let hook_preserved_database = preserved_database.clone();
+            let result = with_index_repair_after_publish_hook(
+                move || {
+                    if scenario == "unverified" {
+                        fs::rename(&hook_database, hook_preserved_database)
+                            .expect("make freshness observation unavailable");
+                    } else {
+                        insert_fact(&hook_database, "mem_00000000000000000000000088");
+                    }
+                    if scenario == "journal_failure" {
+                        let run_dir = fs::read_dir(hook_workspace.join(".doctor/runs"))
+                            .expect("run directory")
+                            .next()
+                            .expect("active run")
+                            .expect("run entry")
+                            .path();
+                        std::os::unix::fs::symlink(&hook_database, run_dir.join("flush-obstacle"))
+                            .expect("force diagnostic durability failure after publication");
+                    }
+                },
+                || doctor_fix_dispatches(&workspace, dispatches, &[]),
+            );
+            if scenario == "unverified" {
+                fs::rename(&preserved_database, &database).map_err(|error| error.to_string())?;
+            }
+            let source_after_publication =
+                fs::read(&database).map_err(|error| error.to_string())?;
+            let value: serde_json::Value =
+                serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+            let failed = matches!(scenario, "journal_failure" | "later_failure");
+            let details = if failed {
+                &value["error"]["details"]
+            } else {
+                &value["data"]
+            };
+            ensure_equal(
+                &details["fixerResults"][0]["outcome"],
+                &serde_json::json!("applied"),
+                scenario,
+            )?;
+            let receipt_sequence = details["fixerResults"][0]["actionSequence"]
+                .as_u64()
+                .ok_or_else(|| format!("{scenario}: manifest receipt missing"))?;
+            let notice = details["fixerResults"][0]["error"]
+                .as_str()
+                .ok_or_else(|| format!("{scenario}: publication notice missing"))?;
+            ensure(
+                notice.contains("index was replaced"),
+                "completed publication must be explicit",
+            )?;
+            ensure_equal(
+                &details["failedFixerCount"],
+                &serde_json::json!(u64::from(scenario == "later_failure")),
+                "only the later unrelated mutation may count as failed",
+            )?;
+            let run = if failed { &details["run"] } else { details };
+            ensure_equal(
+                &run["status"],
+                &serde_json::json!("completed_partial"),
+                scenario,
+            )?;
+            if failed {
+                ensure_equal(
+                    &details["phase"],
+                    &serde_json::json!(if scenario == "journal_failure" {
+                        "post_publication"
+                    } else {
+                        "mutate"
+                    }),
+                    scenario,
+                )?;
+                ensure_equal(
+                    &details["skippedFixerCount"],
+                    &serde_json::json!(1),
+                    scenario,
+                )?;
+                ensure(
+                    !after_repair.exists(),
+                    "dispatches must stop after a runtime failure",
+                )?;
+                ensure_equal(
+                    &result.exit_code,
+                    &if scenario == "journal_failure" {
+                        ProcessExitCode::Storage
+                    } else {
+                        ProcessExitCode::PolicyDenied
+                    },
+                    scenario,
+                )?;
+                if scenario == "journal_failure" {
+                    ensure(
+                        notice.contains("ee index rebuild"),
+                        "post-publication error keeps retry guidance",
+                    )?;
+                } else {
+                    ensure_equal(
+                        &details["fixerResults"][1]["outcome"],
+                        &serde_json::json!("failed"),
+                        scenario,
+                    )?;
+                    ensure(
+                        details["fixerResults"][1]["actionSequence"].is_null(),
+                        "a prior publication notice must not authorize a later failed mutation",
+                    )?;
+                }
+            } else {
+                ensure_equal(
+                    &result.exit_code,
+                    &ProcessExitCode::UnsatisfiedDegradedMode,
+                    scenario,
+                )?;
+                ensure(
+                    after_repair.is_dir(),
+                    "a freshness notice must allow remaining repairs",
+                )?;
+                ensure_equal(
+                    &details["unresolvedCoreCheckCount"],
+                    &serde_json::json!(1),
+                    scenario,
+                )?;
+                let unresolved = &details["unresolvedCoreChecks"][0];
+                ensure_equal(
+                    &unresolved["name"],
+                    &serde_json::json!("index_freshness"),
+                    scenario,
+                )?;
+                ensure_equal(
+                    &unresolved["errorCode"],
+                    &if scenario == "stale" {
+                        serde_json::json!("EE-E301")
+                    } else {
+                        serde_json::Value::Null
+                    },
+                    "unverified freshness must not invent a stale observation",
+                )?;
+                ensure(
+                    unresolved["repair"]
+                        .as_str()
+                        .is_some_and(|repair| repair.contains("ee index")),
+                    "freshness retry guidance",
+                )?;
+                ensure_equal(
+                    &value["degraded"][0]["code"],
+                    &serde_json::json!("doctor_core_repair_pending"),
+                    scenario,
+                )?;
+            }
+
+            let run_id = run["runId"]
+                .as_str()
+                .ok_or_else(|| "runId missing".to_owned())?;
+            let run_dir = PathBuf::from(
+                run["runDir"]
+                    .as_str()
+                    .ok_or_else(|| "runDir missing".to_owned())?,
+            );
+            let journal = fs::read_to_string(run_dir.join("actions.jsonl"))
+                .map_err(|error| error.to_string())?;
+            let actions = journal
+                .lines()
+                .map(serde_json::from_str::<ActionLine>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            ensure(
+                actions.iter().any(|action| {
+                    action.sequence == receipt_sequence
+                        && action.kind == "write_file"
+                        && action.path == workspace.join(".ee/index/meta.json")
+                }),
+                "CLI receipt must identify the original published manifest action",
+            )?;
+            let state: serde_json::Value = serde_json::from_slice(
+                &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            ensure_equal(
+                &state["status"],
+                &serde_json::json!("completed_partial"),
+                "durable partial status",
+            )?;
+            ensure_persistent_doctor_lock_released(&workspace)?;
+            if scenario == "journal_failure" {
+                fs::rename(
+                    run_dir.join("flush-obstacle"),
+                    workspace.join("preserved-flush-obstacle"),
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let workspace_arg = workspace.to_string_lossy().into_owned();
+            let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
+                "ee",
+                "--workspace",
+                &workspace_arg,
+                "doctor",
+                "--undo",
+                run_id,
+                "--json",
+            ]);
+            ensure_equal(&undo_exit, &ProcessExitCode::Success, &undo_stdout)?;
+            ensure(undo_stderr.is_empty(), "undo JSON stderr must be empty")?;
+            ensure(
+                !workspace.join(".ee/index").exists(),
+                "undo restores the missing index",
+            )?;
+            ensure(
+                !after_repair.exists(),
+                "undo restores subsequent successful mutations",
+            )?;
+            ensure_equal(
+                &fs::read(&database).map_err(|error| error.to_string())?,
+                &source_after_publication,
+                "undo preserves the concurrent source commit",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

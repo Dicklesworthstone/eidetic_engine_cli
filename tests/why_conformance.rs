@@ -1,9 +1,11 @@
-//! EE-lp4p.8: ee why memory explanation conformance tests
+//! EE-lp4p.8: ee why memory and native entity explanation conformance tests
 //!
 //! Validates that `ee why <memory-id> --json` output conforms to the expected
 //! schema and includes complete explanation fields for storage, retrieval,
 //! and selection decisions.
 
+use ee::db::{CreateProceduralRuleInput, DbConnection, UpdateProceduralRuleLifecycleInput};
+use ee::search::RuleIndexProjection;
 use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
@@ -86,6 +88,417 @@ fn persist_json_artifact(name: &str, value: &serde_json::Value) {
         Err(error) => panic!("artifact JSON serialization should not fail: {error}"),
     };
     let _ = fs::write(&path, serialized);
+}
+
+fn native_rule_command(
+    workspace: &str,
+    args: &[&str],
+    artifact: &str,
+) -> Result<serde_json::Value, String> {
+    let mut command_args = args.to_vec();
+    command_args.push("--json");
+    let output = native_rule_output(workspace, &command_args)?;
+    persist_artifact(artifact, &output);
+    ensure_equal(
+        &output.status.code(),
+        &Some(0),
+        &format!(
+            "{artifact} exit (stderr: {}) (stdout: {})",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(&json["success"], &serde_json::json!(true), artifact)?;
+    Ok(json)
+}
+
+fn native_rule_output(workspace: &str, args: &[&str]) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["--workspace", workspace])
+        .args(args)
+        .current_dir(workspace)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .output()
+        .map_err(|error| format!("failed native rule command: {error}"))
+}
+
+#[test]
+fn why_native_rule_and_result_target_use_sourceless_identity_and_feedback() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    native_rule_command(&workspace, &["init"], "native_rule_init")?;
+    let content = "Verify the release checklist before publishing a release tag.";
+    let added = native_rule_command(
+        &workspace,
+        &[
+            "rule",
+            "add",
+            content,
+            "--trust-class",
+            "agent_assertion",
+            "--confidence",
+            "0.55",
+        ],
+        "native_rule_add",
+    )?;
+    let rule_id = added["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "rule add must return a native ruleId".to_owned())?
+        .to_owned();
+    ensure(rule_id.starts_with("rule_"), "native rule ID prefix")?;
+
+    let database = tempdir.path().join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let rule = connection
+        .get_procedural_rule(&rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "native rule must exist".to_owned())?;
+    let workspace_id = rule.workspace_id.clone();
+    // Seed distinct native counters without creating or consulting a memory
+    // posterior. Why must project this row's state, including its revision.
+    ensure(
+        connection
+            .update_procedural_rule_lifecycle(
+                &rule_id,
+                &UpdateProceduralRuleLifecycleInput {
+                    workspace_id: workspace_id.clone(),
+                    maturity: "candidate".to_owned(),
+                    confidence: rule.confidence,
+                    utility: rule.utility,
+                    positive_feedback_delta: 3,
+                    negative_feedback_delta: 2,
+                    validation_passes_delta: 1,
+                    validation_contradictions_delta: 1,
+                    last_validated_at: Some("2026-09-25T12:00:00Z".to_owned()),
+                    superseded_by: None,
+                    updated_at: "2026-09-25T12:00:00Z".to_owned(),
+                },
+            )
+            .map_err(|error| error.to_string())?,
+        "native lifecycle fixture updated",
+    )?;
+    let rule = connection
+        .get_procedural_rule(&rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "updated native rule must exist".to_owned())?;
+    let tags = connection
+        .get_rule_tags(&rule_id)
+        .map_err(|error| error.to_string())?;
+    let sources = connection
+        .get_rule_source_memory_ids(&rule_id)
+        .map_err(|error| error.to_string())?;
+    ensure(sources.is_empty(), "candidate rule is sourceless")?;
+    let projection = RuleIndexProjection::new(rule, tempdir.path(), tags, sources);
+    let revision = projection.entity_revision().to_owned();
+    connection.close().map_err(|error| error.to_string())?;
+
+    for (target, artifact) in [
+        (rule_id.clone(), "native_rule_direct_why"),
+        (format!("result:{rule_id}"), "native_rule_result_why"),
+    ] {
+        let why = native_rule_command(&workspace, &["why", &target], artifact)?;
+        ensure_equal(&why["data"]["found"], &serde_json::json!(true), artifact)?;
+        ensure_equal(
+            &why["data"]["entity"]["kind"],
+            &serde_json::json!("rule"),
+            "native why entity kind",
+        )?;
+        ensure_equal(
+            &why["data"]["entity"]["id"],
+            &serde_json::json!(&rule_id),
+            "native why entity ID",
+        )?;
+        ensure_equal(
+            &why["data"]["entity"]["revision"],
+            &serde_json::json!(&revision),
+            "native why canonical revision",
+        )?;
+        ensure(
+            why["data"]["memoryId"].is_null(),
+            "no memory identity alias",
+        )?;
+        ensure_equal(
+            &why["data"]["content"],
+            &serde_json::json!(content),
+            "why uses the rule body",
+        )?;
+        let details = &why["data"]["entity"]["details"];
+        ensure_equal(
+            &details["feedback"],
+            &serde_json::json!({
+                "target": {"kind": "rule", "id": &rule_id},
+                "positiveCount": 3,
+                "negativeCount": 2,
+                "validationPasses": 1,
+                "validationContradictions": 1,
+                "lastAppliedAt": null,
+                "lastValidatedAt": "2026-09-25T12:00:00Z",
+            }),
+            "native rule feedback counters",
+        )?;
+        ensure_equal(
+            &details["provenance"]["status"],
+            &serde_json::json!("unlinked"),
+            "sourceless provenance posture",
+        )?;
+        ensure_equal(
+            &details["provenance"]["sourceMemories"],
+            &serde_json::json!([]),
+            "no fabricated source memory",
+        )?;
+        ensure(
+            why["data"]["selection"]["latestPackSelection"].is_null(),
+            "unpacked native rule has no pack selection",
+        )?;
+    }
+
+    for format in ["human", "markdown"] {
+        let output = native_rule_output(&workspace, &["--format", format, "why", &rule_id])?;
+        ensure_equal(&output.status.code(), &Some(0), "typed text why exit")?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        ensure(
+            text.starts_with(&format!("Rule: {rule_id}\n")),
+            "text why names a rule",
+        )?;
+        ensure(text.contains(&revision), "text why carries native revision")?;
+        ensure(
+            text.contains("\"positiveCount\": 3") && text.contains("\"scope\":"),
+            "text why preserves rule feedback and scope",
+        )?;
+    }
+    let mermaid = native_rule_output(&workspace, &["--format", "mermaid", "why", &rule_id])?;
+    ensure_equal(&mermaid.status.code(), &Some(0), "typed Mermaid why exit")?;
+    ensure(
+        String::from_utf8_lossy(&mermaid.stdout).contains(&format!("rule: {rule_id}")),
+        "Mermaid labels native rule identity",
+    )?;
+    let unsupported = native_rule_output(
+        &workspace,
+        &["why", &rule_id, "--include-sentinel", "--json"],
+    )?;
+    ensure_equal(
+        &unsupported.status.code(),
+        &Some(2),
+        "rule rejects memory sentinel options",
+    )?;
+
+    let foreign = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let foreign_workspace = foreign.path().to_string_lossy().to_string();
+    native_rule_command(&foreign_workspace, &["init"], "native_rule_foreign_init")?;
+    let database_text = database.to_string_lossy().to_string();
+    let wrong_workspace = native_rule_output(
+        &foreign_workspace,
+        &["why", &rule_id, "--database", &database_text, "--json"],
+    )?;
+    ensure_equal(
+        &wrong_workspace.status.code(),
+        &Some(3),
+        "explicit database does not override native workspace admission",
+    )?;
+    ensure(
+        !String::from_utf8_lossy(&wrong_workspace.stdout).contains(content),
+        "wrong workspace cannot expose rule body",
+    )?;
+
+    let connection =
+        DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    ensure(
+        connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .is_empty(),
+        "rule add and why never synthesize memory rows",
+    )?;
+    connection.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn why_native_rule_does_not_inherit_source_memory_pack_selection() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    native_rule_command(&workspace, &["init"], "native_linked_rule_init")?;
+    native_rule_command(
+        &workspace,
+        &["config", "set", "memory.include_global", "false"],
+        "native_linked_rule_disable_global_recall",
+    )?;
+    native_rule_command(
+        &workspace,
+        &["config", "set", "memory.participate", "false"],
+        "native_linked_rule_disable_global_writes",
+    )?;
+    let memory = native_rule_command(
+        &workspace,
+        &[
+            "remember",
+            "Release checklist observation: formatting prevented a broken release tag.",
+            "--level",
+            "episodic",
+            "--kind",
+            "fact",
+        ],
+        "native_linked_rule_remember",
+    )?;
+    let memory_id = memory["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember must return memory_id".to_owned())?;
+    native_rule_command(
+        &workspace,
+        &["index", "rebuild"],
+        "native_linked_rule_index",
+    )?;
+    native_rule_command(
+        &workspace,
+        &[
+            "pack",
+            "release checklist formatting",
+            "--source-mode",
+            "lexical_only",
+            "--max-tokens",
+            "4000",
+        ],
+        "native_linked_rule_pack",
+    )?;
+    let memory_why = native_rule_command(
+        &workspace,
+        &["why", memory_id],
+        "native_linked_rule_memory_why",
+    )?;
+    ensure(
+        memory_why["data"]["selection"]["latestPackSelection"].is_object(),
+        "source memory must really have a recorded pack selection",
+    )?;
+
+    let rule_content = "Always run the release formatter before tagging the release.";
+    let added = native_rule_command(
+        &workspace,
+        &["rule", "add", rule_content, "--source-memory", memory_id],
+        "native_linked_rule_add",
+    )?;
+    let rule_id = added["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "rule add must return ruleId".to_owned())?;
+    let why = native_rule_command(
+        &workspace,
+        &["why", &format!("result:{rule_id}")],
+        "native_linked_rule_why",
+    )?;
+    ensure_equal(
+        &why["data"]["entity"]["id"],
+        &serde_json::json!(rule_id),
+        "linked rule preserves native identity",
+    )?;
+    ensure_equal(
+        &why["data"]["content"],
+        &serde_json::json!(rule_content),
+        "linked rule uses its own body",
+    )?;
+    ensure(
+        why["data"]["memoryId"].is_null(),
+        "source is not an identity alias",
+    )?;
+    ensure(
+        why["data"]["selection"]["latestPackSelection"].is_null(),
+        "source memory pack selection is not rule pack selection",
+    )?;
+    ensure_equal(
+        &why["data"]["entity"]["details"]["provenance"]["sourceMemories"],
+        &serde_json::json!([{"id": memory_id, "uri": format!("ee://memory/{memory_id}")}]),
+        "source memory is represented only as provenance",
+    )
+}
+
+#[test]
+fn why_native_rule_redacts_historical_secret_and_path_without_mutation() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    native_rule_command(&workspace, &["init"], "native_rule_redaction_init")?;
+    let database = tempdir.path().join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let workspace_id = connection
+        .get_workspace_by_path(&workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "workspace must exist".to_owned())?
+        .id;
+    let rule_id = "rule_00000000000000000000000044";
+    let content = concat!(
+        "Review release guidance in /Users/alice/private/release.txt with ",
+        "api",
+        "_key=why-rule-secret-fixture before publishing."
+    );
+    // Model historical source data directly: public creation policy may reject
+    // secrets, but explanation egress must still protect existing durable rows.
+    connection
+        .insert_procedural_rule(
+            rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.clone(),
+                content: content.to_owned(),
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "agent_assertion".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: vec![],
+                tags: vec![],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let before = connection
+        .get_procedural_rule(rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "historical native rule must exist".to_owned())?;
+    let projection = RuleIndexProjection::new(before.clone(), tempdir.path(), vec![], vec![]);
+    connection.close().map_err(|error| error.to_string())?;
+
+    let why = native_rule_command(&workspace, &["why", rule_id], "native_rule_redaction_why")?;
+    ensure_equal(
+        &why["data"]["found"],
+        &serde_json::json!(true),
+        "rule found",
+    )?;
+    ensure_equal(
+        &why["data"]["entity"]["revision"],
+        &serde_json::json!(projection.entity_revision()),
+        "revision binds original rule state, not its redacted rendering",
+    )?;
+    let public_json = why.to_string();
+    ensure(
+        !public_json.contains("/Users/alice") && !public_json.contains("why-rule-secret-fixture"),
+        "native why must not emit stored secret or private path",
+    )?;
+    let public_content = why["data"]["content"]
+        .as_str()
+        .ok_or_else(|| "native rule content must be a string".to_owned())?;
+    ensure(
+        public_content.contains("[REDACTED:"),
+        "native why replaces sensitive content with a redaction placeholder",
+    )?;
+    ensure_equal(
+        &why["data"]["entity"]["details"]["redaction"]["egressRedacted"],
+        &serde_json::json!(true),
+        "native why reports egress redaction",
+    )?;
+
+    let connection =
+        DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    let after = connection
+        .get_procedural_rule(rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "why must preserve historical rule".to_owned())?;
+    ensure_equal(&after, &before, "why does not rewrite native rule source")?;
+    ensure(
+        connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .is_empty(),
+        "why redaction does not synthesize memory rows",
+    )?;
+    connection.close().map_err(|error| error.to_string())
 }
 
 // ============================================================================

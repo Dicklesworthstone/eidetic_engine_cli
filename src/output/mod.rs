@@ -6790,9 +6790,16 @@ fn why_posterior_interval_json_value(
 #[must_use]
 pub fn render_why_mermaid(report: &WhyReport) -> String {
     let mut output = String::from("flowchart TD\n");
+    let (kind, id) = report
+        .entity
+        .as_ref()
+        .map_or(("memory", report.memory_id.as_str()), |entity| {
+            (entity.kind.as_str(), entity.id.as_str())
+        });
     output.push_str(&format!(
-        "  memory[\"memory: {}\"]\n",
-        escape_mermaid_label(&report.memory_id)
+        "  memory[\"{}: {}\"]\n",
+        escape_mermaid_label(kind),
+        escape_mermaid_label(id)
     ));
 
     if let Some(storage) = &report.storage {

@@ -12,13 +12,36 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{
-    ActionLine, DoctorRuntimeError, Op, RunContext, configure_doctor_inspect_open_no_follow,
-    ensure_doctor_lifecycle_bindings, is_mutating_action_kind, mutate,
-    validate_doctor_lifecycle_paths,
+    ActionLine, DoctorRuntimeError, IndexRepairPostcondition, IndexRepairPublicationNotice, Op,
+    RunContext, configure_doctor_inspect_open_no_follow, ensure_doctor_lifecycle_bindings,
+    is_mutating_action_kind, mutate, validate_doctor_lifecycle_paths,
 };
 use crate::core::index::{IndexGenerationLease, doctor_repair};
 
 const MANIFEST: &str = "meta.json";
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Exercise the actual public mutation path with a deterministic source change
+/// after files are published. Scope cleanup also runs on failure or unwind.
+#[cfg(test)]
+pub(crate) fn with_after_publish_hook<T>(
+    hook: impl FnOnce() + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreHook(Option<Box<dyn FnOnce()>>);
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            AFTER_PUBLISH_HOOK.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _restore = RestoreHook(AFTER_PUBLISH_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
+    operation()
+}
 
 #[derive(Default)]
 struct Inventory {
@@ -117,6 +140,19 @@ pub(super) fn rebuild(
     ctx: &mut RunContext,
     index: &Path,
 ) -> Result<ActionLine, DoctorRuntimeError> {
+    rebuild_with_after_publish(ctx, index, || {
+        #[cfg(test)]
+        if let Some(hook) = AFTER_PUBLISH_HOOK.with(|slot| slot.take()) {
+            hook();
+        }
+    })
+}
+
+fn rebuild_with_after_publish(
+    ctx: &mut RunContext,
+    index: &Path,
+    after_publish: impl FnOnce(),
+) -> Result<ActionLine, DoctorRuntimeError> {
     let expected = crate::config::workspace::resolve_store_index_dir(&ctx.workspace, None, None);
     if index != expected {
         return Err(repair_error(
@@ -161,9 +197,36 @@ pub(super) fn rebuild(
                 .map_err(|error| repair_error("reserve live index copy and undo backups", error))?;
         }
         let receipt = publish_files(ctx, index, &staging, &staged, &previous)?;
-        prepared.check_source_generation().map_err(|error| {
-            repair_error("source advanced during doctor index publication", error)
-        })?;
+        after_publish();
+        let postcondition = match prepared.source_generation() {
+            Ok(observed) if observed.current == observed.published => None,
+            Ok(observed) => Some(IndexRepairPostcondition::Stale {
+                published_generation: observed.published,
+                current_generation: observed.current,
+            }),
+            Err(_) => Some(IndexRepairPostcondition::Unverified {
+                published_generation: prepared.published_generation(),
+            }),
+        };
+        if let Some(postcondition) = postcondition {
+            // Publication is complete and undoable. A subsequent source write
+            // or failed freshness observation cannot undo that fact. Preserve
+            // the original manifest receipt and expose a typed follow-up to
+            // the caller, with the same explanation in the durable journal.
+            ctx.index_repair_notices.push(IndexRepairPublicationNotice {
+                action_sequence: receipt.sequence,
+                postcondition,
+            });
+            mutate(
+                ctx,
+                index,
+                Op::Manual {
+                    steps: vec![postcondition.message(), postcondition.repair().to_owned()],
+                },
+            )?;
+            doctor_repair::flush_tree(&ctx.run_dir)
+                .map_err(|error| repair_error("persist index repair freshness notice", error))?;
+        }
         Ok(receipt)
     })
     .map_err(|error| repair_error("start doctor index repair runtime", error))?
@@ -406,6 +469,136 @@ mod tests {
     }
 
     #[test]
+    fn source_advance_after_publication_reports_applied_stale_and_preserves_undo() {
+        let (_root, workspace) = fixture();
+        let database = workspace.join(".ee/ee.db");
+        let db = DbConnection::open_file_read_only(&database).expect("source snapshot");
+        let published_generation = db
+            .get_workspace_generation(WORKSPACE)
+            .expect("source generation")
+            .expect("workspace generation");
+        drop(db);
+        let index = workspace.join(".ee/index");
+        let mut ctx = start(&workspace);
+        let mut current_generation = None;
+        let receipt = rebuild_with_after_publish(&mut ctx, &index, || {
+            let db = DbConnection::open_file(&database).expect("concurrent source writer");
+            db.insert_memory_revision(
+                "mem_00000000000000000000000082",
+                "mem_00000000000000000000000082",
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "A new durable fact committed after the index replacement.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("advance source generation after real publication");
+            current_generation = db
+                .get_workspace_generation(WORKSPACE)
+                .expect("new generation");
+        })
+        .expect("source advancement cannot fail a completed replacement");
+        let current_generation = current_generation.expect("advanced source generation");
+        assert!(current_generation > published_generation);
+        assert_eq!(receipt.kind, "write_file");
+        assert_eq!(receipt.path, index.join(MANIFEST));
+        let postcondition = IndexRepairPostcondition::Stale {
+            published_generation,
+            current_generation,
+        };
+        assert_eq!(
+            ctx.index_repair_notices(),
+            &[IndexRepairPublicationNotice {
+                action_sequence: receipt.sequence,
+                postcondition,
+            }]
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(index.join(MANIFEST)).expect("published manifest"))
+                .expect("manifest JSON");
+        assert_eq!(metadata["sourceGeneration"], published_generation);
+        assert_eq!(metadata["documentCount"], 1);
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index.clone()),
+            })
+            .expect("published index status");
+        assert_eq!(status.health, crate::core::index::IndexHealth::Stale);
+        assert_eq!(status.index_generation, Some(published_generation));
+        assert_eq!(status.db_generation, Some(current_generation));
+        let ledger = fs::read_to_string(ctx.run_dir.join("actions.jsonl")).expect("action journal");
+        let actions: Vec<ActionLine> = ledger
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("journal action"))
+            .collect();
+        assert!(actions.iter().any(|action| action == &receipt));
+        assert!(actions.iter().any(|action| {
+            action.kind == "manual"
+                && action.notes.as_ref().is_some_and(|notes| {
+                    notes.contains(&postcondition.message())
+                        && notes.contains(postcondition.repair())
+                })
+        }));
+        let source_after_write = fs::read(&database).expect("advanced source bytes");
+        let summary = ctx
+            .finish(RunStatus::CompletedPartial)
+            .expect("finish stale repair");
+        let undo =
+            replay_undo_for_workspace(&workspace, &summary.run_id).expect("undo stale repair");
+        assert_eq!(undo.status, RunStatus::Undone, "{:?}", undo.first_error);
+        assert!(!index.exists(), "undo restores the original missing index");
+        assert_eq!(
+            fs::read(database).expect("source after undo"),
+            source_after_write
+        );
+    }
+
+    #[test]
+    fn freshness_inspection_failure_after_publication_keeps_the_applied_receipt() {
+        let (_root, workspace) = fixture();
+        let database = workspace.join(".ee/ee.db");
+        let preserved = workspace.join(".ee/source-preserved.db");
+        let index = workspace.join(".ee/index");
+        let mut ctx = start(&workspace);
+        let receipt = rebuild_with_after_publish(&mut ctx, &index, || {
+            fs::rename(&database, &preserved).expect("make source observation unavailable");
+        })
+        .expect("unavailable freshness does not undo a completed index replacement");
+        assert_eq!(receipt.kind, "write_file");
+        assert_eq!(receipt.path, index.join(MANIFEST));
+        assert!(index.join("vector.fast.idx").is_file());
+        assert_eq!(ctx.index_repair_notices().len(), 1);
+        assert!(matches!(
+            ctx.index_repair_notices()[0].postcondition,
+            IndexRepairPostcondition::Unverified { .. }
+        ));
+        assert_eq!(
+            ctx.index_repair_notices()[0].action_sequence,
+            receipt.sequence
+        );
+        fs::rename(&preserved, &database).expect("restore source pathname");
+        let summary = ctx
+            .finish(RunStatus::CompletedPartial)
+            .expect("finish unverified repair");
+        let undo = replay_undo_for_workspace(&workspace, &summary.run_id).expect("undo repair");
+        assert_eq!(undo.status, RunStatus::Undone, "{:?}", undo.first_error);
+        assert!(!index.exists());
+    }
+
+    #[test]
     fn stale_files_and_original_manifest_are_restored_byte_for_byte() {
         let (_root, workspace) = fixture();
         let index = workspace.join(".ee/index");
@@ -448,6 +641,7 @@ mod tests {
         std::os::unix::fs::symlink(&protected, index.join("vector.fast.idx")).expect("redirect");
         let mut ctx = start(&workspace);
         assert!(repair(&mut ctx, &index).is_err());
+        assert!(ctx.index_repair_notices().is_empty());
         assert_eq!(ctx.state.action_count, 0);
         assert_eq!(fs::read(&protected).expect("sentinel"), b"never change");
         ctx.finish(RunStatus::CompletedPartial).expect("finish");
