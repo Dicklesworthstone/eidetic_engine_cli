@@ -2509,6 +2509,45 @@ fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> Te
     Ok(())
 }
 
+/// GH #60: per-item `evidenceFreshness` and `origin` are additive, typed and
+/// closed: a valid shape validates, an unknown status/lane or stray key does
+/// not.
+#[test]
+fn pack_schema_types_item_evidence_freshness_and_origin() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    let mut response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    if response
+        .pointer("/data/pack/items/0/evidenceFreshness/status")
+        .and_then(Value::as_str)
+        != Some("missing_source")
+    {
+        return Err("context-pack golden must carry typed item evidenceFreshness".to_owned());
+    }
+    response["data"]["pack"]["items"][0]["origin"] =
+        json!({ "lane": "global", "workspaceId": "wsp_01J00000000000000000000000" });
+    validate_json_schema(&response, &schema, &schema, "$")?;
+
+    let invalid_cases = [
+        ("/evidenceFreshness/status", json!("stale")),
+        ("/evidenceFreshness/detail", json!("prose")),
+        ("/origin/lane", json!("peer")),
+        ("/origin/note", json!("prose")),
+    ];
+    for (pointer, value) in invalid_cases {
+        let mut invalid = response.clone();
+        let (parent, key) = pointer.rsplit_once('/').ok_or("pointer has a key")?;
+        invalid["data"]["pack"]["items"][0]
+            .pointer_mut(parent)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("item object {parent} missing"))?
+            .insert(key.to_owned(), value);
+        if validate_json_schema(&invalid, &schema, &schema, "$").is_ok() {
+            return Err(format!("ee.pack.v2 accepted an invalid item {pointer}"));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
     let schema = schema_doc("ee.error.v2")?;

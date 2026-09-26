@@ -50,7 +50,7 @@ Each memory's provenance can have a freshness state:
 | `missing_source` | Source file or session no longer exists | Re-import or re-remember with current evidence |
 | `changed_source` | Source exists but content changed | Inspect the change, re-import if intentional |
 | `unreachable_source` | Source path exists but cannot be read | Check permissions, re-import |
-| `unsupported_source` | Provenance scheme cannot be verified | Manual inspection or re-remember with verifiable source |
+| `unsupported_source` | Provenance scheme cannot be verified locally, or the cited file is not UTF-8 text (a PDF, DOCX, image, ...) | Manual inspection, or cite a text extract (`file://<extract>#L<n>`) |
 | `unknown` | Freshness check did not run or data unavailable | Trigger explicit freshness check |
 
 Freshness states **warn and explain**. They do not silently delete, demote, or
@@ -59,15 +59,42 @@ audit pathways.
 
 ### Interpreting freshness in packs
 
-A `context` or `pack` response may include freshness states per item:
+Every memory item in a `pack` (or `context`) response carries its freshness
+state as data in `evidenceFreshness`. Items that did not come from the pack's
+own workspace also carry `origin`:
 
 ```json
 {
   "memoryId": "mem_...",
-  "freshness": "changed_source",
-  "freshnessRepair": "ee remember --update --source <path>"
+  "evidenceFreshness": {
+    "status": "changed_source",
+    "repair": "Inspect the source, then re-remember or revise this memory if needed; rebuild the index if the remembered content changes."
+  },
+  "origin": { "lane": "global", "workspaceId": "wsp_..." }
 }
 ```
+
+- `evidenceFreshness.status` is one of the states in the table above. `repair`
+  is present only when the state is actionable (not `fresh` or `unknown`).
+- `origin` is absent for the pack workspace's own memories. `lane` is `global`
+  for the user-global store (ADR 0083) and `cross_shard` for another
+  workspace's memory; `workspaceId` is the workspace the memory belongs to.
+- These fields restate what `provenance[].note` says
+  (`evidenceFreshness=...`, `lane=global`, `origin_workspace_id=...`), so
+  consumers never need to parse the note. `data.degraded[]` still aggregates
+  freshness rows by code; use the per-item fields to find every affected item.
+
+### `quality.provenanceComplete`
+
+`data.pack.quality.provenanceComplete` is `true` when every selected item has
+at least one provenance entry. It is a structural check, not a verification
+claim: a memory remembered without `--source` cites itself
+(`ee-mem://<its own id>`), and a cited file may be missing or changed. Read
+each item's `evidenceFreshness.status` to judge whether its evidence was
+actually checked (`fresh`), is broken (`missing_source`, `changed_source`,
+`unreachable_source`), or could not be checked (`unsupported_source`,
+`unknown`). `provenanceSourceCount` counts provenance entries across the
+selected items.
 
 When freshness is not `fresh`, consider:
 1. Is the change intentional (file edited, ADR superseded)?

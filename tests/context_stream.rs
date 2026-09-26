@@ -85,6 +85,8 @@ fn fixture_item(
         lifecycle: candidate.lifecycle,
         freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::StrictMmr,
+        evidence_freshness: None,
+        origin: None,
     }
 }
 

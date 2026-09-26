@@ -67,6 +67,8 @@ fn item(
         lifecycle: valid_from.map(lifecycle),
         freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::StrictMmr,
+        evidence_freshness: None,
+        origin: None,
     }
 }
 
