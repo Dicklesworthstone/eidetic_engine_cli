@@ -7,6 +7,7 @@ on:
       - src/cass/**
       - src/core/backup*.rs
       - src/core/ask*.rs
+      - src/core/resume*.rs
       - src/core/jsonl*.rs
       - src/core/context*.rs
       - src/core/curate*.rs
@@ -103,6 +104,7 @@ jobs:
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
           ask-long-evidence core::ask::corpus::admission::long_evidence_tests::
+          resume-transcript-privacy core::resume::transcripts::privacy_tests::
           search-producer-integrity core::search::runtime_fallback::tests::
           ask-semantic-runtime core::ask::semantic::
           global-promotion core::global_promotion::
