@@ -1,0 +1,41 @@
+name: Structured pack provenance
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/pack-provenance-20260925.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pack-provenance-source-inspection
+  cancel-in-progress: true
+jobs:
+  source:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Export tracked implementation inputs without credentials or runtime data
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source-sha.txt"
+          git archive --format=tar HEAD src tests docs/schemas docs/pack-replay.md COMPREHENSIVE_PLAN.md CLOSE_THE_GAP_PLAN.md AGENTS.md .beads/issues.jsonl Cargo.toml Cargo.lock rust-toolchain.toml | gzip > "$RUNNER_TEMP/pack-source.tar.gz"
+          python3 - <<'PY'
+          import pathlib
+          for path in pathlib.Path('src').rglob('*.rs'):
+              for number, line in enumerate(path.read_text().splitlines(), 1):
+                  if any(term in line for term in ['PackProvenance {', 'pack_item_provenance_json', 'fn provenance_for_memory_cached', 'struct EvidenceFreshness', 'enum EvidenceFreshnessStatus']):
+                      print(f'{path}:{number}: {line}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-provenance-source
+          path: |
+            ${{ runner.temp }}/pack-source.tar.gz
+            ${{ runner.temp }}/source-sha.txt
+          retention-days: 3

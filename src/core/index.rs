@@ -22365,12 +22365,13 @@ mod tests {
         let workspace_id = "wsp_00000000000000000000000082";
         let source_path = root.join("original").to_string_lossy().into_owned();
         connection
-            .upsert_workspace(
+            .upsert_workspace_with_scope(
                 workspace_id,
-                &CreateWorkspaceInput {
+                &crate::db::CreateWorkspaceInput {
                     path: source_path.clone(),
                     name: None,
                 },
+                &crate::db::WorkspaceScopeFields::standalone(),
             )
             .map_err(|error| error.to_string())?;
         connection

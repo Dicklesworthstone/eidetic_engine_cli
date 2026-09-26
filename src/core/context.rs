@@ -1662,7 +1662,7 @@ pub(crate) fn admit_recent_context_memories(
             .get(&memory.id)
             .cloned()
             .unwrap_or_else(Vec::new);
-        let Some(provenance) = provenance_for_memory(
+        let Some(memory_provenance) = provenance_for_memory(
             &memory,
             memory_id,
             &options.workspace_path,
@@ -1671,6 +1671,8 @@ pub(crate) fn admit_recent_context_memories(
         ) else {
             continue;
         };
+        let mut provenance = Vec::with_capacity(1);
+        let source_signals = memory_provenance.attach_to(&mut provenance);
         let relevance = unit_score(1.0 - (recency_rank.min(500) as f32 * 0.001))
             .ok_or_else(|| ContextPackError::Pack("invalid recent relevance score".to_owned()))?;
         let utility = unit_score(memory.utility)
@@ -1683,14 +1685,16 @@ pub(crate) fn admit_recent_context_memories(
             content,
             relevance,
             utility,
-            provenance: vec![provenance],
+            provenance,
             why: "Selected by the bounded orient-fast recency strategy after context admission."
                 .to_owned(),
         })
-        .map_err(|error| ContextPackError::Pack(error.to_string()))?
-        .with_diversity_key(diversity_key_for_memory(&memory, &tags))
-        .with_trust_signal(trust_signal_for_memory(&memory, memory_id, &mut degraded))
-        .with_lifecycle(pack_lifecycle_for_memory(&memory, Some(reference_time)));
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+        let candidate = source_signals
+            .apply(candidate)
+            .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+            .with_trust_signal(trust_signal_for_memory(&memory, memory_id, &mut degraded))
+            .with_lifecycle(pack_lifecycle_for_memory(&memory, Some(reference_time)));
         metadata.insert(memory.id, (memory.created_at, tags));
         candidates.push(candidate);
     }
@@ -2309,6 +2313,16 @@ pub fn context_request_from_options(
     Ok(context_request_from_options_with_runtime_profile(options, &runtime_profile)?.request)
 }
 
+/// An omitted candidate pool follows `pack.candidate_pool` (GH #49). The
+/// profile caps apply afterwards, to the resolved value.
+fn resolved_candidate_pool(options: &ContextPackOptions) -> Result<Option<u32>, ContextPackError> {
+    crate::core::config_surface::resolve_pack_candidate_pool(
+        &options.workspace_path,
+        options.candidate_pool,
+    )
+    .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
+}
+
 struct RuntimeProfileCappedRequest {
     request: ContextRequest,
     effective_max_tokens: u32,
@@ -2325,7 +2339,7 @@ fn context_request_from_options_with_runtime_profile(
         query: options.query.clone(),
         profile: options.profile,
         max_tokens: options.max_tokens,
-        candidate_pool: options.candidate_pool,
+        candidate_pool: resolved_candidate_pool(options)?,
         max_results: options.max_results,
         sections: Vec::new(),
     })
@@ -2537,7 +2551,7 @@ pub fn explain_why_not(
         query: options.query.clone(),
         profile: options.profile,
         max_tokens: options.max_tokens,
-        candidate_pool: options.candidate_pool,
+        candidate_pool: resolved_candidate_pool(options)?,
         max_results: options.max_results,
         sections: Vec::new(),
     })
@@ -2552,27 +2566,28 @@ pub fn explain_why_not(
 
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
+    let search_options = SearchOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        index_dir: options.index_dir.clone(),
+        query: request.query.clone(),
+        limit: request.candidate_pool,
+        speed: options.speed,
+        explain: false,
+        as_of: context_validity_reference_time(options, &effective_filters),
+        include_tombstoned: options.include_tombstoned,
+        include_expired: context_include_expired(options, &effective_filters),
+        include_future: context_include_future(options, &effective_filters),
+        include_stale: context_include_stale(options, &effective_filters),
+        relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+        dedup_mode: crate::core::search::SearchDedupMode::DocId,
+        source_mode: options.source_mode,
+        strict_source_mode: options.strict_source_mode,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+    };
     let mut search_report = match run_context_search_with_preloaded_memories(
-        &SearchOptions {
-            workspace_path: options.workspace_path.clone(),
-            database_path: Some(database_path.clone()),
-            index_dir: options.index_dir.clone(),
-            query: request.query.clone(),
-            limit: request.candidate_pool,
-            speed: options.speed,
-            explain: false,
-            as_of: context_validity_reference_time(options, &effective_filters),
-            include_tombstoned: options.include_tombstoned,
-            include_expired: context_include_expired(options, &effective_filters),
-            include_future: context_include_future(options, &effective_filters),
-            include_stale: context_include_stale(options, &effective_filters),
-            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-            dedup_mode: crate::core::search::SearchDedupMode::DocId,
-            source_mode: options.source_mode,
-            strict_source_mode: options.strict_source_mode,
-            memory_scope: options.memory_scope,
-            strict_scope: options.strict_scope,
-        },
+        &search_options,
         read_connection,
         None,
         determinism,
@@ -2600,6 +2615,11 @@ pub fn explain_why_not(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
     ) {
+        let global_memories = global_store_fallback_memories(
+            &search_options,
+            &mut degraded,
+            &mut search_preloaded_memories,
+        )?;
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         let fallback_hits = lexical_memory_fallback_hits(
             read_connection,
@@ -2611,6 +2631,7 @@ pub fn explain_why_not(
             context_include_expired(options, &effective_filters),
             context_include_future(options, &effective_filters),
             context_include_stale(options, &effective_filters),
+            global_memories,
             &mut degraded,
         );
         search_report.results = fallback_hits;
@@ -2784,6 +2805,7 @@ fn reconstruct_not_retrieved_candidate(
         })?;
     let tags = connection.get_memory_tags(&memory.id).unwrap_or_default();
     let mut provenance = Vec::new();
+    let mut source_signals = None;
     let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
         connection,
         &crate::core::workspace::stable_workspace_id(workspace_path),
@@ -2797,7 +2819,7 @@ fn reconstruct_not_retrieved_candidate(
         bound_workspace_id.as_deref(),
         degraded,
     ) {
-        provenance.push(memory_provenance);
+        source_signals = Some(memory_provenance.attach_to(&mut provenance));
     }
     let relevance = unit_score(0.0)
         .ok_or_else(|| ContextPackError::Pack("invalid relevance score".to_string()))?;
@@ -2816,7 +2838,7 @@ fn reconstruct_not_retrieved_candidate(
         ),
     })
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-    let candidate = candidate
+    let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(&memory, &tags))
         .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded))
         .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
@@ -3151,6 +3173,13 @@ async fn run_context_pack_with_performance_inner(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
     ) {
+        // The user-global lane is a separate store with its own index; a
+        // workspace index that cannot serve this request must not hide it.
+        let global_memories = global_store_fallback_memories(
+            &search_options,
+            &mut degraded,
+            &mut search_preloaded_memories,
+        )?;
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         let fallback_hits = lexical_memory_fallback_hits(
             read_connection,
@@ -3162,6 +3191,7 @@ async fn run_context_pack_with_performance_inner(
             context_include_expired(options, &effective_filters),
             context_include_future(options, &effective_filters),
             context_include_stale(options, &effective_filters),
+            global_memories,
             &mut degraded,
         );
         // bd-auto-index-rebuild-on-fallback-x35vi: record a durable rebuild
@@ -4024,6 +4054,10 @@ async fn run_context_pack_with_performance_inner(
     let persist_succeeded = options.persist_pack && persist_result.is_ok();
     pack_persistence.succeeded = persist_succeeded;
     if let Err(persist_error) = persist_result {
+        // The "persisted without its global items" notice was added before
+        // the write so the persisted record and hash include it. No pack was
+        // persisted, so it would now contradict `context_pack_persist_failed`.
+        response_degraded.retain(|entry| entry.code != GLOBAL_ITEMS_NOT_PERSISTED_CODE);
         let (message, repair) = context_pack_persist_failed_message_and_repair(&persist_error);
         push_degradation(
             &mut response_degraded,
@@ -4884,6 +4918,7 @@ fn lexical_memory_fallback_hits(
     include_expired: bool,
     include_future: bool,
     include_stale: bool,
+    global_memories: Vec<StoredMemory>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<SearchHit> {
     let query_terms = lexical_terms(query);
@@ -4892,7 +4927,7 @@ fn lexical_memory_fallback_hits(
     }
     let reference_time = as_of.unwrap_or_else(Utc::now);
 
-    let memories = fallback_memories_for_workspace(
+    let (memories, global_ids) = fallback_memories_for_workspace(
         connection,
         workspace_path,
         include_tombstoned,
@@ -4900,6 +4935,7 @@ fn lexical_memory_fallback_hits(
         include_expired,
         include_future,
         include_stale,
+        global_memories,
         degraded,
     );
     let mut scored: Vec<(StoredMemory, f32)> = memories
@@ -4932,10 +4968,37 @@ fn lexical_memory_fallback_hits(
             // Reporting no raw score is the truthful answer.
             lexical_score: None,
             rerank_score: None,
-            metadata: Some(public_memory_fallback_metadata(&memory, reference_time)),
+            // Global rows carry the same `storeLane=global` metadata the
+            // indexed global lane emits, so persistence and provenance treat
+            // them as global items (GH #57).
+            metadata: Some(if global_ids.contains(&memory.id) {
+                crate::core::search::global_store_search_metadata(&memory, reference_time)
+            } else {
+                public_memory_fallback_metadata(&memory, reference_time)
+            }),
             explanation: None,
         })
         .collect()
+}
+
+/// User-global rows for the lexical fallback, preloaded so candidate
+/// hydration never looks for them in the workspace database.
+fn global_store_fallback_memories(
+    search_options: &SearchOptions,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    preloaded: &mut BTreeMap<String, StoredMemory>,
+) -> Result<Vec<StoredMemory>, ContextPackError> {
+    let mut search_degraded = Vec::new();
+    let memories =
+        crate::core::search::global_store_fallback_memories(search_options, &mut search_degraded)
+            .map_err(ContextPackError::Search)?;
+    push_search_degradations(degraded, &search_degraded);
+    for memory in &memories {
+        preloaded
+            .entry(memory.id.clone())
+            .or_insert_with(|| memory.clone());
+    }
+    Ok(memories)
 }
 
 fn sort_scored_memories_by_score_then_memory_id(scored: &mut Vec<(StoredMemory, f32)>) {
@@ -4986,47 +5049,24 @@ fn fallback_memories_for_workspace(
     include_expired: bool,
     include_future: bool,
     include_stale: bool,
+    global_memories: Vec<StoredMemory>,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> BTreeMap<String, StoredMemory> {
+) -> (BTreeMap<String, StoredMemory>, BTreeSet<String>) {
     let mut memories = BTreeMap::new();
+    let mut global_ids = BTreeSet::new();
     let reference_time = as_of.unwrap_or_else(Utc::now);
     let mut expired_filtered = 0usize;
     let mut future_filtered = 0usize;
     let mut malformed_filtered = 0usize;
     let mut total_seen = 0usize;
+    let mut rows_by_lane = Vec::new();
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
         match connection.list_memories_for_retrieval_with_global(
             &workspace_id,
             None,
             include_tombstoned,
         ) {
-            Ok(rows) => {
-                for memory in rows {
-                    total_seen = total_seen.saturating_add(1);
-                    match fallback_memory_validity_visibility(
-                        &memory,
-                        reference_time,
-                        include_expired,
-                        include_future,
-                        include_stale,
-                    ) {
-                        FallbackMemoryVisibility::Visible => {}
-                        FallbackMemoryVisibility::Expired => {
-                            expired_filtered = expired_filtered.saturating_add(1);
-                            continue;
-                        }
-                        FallbackMemoryVisibility::Future => {
-                            future_filtered = future_filtered.saturating_add(1);
-                            continue;
-                        }
-                        FallbackMemoryVisibility::Malformed => {
-                            malformed_filtered = malformed_filtered.saturating_add(1);
-                            continue;
-                        }
-                    }
-                    memories.insert(memory.id.clone(), memory);
-                }
-            }
+            Ok(rows) => rows_by_lane.push((false, rows)),
             Err(error) => push_degradation(
                 degraded,
                 "context_lexical_fallback_workspace_read_failed",
@@ -5034,6 +5074,42 @@ fn fallback_memories_for_workspace(
                 format!("Stored memories for workspace {workspace_id} could not be read: {error}"),
                 Some("ee doctor --json".to_owned()),
             ),
+        }
+    }
+    // Workspace rows first: a workspace row keeps its id if the global store
+    // ever holds the same one.
+    rows_by_lane.push((true, global_memories));
+    for (global_lane, rows) in rows_by_lane {
+        for memory in rows {
+            if global_lane && memories.contains_key(&memory.id) {
+                continue;
+            }
+            total_seen = total_seen.saturating_add(1);
+            match fallback_memory_validity_visibility(
+                &memory,
+                reference_time,
+                include_expired,
+                include_future,
+                include_stale,
+            ) {
+                FallbackMemoryVisibility::Visible => {}
+                FallbackMemoryVisibility::Expired => {
+                    expired_filtered = expired_filtered.saturating_add(1);
+                    continue;
+                }
+                FallbackMemoryVisibility::Future => {
+                    future_filtered = future_filtered.saturating_add(1);
+                    continue;
+                }
+                FallbackMemoryVisibility::Malformed => {
+                    malformed_filtered = malformed_filtered.saturating_add(1);
+                    continue;
+                }
+            }
+            if global_lane {
+                global_ids.insert(memory.id.clone());
+            }
+            memories.insert(memory.id.clone(), memory);
         }
     }
     let total_filtered = expired_filtered
@@ -5053,7 +5129,7 @@ fn fallback_memories_for_workspace(
             Some("Consider --as-of, --include-expired, --include-future, or --include-stale when historic or inactive memories are expected.".to_owned()),
         );
     }
-    memories
+    (memories, global_ids)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6584,6 +6660,8 @@ fn persist_pack_record_seeded_measured(
     )
 }
 
+const GLOBAL_ITEMS_NOT_PERSISTED_CODE: &str = "context_pack_global_items_not_persisted";
+
 /// GH #57: user-global memories (ADR 0083) live in a separate database, so a
 /// persisted pack's workspace ledger cannot reference them. Say so instead of
 /// letting `ee outcome --pack <hash> --item <n>` fail later for those ranks
@@ -6621,7 +6699,7 @@ fn push_global_items_not_persisted_degradation(
     };
     push_degradation(
         degraded,
-        "context_pack_global_items_not_persisted",
+        GLOBAL_ITEMS_NOT_PERSISTED_CODE,
         ContextResponseSeverity::Low,
         format!(
             "Pack persisted without its user-global memories ({selected}; {global_omissions} omission{}): they live in the user-global store, not this workspace's database, so this workspace's pack ledger does not record them.",
@@ -12189,6 +12267,7 @@ fn graph_candidate_from_memory(
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
     let mut provenance = Vec::new();
+    let mut source_signals = None;
     if let Some(memory_provenance) = provenance_for_memory(
         memory,
         memory_id,
@@ -12196,7 +12275,7 @@ fn graph_candidate_from_memory(
         bound_workspace_id,
         degraded,
     ) {
-        provenance.push(memory_provenance);
+        source_signals = Some(memory_provenance.attach_to(&mut provenance));
     }
     if let Ok(seed_id) = MemoryId::from_str(&evidence.seed_memory_id)
         && let Ok(graph_provenance) = PackProvenance::new(
@@ -12231,7 +12310,7 @@ fn graph_candidate_from_memory(
         ),
     })
     .ok()?;
-    let candidate = candidate
+    let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(memory, tags))
         .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded))
         .with_lifecycle(pack_lifecycle_for_memory(memory, None));
@@ -12642,7 +12721,11 @@ fn candidate_from_hit_preloaded(
         source.freshness_file_cache,
     );
     subspans.freshness_provenance += provenance_start.elapsed();
-    let provenance = provenance?;
+    let MemoryProvenance {
+        entry: provenance,
+        evidence_freshness,
+        origin,
+    } = provenance?;
     let construction_start = Instant::now();
     let Some(relevance) = pack_candidate_relevance_from_search_hit(hit) else {
         subspans.candidate_construction += construction_start.elapsed();
@@ -12732,6 +12815,7 @@ fn candidate_from_hit_preloaded(
         |class| PackTrustSignal::new(class, Some("procedural_rule".to_owned())),
     );
     let candidate = candidate
+        .with_source_signals(evidence_freshness, origin)
         .with_diversity_key(diversity_key_for_memory(memory, &tags))
         .with_trust_signal(trust)
         .with_lifecycle(pack_lifecycle_for_memory(
@@ -12921,6 +13005,7 @@ fn focus_candidate_from_item(
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
     let mut provenance = Vec::new();
+    let mut source_signals = None;
     if let Some(memory_provenance) = provenance_for_memory(
         &memory,
         item.memory_id,
@@ -12931,7 +13016,7 @@ fn focus_candidate_from_item(
             .then_some(memory.workspace_id.as_str()),
         degraded,
     ) {
-        provenance.push(memory_provenance);
+        source_signals = Some(memory_provenance.attach_to(&mut provenance));
     }
     if let Ok(focus_provenance) = PackProvenance::new(
         ProvenanceUri::File {
@@ -12963,7 +13048,7 @@ fn focus_candidate_from_item(
     })
     .ok()?;
 
-    let candidate = candidate
+    let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(&memory, &tags))
         .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded))
         .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
@@ -13838,13 +13923,54 @@ fn trust_signal_for_memory(
     PackTrustSignal::new(trust_class, memory.trust_subclass.clone())
 }
 
+/// A memory's pack provenance entry plus the typed per-item signals the note
+/// summarizes (GH #60).
+struct MemoryProvenance {
+    entry: PackProvenance,
+    evidence_freshness: crate::pack::PackItemEvidenceFreshness,
+    origin: Option<crate::pack::PackItemOrigin>,
+}
+
+impl MemoryProvenance {
+    fn attach_to(self, candidates: &mut Vec<PackProvenance>) -> PackSourceSignals {
+        candidates.push(self.entry);
+        PackSourceSignals {
+            evidence_freshness: self.evidence_freshness,
+            origin: self.origin,
+        }
+    }
+}
+
+/// The typed signals of a candidate's source memory, applied after the
+/// candidate is constructed.
+struct PackSourceSignals {
+    evidence_freshness: crate::pack::PackItemEvidenceFreshness,
+    origin: Option<crate::pack::PackItemOrigin>,
+}
+
+impl PackSourceSignals {
+    fn apply(self, candidate: PackCandidate) -> PackCandidate {
+        candidate.with_source_signals(self.evidence_freshness, self.origin)
+    }
+}
+
+fn apply_source_signals(
+    candidate: PackCandidate,
+    signals: Option<PackSourceSignals>,
+) -> PackCandidate {
+    match signals {
+        Some(signals) => signals.apply(candidate),
+        None => candidate,
+    }
+}
+
 fn provenance_for_memory(
     memory: &StoredMemory,
     memory_id: MemoryId,
     workspace_path: &Path,
     bound_workspace_id: Option<&str>,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Option<PackProvenance> {
+) -> Option<MemoryProvenance> {
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
     provenance_for_memory_cached(
         memory,
@@ -13869,7 +13995,7 @@ fn provenance_for_memory_cached(
     global_store_lane: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
     freshness_file_cache: &mut crate::core::memory::EvidenceFreshnessFileCache,
-) -> Option<PackProvenance> {
+) -> Option<MemoryProvenance> {
     let uri = match memory.provenance_uri.as_deref() {
         Some(raw) => match ProvenanceUri::from_str(raw) {
             Ok(uri) => uri,
@@ -13927,8 +14053,32 @@ fn provenance_for_memory_cached(
             freshness.status.as_str()
         )
     };
+    let origin = if global_store_lane {
+        Some(crate::pack::PackItemOrigin::GLOBAL_LANE)
+    } else if local_workspace {
+        None
+    } else {
+        Some(crate::pack::PackItemOrigin::CROSS_SHARD_LANE)
+    }
+    .map(|lane| crate::pack::PackItemOrigin {
+        lane: lane.to_owned(),
+        workspace_id: memory.workspace_id.clone(),
+    });
+    let evidence_freshness = crate::pack::PackItemEvidenceFreshness {
+        status: freshness.status.as_str().to_owned(),
+        // Same redaction as the freshness degradation's repair text.
+        repair: freshness
+            .repair
+            .as_deref()
+            .filter(|_| freshness.status.should_report())
+            .map(redact_pack_provenance_text),
+    };
 
-    PackProvenance::new(uri, note).ok()
+    Some(MemoryProvenance {
+        entry: PackProvenance::new(uri, note).ok()?,
+        evidence_freshness,
+        origin,
+    })
 }
 
 fn push_evidence_freshness_degradation(
@@ -14129,5 +14279,9 @@ fn push_consensus_conflict_degradations(
 #[cfg(test)]
 #[path = "context_rule_admission_tests.rs"]
 mod rule_admission_tests;
+
+#[cfg(test)]
+#[path = "context_candidate_pool_tests.rs"]
+mod candidate_pool_tests;
 
 include!("context_test_module.rs");

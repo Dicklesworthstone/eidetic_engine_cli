@@ -5158,8 +5158,9 @@ fn load_workspace_policy_modes(workspace_path: &Path) -> Result<WorkspacePolicyM
         .parse::<DocumentMut>()
         .map_err(|error| DomainError::Configuration {
             message: format!(
-                "Failed to parse mesh discovery policy config {}: {error}",
-                path.display()
+                "Failed to parse mesh discovery policy config {}: {}",
+                path.display(),
+                crate::config::file::toml_syntax_error_summary(&body, &error)
             ),
             repair: Some("Re-run `ee mesh discovery-policy set` to rewrite the config.".to_owned()),
         })?;
@@ -5209,19 +5210,20 @@ fn write_workspace_policy_modes(
         })?;
     }
     let mut document = if path.is_file() {
-        read_mesh_text_bounded(path, MESH_CONFIG_MAX_BYTES, "discovery policy config")
+        let body = read_mesh_text_bounded(path, MESH_CONFIG_MAX_BYTES, "discovery policy config")
             .map_err(|error| DomainError::Storage {
-                message: format!(
-                    "Failed to read mesh discovery policy config {}: {error}",
-                    path.display()
-                ),
-                repair: Some("Check workspace .ee directory permissions.".to_owned()),
-            })?
-            .parse::<DocumentMut>()
+            message: format!(
+                "Failed to read mesh discovery policy config {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+        body.parse::<DocumentMut>()
             .map_err(|error| DomainError::Configuration {
                 message: format!(
-                    "Failed to parse mesh discovery policy config {}: {error}",
-                    path.display()
+                    "Failed to parse mesh discovery policy config {}: {}",
+                    path.display(),
+                    crate::config::file::toml_syntax_error_summary(&body, &error)
                 ),
                 repair: Some(
                     "Fix or remove the invalid discovery policy config before retrying.".to_owned(),
@@ -5666,14 +5668,19 @@ fn write_auto_enroll_overrides_file(
         })?;
     }
     let mut document = if path.is_file() {
-        read_mesh_text_bounded(&path, MESH_CONFIG_MAX_BYTES, "auto-enroll override config")
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to read {}: {error}", path.display()),
-                repair: Some("Check workspace .ee directory permissions.".to_owned()),
-            })?
-            .parse::<DocumentMut>()
+        let body =
+            read_mesh_text_bounded(&path, MESH_CONFIG_MAX_BYTES, "auto-enroll override config")
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to read {}: {error}", path.display()),
+                    repair: Some("Check workspace .ee directory permissions.".to_owned()),
+                })?;
+        body.parse::<DocumentMut>()
             .map_err(|error| DomainError::Configuration {
-                message: format!("Failed to parse {}: {error}", path.display()),
+                message: format!(
+                    "Failed to parse {}: {}",
+                    path.display(),
+                    crate::config::file::toml_syntax_error_summary(&body, &error)
+                ),
                 repair: Some("Fix the invalid auto-enroll override TOML and retry.".to_owned()),
             })?
     } else {

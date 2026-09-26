@@ -53,6 +53,8 @@ fn response() -> ContextResponse {
         lifecycle: None,
         freshness_facets: Vec::new(),
         selected_in: PackSelectionPhase::StrictMmr,
+        evidence_freshness: None,
+        origin: None,
     };
     let selected_items = vec![PackSelectedItem {
         rank: 1,

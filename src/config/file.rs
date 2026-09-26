@@ -108,7 +108,7 @@ impl ConfigFile {
         let document = input
             .parse::<DocumentMut>()
             .map_err(|source| ConfigParseError::Toml {
-                message: source.to_string(),
+                message: toml_syntax_error_summary(input, &source),
             })?;
 
         let parsed = Self {
@@ -398,7 +398,7 @@ impl PackConfig {
             default_max_tokens: optional_u64(document, "pack", "default_max_tokens")?,
             adaptive_budget: optional_bool(document, "pack", "adaptive_budget")?,
             mmr_lambda: optional_unit_float(document, "pack", "mmr_lambda")?,
-            candidate_pool: optional_u64(document, "pack", "candidate_pool")?,
+            candidate_pool: optional_positive_u32_as_u64(document, "pack", "candidate_pool")?,
             memory_tier_admission: optional_bool(document, "pack", "memory_tier_admission")?,
             lod_full_basis_points: optional_u64(document, "pack", "lod_full_basis_points")?,
             lod_truncated_preview_basis_points: optional_u64(
@@ -1424,6 +1424,44 @@ impl TrustConfig {
     }
 }
 
+/// Describe a TOML syntax error by position and grammar only.
+///
+/// `toml_edit`'s `Display` quotes the offending source line, and a config
+/// file can hold private policy values or secrets. Every config parse error
+/// that reaches a user, an agent, or a log goes through this instead, so it
+/// names the line, column, and what the parser expected, never file content.
+#[must_use]
+pub fn toml_syntax_error_summary(input: &str, error: &toml_edit::TomlError) -> String {
+    // `TomlError::message` is the parser's description plus the expected
+    // tokens; it never contains document text. Keep only its first line.
+    let description = error
+        .message()
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("invalid TOML syntax");
+    match error.span() {
+        Some(span) => {
+            let (line, column) = toml_line_column(input, span.start);
+            format!("line {line}, column {column}: {description}")
+        }
+        None => description.to_owned(),
+    }
+}
+
+/// One-based line and column (in characters) of a byte offset.
+fn toml_line_column(input: &str, offset: usize) -> (usize, usize) {
+    let mut end = offset.min(input.len());
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let before = &input[..end];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let column = before[line_start..].chars().count() + 1;
+    (line, column)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigParseError {
     Toml {
@@ -1455,14 +1493,14 @@ impl fmt::Display for ConfigParseError {
             Self::InvalidType { key, expected } => {
                 write!(formatter, "config key `{key}` must be {expected}")
             }
-            Self::InvalidValue {
-                key,
-                value,
-                message,
-            } => write!(
-                formatter,
-                "config key `{key}` has invalid value `{value}`: {message}"
-            ),
+            // The rejected value stays in the struct for callers, but is
+            // never rendered: a config value can be private.
+            Self::InvalidValue { key, message, .. } => {
+                write!(
+                    formatter,
+                    "config key `{key}` has an invalid value: {message}"
+                )
+            }
             Self::PathExpansion { key, source } => {
                 write!(formatter, "failed to expand config path `{key}`: {source}")
             }
@@ -2001,6 +2039,27 @@ fn optional_u64(
             }),
         },
         None => Ok(None),
+    }
+}
+
+/// A non-negative integer key whose value must also be a usable `u32` count
+/// (`1..=u32::MAX`). Kept as `u64` so merged-config consumers are unchanged;
+/// the range is enforced here so a config file and `ee config set` accept the
+/// same values (GH #49).
+fn optional_positive_u32_as_u64(
+    document: &DocumentMut,
+    section: &str,
+    key: &str,
+) -> Result<Option<u64>, ConfigParseError> {
+    match optional_u64(document, section, key)? {
+        Some(value) if value == 0 || value > u64::from(u32::MAX) => {
+            Err(ConfigParseError::InvalidValue {
+                key: key_name(section, key),
+                value: value.to_string(),
+                message: format!("expected an integer in the range 1..={}", u32::MAX),
+            })
+        }
+        value => Ok(value),
     }
 }
 
@@ -2947,6 +3006,48 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn toml_syntax_errors_report_position_never_file_content() -> TestResult {
+        let input =
+            "[memory]\ninclude_global = false\n# ünïcode\ninvalid = [\"private-policy-value\"\n";
+        let error = expect_config_error(input)?;
+        let rendered = error.to_string();
+        ensure(
+            !rendered.contains("private-policy-value") && !rendered.contains("invalid = ["),
+            format!("syntax error echoed file content: {rendered}"),
+        )?;
+        ensure(
+            rendered.starts_with("invalid TOML config: line 4, column ")
+                && rendered.contains("expected `]`")
+                && !rendered.contains('\n'),
+            format!("syntax error lost its position or grammar hint: {rendered}"),
+        )?;
+
+        // A rejected value of a known key is never rendered either.
+        let error = expect_config_error("[search]\nrerank = \"private-rerank-value\"\n")?;
+        let rendered = error.to_string();
+        ensure(
+            !rendered.contains("private-rerank-value") && rendered.contains("search.rerank"),
+            format!("invalid value error must name the key only: {rendered}"),
+        )
+    }
+
+    #[test]
+    fn toml_line_column_counts_characters_and_clamps() -> TestResult {
+        ensure_equal(
+            &super::toml_line_column("ab\ncd", 4),
+            &(2, 2),
+            "second line",
+        )?;
+        ensure_equal(
+            &super::toml_line_column("é\nx", 1),
+            &(1, 1),
+            "mid-char offset",
+        )?;
+        ensure_equal(&super::toml_line_column("é\nx", 99), &(2, 2), "past end")?;
+        ensure_equal(&super::toml_line_column("", 0), &(1, 1), "empty input")
     }
 
     #[test]

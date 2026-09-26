@@ -212,6 +212,10 @@
               "note": "Memory mem_00000000000000000000000001 selected for context pack; evidenceFreshness=missing_source"
             }
           ],
+          "evidenceFreshness": {
+            "status": "missing_source",
+            "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes."
+          },
           "why": "matched 'format before release' via lexical (relevance 1.0000, utility 0.8000)",
           "selectedIn": "strict_mmr",
           "lifecycle": {

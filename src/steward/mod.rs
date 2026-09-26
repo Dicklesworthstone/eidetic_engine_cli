@@ -8356,6 +8356,8 @@ mod tests {
             })
         }
 
+        /// `job_id` must satisfy the schema's CHECK: `sidx_` plus exactly 26
+        /// characters (31 in all), as product code mints them.
         fn queue(&self, job_id: &str, workspace_id: &str) -> TestResult {
             let connection = DbConnection::open_file(&self.database).map_err(|e| e.to_string())?;
             connection
@@ -8435,9 +8437,9 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
         connection.close().map_err(|e| e.to_string())?;
-        fixture.queue("sidx_background_foreign", &foreign_id)?;
+        fixture.queue("sidx_background_foreign00000000", &foreign_id)?;
         assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
-        fixture.queue("sidx_background_owned", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_owned0000000000", &fixture.workspace_id)?;
         let scheduled = fixture.scheduled();
         assert!(scheduled.contains(&JobType::IndexCoalesce));
         assert!(!scheduled.contains(&JobType::IndexRebuild));
@@ -8461,8 +8463,8 @@ mod tests {
         let connection =
             DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
         for (id, workspace_id) in [
-            ("sidx_background_owned", &fixture.workspace_id),
-            ("sidx_background_foreign", &foreign_id),
+            ("sidx_background_owned0000000000", &fixture.workspace_id),
+            ("sidx_background_foreign00000000", &foreign_id),
         ] {
             let job = connection
                 .get_search_index_job(id)
@@ -8478,16 +8480,16 @@ mod tests {
     #[test]
     fn background_index_queue_does_not_reschedule_completed_history() -> TestResult {
         let fixture = BackgroundIndexFixture::new()?;
-        fixture.queue("sidx_background_done", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_done00000000000", &fixture.workspace_id)?;
         let connection = DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
         assert!(
             connection
-                .start_search_index_job("sidx_background_done")
+                .start_search_index_job("sidx_background_done00000000000")
                 .map_err(|e| e.to_string())?
         );
         assert!(
             connection
-                .complete_search_index_job("sidx_background_done", 0)
+                .complete_search_index_job("sidx_background_done00000000000", 0)
                 .map_err(|e| e.to_string())?
         );
         let before = connection
@@ -8509,8 +8511,8 @@ mod tests {
     #[test]
     fn background_index_coalesce_preflight_obeys_remaining_item_budget() -> TestResult {
         let fixture = BackgroundIndexFixture::new()?;
-        fixture.queue("sidx_background_budget_one", &fixture.workspace_id)?;
-        fixture.queue("sidx_background_budget_two", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_budget_one00000", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_budget_two00000", &fixture.workspace_id)?;
         let runner = ManualRunner::new(
             RunnerOptions::new()
                 .with_workspace_path(&fixture.workspace)
@@ -8542,7 +8544,7 @@ mod tests {
     #[test]
     fn background_index_coalesce_checks_shutdown_after_preflight_before_claiming() -> TestResult {
         let fixture = BackgroundIndexFixture::new()?;
-        fixture.queue("sidx_background_shutdown", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_shutdown0000000", &fixture.workspace_id)?;
         let shutdown = Arc::new(AtomicBool::new(true));
         let runner = ManualRunner::new(
             RunnerOptions::new()
@@ -8610,7 +8612,7 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
         connection.close().map_err(|e| e.to_string())?;
-        fixture.queue("sidx_background_publish", &fixture.workspace_id)?;
+        fixture.queue("sidx_background_publish00000000", &fixture.workspace_id)?;
         let mut options = background_scheduler_tick_options(
             &fixture.workspace.to_string_lossy(),
             Arc::new(AtomicBool::new(false)),
@@ -8651,7 +8653,7 @@ mod tests {
         let connection =
             DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
         let stored = connection
-            .get_search_index_job("sidx_background_publish")
+            .get_search_index_job("sidx_background_publish00000000")
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "completed durable job disappeared".to_owned())?;
         assert_eq!(stored.status, "completed");
@@ -8684,7 +8686,7 @@ mod tests {
             let fixture = BackgroundIndexFixture::new()?;
             let _embedder =
                 crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
-            let job_id = "sidx_background_retry";
+            let job_id = "sidx_background_retry0000000000";
             fixture.queue(job_id, &fixture.workspace_id)?;
             let connection =
                 DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;

@@ -1858,6 +1858,8 @@ pub struct PackCandidate {
     pub trust: PackTrustSignal,
     pub tombstoned_at: Option<String>,
     pub lifecycle: Option<PackItemLifecycle>,
+    pub evidence_freshness: Option<PackItemEvidenceFreshness>,
+    pub origin: Option<PackItemOrigin>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1936,6 +1938,31 @@ fn finite_unit_float(value: f32) -> f32 {
 pub struct PackTrustSignal {
     pub class: TrustClass,
     pub subclass: Option<String>,
+}
+
+/// Per-item evidence freshness (GH #60): the typed form of the
+/// `evidenceFreshness=<status>` part of the item's provenance note, so
+/// consumers never parse prose. `status` uses the `docs/pack-replay.md`
+/// vocabulary; `repair` is present only when the state is actionable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackItemEvidenceFreshness {
+    pub status: String,
+    pub repair: Option<String>,
+}
+
+/// Where a non-local item came from (GH #60). Absent for memories of the
+/// pack's own workspace. `lane` is `global` for the user-global store
+/// (ADR 0083) and `cross_shard` for another workspace's memory;
+/// `workspace_id` is the origin workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackItemOrigin {
+    pub lane: String,
+    pub workspace_id: String,
+}
+
+impl PackItemOrigin {
+    pub const GLOBAL_LANE: &'static str = "global";
+    pub const CROSS_SHARD_LANE: &'static str = "cross_shard";
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2060,6 +2087,8 @@ impl PackCandidate {
             trust: PackTrustSignal::default(),
             tombstoned_at: None,
             lifecycle: None,
+            evidence_freshness: None,
+            origin: None,
         })
     }
 
@@ -2104,6 +2133,18 @@ impl PackCandidate {
     #[must_use]
     pub fn with_lifecycle(mut self, lifecycle: PackItemLifecycle) -> Self {
         self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Attach the typed freshness and origin of the item's source memory.
+    #[must_use]
+    pub fn with_source_signals(
+        mut self,
+        evidence_freshness: PackItemEvidenceFreshness,
+        origin: Option<PackItemOrigin>,
+    ) -> Self {
+        self.evidence_freshness = Some(evidence_freshness);
+        self.origin = origin;
         self
     }
 }
@@ -5578,6 +5619,8 @@ pub struct PackDraftItem {
     pub lifecycle: Option<PackItemLifecycle>,
     pub freshness_facets: Vec<PackFreshnessFacet>,
     pub selected_in: PackSelectionPhase,
+    pub evidence_freshness: Option<PackItemEvidenceFreshness>,
+    pub origin: Option<PackItemOrigin>,
 }
 
 /// A live-admitted imported transcript excerpt selected directly into a pack.
@@ -5682,6 +5725,8 @@ impl PackDraftItem {
             trust,
             tombstoned_at,
             lifecycle,
+            evidence_freshness,
+            origin,
         } = candidate;
         Self {
             rank,
@@ -5703,6 +5748,8 @@ impl PackDraftItem {
             lifecycle,
             freshness_facets: Vec::new(),
             selected_in,
+            evidence_freshness,
+            origin,
         }
     }
 
@@ -5732,6 +5779,8 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
         trust,
         tombstoned_at,
         lifecycle,
+        evidence_freshness,
+        origin,
     } = candidate;
     let (content, redactions) = redact_pack_item_content(content);
     let estimated_tokens = if redactions.is_empty() {
@@ -5756,6 +5805,8 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
             trust,
             tombstoned_at,
             lifecycle,
+            evidence_freshness,
+            origin,
         },
         redactions,
     )

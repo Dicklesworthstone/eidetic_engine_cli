@@ -97,6 +97,10 @@ expression: canonical_json_text(value)
           ],
           "diversityKey": "procedural:rule:cargo",
           "estimatedTokens": 8,
+          "evidenceFreshness": {
+            "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes.",
+            "status": "missing_source"
+          },
           "feasible": true,
           "lifecycle": {
             "status": "current",

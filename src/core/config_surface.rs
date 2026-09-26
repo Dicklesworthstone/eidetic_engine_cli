@@ -138,14 +138,16 @@ impl fmt::Display for ConfigSurfaceError {
             Self::Read { path, source } => {
                 write!(
                     formatter,
-                    "could not read config `{}`: {source}",
+                    "could not read config `{}`, so its memory privacy policy and other settings \
+                     cannot be trusted: {source}",
                     path.display()
                 )
             }
             Self::Parse { path, message } => {
                 write!(
                     formatter,
-                    "could not parse config `{}`: {message}",
+                    "could not parse config `{}`, so its memory privacy policy and other settings \
+                     cannot be trusted: {message}",
                     path.display()
                 )
             }
@@ -273,7 +275,10 @@ pub fn set_config(
             .parse::<DocumentMut>()
             .map_err(|source| ConfigSurfaceError::Parse {
                 path: path.clone(),
-                message: source.to_string(),
+                message: format!(
+                    "invalid TOML config: {}",
+                    crate::config::file::toml_syntax_error_summary(&input, &source)
+                ),
             })?;
     let before = item_for_path(&document, spec.path).map(item_value_for_report);
     let after = scalar.report_value();
@@ -403,6 +408,35 @@ pub fn merged_workspace_config(
         workspace_root: workspace_root.to_path_buf(),
         config_path: None,
     })
+}
+
+/// The pack candidate pool for one request (GH #49): an explicit value wins,
+/// otherwise the merged `pack.candidate_pool` (project, then user, then the
+/// built-in 100). Every entry point (`ee pack`, `ee context`, `ee orient`,
+/// library callers) resolves through this one function, so an omitted flag
+/// means the same thing everywhere. The config parser already bounds the value
+/// to `1..=u32::MAX`; the check here keeps this function total on its own.
+pub(crate) fn resolve_pack_candidate_pool(
+    workspace_root: &Path,
+    explicit: Option<u32>,
+) -> Result<Option<u32>, ConfigSurfaceError> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    merged_workspace_config(workspace_root)?
+        .values
+        .pack
+        .candidate_pool
+        .map(|pool| {
+            u32::try_from(pool).ok().filter(|pool| *pool > 0).ok_or(
+                ConfigSurfaceError::InvalidValue {
+                    key: PACK_CANDIDATE_POOL_KEY,
+                    value: pool.to_string(),
+                    expected: "an integer in the range 1..=4294967295",
+                },
+            )
+        })
+        .transpose()
 }
 
 fn read_project_config(
@@ -1169,6 +1203,10 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
         TomlScalar::String(value) => toml_edit::value(value),
     };
 }
+
+#[cfg(test)]
+#[path = "config_candidate_pool_tests.rs"]
+mod config_candidate_pool_tests;
 
 #[cfg(test)]
 mod tests {

@@ -805,6 +805,8 @@ fn make_context_response_fixture() -> ContextResponse {
             lifecycle: None,
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
+            evidence_freshness: None,
+            origin: None,
         },
         PackDraftItem {
             rank: 2,
@@ -827,6 +829,8 @@ fn make_context_response_fixture() -> ContextResponse {
             lifecycle: None,
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::CoverageFill,
+            evidence_freshness: None,
+            origin: None,
         },
     ];
 

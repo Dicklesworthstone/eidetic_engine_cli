@@ -2509,6 +2509,66 @@ fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> Te
     Ok(())
 }
 
+/// GH #60: per-item `evidenceFreshness` and `origin` are additive, typed and
+/// closed: a valid shape validates, an unknown status/lane or stray key does
+/// not. The item schema's `oneOf` (memory vs evidence-span identity) ends this
+/// file's validator early, so the two property schemas are checked directly.
+#[test]
+fn pack_schema_types_item_evidence_freshness_and_origin() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    let response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    validate_json_schema(&response, &schema, &schema, "$")?;
+    let item_properties = schema
+        .pointer("/properties/data/properties/pack/properties/items/items/properties")
+        .ok_or("ee.pack.v2 must declare pack item properties")?;
+    let property = |name: &str| -> Result<&Value, String> {
+        item_properties
+            .get(name)
+            .ok_or_else(|| format!("ee.pack.v2 items must declare {name}"))
+    };
+
+    let freshness = response
+        .pointer("/data/pack/items/0/evidenceFreshness")
+        .ok_or("context-pack golden must carry typed item evidenceFreshness")?;
+    if freshness.get("status").and_then(Value::as_str) != Some("missing_source") {
+        return Err(format!("unexpected golden evidenceFreshness: {freshness}"));
+    }
+    validate_json_schema(freshness, property("evidenceFreshness")?, &schema, "$")?;
+    let origin = json!({ "lane": "global", "workspaceId": "wsp_01J00000000000000000000000" });
+    validate_json_schema(&origin, property("origin")?, &schema, "$")?;
+    validate_json_schema(
+        &json!({ "lane": "cross_shard", "workspaceId": "wsp_peer" }),
+        property("origin")?,
+        &schema,
+        "$",
+    )?;
+
+    for (name, invalid) in [
+        ("evidenceFreshness", json!({ "status": "stale" })),
+        (
+            "evidenceFreshness",
+            json!({ "status": "fresh", "detail": "prose" }),
+        ),
+        ("evidenceFreshness", json!({ "repair": "orphan repair" })),
+        (
+            "origin",
+            json!({ "lane": "peer", "workspaceId": "wsp_peer" }),
+        ),
+        ("origin", json!({ "lane": "global" })),
+        (
+            "origin",
+            json!({ "lane": "global", "workspaceId": "wsp_peer", "note": "prose" }),
+        ),
+    ] {
+        if validate_json_schema(&invalid, property(name)?, &schema, "$").is_ok() {
+            return Err(format!(
+                "ee.pack.v2 accepted an invalid item {name}: {invalid}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
     let schema = schema_doc("ee.error.v2")?;

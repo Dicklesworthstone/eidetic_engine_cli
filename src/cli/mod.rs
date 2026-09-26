@@ -3490,9 +3490,10 @@ pub struct OrientArgs {
     #[arg(long, short = 'p', default_value = "orientation")]
     pub profile: String,
 
-    /// Maximum candidate memories to retrieve before packing.
-    #[arg(long, default_value_t = 100)]
-    pub candidate_pool: u32,
+    /// Maximum candidate memories to retrieve before packing. Defaults to
+    /// `pack.candidate_pool` from config (built-in default 100).
+    #[arg(long)]
+    pub candidate_pool: Option<u32>,
 
     /// Fast session-start mode: skip full doctor and use bounded recent and lexical content.
     #[arg(long, alias = "quick", action = ArgAction::SetTrue)]
@@ -28118,16 +28119,14 @@ fn task_lens_catalog_for_workspace(workspace_root: &Path) -> Result<TaskLensCata
     })
 }
 
+/// GH #49: the CLI resolves the pool through the same core resolver the
+/// context engine uses, before anything (the pack id, the lens overlay, the
+/// daemon handoff) is derived from it.
 fn configured_pack_candidate_pool(workspace_root: &Path) -> Result<u32, DomainError> {
-    let merged = crate::core::config_surface::merged_workspace_config(workspace_root)
-        .map_err(config_surface_error_to_domain)?;
-    let pool = merged.values.pack.candidate_pool.unwrap_or(100);
-    u32::try_from(pool)
-        .ok()
-        .filter(|pool| *pool > 0)
+    crate::core::config_surface::resolve_pack_candidate_pool(workspace_root, None)
+        .map_err(config_surface_error_to_domain)?
         .ok_or_else(|| DomainError::Configuration {
-            message: "pack.candidate_pool must be an integer in the range 1..=4294967295"
-                .to_owned(),
+            message: "pack.candidate_pool has no value in the merged configuration".to_owned(),
             repair: Some(
                 "Set [pack].candidate_pool to a positive u32 value in .ee/config.toml.".to_owned(),
             ),
@@ -28589,12 +28588,31 @@ fn config_surface_error_to_domain(error: ConfigSurfaceError) -> DomainError {
             repair: Some("Check EE_* environment variables and path expansion inputs.".into()),
         },
         ConfigSurfaceError::Read { path, source } => DomainError::Configuration {
-            message: format!("Could not read config `{}`: {source}", path.display()),
-            repair: Some("Check the config path and file permissions.".into()),
+            message: format!(
+                "Could not read config `{}`, so its memory privacy policy and other settings \
+                 cannot be trusted: {source}",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Make `{}` a readable, regular, UTF-8 file (not a symlink), then rerun \
+                 `ee config show --json`.",
+                path.display()
+            )),
         },
+        // `message` is position-only (`toml_syntax_error_summary`); a config
+        // file can hold private values, so its content is never echoed. The
+        // same file carries the memory privacy policy, which cannot be
+        // trusted while it is unparseable, so every caller fails closed.
         ConfigSurfaceError::Parse { path, message } => DomainError::Configuration {
-            message: format!("Could not parse config `{}`: {message}", path.display()),
-            repair: Some("Fix .ee/config.toml, then rerun `ee config show --json`.".into()),
+            message: format!(
+                "Could not parse config `{}`, so its memory privacy policy and other settings \
+                 cannot be trusted: {message}",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Fix the reported line in `{}`, then rerun `ee config show --json`.",
+                path.display()
+            )),
         },
         ConfigSurfaceError::Write { path, source } => DomainError::Configuration {
             message: format!("Could not write config `{}`: {source}", path.display()),
@@ -41591,6 +41609,15 @@ where
     };
 
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    // GH #49: an omitted `--candidate-pool` follows `pack.candidate_pool`, as
+    // it does for `ee pack` / `ee context`.
+    let candidate_pool = match args.candidate_pool {
+        Some(pool) => pool,
+        None => match configured_pack_candidate_pool(&workspace_path) {
+            Ok(pool) => pool,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        },
+    };
     let addressed_database_path = args
         .database
         .as_deref()
@@ -41617,7 +41644,7 @@ where
                 schema: DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1.to_owned(),
                 task: args.task.clone(),
                 max_tokens: args.max_tokens,
-                candidate_pool: args.candidate_pool,
+                candidate_pool,
                 include_primer: args.include_primer,
             });
             match memory_read_via_daemon(
@@ -41641,7 +41668,7 @@ where
                 index_dir: Some(&addressed_index_dir),
                 task: &args.task,
                 max_tokens: args.max_tokens,
-                candidate_pool: args.candidate_pool,
+                candidate_pool,
             },
             args.include_primer,
         ) {
@@ -41768,7 +41795,7 @@ where
             index_dir: Some(&addressed_index_dir),
             task: &args.task,
             max_tokens: args.max_tokens,
-            candidate_pool: args.candidate_pool,
+            candidate_pool,
         });
         degraded.extend(report.issues.iter().map(|issue| {
             orient_degradation_value(
@@ -41802,7 +41829,7 @@ where
             filters,
             profile: Some(profile),
             max_tokens: Some(args.max_tokens),
-            candidate_pool: Some(args.candidate_pool),
+            candidate_pool: Some(candidate_pool),
             max_results: None,
             include_tombstoned: false,
             as_of: None,
@@ -81559,12 +81586,13 @@ mod tests {
         let database = original.join(".ee/ee.db");
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         db.migrate().map_err(|e| e.to_string())?;
-        db.upsert_workspace(
+        db.upsert_workspace_with_scope(
             workspace_id,
             &CreateWorkspaceInput {
                 path: original.to_string_lossy().into_owned(),
                 name: Some("relocation-fixture".to_owned()),
             },
+            &crate::db::WorkspaceScopeFields::standalone(),
         )
         .map_err(|e| e.to_string())?;
         db.insert_memory(

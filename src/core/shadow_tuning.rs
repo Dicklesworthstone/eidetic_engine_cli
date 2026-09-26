@@ -1558,7 +1558,12 @@ pub fn promote_retrieval_weights(
     let (prior_config, prior_existed) = read_config_bytes(workspace_path)?;
     let mut document = prior_config
         .parse::<toml_edit::DocumentMut>()
-        .map_err(|error| storage_error("parse workspace config.toml", &error))?;
+        .map_err(|error| {
+            storage_error(
+                "parse workspace config.toml",
+                &crate::config::file::toml_syntax_error_summary(&prior_config, &error),
+            )
+        })?;
     let mut diff = Vec::new();
     {
         let search_item = document.entry("search").or_insert(toml_edit::table());

@@ -444,7 +444,8 @@ pub fn decide_respond(input: &RespondDecisionInput<'_>) -> (DiscoveryConsent, Di
 #[derive(Debug)]
 pub enum LoadListError {
     Read(std::io::Error),
-    Parse(toml_edit::TomlError),
+    /// Position-only TOML syntax summary; never quotes file content.
+    Parse(String),
     InvalidShape(String),
 }
 
@@ -488,9 +489,11 @@ pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(error) => return Err(LoadListError::Read(error)),
     };
-    let document = body
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(LoadListError::Parse)?;
+    let document = body.parse::<toml_edit::DocumentMut>().map_err(|error| {
+        LoadListError::Parse(crate::config::file::toml_syntax_error_summary(
+            &body, &error,
+        ))
+    })?;
     let Some(node_keys_item) = document.get("node_keys") else {
         // Missing field treated as empty list — symmetric with the
         // absent-file case. Lets a fresh workspace ship a file with

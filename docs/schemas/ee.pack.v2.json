@@ -201,6 +201,34 @@
                     "type": "object",
                     "additionalProperties": { "$ref": "#/$defs/jsonValue" }
                   },
+                  "evidenceFreshness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status"],
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "fresh",
+                          "missing_source",
+                          "changed_source",
+                          "unreachable_source",
+                          "unsupported_source",
+                          "unknown"
+                        ]
+                      },
+                      "repair": { "type": "string" }
+                    }
+                  },
+                  "origin": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["lane", "workspaceId"],
+                    "properties": {
+                      "lane": { "type": "string", "enum": ["global", "cross_shard"] },
+                      "workspaceId": { "type": "string" }
+                    }
+                  },
                   "tokenCost": { "type": "integer" },
                   "feasible": { "type": "boolean" },
                   "coveredFeatures": { "type": "array", "items": { "type": "string" } },

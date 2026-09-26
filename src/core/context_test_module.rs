@@ -2387,6 +2387,7 @@ mod tests {
             false,
             false,
             false,
+            Vec::new(),
             &mut degraded,
         );
 
@@ -5276,9 +5277,62 @@ pub fn unrelated_context() -> u64 {{
             super::provenance_for_memory(&memory, memory_id, temp.path(), None, &mut degraded)
                 .ok_or_else(|| "cross-shard provenance should render".to_owned())?;
 
-        assert!(provenance.note.contains("cross_shard_read"));
-        assert!(provenance.note.contains("origin_workspace_id=wsp_peer"));
-        assert!(provenance.note.contains("pack_workspace_id="));
+        assert!(provenance.entry.note.contains("cross_shard_read"));
+        assert!(
+            provenance
+                .entry
+                .note
+                .contains("origin_workspace_id=wsp_peer")
+        );
+        assert!(provenance.entry.note.contains("pack_workspace_id="));
+        // GH #60: the same facts as typed per-item fields.
+        assert_eq!(
+            provenance.origin,
+            Some(crate::pack::PackItemOrigin {
+                lane: "cross_shard".to_owned(),
+                workspace_id: "wsp_peer".to_owned(),
+            })
+        );
+        assert_eq!(provenance.evidence_freshness.status, "unknown");
+        assert_eq!(provenance.evidence_freshness.repair, None);
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_types_missing_source_freshness_and_leaves_local_origin_absent()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut memory =
+            stored_memory_with_time("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z", None, None);
+        memory.workspace_id = super::stable_context_workspace_id(temp.path());
+        memory.provenance_uri = Some("file://gone.md#L1".to_owned());
+        let memory_id = memory
+            .id
+            .parse::<MemoryId>()
+            .map_err(|error| error.to_string())?;
+        let mut degraded = Vec::new();
+
+        let provenance =
+            super::provenance_for_memory(&memory, memory_id, temp.path(), None, &mut degraded)
+                .ok_or_else(|| "local provenance should render".to_owned())?;
+
+        assert_eq!(provenance.origin, None, "a local memory has no origin");
+        assert_eq!(provenance.evidence_freshness.status, "missing_source");
+        assert!(
+            provenance
+                .evidence_freshness
+                .repair
+                .as_deref()
+                .is_some_and(|repair| !repair.trim().is_empty()),
+            "{:?}",
+            provenance.evidence_freshness
+        );
+        assert!(
+            provenance
+                .entry
+                .note
+                .contains("evidenceFreshness=missing_source")
+        );
         Ok(())
     }
 
@@ -8441,6 +8495,7 @@ pub fn unrelated_context() -> u64 {{
             false,
             false,
             false,
+            Vec::new(),
             &mut degraded,
         );
         assert!(
@@ -8578,6 +8633,7 @@ pub fn unrelated_context() -> u64 {{
             false,
             false,
             false,
+            Vec::new(),
             &mut degraded,
         );
         let hit = hits
@@ -9443,6 +9499,8 @@ pub fn unrelated_context() -> u64 {{
                 lifecycle: None,
                 freshness_facets: Vec::new(),
                 selected_in: PackSelectionPhase::StrictMmr,
+                evidence_freshness: None,
+                origin: None,
             })
         }
 
@@ -9841,6 +9899,8 @@ pub fn unrelated_context() -> u64 {{
             lifecycle: None,
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
+            evidence_freshness: None,
+            origin: None,
         };
 
         let base_draft = PackDraft {
@@ -10183,6 +10243,8 @@ pub fn unrelated_context() -> u64 {{
             lifecycle: None,
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
+            evidence_freshness: None,
+            origin: None,
         };
         let draft_with = |relevance: UnitScore| {
             let mut scored = item.clone();
@@ -10262,6 +10324,8 @@ pub fn unrelated_context() -> u64 {{
             lifecycle: None,
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
+            evidence_freshness: None,
+            origin: None,
         };
         let draft = PackDraft {
             query: request.query.clone(),

@@ -55,18 +55,37 @@ fn candidate_pool_config_reaches_request_and_profile_caps_still_apply() {
     assert_eq!(run.request.candidate_pool, 7);
     assert!(!run.candidate_pool_capped);
     opts.candidate_pool = Some(100);
-    assert_eq!(context_request_from_options_with_runtime_profile(&opts, &profile).unwrap().request.candidate_pool, 100);
+    assert_eq!(
+        context_request_from_options_with_runtime_profile(&opts, &profile)
+            .unwrap()
+            .request
+            .candidate_pool,
+        100
+    );
     opts.candidate_pool = Some(0);
     assert!(context_request_from_options_with_runtime_profile(&opts, &profile).is_err());
     opts.candidate_pool = None;
-    fs::write(&config_path, format!("[pack]\ncandidate_pool = {}\n", u32::MAX)).unwrap();
+    fs::write(
+        &config_path,
+        format!("[pack]\ncandidate_pool = {}\n", u32::MAX),
+    )
+    .unwrap();
     let run = context_request_from_options_with_runtime_profile(&opts, &profile).unwrap();
     assert!(run.candidate_pool_capped);
-    assert_eq!(u64::from(run.request.candidate_pool), profile.budgets.pack.max_candidate_memories);
+    assert_eq!(
+        u64::from(run.request.candidate_pool),
+        profile.budgets.pack.max_candidate_memories
+    );
     assert_eq!(run.effective_candidate_pool, run.request.candidate_pool);
     // An edited configuration is observed by the next request, not cached as a default.
     fs::write(&config_path, "[pack]\ncandidate_pool = 11\n").unwrap();
-    assert_eq!(context_request_from_options_with_runtime_profile(&opts, &profile).unwrap().request.candidate_pool, 11);
+    assert_eq!(
+        context_request_from_options_with_runtime_profile(&opts, &profile)
+            .unwrap()
+            .request
+            .candidate_pool,
+        11
+    );
     fs::write(&config_path, "[pack]\ncandidate_pool = 4294967296\n").unwrap();
     assert!(context_request_from_options_with_runtime_profile(&opts, &profile).is_err());
 }
