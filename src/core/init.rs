@@ -139,14 +139,19 @@ impl InitReport {
         // clean machine it degrades to lexical-only hash fallback, and the
         // agent should know to enable it rather than silently getting weaker
         // recall. (agent-UX item 6)
-        match crate::core::search::semantic_retrieval_unavailable_reason() {
-            Some(reason) => {
+        match init_semantic_retrieval() {
+            InitSemanticRetrieval::Unavailable(reason) => {
                 output.push_str(&format!(
                     "  Semantic retrieval: OFF — lexical-only ({reason})\n    Enable: {}\n",
                     crate::core::search::SEMANTIC_ENABLE_HINT
                 ));
             }
-            None => output.push_str("  Semantic retrieval: ready\n"),
+            InitSemanticRetrieval::VerifiedNotLoaded => {
+                output.push_str(&format!(
+                    "  Semantic retrieval: {VERIFIED_NOT_LOADED_NOTE}\n"
+                ));
+            }
+            InitSemanticRetrieval::Ready => output.push_str("  Semantic retrieval: ready\n"),
         }
 
         if !self.actions.is_empty() {
@@ -226,16 +231,65 @@ impl InitReport {
             "dryRun": self.dry_run,
             // agent-UX item 6: onboarding-time semantic posture so harnesses
             // can branch on whether retrieval is full-hybrid or lexical-only.
-            "semanticRetrieval": crate::core::search::semantic_retrieval_unavailable_reason()
-                .map_or_else(
-                    || serde_json::json!({ "enabled": true }),
-                    |reason| serde_json::json!({
-                        "enabled": false,
-                        "reason": reason,
-                        "enable": crate::core::search::SEMANTIC_ENABLE_HINT,
-                    }),
-                ),
+            "semanticRetrieval": semantic_retrieval_json(&init_semantic_retrieval()),
         })
+    }
+}
+
+/// What init tells the agent about semantic retrieval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InitSemanticRetrieval {
+    /// The resolved posture is live, or pending a first-use download.
+    Ready,
+    /// Verified local model files are present and this process has not loaded
+    /// them. Verification proves the files, not that the weights load
+    /// (bd-7hsgy), so this is not reported as ready.
+    VerifiedNotLoaded,
+    /// Retrieval is lexical-only, for the given reason.
+    Unavailable(String),
+}
+
+const VERIFIED_NOT_LOADED_NOTE: &str =
+    "model verified, not loaded — it loads on the first search, which reports the backend it used";
+
+fn init_semantic_retrieval() -> InitSemanticRetrieval {
+    init_semantic_retrieval_with(
+        crate::core::index::local_model_verified_and_unresolved,
+        crate::core::search::semantic_retrieval_unavailable_reason,
+    )
+}
+
+/// Resolving the default embedder loads a verified local model, about 1.2-1.6 GB
+/// of RSS for a one-line banner (bd-qf3l4). A verified model this process has
+/// not loaded is therefore reported as such, and `resolved_reason` runs only
+/// when resolving would not load weights.
+fn init_semantic_retrieval_with(
+    verified_unloaded: impl FnOnce() -> bool,
+    resolved_reason: impl FnOnce() -> Option<String>,
+) -> InitSemanticRetrieval {
+    if verified_unloaded() {
+        return InitSemanticRetrieval::VerifiedNotLoaded;
+    }
+    resolved_reason().map_or(
+        InitSemanticRetrieval::Ready,
+        InitSemanticRetrieval::Unavailable,
+    )
+}
+
+fn semantic_retrieval_json(posture: &InitSemanticRetrieval) -> serde_json::Value {
+    match posture {
+        InitSemanticRetrieval::Ready => serde_json::json!({ "enabled": true, "state": "ready" }),
+        InitSemanticRetrieval::VerifiedNotLoaded => serde_json::json!({
+            "enabled": false,
+            "state": "model_verified_not_loaded",
+            "reason": VERIFIED_NOT_LOADED_NOTE,
+        }),
+        InitSemanticRetrieval::Unavailable(reason) => serde_json::json!({
+            "enabled": false,
+            "state": "unavailable",
+            "reason": reason,
+            "enable": crate::core::search::SEMANTIC_ENABLE_HINT,
+        }),
     }
 }
 
@@ -1853,6 +1907,61 @@ mod tests {
                 .map(Vec::is_empty),
             Some(true),
             "actionErrors field",
+        )
+    }
+
+    /// bd-qf3l4: when a verified model awaits loading, init must not resolve the
+    /// embedder, because resolving it loads the weights (~1.2-1.6 GB RSS).
+    #[test]
+    fn init_semantic_posture_never_resolves_the_model_when_one_is_verified() -> TestResult {
+        let posture = init_semantic_retrieval_with(
+            || true,
+            || panic!("init resolved the embedder, which loads a verified model"),
+        );
+        ensure(
+            posture.clone(),
+            InitSemanticRetrieval::VerifiedNotLoaded,
+            "verified model is reported, not loaded",
+        )?;
+        let json = semantic_retrieval_json(&posture);
+        ensure(
+            json.get("state").and_then(|value| value.as_str()),
+            Some("model_verified_not_loaded"),
+            "distinct JSON state",
+        )?;
+        // Files prove presence, not a successful load (bd-7hsgy).
+        ensure(
+            json.get("enabled").and_then(|value| value.as_bool()),
+            Some(false),
+            "not claimed enabled",
+        )
+    }
+
+    #[test]
+    fn init_semantic_posture_delegates_when_no_verified_model_awaits_loading() -> TestResult {
+        ensure(
+            init_semantic_retrieval_with(|| false, || None),
+            InitSemanticRetrieval::Ready,
+            "resolved live posture",
+        )?;
+        let unavailable = init_semantic_retrieval_with(|| false, || Some("no model".to_owned()));
+        ensure(
+            unavailable.clone(),
+            InitSemanticRetrieval::Unavailable("no model".to_owned()),
+            "resolved degraded posture",
+        )?;
+        let json = semantic_retrieval_json(&unavailable);
+        ensure(
+            json.get("state").and_then(|value| value.as_str()),
+            Some("unavailable"),
+            "unavailable state",
+        )?;
+        ensure(
+            semantic_retrieval_json(&InitSemanticRetrieval::Ready)
+                .get("enabled")
+                .and_then(|value| value.as_bool()),
+            Some(true),
+            "ready stays enabled",
         )
     }
 

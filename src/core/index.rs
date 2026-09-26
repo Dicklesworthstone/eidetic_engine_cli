@@ -6680,6 +6680,19 @@ fn verified_default_model_dir(settings: &EeEmbedderSettings) -> Option<PathBuf> 
         .then(|| settings.model_root.clone())
 }
 
+/// Whether resolving the default embedder now would load local weights: no
+/// remote backend is configured, this process has not resolved the embedder,
+/// and the local model directory verifies. This is exactly the condition under
+/// which `default_search_embedder_for_settings` loads. It reads only in-memory
+/// state and the verification receipt, and never constructs a model, so a
+/// posture surface can report "verified, not loaded" without the load (bd-qf3l4)
+/// and without claiming a load it has not seen (bd-7hsgy).
+pub(crate) fn local_model_verified_and_unresolved() -> bool {
+    DEFAULT_SEARCH_EMBEDDER.get().is_none()
+        && configured_embed_backend() != EmbedBackendSelection::Remote
+        && verified_default_model_dir(&default_embedder_settings()).is_some()
+}
+
 /// Test-only since 5434b5b4e (bd-kvltg). Production now resolves through
 /// `default_search_embedder_stack_with_provenance`, which carries the origin
 /// fact the posture needs; this bare wrapper survives only because the

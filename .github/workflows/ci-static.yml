@@ -12,8 +12,9 @@ name: CI Static
 # - The cargo-free half of `verify` was re-measured green on 2026-09-17
 #   (forbidden-deps, migration-registry, closure-lint, vision-coverage,
 #   mcp_lib_tests --self-test, format, contract-drift-radar). Those are the
-#   steps this job runs. Clippy and cargo test stay on RCH until a green
-#   scratch run of the full CI exists.
+#   steps this job runs. cargo test stays on RCH until a green scratch run of
+#   the full CI exists. Clippy runs in the separate `clippy` job below
+#   (operator decision 2026-09-26).
 #
 # This job is the hosted system of record for those cheap invariants. It does
 # not prove the Rust test suite. Do not read a green CI Static run as "CI is
@@ -356,3 +357,66 @@ jobs:
       - name: Release binary probe --self-test
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/release_binary_probe.sh --self-test
+
+  # bd-ci-static-covers-no-cargo. Operator decision 2026-09-26: "Add clippy to
+  # CI Static". The job above is cargo-free, and ci.yml is disabled_manually,
+  # so NOTHING hosted compiled main. In the 24 hours before this job, three
+  # pushes broke the build or the lint for every lane, and each red was found
+  # hours later by a lane's own remote run:
+  #   610aefc23  lib TEST build E0433 (Utc)          -> bd-scboh
+  #   b970aa30e  lib TEST build E0599 (upsert_...)   -> bd-ql35o
+  #   5d2934fa6  clippy::cloned_ref_to_slice_refs    -> bd-23wde
+  # `clippy --all-targets -D warnings` fails on every one of them.
+  #
+  # A SEPARATE JOB, not steps in `static`: that job is deliberately cargo-free
+  # with a 20-minute limit, and a cold all-targets build does not fit in it.
+  #
+  # BOUNDED COST. Pushes arrive minutes apart, and this job takes tens of
+  # minutes. The workflow-level group is keyed per sha, so without a job-level
+  # group every push would start its own build and they would pile up. This
+  # group has NO cancel-in-progress: at most one run executes and one waits,
+  # and a newer waiting run replaces the older one. Each verdict is for a
+  # recent HEAD, never a stale queue, and the cost is about one runner.
+  #
+  # Every action is pinned to the commit sha release.yml already uses, so the
+  # action-pin baseline for this file does not grow.
+  clippy:
+    name: clippy --all-targets -D warnings (compile + lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    concurrency:
+      group: ci-static-clippy-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+
+      - name: Install nightly Rust with clippy
+        # The same dated pin as the job above and rust-toolchain.toml
+        # (bd-niay4): the action ref alone would float the toolchain.
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-static-clippy-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ci-static-clippy-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ci-static-clippy-${{ runner.os }}-nightly-2026-08-31-
+
+      - name: Clippy (all targets, warnings are errors)
+        run: cargo clippy --locked --all-targets -- -D warnings

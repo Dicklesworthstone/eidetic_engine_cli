@@ -30,8 +30,8 @@ pub(super) fn preserve_distinct_answers<'a>(
     // Match clustering's capped logarithmic multiplier. Do not hard-code a
     // count of copies, confuse source IDs with lineages, or round down the
     // number of independent observations needed to saturate the multiplier.
-    let Some(support_limit) = (1..ranked.len())
-        .find(|&count| 1.0 + 0.1 * (count as f32).ln() >= CORROBORATION_CAP)
+    let Some(support_limit) =
+        (1..ranked.len()).find(|&count| 1.0 + 0.1 * (count as f32).ln() >= CORROBORATION_CAP)
     else {
         return;
     };
@@ -78,10 +78,7 @@ pub(super) fn preserve_distinct_answers<'a>(
             candidate,
             score: best_span_score(question_terms, candidate, scorer),
         };
-        if !entry.score.is_finite()
-            || entry.score <= 0.0
-            || entry.score < request.min_confidence
-        {
+        if !entry.score.is_finite() || entry.score <= 0.0 || entry.score < request.min_confidence {
             continue;
         }
         if let Some(previous) = by_body.get(candidate.content.as_str()).copied() {

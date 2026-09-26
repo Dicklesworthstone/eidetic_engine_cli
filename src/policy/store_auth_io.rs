@@ -424,7 +424,10 @@ mod tests {
                 & 0o777,
             0o755
         );
-        assert_eq!(fs::read_dir(&keys).expect("no key or lock written").count(), 0);
+        assert_eq!(
+            fs::read_dir(&keys).expect("no key or lock written").count(),
+            0
+        );
         assert!(!outside.join("new").exists());
     }
 
@@ -455,11 +458,7 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("widen mode");
         assert!(StoreAuthRoot::open_read_locked(dir.path()).is_err());
         assert_eq!(
-            fs::metadata(dir.path())
-                .expect("mode")
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(dir.path()).expect("mode").permissions().mode() & 0o777,
             0o755
         );
         assert!(!dir.path().join(KEY_LOCK_FILE_NAME).exists());

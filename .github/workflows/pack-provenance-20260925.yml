@@ -15,7 +15,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           persist-credentials: false
@@ -32,7 +32,7 @@ jobs:
                   if any(term in line for term in ['PackProvenance {', 'pack_item_provenance_json', 'fn provenance_for_memory_cached', 'struct EvidenceFreshness', 'enum EvidenceFreshnessStatus']):
                       print(f'{path}:{number}: {line}')
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pack-provenance-source
           path: |

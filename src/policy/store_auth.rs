@@ -1070,7 +1070,11 @@ mod tests {
                 |_| panic!("no directory barrier before publication"),
             )
             .expect_err("publication fails");
-        assert!(error.to_string().contains("injected pre-publication failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected pre-publication failure")
+        );
         assert_eq!(root.window_key_ids(), before);
         assert_eq!(std::fs::read(&path).expect("unchanged bytes"), bytes);
         assert_eq!(
@@ -1101,7 +1105,11 @@ mod tests {
                 Err(recovery_error("injected directory barrier failure"))
             })
             .expect_err("durability failure is not success");
-        assert!(error.to_string().contains("injected directory barrier failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected directory barrier failure")
+        );
         let disk = StoreAuthRoot::open(dir.path()).expect("installed key");
         assert_ne!(root.current_key_id(), old_id);
         assert_eq!(root.window_key_ids(), disk.window_key_ids());

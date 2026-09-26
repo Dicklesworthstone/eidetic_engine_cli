@@ -2479,23 +2479,34 @@ fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> 
 fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> TestResult {
     let schema = schema_doc("ee.pack.v2")?;
     let mut response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
-    if response
-        .pointer("/data/rerank/advisory/code")
-        .and_then(Value::as_str)
-        != Some("rerank_model_unavailable")
-        || response
-            .pointer("/data/rerank/advisory/resolution")
+    // bd-fjbu9. The context-pack golden is captured with reranking configured
+    // off, so its advisory is truthfully null, and it must validate as it is.
+    // The permanent advisory is exercised with the posture the search golden
+    // captured with reranking on and no model: the same ee.rerank_posture.v1
+    // shape, real output rather than a hand-written sample, transplanted into
+    // a copy of the pack response.
+    validate_json_schema(&response, &schema, &schema, "$")?;
+    let search = read_json(&fixture_path(
+        "golden/agent/search_deterministic_ranking.json.golden",
+    ))?;
+    let posture = search
+        .pointer("/data/rerank")
+        .cloned()
+        .ok_or_else(|| "search golden must carry a rerank posture".to_owned())?;
+    if posture.pointer("/advisory/code").and_then(Value::as_str) != Some("rerank_model_unavailable")
+        || posture
+            .pointer("/advisory/resolution")
             .and_then(Value::as_str)
             != Some("automatic_repair_unavailable")
-        || !response
-            .pointer("/data/rerank/advisory/repair")
+        || !posture
+            .pointer("/advisory/repair")
             .is_some_and(Value::is_null)
     {
         return Err(
-            "real context-pack golden must carry the canonical permanent rerank advisory"
-                .to_owned(),
+            "real search golden must carry the canonical permanent rerank advisory".to_owned(),
         );
     }
+    response["data"]["rerank"] = posture;
     validate_json_schema(&response, &schema, &schema, "$")?;
 
     response["data"]["rerank"]["advisory"]["repair"] =
@@ -2813,17 +2824,33 @@ fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult
         ),
     ];
 
+    // bd-fjbu9: check every surface and report every failure. Returning at the
+    // first bad case let one red surface (search, since 2026-09-18) leave
+    // every later surface in this matrix unverified.
+    let case_count = cases.len();
+    let mut failures = Vec::new();
     for case in cases {
         let schema = read_json(&schema_path(case.schema_file))?;
-        if let Some(pointer) = case.schema_pointer {
-            ensure_json_str(&case.document, pointer, case.schema_id)
-                .map_err(|error| format!("{}: {error}", case.surface))?;
+        if let Some(pointer) = case.schema_pointer
+            && let Err(error) = ensure_json_str(&case.document, pointer, case.schema_id)
+        {
+            failures.push(format!("{}: {error}", case.surface));
+            continue;
         }
-        validate_json_schema(&case.document, &schema, &schema, "$")
-            .map_err(|error| format!("{} ({}): {error}", case.surface, case.schema_id))?;
+        if let Err(error) = validate_json_schema(&case.document, &schema, &schema, "$") {
+            failures.push(format!("{} ({}): {error}", case.surface, case.schema_id));
+        }
     }
 
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {case_count} machine surfaces fail their declared schema:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
 }
 
 #[test]
@@ -2858,6 +2885,10 @@ fn search_document_conformance_sample() -> Value {
         "scoreInterval": [0.72, 0.97],
         "coverageGuarantee": 0.95,
         "calibrated": true,
+        // Required since 9058cd8d6. A calibrated hit names its calibration
+        // regime; this is blake3 of the label "ee.search.document.v1
+        // conformance sample calibration", a well-formed id with no meaning.
+        "calibrationId": "blake3:c5707faa478dcb7f2ae69865b86e6db0c5689db3e5cb1c95ed496787fe9d42cd",
         "source": "hybrid",
         "why": "Selected by hybrid retrieval with raw RRF score 0.029836.",
         "provenance": [

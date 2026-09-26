@@ -105,25 +105,28 @@ fn contains_ordered_literals(text: &str, literals: &[&str]) -> bool {
         if literal.is_empty() {
             continue;
         }
-        let Some(position) = text[offset..].match_indices(literal).find_map(|(start, _)| {
-            let start = offset + start;
-            let end = start + literal.len();
-            let left = literal.chars().next().is_none_or(|first| {
-                !identifier_char(first)
-                    || text[..start]
-                        .chars()
-                        .next_back()
-                        .is_none_or(|previous| !identifier_char(previous))
-            });
-            let right = literal.chars().next_back().is_none_or(|last| {
-                !identifier_char(last)
-                    || text[end..]
-                        .chars()
-                        .next()
-                        .is_none_or(|next| !identifier_char(next))
-            });
-            (left && right).then_some(end)
-        }) else {
+        let Some(position) = text[offset..]
+            .match_indices(literal)
+            .find_map(|(start, _)| {
+                let start = offset + start;
+                let end = start + literal.len();
+                let left = literal.chars().next().is_none_or(|first| {
+                    !identifier_char(first)
+                        || text[..start]
+                            .chars()
+                            .next_back()
+                            .is_none_or(|previous| !identifier_char(previous))
+                });
+                let right = literal.chars().next_back().is_none_or(|last| {
+                    !identifier_char(last)
+                        || text[end..]
+                            .chars()
+                            .next()
+                            .is_none_or(|next| !identifier_char(next))
+                });
+                (left && right).then_some(end)
+            })
+        else {
             return false;
         };
         offset = position;
@@ -235,14 +238,27 @@ mod tests {
     #[test]
     fn inline_code_is_literal_even_inside_nearly_identical_prose() {
         for (left, right) in [
-            ("The recommended invocation is `git reset --soft HEAD` for this task.",
-             "The recommended invocation is `git reset --hard HEAD` for this task."),
-            ("Copy `source` to `target` for the release.",
-             "Copy `target` to `source` for the release."),
-            ("Use `Build` for the release.", "Use `build` for the release."),
+            (
+                "The recommended invocation is `git reset --soft HEAD` for this task.",
+                "The recommended invocation is `git reset --hard HEAD` for this task.",
+            ),
+            (
+                "Copy `source` to `target` for the release.",
+                "Copy `target` to `source` for the release.",
+            ),
+            (
+                "Use `Build` for the release.",
+                "Use `build` for the release.",
+            ),
             ("Use `foo` for the release.", "Use foobar for the release."),
-            ("Use `foo` for the release.", "Use foo-extra for the release."),
-            ("Use ``echo `a`  b`` for the release.", "Use ``echo `a` b`` for the release."),
+            (
+                "Use `foo` for the release.",
+                "Use foo-extra for the release.",
+            ),
+            (
+                "Use ``echo `a`  b`` for the release.",
+                "Use ``echo `a` b`` for the release.",
+            ),
         ] {
             assert!(!compatible(left, right));
             assert!(!compatible(right, left));
@@ -252,10 +268,19 @@ mod tests {
     #[test]
     fn paths_namespaces_and_short_options_are_not_case_folded_or_reordered() {
         for (left, right) in [
-            ("Use src/Main.rs for release.", "Use src/main.rs for release."),
-            ("Copy src/first to src/second.", "Copy src/second to src/first."),
+            (
+                "Use src/Main.rs for release.",
+                "Use src/main.rs for release.",
+            ),
+            (
+                "Copy src/first to src/second.",
+                "Copy src/second to src/first.",
+            ),
             ("Use tool -f for release.", "Use tool -F for release."),
-            ("Use library::Build for release.", "Use library::build for release."),
+            (
+                "Use library::Build for release.",
+                "Use library::build for release.",
+            ),
             (r"Use C:\Build for release.", r"Use C:\build for release."),
         ] {
             assert!(!compatible(left, right));
@@ -267,11 +292,20 @@ mod tests {
     fn formatting_does_not_remove_real_agreement() {
         for (left, right) in [
             ("Run `cargo test --all`.", "Execute cargo test --all."),
-            ("The command is `cargo test --all`.", "The command is cargo test --all."),
-            ("Use `src/main.rs` for the release.", "Use src/main.rs for the release."),
+            (
+                "The command is `cargo test --all`.",
+                "The command is cargo test --all.",
+            ),
+            (
+                "Use `src/main.rs` for the release.",
+                "Use src/main.rs for the release.",
+            ),
             ("BACKEND: `sqlite`", "BACKEND: sqlite"),
             ("Use `café` for release.", "Use café for release."),
-            ("Ordinary prose remains eligible.", "Ordinary prose is still eligible."),
+            (
+                "Ordinary prose remains eligible.",
+                "Ordinary prose is still eligible.",
+            ),
         ] {
             assert!(compatible(left, right), "{left:?} / {right:?}");
             assert!(compatible(right, left));
@@ -286,7 +320,10 @@ mod tests {
         for (left, right) in [
             ("```sh\nprepare\ndeploy\n```", "```sh\ndeploy\nprepare\n```"),
             ("~~~sh\ncopy a b\n~~~", "~~~sh\ncopy b a\n~~~"),
-            ("````sh\n```\nprepare\ndeploy\n````", "````sh\n```\ndeploy\nprepare\n````"),
+            (
+                "````sh\n```\nprepare\ndeploy\n````",
+                "````sh\n```\ndeploy\nprepare\n````",
+            ),
         ] {
             assert!(!compatible(left, right));
             assert!(compatible(left, left));
@@ -298,7 +335,10 @@ mod tests {
         assert!(!compatible("Use `cargo test", "Use `cargo build"));
         assert!(!compatible("Use `cargo test", "Use cargo test"));
         assert!(compatible("Use `cargo test", "Use `cargo test"));
-        assert_eq!(literal_text("Use `A. B\\` safely.").unwrap().code, ["A. B\\"]);
+        assert_eq!(
+            literal_text("Use `A. B\\` safely.").unwrap().code,
+            ["A. B\\"]
+        );
         assert!(literal_text(r"Use \`literal.").unwrap().code.is_empty());
         assert!(literal_text(r"Use \``literal.").unwrap().code.is_empty());
         let text = (1..=128)
@@ -317,12 +357,8 @@ mod tests {
         for semantic_degraded in [false, true] {
             // Exercise the real shared evaluator with a controlled score at
             // the existing floor boundary; this is not a model-quality test.
-            let report = evaluate_ask_scored(
-                &request,
-                &candidates,
-                &|_, _, _, _| 0.52,
-                semantic_degraded,
-            );
+            let report =
+                evaluate_ask_scored(&request, &candidates, &|_, _, _, _| 0.52, semantic_degraded);
             assert!(report.abstained);
             assert!(report.answer_text.is_none() && report.citations.is_empty());
             assert!(!report.extractiveness_violated && !report.conflict_detected);
@@ -341,23 +377,34 @@ mod tests {
         };
         let mut candidates = [candidate("a", SOFT), candidate("b", HARD)];
         for row in &candidates {
-            assert!(score_span(
-                &tokenize_for_ask(&request.question),
-                &row.content,
-                row.confidence,
-                &row.trust_class,
-            ) > request.min_confidence);
+            assert!(
+                score_span(
+                    &tokenize_for_ask(&request.question),
+                    &row.content,
+                    row.confidence,
+                    &row.trust_class,
+                ) > request.min_confidence
+            );
         }
         let report = evaluate_ask(&request, &candidates);
         assert!(!report.abstained && !report.conflict_detected);
         assert_eq!(report.citations.len(), 2);
         for citation in &report.citations {
-            let original = candidates.iter().find(|row| row.memory_id == citation.memory_id).unwrap();
-            assert_eq!(original.content.get(citation.byte_start..citation.byte_end), Some(citation.text.as_str()));
+            let original = candidates
+                .iter()
+                .find(|row| row.memory_id == citation.memory_id)
+                .unwrap();
+            assert_eq!(
+                original.content.get(citation.byte_start..citation.byte_end),
+                Some(citation.text.as_str())
+            );
             assert_eq!(citation.provenance_uri, original.provenance_uri);
         }
         let expected = ask_data_json(&report);
         candidates.reverse();
-        assert_eq!(expected, ask_data_json(&evaluate_ask(&request, &candidates)));
+        assert_eq!(
+            expected,
+            ask_data_json(&evaluate_ask(&request, &candidates))
+        );
     }
 }

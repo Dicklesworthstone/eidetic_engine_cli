@@ -8,15 +8,13 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Instant;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use sqlmodel_core::Value as SqlValue;
 
-use super::workspace::stable_workspace_id;
-use crate::db::{DatabaseConfig, DbConnection, audit_actions};
+use crate::db::{DbConnection, audit_actions};
 use crate::models::{DomainError, MemoryKind, MemoryLevel, Tag, TrustClass};
 
 pub const MEMORY_DELTA_SCHEMA_V1: &str = "ee.memory.delta.v1";
@@ -26,6 +24,10 @@ pub const SUBSCRIBE_CURSOR_STALE: &str = "subscribe_cursor_stale";
 
 const DEFAULT_LIMIT: u32 = 1_000;
 const MAX_LIMIT: u32 = 10_000;
+
+#[path = "subscribe_poll.rs"]
+mod poll;
+pub use poll::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TagMatchMode {
@@ -223,8 +225,14 @@ pub struct SubscribePollReport {
     pub database_path: PathBuf,
     pub cursor: u64,
     pub next_cursor: u64,
+    /// Workspace audit watermark observed in the same snapshot as this page.
+    pub high_watermark: u64,
+    /// More eligible audit rows remain, even if this page matched no filters.
+    pub has_more: bool,
     pub delta_count: usize,
     pub deltas: Vec<MemoryDelta>,
+    /// Identity-only notices for mutations whose prior filter membership is unknown.
+    pub invalidations: Vec<MemoryInvalidation>,
     pub degraded: Vec<SubscribeDegradation>,
 }
 
@@ -239,8 +247,12 @@ impl SubscribePollReport {
             "databasePath": self.database_path.to_string_lossy(),
             "cursor": self.cursor,
             "nextCursor": self.next_cursor,
+            "highWatermark": self.high_watermark,
+            "hasMore": self.has_more,
             "deltaCount": self.delta_count,
             "deltas": self.deltas,
+            "invalidationCount": self.invalidations.len(),
+            "invalidations": self.invalidations,
             "degraded": self.degraded,
         })
     }
@@ -382,112 +394,7 @@ pub fn parse_subscribe_filter(raw: Option<&str>) -> Result<SubscribeFilter, Doma
 pub fn poll_memory_deltas(
     options: &SubscribePollOptions<'_>,
 ) -> Result<SubscribePollReport, DomainError> {
-    let started = Instant::now();
-    let workspace_path = resolve_workspace_path(options.workspace_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
-    let database_path = options
-        .database_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    let limit = options.limit.clamp(1, MAX_LIMIT);
-    let mut degraded = Vec::new();
-
-    if !database_path.exists() {
-        return Err(crate::core::storeless_workspace_error(&database_path));
-    }
-
-    let connection =
-        DbConnection::open(DatabaseConfig::file(database_path.clone())).map_err(|error| {
-            DomainError::Storage {
-                message: format!("Failed to open database: {error}"),
-                repair: Some("Run `ee doctor --json` for storage diagnostics.".to_owned()),
-            }
-        })?;
-    connection.migrate().map_err(|error| DomainError::Storage {
-        message: format!("Failed to migrate database: {error}"),
-        repair: Some("Run `ee migrate run --workspace . --json`.".to_owned()),
-    })?;
-    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-        &connection,
-        &workspace_id,
-        &[workspace_path.as_path(), options.workspace_path],
-    )?;
-
-    let high_watermark = audit_high_watermark(&connection)?;
-    if options.cursor > high_watermark {
-        degraded.push(SubscribeDegradation {
-            code: SUBSCRIBE_CURSOR_STALE.to_owned(),
-            severity: "warning".to_owned(),
-            message: format!(
-                "Requested cursor {} is ahead of the audit high watermark {}.",
-                options.cursor, high_watermark
-            ),
-            repair: "Persist the returned nextCursor before polling again.".to_owned(),
-        });
-    }
-
-    let rows = connection
-        .query(
-            "SELECT a.rowid, a.id, a.workspace_id, a.timestamp, a.actor, a.action, a.target_id, \
-                    m.level, m.kind, m.trust_class \
-             FROM audit_log a \
-             LEFT JOIN memories m ON m.id = a.target_id \
-             WHERE a.rowid > ?1 \
-               AND (a.target_type = 'memory' OR a.action LIKE 'memory.%' OR a.action = ?3) \
-               AND a.target_id IS NOT NULL \
-             ORDER BY a.rowid ASC \
-             LIMIT ?2",
-            &[
-                cursor_sql_value(options.cursor),
-                SqlValue::BigInt(i64::from(limit)),
-                SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
-            ],
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read memory audit deltas: {error}"),
-            repair: Some("Run `ee doctor --json` for storage diagnostics.".to_owned()),
-        })?;
-
-    let since_cutoff = options.filter.since_ms.and_then(|milliseconds| {
-        Utc::now().checked_sub_signed(TimeDelta::milliseconds(milliseconds))
-    });
-    let mut next_cursor = options.cursor.min(high_watermark);
-    let mut deltas = Vec::new();
-    for row in rows {
-        let raw = raw_delta_from_row(&row)?;
-        next_cursor = next_cursor.max(raw.cursor);
-        let delta = materialize_delta(&connection, raw)?;
-        if options.filter.matches_delta(&delta, since_cutoff) {
-            deltas.push(delta);
-        }
-    }
-
-    let degraded_codes: Vec<&str> = degraded.iter().map(|entry| entry.code.as_str()).collect();
-    tracing::info!(
-        target: "ee::subscribe",
-        surface = "subscribe",
-        bead_id = "bd-ub249",
-        workspace_id,
-        request_id = "subscribe_poll",
-        cursor = options.cursor,
-        deltas_emitted = deltas.len(),
-        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-        degraded_codes = ?degraded_codes,
-        "subscribe poll complete"
-    );
-
-    Ok(SubscribePollReport {
-        schema: SUBSCRIBE_POLL_SCHEMA_V1,
-        command: "subscribe poll",
-        version: env!("CARGO_PKG_VERSION"),
-        workspace_id,
-        database_path,
-        cursor: options.cursor,
-        next_cursor,
-        delta_count: deltas.len(),
-        deltas,
-        degraded,
-    })
+    poll::poll_memory_deltas(options)
 }
 
 fn raw_delta_from_row(row: &sqlmodel_core::Row) -> Result<RawAuditDelta, DomainError> {
@@ -558,20 +465,6 @@ fn memory_tags(connection: &DbConnection, memory_id: &str) -> Result<Vec<String>
                 .map(str::to_owned)
         })
         .collect())
-}
-
-fn audit_high_watermark(connection: &DbConnection) -> Result<u64, DomainError> {
-    let rows = connection
-        .query("SELECT COALESCE(MAX(rowid), 0) FROM audit_log", &[])
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read audit high watermark: {error}"),
-            repair: Some("Run `ee doctor --json` for storage diagnostics.".to_owned()),
-        })?;
-    Ok(rows
-        .first()
-        .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
-        .and_then(|value| u64::try_from(value).ok())
-        .unwrap_or(0))
 }
 
 #[must_use]
