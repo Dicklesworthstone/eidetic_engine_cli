@@ -18780,6 +18780,15 @@ mod tests {
     fn live_large_gap_search_emits_repair_once_without_hiding_stale_truth_fixture() -> TestResult {
         let workspace = unique_test_dir("live-large-index-gap");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        // Workspace scope also reads the user-global store by design. Keep this
+        // fixture off the host's real store: one whose schema lags adds a
+        // global_lane_migration_required advisory this test is not about.
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
         let database_path = workspace.join("ee.db");
         let index_dir = workspace.join("index");
         let workspace_id = "wsp_live_large_gap_00000000000";

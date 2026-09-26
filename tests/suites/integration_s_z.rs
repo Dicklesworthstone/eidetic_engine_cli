@@ -163,6 +163,8 @@ mod workspace_hygiene_logged_e2e;
 mod workspace_hygiene_public_emission;
 #[path = "../workspace_hygiene_recommendations_e2e.rs"]
 mod workspace_hygiene_recommendations_e2e;
+#[path = "../workspace_rebind_cli_e2e.rs"]
+mod workspace_rebind_cli_e2e;
 #[path = "../write_immune_quarantine.rs"]
 mod write_immune_quarantine;
 #[path = "../write_owner.rs"]

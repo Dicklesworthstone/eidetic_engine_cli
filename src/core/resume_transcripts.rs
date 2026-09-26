@@ -173,6 +173,33 @@ fn line_number<T: TryInto<u64>>(value: T) -> Option<u64> {
     value.try_into().ok()
 }
 
+/// The public-replay screen withholds any text above its scan bound, but CASS
+/// stores excerpts far longer than that, so screening the whole excerpt at once
+/// dropped every long span from history (bd-6urj3). Screen the complete excerpt
+/// as half-overlapping windows of that bound instead: text up to half a window
+/// long lies wholly inside one window, and any redacting window withholds the
+/// span. An excerpt within the bound is one window, screened exactly as before.
+fn public_excerpt(excerpt: &str) -> bool {
+    const WINDOW: usize = crate::policy::MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES;
+    let mut start = 0;
+    loop {
+        let mut end = excerpt.len().min(start + WINDOW);
+        while !excerpt.is_char_boundary(end) {
+            end -= 1;
+        }
+        if crate::policy::redact_public_replay_text(&excerpt[start..end]).redacted {
+            return false;
+        }
+        if end == excerpt.len() {
+            return true;
+        }
+        start += WINDOW / 2;
+        while !excerpt.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+}
+
 fn admitted_item(span: &StoredEvidenceSpan) -> Option<ResumeTranscriptItem> {
     if !EvidenceId::from_str(&span.id).is_ok_and(|id| id.to_string() == span.id)
         || !SessionId::from_str(&span.session_id).is_ok_and(|id| id.to_string() == span.session_id)
@@ -180,7 +207,7 @@ fn admitted_item(span: &StoredEvidenceSpan) -> Option<ResumeTranscriptItem> {
         || span.end_line < span.start_line
         || span.excerpt.trim().is_empty()
         || span.excerpt == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-        || crate::policy::redact_public_replay_text(&span.excerpt).redacted
+        || !public_excerpt(&span.excerpt)
     {
         return None;
     }
