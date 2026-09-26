@@ -255,7 +255,15 @@ fn why_native_rule_and_result_target_use_sourceless_identity_and_feedback() -> T
 
     for format in ["human", "markdown"] {
         let output = native_rule_output(&workspace, &["--format", format, "why", &rule_id])?;
-        ensure_equal(&output.status.code(), &Some(0), "typed text why exit")?;
+        ensure_equal(
+            &output.status.code(),
+            &Some(0),
+            &format!(
+                "typed text why exit; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
         let text = String::from_utf8_lossy(&output.stdout);
         ensure(
             text.starts_with(&format!("Rule: {rule_id}\n")),
@@ -268,7 +276,15 @@ fn why_native_rule_and_result_target_use_sourceless_identity_and_feedback() -> T
         )?;
     }
     let mermaid = native_rule_output(&workspace, &["--format", "mermaid", "why", &rule_id])?;
-    ensure_equal(&mermaid.status.code(), &Some(0), "typed Mermaid why exit")?;
+    ensure_equal(
+        &mermaid.status.code(),
+        &Some(0),
+        &format!(
+            "typed Mermaid why exit; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&mermaid.stdout),
+            String::from_utf8_lossy(&mermaid.stderr)
+        ),
+    )?;
     ensure(
         String::from_utf8_lossy(&mermaid.stdout).contains(&format!("rule: {rule_id}")),
         "Mermaid labels native rule identity",

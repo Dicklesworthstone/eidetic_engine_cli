@@ -173,14 +173,31 @@ fn line_number<T: TryInto<u64>>(value: T) -> Option<u64> {
     value.try_into().ok()
 }
 
-/// The public-replay screen withholds any text above its scan bound, but CASS
-/// stores excerpts far longer than that, so screening the whole excerpt at once
-/// dropped every long span from history (bd-6urj3). Screen the complete excerpt
-/// as half-overlapping windows of that bound instead: text up to half a window
-/// long lies wholly inside one window, and any redacting window withholds the
-/// span. An excerpt within the bound is one window, screened exactly as before.
+/// Screen the complete admitted source before publishing even a short prefix.
+/// Ingestion permits source paths and records instruction risk; neither grants
+/// public replay authority. Full-input screening is needed in addition to
+/// overlapping windows: contextual credentials and instruction phrases can
+/// contain arbitrarily wide whitespace and token detectors need intact atoms.
 fn public_excerpt(excerpt: &str) -> bool {
     const WINDOW: usize = crate::policy::MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES;
+    if excerpt.len() > crate::models::MAX_CONTENT_BYTES
+        || excerpt
+            .char_indices()
+            .any(|(index, _)| crate::util::sensitive_path_starts_at(excerpt, index))
+    {
+        // The shared replay detector skips URI slashes at bare-path boundaries.
+        // file:///home/... is still a private path, not a public transcript.
+        return false;
+    }
+    if excerpt.len() > WINDOW {
+        let screened = crate::policy::screen_external_text_for_ingestion(excerpt);
+        if screened.redacted
+            || screened.instruction_like
+            || excerpt.split_whitespace().any(|atom| atom.len() > WINDOW / 4)
+        {
+            return false;
+        }
+    }
     let mut start = 0;
     loop {
         let mut end = excerpt.len().min(start + WINDOW);
@@ -199,6 +216,10 @@ fn public_excerpt(excerpt: &str) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "resume_transcript_privacy_tests.rs"]
+mod privacy_tests;
 
 fn admitted_item(span: &StoredEvidenceSpan) -> Option<ResumeTranscriptItem> {
     if !EvidenceId::from_str(&span.id).is_ok_and(|id| id.to_string() == span.id)
