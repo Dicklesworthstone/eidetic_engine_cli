@@ -44,6 +44,10 @@ use crate::pack::PackProvenance;
 mod projection;
 #[path = "resume_snapshot.rs"]
 mod snapshot;
+#[path = "resume_transcripts.rs"]
+mod transcripts;
+
+pub use transcripts::{ResumeTranscriptHistory, ResumeTranscriptItem, ResumeTranscriptSession};
 
 /// Wire schema id for the resume report.
 pub const RESUME_SCHEMA_V1: &str = "ee.resume.v1";
@@ -173,6 +177,8 @@ pub struct ResumeReport {
     pub workspace_id: String,
     pub episodic_total: usize,
     pub sessions: Vec<ResumeSession>,
+    /// Native historical excerpts; never inferred decisions or synthetic memories.
+    pub transcript_history: ResumeTranscriptHistory,
     pub open_loops: OpenLoops,
     /// Unique stale memory IDs across every rendered projection.
     pub stale_count: usize,
@@ -777,6 +783,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         all_live,
         tags,
         typed_decision_fields,
+        transcript_history,
     } = snapshot::load(&connection, options, &canonical_workspace, now)?;
     // Projection and optional nearby-store discovery do not hold a database
     // reader open. All dependent source rows are owned by the same snapshot.
@@ -821,7 +828,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     // than rendered projections because an episodic open loop appears twice.
     let stale_count = apply_report_staleness(&mut tagged_items, &mut sessions, &all_live, &tags);
 
-    let nearby_stores = if episodic_total == 0 {
+    let nearby_stores = if episodic_total == 0 && transcript_history.session_total == 0 {
         let mut scan = discover_nearby_stores_for_database(
             options.workspace_path,
             options.database_path,
@@ -833,13 +840,27 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         None
     };
 
-    let next_commands = resume_next_commands(nearby_stores.as_ref());
+    let mut next_commands = resume_next_commands(nearby_stores.as_ref());
+    // Existing text clients also receive native-session pointers even before
+    // rendering the additive transcriptHistory JSON lane. Typed IDs are safe
+    // command arguments; opaque upstream identifiers never enter commands.
+    for session in transcript_history.sessions.iter().take(2).rev() {
+        next_commands.insert(
+            0,
+            format!(
+                "ee session info {} --json  # admitted transcript history, not curated decisions",
+                session.session_id
+            ),
+        );
+    }
+    next_commands.truncate(RESUME_NEXT_COMMAND_CAP);
 
     Ok(ResumeReport {
         schema: RESUME_SCHEMA_V1,
         workspace_id,
         episodic_total,
         sessions,
+        transcript_history,
         open_loops: OpenLoops {
             revisit_decisions_total,
             revisit_decisions_truncated,
@@ -873,6 +894,7 @@ fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
         workspace_id: crate::core::workspace::stable_workspace_id(&canonical_workspace),
         episodic_total: 0,
         sessions: Vec::new(),
+        transcript_history: ResumeTranscriptHistory::default(),
         open_loops: OpenLoops::default(),
         stale_count: 0,
         nearby_stores,

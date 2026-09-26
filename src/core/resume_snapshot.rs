@@ -20,6 +20,7 @@ pub(super) struct ResumeState {
     pub(super) all_live: Vec<StoredMemory>,
     pub(super) tags: BTreeMap<String, Vec<String>>,
     pub(super) typed_decision_fields: BTreeMap<String, String>,
+    pub(super) transcript_history: super::ResumeTranscriptHistory,
 }
 
 pub(super) fn load(
@@ -133,12 +134,19 @@ fn load_with_boundary(
         .collect();
 
     let typed_decision_fields = load_decision_typed_fields(connection, &all_live)?;
+    let transcript_history = super::transcripts::load(
+        connection,
+        &workspace_id,
+        &all_live,
+        options.sessions,
+    )?;
     snapshot.finish()?;
     Ok(ResumeState {
         workspace_id,
         all_live,
         tags,
         typed_decision_fields,
+        transcript_history,
     })
 }
 
@@ -449,3 +457,7 @@ mod seal_authority_tests {
         fixture.reader.rollback_read_snapshot().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "resume_transcript_tests.rs"]
+mod transcript_tests;
