@@ -137,10 +137,8 @@ mod tests {
         assert!(before > 0, "the corruption must change a real tag row");
         db.execute_raw("PRAGMA foreign_keys = OFF")
             .map_err(error_text)?;
-        db.execute_raw(
-            "UPDATE memory_tags SET memory_id = 'mem_00000000000000000000009999'",
-        )
-        .map_err(error_text)?;
+        db.execute_raw("UPDATE memory_tags SET memory_id = 'mem_00000000000000000000009999'")
+            .map_err(error_text)?;
         assert_eq!(
             before,
             db.count_table_rows("memory_tags").map_err(error_text)?
@@ -149,7 +147,11 @@ mod tests {
         // Checking does not depend on enforcement being enabled on the writer.
         db.close().map_err(error_text)?;
         let error = read_storage_graph(&database).expect_err("dangling tag must be rejected");
-        assert!(error.to_string().contains("broken foreign-key relationships"));
+        assert!(
+            error
+                .to_string()
+                .contains("broken foreign-key relationships")
+        );
         assert!(!error.to_string().contains("00009999"));
         let db = DbConnection::open_file(&database).map_err(error_text)?;
         assert_eq!(
@@ -209,10 +211,8 @@ mod tests {
             |_| Ok(()),
             |path| {
                 let db = DbConnection::open_file(path).map_err(storage_error)?;
-                db.execute_raw(
-                    "CREATE TABLE private_recovery_schema_canary (id TEXT PRIMARY KEY)",
-                )
-                .map_err(storage_error)?;
+                db.execute_raw("CREATE TABLE private_recovery_schema_canary (id TEXT PRIMARY KEY)")
+                    .map_err(storage_error)?;
                 db.close().map_err(storage_error)
             },
         )
