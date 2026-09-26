@@ -134,6 +134,43 @@ fn explicit_author_start_is_preserved_and_bad_default_cannot_insert() -> TestRes
 }
 
 #[test]
+fn revision_recorded_instant_preserves_author_start_and_exact_read_boundary() -> TestResult {
+    let db = DbConnection::open_memory()?;
+    setup(&db)?;
+    let recorded_at = DateTime::parse_from_rfc3339(AT)?.with_timezone(&Utc);
+    let mut value = input();
+    value.kind = "decision".to_owned();
+    value.valid_from = Some(BASE.to_owned());
+    db.insert_memory_revision_at(&id(2), &id(1), &value, recorded_at)?;
+    assert!(db.set_memory_typed_fields_json_at(
+        &id(2),
+        Some(
+            r#"{"chosen":"SQLite","options":["SQLite","Postgres"],"rationale":"Offline operation"}"#
+        ),
+        recorded_at,
+    )?);
+    let row = db.get_memory(&id(2))?.ok_or("revision missing")?;
+    assert_eq!(
+        row.valid_from, value.valid_from,
+        "author start is independent of recording time"
+    );
+    assert_eq!(row.created_at, recorded_at.to_rfc3339());
+    assert_eq!(row.updated_at, recorded_at.to_rfc3339());
+    let before = (recorded_at - chrono::Duration::nanoseconds(1)).to_rfc3339();
+    assert!(
+        db.list_recent_current_memories_for_retrieval(WORKSPACE, &before, 10)?
+            .is_empty(),
+        "an earlier author start must not backdate the stored revision"
+    );
+    assert_eq!(
+        identities(&db.list_recent_current_memories_for_retrieval(WORKSPACE, AT, 10)?),
+        vec![id(2)],
+        "the complete revision is readable at the exact captured instant"
+    );
+    Ok(())
+}
+
+#[test]
 fn applicability_and_tag_surfaces_use_exact_inclusive_expiry() -> TestResult {
     let db = DbConnection::open_memory()?;
     setup(&db)?;

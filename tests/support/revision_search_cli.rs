@@ -173,6 +173,17 @@ impl Fixture {
         assert_eq!(old.valid_to.as_deref(), Some("2099-01-01T00:00:00Z"));
         assert_eq!(new.content, HEAD_BODY);
         assert_eq!(new.valid_from.as_deref(), Some(cutoff.as_str()));
+        let revision_instant = DateTime::parse_from_rfc3339(&cutoff).map_err(|e| e.to_string())?;
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&new.created_at).map_err(|e| e.to_string())?,
+            revision_instant,
+            "revision creation must be visible at its exact validity boundary"
+        );
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&new.updated_at).map_err(|e| e.to_string())?,
+            revision_instant,
+            "revision sidecars must share the same atomic write instant"
+        );
         assert_eq!(
             db.get_memory_superseded_at(&head)
                 .map_err(|e| e.to_string())?,
