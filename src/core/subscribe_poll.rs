@@ -4,6 +4,7 @@
 //! within the same pinned snapshot, not a reconstruction of past memory bodies.
 //! A filter narrows the addressed workspace and never grants another scope.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Instant;
@@ -225,6 +226,10 @@ impl<'a> SubscriptionSnapshot<'a> {
         let mut next_cursor = cursor.min(high_watermark);
         let mut deltas = Vec::new();
         let mut invalidations = Vec::new();
+        // Metadata-excluded events can still invalidate prior membership.
+        // Only candidates eligible for a full delta need current tag reads.
+        let mut metadata_filter = filter.clone();
+        metadata_filter.tags.clear();
         for row in rows.into_iter().take(limit) {
             let raw = raw_delta_from_row(&row)?;
             next_cursor = raw.cursor;
@@ -233,8 +238,8 @@ impl<'a> SubscriptionSnapshot<'a> {
             if MemoryId::from_str(&raw.memory_id).is_err() {
                 continue;
             }
-            let delta = materialize_delta(self.connection, raw).map_err(storage_error)?;
-            if filter.matches_delta(&delta, since_cutoff) {
+            let delta = materialize_delta(raw, Vec::new());
+            if metadata_filter.matches_delta(&delta, since_cutoff) {
                 deltas.push(delta);
             } else if let Some(notice) =
                 invalidation::filtered_invalidation(filter, &delta, since_cutoff)
@@ -242,6 +247,22 @@ impl<'a> SubscriptionSnapshot<'a> {
                 invalidations.push(notice);
             }
         }
+        self.hydrate_tags(&mut deltas)?;
+        deltas.retain(|delta| {
+            if filter.matches_delta(delta, since_cutoff) {
+                true
+            } else {
+                if let Some(notice) =
+                    invalidation::filtered_invalidation(filter, delta, since_cutoff)
+                {
+                    invalidations.push(notice);
+                }
+                false
+            }
+        });
+        // The metadata and tag phases can discover exits in opposite order.
+        // Both arrays must retain the durable audit order within this page.
+        invalidations.sort_by_key(|notice| notice.cursor);
         if !has_more {
             // Skip only the proven-empty tail of this pinned snapshot. New
             // commits are above this watermark and remain visible next time.
@@ -254,6 +275,30 @@ impl<'a> SubscriptionSnapshot<'a> {
             deltas,
             invalidations,
         })
+    }
+
+    /// Hydrate each distinct candidate once in this same read snapshot.
+    /// Repeated events retain their own cursors and complete canonical tags;
+    /// lookahead and metadata-only invalidations never enter a batch.
+    fn hydrate_tags(&self, deltas: &mut [MemoryDelta]) -> Result<(), DomainError> {
+        let ids: BTreeSet<&str> = deltas.iter().map(|delta| delta.memory_id.as_str()).collect();
+        let ids: Vec<&str> = ids.into_iter().collect();
+        let mut tags = BTreeMap::new();
+        // At most 40 bulk-reader calls for the 10,000-event page limit.
+        // Bound SQL parameters independently of repeated audit identities.
+        for batch in ids.chunks(256) {
+            tags.extend(
+                self.connection
+                    .get_memory_tags_batch(batch)
+                    .map_err(storage_error)?,
+            );
+        }
+        for delta in deltas {
+            delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();
+            delta.tags.sort();
+            delta.tags.dedup();
+        }
+        Ok(())
     }
 
     fn finish(mut self) -> Result<(), DomainError> {
@@ -276,3 +321,7 @@ impl Drop for SubscriptionSnapshot<'_> {
 #[cfg(test)]
 #[path = "subscribe_poll_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "subscribe_hydration_tests.rs"]
+mod hydration_tests;
