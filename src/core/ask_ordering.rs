@@ -7,6 +7,9 @@
 //! Unknown prose, conditions, programs and multiple constraints need an
 //! explicit contradiction edge. Parsing never changes quoted evidence.
 
+#[path = "ask_command_literals.rs"]
+mod literals;
+
 #[derive(Debug, Eq, PartialEq)]
 struct OrderingClaim {
     before: String,
@@ -26,10 +29,11 @@ pub(super) fn conflicts(left: &str, right: &str) -> bool {
 /// Known ordering requirements corroborate only the same ordered pair.
 /// In particular, an unparsed or conditional near-duplicate must not lift a
 /// recognized unconditional instruction across the answer confidence floor.
+/// Unparsed ordering prose still has to agree on command and code literals.
 pub(super) fn compatible(left: &str, right: &str) -> bool {
     match (claim(left), claim(right)) {
         (Some(left), Some(right)) => left == right,
-        (None, None) => true,
+        (None, None) => literals::compatible(left, right),
         _ => false,
     }
 }
