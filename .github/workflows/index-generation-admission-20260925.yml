@@ -22,7 +22,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.publish.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
@@ -118,7 +118,7 @@ jobs:
           push_source
           git rev-parse HEAD | tee "$RUNNER_TEMP/generation-stage2-published.log"
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: generation-admission-source-delivery
@@ -139,7 +139,7 @@ jobs:
       EE_EMBED_DOWNLOAD: 'off'
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.integrate.outputs.source_sha }}
           persist-credentials: false
@@ -150,7 +150,7 @@ jobs:
           case "$channel" in nightly|nightly-*) ;; *) exit 1 ;; esac
           rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
           echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -178,7 +178,7 @@ jobs:
           set -euo pipefail
           cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/generation-clippy.log"
           rustfmt --edition 2024 --check src/core/index_generation_watermark.rs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: generation-admission-verification

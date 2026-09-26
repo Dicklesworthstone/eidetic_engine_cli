@@ -19,7 +19,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 1
@@ -118,7 +118,7 @@ jobs:
               if i.get('priority', 9) <= 1:
                   print(json.dumps({k: i.get(k) for k in ('id', 'title', 'status', 'priority', 'description')}, ensure_ascii=False))
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: index-recovery-source
           path: ${{ runner.temp }}/recovery-source.tar
@@ -135,7 +135,7 @@ jobs:
       EE_EMBED_DOWNLOAD: 'off'
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.integrate.outputs.source_sha }}
           persist-credentials: false
@@ -146,7 +146,7 @@ jobs:
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
           echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -184,7 +184,7 @@ jobs:
           set -euo pipefail
           cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/recovery-clippy.log"
           rustfmt --edition 2024 --config skip_children=true --check src/core/index_rollback_manifest.rs src/core/index_rollback_admission_tests.rs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
         with:
           name: index-rejection-admission-verification

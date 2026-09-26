@@ -1721,8 +1721,10 @@ fn normal_verify_test_gate_excludes_criterion_benches() {
 /// so they never observe an ordinary source commit. Exactly one compiling
 /// workflow is unfiltered -- ci.yml -- and `gh workflow list --all` reports it
 /// `disabled_manually`. The one active unfiltered workflow, ci-static.yml,
-/// runs `cargo fmt --check` and nothing that typechecks; its own header says
-/// "Do not read a green CI Static run as 'CI is restored.'"
+/// ran `cargo fmt --check` and nothing that typechecked until 2026-09-26,
+/// when its `clippy` job (`cargo clippy --locked --all-targets -D warnings`)
+/// was added by operator decision. Its header still says "Do not read a green
+/// CI Static run as 'CI is restored.'": clippy compiles, it does not test.
 ///
 /// This guard pins the UNFILTERED set only, deliberately. Pinning totals would
 /// red on every new delivery workflow -- 29 arrived in 24h -- and a guard that
@@ -1744,9 +1746,10 @@ fn unfiltered_push_to_main_workflows_are_pinned() {
     // (file name, runs a compiling cargo command)
     //
     // TWO workflows can run on an arbitrary push to main. ci.yml compiles and
-    // is disabled_manually; ci-static.yml is active and compiles nothing. So
-    // exactly one workflow observes an ordinary main commit, and it does not
-    // typecheck.
+    // is disabled_manually. ci-static.yml is active, and since 2026-09-26 it
+    // also typechecks and lints every target through its clippy job. Main's
+    // compiling coverage went UP with that change: before it, the one workflow
+    // that observed an ordinary main commit did not typecheck.
     //
     // My first draft of this list had three entries. It wrongly included
     // recovery-source-snapshot.yml, because the scan I built it from applied
@@ -1754,7 +1757,7 @@ fn unfiltered_push_to_main_workflows_are_pinned() {
     // not -- so a path-filtered workflow arrived here looking unfiltered.
     // This test failed on it, which is the negative arm doing its job against
     // a real mistake rather than a planted one.
-    const EXPECTED_UNFILTERED: [(&str, bool); 2] = [("ci-static.yml", false), ("ci.yml", true)];
+    const EXPECTED_UNFILTERED: [(&str, bool); 2] = [("ci-static.yml", true), ("ci.yml", true)];
 
     let actual = classify_unfiltered_push_to_main(&project_root().join(".github/workflows"));
     let expected: Vec<(String, bool)> = EXPECTED_UNFILTERED
