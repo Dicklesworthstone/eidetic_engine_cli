@@ -298,15 +298,13 @@ fn subscription_snapshot_pins_watermark_rows_and_tags_across_real_writes() {
         DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).expect("reader");
     let snapshot = SubscriptionSnapshot::begin(&reader).expect("snapshot");
     assert_eq!(snapshot.high_watermark(&f.own).expect("pin"), before);
-    f.db.execute(
-        "UPDATE memories SET kind = 'decision' WHERE id = ?1",
-        &[SqlValue::Text(id.clone())],
-    )
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET kind = 'decision' WHERE id = '{id}'"
+    ))
     .expect("change kind");
-    f.db.execute(
-        "UPDATE memory_tags SET tag = 'other' WHERE memory_id = ?1",
-        &[SqlValue::Text(id.clone())],
-    )
+    f.db.execute_raw(&format!(
+        "UPDATE memory_tags SET tag = 'other' WHERE memory_id = '{id}'"
+    ))
     .expect("change tag");
     f.audit(
         Some(&f.own),
@@ -401,10 +399,9 @@ fn filtered_tag_removal_invalidates_the_previously_visible_identity() {
     let first = f.poll(0, 100, filter.clone());
     assert_eq!(first.delta_count, 1);
     assert!(first.invalidations.is_empty());
-    f.db.execute(
-        "UPDATE memory_tags SET tag = 'other' WHERE memory_id = ?1",
-        &[SqlValue::Text(id.clone())],
-    )
+    f.db.execute_raw(&format!(
+        "UPDATE memory_tags SET tag = 'other' WHERE memory_id = '{id}'"
+    ))
     .expect("remove membership");
     f.audit(
         Some(&f.own),
@@ -439,10 +436,9 @@ fn filtered_trust_downgrade_never_leaves_a_silent_stale_trusted_entry() {
         super::super::parse_subscribe_filter(Some("TRUST_CLASS=human_explicit")).expect("filter");
     let first = f.poll(0, 100, filter.clone());
     assert_eq!(first.delta_count, 1);
-    f.db.execute(
-        "UPDATE memories SET trust_class = 'legacy_import' WHERE id = ?1",
-        &[SqlValue::Text(id.clone())],
-    )
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET trust_class = 'legacy_import' WHERE id = '{id}'"
+    ))
     .expect("downgrade");
     f.audit(
         Some(&f.own),

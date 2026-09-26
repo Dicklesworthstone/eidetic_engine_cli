@@ -131,7 +131,7 @@ fn session_headers(
                 &[
                     Value::Text(workspace_id.to_owned()),
                     Value::Text(after.clone()),
-                    Value::Integer(RESUME_STORAGE_PAGE_SIZE as i64),
+                    Value::BigInt(RESUME_STORAGE_PAGE_SIZE as i64),
                 ],
             )
             .map_err(|_| storage_error())?;

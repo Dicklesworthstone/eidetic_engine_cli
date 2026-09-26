@@ -71668,6 +71668,7 @@ mod tests {
             workspace_id: "wsp_fixture".to_owned(),
             episodic_total: 0,
             sessions: Vec::new(),
+            transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
             open_loops: crate::core::resume::OpenLoops::default(),
             stale_count: 0,
             nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
@@ -71713,6 +71714,7 @@ mod tests {
             workspace_id: "wsp_fixture".to_owned(),
             episodic_total: 0,
             sessions: Vec::new(),
+            transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
             open_loops: crate::core::resume::OpenLoops::default(),
             stale_count: 0,
             nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
@@ -71744,6 +71746,7 @@ mod tests {
             workspace_id: "wsp_fixture".to_owned(),
             episodic_total: 0,
             sessions: Vec::new(),
+            transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
             open_loops: crate::core::resume::OpenLoops {
                 revisit_decisions_total: 40,
                 revisit_decisions_truncated: true,
@@ -87661,7 +87664,7 @@ mod tests {
                 finding_code: "test_dispatch_after_index_repair",
                 severity: "warning",
                 path: after_repair.clone(),
-                op: Op::CreateDirAll,
+                op: Op::CreateDirAll { mode: 0o700 },
             });
 
             let hook_workspace = workspace.clone();

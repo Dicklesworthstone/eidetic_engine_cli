@@ -4021,13 +4021,9 @@ mod tests {
                 "absence is not a storage error",
             )?;
         }
-        conn.execute(
-            "UPDATE procedural_rules SET tombstoned_at = ?1 WHERE id = ?2",
-            &[
-                Value::Text("2026-09-25T00:00:00Z".to_owned()),
-                Value::Text(rule_id.clone()),
-            ],
-        )
+        conn.execute_raw(&format!(
+            "UPDATE procedural_rules SET tombstoned_at = '2026-09-25T00:00:00Z' WHERE id = '{rule_id}'"
+        ))
         .map_err(|error| error.to_string())?;
         let deleted = explain_memory_with_connection(&options, &conn);
         ensure(deleted.found, false, "deleted rule is not resurrected")?;
@@ -4049,10 +4045,10 @@ mod tests {
             .ok_or("native entity")?
             .revision
             .clone();
-        conn.execute(
-            "UPDATE procedural_rules SET scope = 'file', scope_pattern = '../escape.txt' WHERE id = ?1",
-            &[Value::Text(rule_id.clone())],
-        ).map_err(|error| error.to_string())?;
+        conn.execute_raw(&format!(
+            "UPDATE procedural_rules SET scope = 'file', scope_pattern = '../escape.txt' WHERE id = '{rule_id}'"
+        ))
+        .map_err(|error| error.to_string())?;
         let invalid_scope = explain_memory_with_connection(&options, &conn);
         ensure(
             invalid_scope.found,
@@ -4093,13 +4089,9 @@ mod tests {
             },
         )
         .map_err(|error| error.to_string())?;
-        conn.execute(
-            "UPDATE procedural_rules SET maturity = 'superseded', superseded_by = ?1 WHERE id = ?2",
-            &[
-                Value::Text(replacement_id.clone()),
-                Value::Text(rule_id.clone()),
-            ],
-        )
+        conn.execute_raw(&format!(
+            "UPDATE procedural_rules SET maturity = 'superseded', superseded_by = '{replacement_id}' WHERE id = '{rule_id}'"
+        ))
         .map_err(|error| error.to_string())?;
         let replaced = explain_memory_with_connection(&options, &conn);
         ensure(
@@ -4187,21 +4179,16 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-            conn.execute(
-                "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
-                &[Value::Text(rule_id.clone()), Value::Text(id.clone())],
-            )
+            conn.execute_raw(&format!(
+                "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{rule_id}', '{id}')"
+            ))
             .map_err(|error| error.to_string())?;
         }
         conn.mark_memory_superseded(&replaced_id, "2020-01-03T00:00:00Z")
             .map_err(|error| error.to_string())?;
-        conn.execute(
-            "UPDATE memories SET tombstoned_at = ?1 WHERE id = ?2",
-            &[
-                Value::Text("2020-01-03T00:00:00Z".to_owned()),
-                Value::Text(deleted_id.clone()),
-            ],
-        )
+        conn.execute_raw(&format!(
+            "UPDATE memories SET tombstoned_at = '2020-01-03T00:00:00Z' WHERE id = '{deleted_id}'"
+        ))
         .map_err(|error| error.to_string())?;
         let report = explain_memory_with_connection(&native_rule_why_options(&rule_id), &conn);
         ensure(
