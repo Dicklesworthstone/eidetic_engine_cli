@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "quarantined_memory_filtered",
+  "introduced_by": { "bead": "bd-1n0np.8", "epic_letter": "P1" },
+  "surfaces": ["search", "context", "pack"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A current source memory has pending feedback quarantine in its owning workspace. Retrieval withholds the candidate before ranking, relevance thresholds, duplicate suppression and query hints, even when its persisted index document claims high trust or an old non-quarantined state. The read does not change source rows, audit records, review status, index files or queued work.",
+    "setup_commands": [
+      "# Build a workspace index containing two current memories.",
+      "# Insert a pending memory-target quarantine row for one memory in that workspace.",
+      "# Covered by public_search_rechecks_quarantine_without_rebuilding_the_index."
+    ],
+    "invocation": "ee search 'release validation' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "quarantined_memory_filtered",
+    "severity": "low",
+    "message_contains": ["Withheld", "pending feedback quarantine review", "do not release a review hold"],
+    "repair_contains": "ee outcome quarantine list",
+    "repair_string": "Review pending feedback with ee outcome quarantine list in the addressed workspace."
+  }
+}
