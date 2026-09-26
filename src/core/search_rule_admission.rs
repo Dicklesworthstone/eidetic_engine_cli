@@ -8,6 +8,7 @@
 //! candidates cannot affect relevance floors, duplicate suppression or hints.
 //! Rule bodies, tags, lineage and workspace binding must describe one snapshot;
 //! a revision assembled from independently current reads is not a real revision.
+//! Pending review holds are native rule authority, not inherited memory state.
 
 #[path = "search_rule_scope.rs"]
 mod scope;
@@ -15,6 +16,10 @@ pub(super) use scope::scoped_metadata;
 
 #[path = "search_revision_admission.rs"]
 pub(super) mod memory_revisions;
+
+#[cfg(test)]
+#[path = "search_rule_quarantine_tests.rs"]
+mod quarantine_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -104,7 +109,9 @@ fn projections(
     rules
         .into_iter()
         .filter_map(|(canonical, rule)| {
-            if relations.invalid_lineage.contains(&canonical) {
+            if relations.invalid_lineage.contains(&canonical)
+                || relations.pending_quarantine.contains(&canonical)
+            {
                 return None;
             }
             let tags = relations.tags.remove(&canonical).unwrap_or_default();
@@ -124,6 +131,7 @@ struct RuleRelations {
     tags: BTreeMap<String, Vec<String>>,
     sources: BTreeMap<String, Vec<String>>,
     invalid_lineage: BTreeSet<String>,
+    pending_quarantine: BTreeSet<String>,
 }
 
 fn malformed_relation() -> crate::db::DbError {
@@ -154,6 +162,19 @@ fn load_relations(
             .iter()
             .map(|id| Value::Text((*id).to_owned()))
             .collect();
+        // The native rule, not any lineage memory, owns this review hold.
+        // Rebuilding the index or protecting/promoting the rule cannot release
+        // it. Only pending events in the target's own workspace withhold it.
+        // Query identities only and collapse multiple pending events per rule.
+        let quarantine_sql = format!(
+            "SELECT DISTINCT r.id FROM procedural_rules AS r JOIN feedback_quarantine AS q ON q.target_id = r.id AND q.workspace_id = r.workspace_id WHERE q.target_type = 'rule' AND q.status = 'pending' AND r.id IN ({placeholders}) ORDER BY r.id ASC"
+        );
+        for row in connection.query(&quarantine_sql, &parameters)? {
+            let Some(Value::Text(rule_id)) = row.get(0) else {
+                return Err(malformed_relation());
+            };
+            relations.pending_quarantine.insert(rule_id.clone());
+        }
         let tags_sql = format!(
             "SELECT rule_id, tag FROM rule_tags WHERE rule_id IN ({placeholders}) ORDER BY rule_id ASC, tag ASC"
         );
@@ -260,7 +281,7 @@ pub(super) fn admit_hits(
             code: "rule_live_admission_filtered".to_owned(),
             severity: "low".to_owned(),
             message: format!("Filtered {filtered} indexed rule candidates because current source-of-truth admission could not be verified."),
-            repair: Some("ee index rebuild --workspace .".to_owned()),
+            repair: Some("Inspect ee outcome quarantine list and ee doctor --json for source admission failures; use ee index rebuild --workspace . after resolving them.".to_owned()),
         });
     }
     hits
