@@ -6536,7 +6536,10 @@ pub fn unrelated_context() -> u64 {{
             include_stale: false,
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
-            memory_scope: MemoryScope::Swarm,
+            // Verified, not Swarm (bd-v40sv): the Swarm scope makes the
+            // mutable-state bypass depend on whether a global store exists on
+            // this host, as l2_try_hit_fixture already notes.
+            memory_scope: MemoryScope::Verified,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),

@@ -2299,7 +2299,10 @@ mod tests {
 
     #[test]
     fn peek_preserves_valid_and_corrupt_entries_without_mutation() -> TestResult {
-        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        // bd-v40sv: this test is about peek's read-only posture, not expiry.
+        // With a 60 s TTL a starved runner (the v0.16.0 gate saw 154 tests
+        // run past 60 s) expired the entry between put and peek.
+        let (_temp, cache) = cache(4096, Duration::from_secs(24 * 60 * 60))?;
         let key = "blake3:read-only";
         let payload =
             json!({"items": [{"memoryId": "mem_read_only", "content": "Keep evidence."}]});
