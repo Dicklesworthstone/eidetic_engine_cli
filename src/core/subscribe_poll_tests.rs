@@ -255,3 +255,74 @@ fn stale_unsigned_cursor_has_explicit_resynchronization_without_overflow() {
     assert_eq!(report.degraded[0].code, SUBSCRIBE_CURSOR_STALE);
     assert!(report.degraded[0].repair.contains("Resynchronize"));
 }
+
+#[test]
+fn filtered_tag_removal_invalidates_the_previously_visible_identity() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    f.audit(Some(&f.own), Some(&id), Some("memory"), audit_actions::MEMORY_CREATE);
+    let filter = super::super::parse_subscribe_filter(Some("TAG=release")).expect("filter");
+    let first = f.poll(0, 100, filter.clone());
+    assert_eq!(first.delta_count, 1);
+    assert!(first.invalidations.is_empty());
+    f.db.execute("UPDATE memory_tags SET tag = 'other' WHERE memory_id = ?1", &[SqlValue::Text(id.clone())]).expect("remove membership");
+    f.audit(Some(&f.own), Some(&id), Some("memory"), audit_actions::MEMORY_TAG_REMOVE);
+    let next = f.poll(first.next_cursor, 100, filter.clone());
+    assert!(next.deltas.is_empty(), "new state is not a filter match");
+    assert_eq!(next.invalidations.len(), 1);
+    assert_eq!(next.invalidations[0].memory_id, id);
+    assert_eq!(next.data_json()["invalidationCount"], 1);
+    let again = f.poll(next.next_cursor, 100, filter);
+    assert!(again.deltas.is_empty());
+    assert!(again.invalidations.is_empty(), "invalidation was acknowledged exactly once");
+}
+
+#[test]
+fn filtered_trust_downgrade_never_leaves_a_silent_stale_trusted_entry() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    f.audit(Some(&f.own), Some(&id), Some("memory"), audit_actions::MEMORY_CREATE);
+    let filter = super::super::parse_subscribe_filter(Some("TRUST_CLASS=human_explicit")).expect("filter");
+    let first = f.poll(0, 100, filter.clone());
+    assert_eq!(first.delta_count, 1);
+    f.db.execute("UPDATE memories SET trust_class = 'legacy_import' WHERE id = ?1", &[SqlValue::Text(id.clone())]).expect("downgrade");
+    f.audit(Some(&f.own), Some(&id), Some("memory"), audit_actions::TRUST_CLASS_TRANSITION);
+    let next = f.poll(first.next_cursor, 100, filter);
+    assert!(next.deltas.is_empty());
+    assert_eq!(next.invalidations.len(), 1);
+    assert_eq!(next.invalidations[0].memory_id, id);
+    assert_eq!(next.invalidations[0].affected_filters, vec!["trustClass"]);
+}
+
+#[test]
+fn mixed_delta_and_invalidation_pages_share_one_lossless_cursor() {
+    let f = Fixture::new();
+    let missing = MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+    let eviction = f.audit(Some(&f.own), Some(&missing), Some("memory"), audit_actions::MEMORY_TOMBSTONE);
+    let matching = f.memory(&f.own, 2, "release");
+    let created = f.audit(Some(&f.own), Some(&matching), Some("memory"), audit_actions::MEMORY_CREATE);
+    let filter = super::super::parse_subscribe_filter(Some("TAG=release")).expect("filter");
+    let first = f.poll(0, 1, filter.clone());
+    assert_eq!(first.next_cursor, eviction);
+    assert!(first.has_more);
+    assert!(first.deltas.is_empty());
+    assert_eq!(first.invalidations[0].memory_id, missing);
+    let second = f.poll(first.next_cursor, 1, filter);
+    assert_eq!(second.next_cursor, created);
+    assert!(!second.has_more);
+    assert_eq!(second.deltas[0].memory_id, matching);
+    assert!(second.invalidations.is_empty());
+}
+
+#[test]
+fn invalid_time_filters_fail_instead_of_disabling_the_cutoff() {
+    let now = DateTime::parse_from_rfc3339("2026-09-26T00:00:00Z")
+        .expect("now").with_timezone(&Utc);
+    for milliseconds in [-1, i64::MAX] {
+        let filter = SubscribeFilter { since_ms: Some(milliseconds), ..SubscribeFilter::default() };
+        assert!(matches!(subscription_cutoff(&filter, now), Err(DomainError::UsageCodeWithDetails { code: super::super::SUBSCRIBE_FILTER_INVALID, .. })));
+    }
+    let filter = SubscribeFilter { since_ms: Some(1_000), ..SubscribeFilter::default() };
+    assert_eq!(subscription_cutoff(&filter, now).expect("cutoff"), Some(now - TimeDelta::seconds(1)));
+    assert_eq!(subscription_cutoff(&SubscribeFilter::default(), now).expect("no cutoff"), None);
+}

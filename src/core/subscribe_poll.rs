@@ -15,10 +15,15 @@ use super::{
     MAX_LIMIT, MemoryDelta, SUBSCRIBE_CURSOR_STALE, SUBSCRIBE_POLL_SCHEMA_V1,
     SubscribeDegradation, SubscribeFilter, SubscribePollOptions, SubscribePollReport,
     cursor_sql_value, malformed_row, materialize_delta, raw_delta_from_row, resolve_workspace_path,
+    subscribe_filter_domain_error,
 };
 use crate::core::workspace::{bound_workspace_id_or_hash, stable_workspace_id};
 use crate::db::{DatabaseConfig, DbConnection, audit_actions};
 use crate::models::{DomainError, MemoryId};
+
+#[path = "subscribe_invalidation.rs"]
+mod invalidation;
+pub use invalidation::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 
 fn storage_error(_: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
@@ -35,6 +40,7 @@ pub(super) fn poll_memory_deltas(
     options: &SubscribePollOptions<'_>,
 ) -> Result<SubscribePollReport, DomainError> {
     let started = Instant::now();
+    let since_cutoff = subscription_cutoff(&options.filter, Utc::now())?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let requested = stable_workspace_id(&workspace_path);
     let database_path = options
@@ -68,9 +74,6 @@ pub(super) fn poll_memory_deltas(
             ),
         });
     }
-    let since_cutoff = options.filter.since_ms.and_then(|milliseconds| {
-        Utc::now().checked_sub_signed(TimeDelta::milliseconds(milliseconds))
-    });
     let page = snapshot.page(
         &workspace_id,
         options.cursor,
@@ -101,6 +104,7 @@ pub(super) fn poll_memory_deltas(
         request_id = "subscribe_poll",
         cursor = options.cursor,
         deltas_emitted = page.deltas.len(),
+        invalidations_emitted = page.invalidations.len(),
         has_more = page.has_more,
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         degraded_codes = ?degraded_codes,
@@ -118,6 +122,7 @@ pub(super) fn poll_memory_deltas(
         has_more: page.has_more,
         delta_count: page.deltas.len(),
         deltas: page.deltas,
+        invalidations: page.invalidations,
         degraded,
     })
 }
@@ -127,6 +132,29 @@ struct DeltaPage {
     next_cursor: u64,
     has_more: bool,
     deltas: Vec<MemoryDelta>,
+    invalidations: Vec<MemoryInvalidation>,
+}
+
+fn subscription_cutoff(
+    filter: &SubscribeFilter,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, DomainError> {
+    let Some(milliseconds) = filter.since_ms else {
+        return Ok(None);
+    };
+    let invalid = || {
+        subscribe_filter_domain_error(
+            "Subscription sinceMs is outside the supported non-negative time range.".to_owned(),
+            "Choose a smaller non-negative sinceMs value; the time filter was not disabled.",
+        )
+    };
+    if milliseconds < 0 {
+        return Err(invalid());
+    }
+    // Overflow must be an error, not None (which means an unfiltered feed).
+    now.checked_sub_signed(TimeDelta::milliseconds(milliseconds))
+        .map(Some)
+        .ok_or_else(invalid)
 }
 
 struct SubscriptionSnapshot<'a> {
@@ -197,6 +225,7 @@ impl<'a> SubscriptionSnapshot<'a> {
         let has_more = rows.len() > limit;
         let mut next_cursor = cursor.min(high_watermark);
         let mut deltas = Vec::new();
+        let mut invalidations = Vec::new();
         for row in rows.into_iter().take(limit) {
             let raw = raw_delta_from_row(&row)?;
             next_cursor = raw.cursor;
@@ -208,6 +237,10 @@ impl<'a> SubscriptionSnapshot<'a> {
             let delta = materialize_delta(self.connection, raw).map_err(storage_error)?;
             if filter.matches_delta(&delta, since_cutoff) {
                 deltas.push(delta);
+            } else if let Some(notice) =
+                invalidation::filtered_invalidation(filter, &delta, since_cutoff)
+            {
+                invalidations.push(notice);
             }
         }
         if !has_more {
@@ -220,6 +253,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             next_cursor,
             has_more,
             deltas,
+            invalidations,
         })
     }
 

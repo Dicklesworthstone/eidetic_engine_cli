@@ -27,6 +27,7 @@ const MAX_LIMIT: u32 = 10_000;
 
 #[path = "subscribe_poll.rs"]
 mod poll;
+pub use poll::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TagMatchMode {
@@ -230,6 +231,8 @@ pub struct SubscribePollReport {
     pub has_more: bool,
     pub delta_count: usize,
     pub deltas: Vec<MemoryDelta>,
+    /// Identity-only notices for mutations whose prior filter membership is unknown.
+    pub invalidations: Vec<MemoryInvalidation>,
     pub degraded: Vec<SubscribeDegradation>,
 }
 
@@ -248,6 +251,8 @@ impl SubscribePollReport {
             "hasMore": self.has_more,
             "deltaCount": self.delta_count,
             "deltas": self.deltas,
+            "invalidationCount": self.invalidations.len(),
+            "invalidations": self.invalidations,
             "degraded": self.degraded,
         })
     }
