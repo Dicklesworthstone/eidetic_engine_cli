@@ -71,16 +71,41 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+thread_local! {
+    /// The empty HOME the last deterministic-probe child ran with (raw and
+    /// canonical spellings). The normalizers scrub it to `<home>`.
+    static ISOLATED_GOLDEN_HOME: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
     let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/missing-ee-workspace/no-bin");
     let isolated_runtime_dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/.runtime");
+    // bd-jrrgc: the host's HOME held a shard catalog on some workers, which
+    // flipped status shardFanout.catalogExists. Give the child an empty HOME.
+    let isolated_home =
+        tempfile::tempdir().map_err(|error| format!("failed to create isolated HOME: {error}"))?;
+    let mut spellings = vec![isolated_home.path().to_string_lossy().into_owned()];
+    if let Ok(canonical) = isolated_home.path().canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if !spellings.contains(&canonical) {
+            spellings.push(canonical);
+        }
+    }
+    // Longest first, so /private/var/.. is not half-rewritten through /var/..
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+    ISOLATED_GOLDEN_HOME.with(|home| *home.borrow_mut() = spellings);
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
         .args(args)
         .env("PATH", isolated_path)
-        .env("XDG_RUNTIME_DIR", isolated_runtime_dir);
+        .env("XDG_RUNTIME_DIR", isolated_runtime_dir)
+        .env("HOME", isolated_home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME");
     for (name, _) in env::vars_os() {
         if name.to_string_lossy().starts_with("EE_") {
             command.env_remove(name);
@@ -570,6 +595,13 @@ fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
 fn scrub_environment_paths(value: &mut Value) {
     scrub_rch_target_paths(value);
     let mut replacements = Vec::new();
+    // First: on rch workers TMPDIR can lie under CARGO_MANIFEST_DIR, which the
+    // <workspace> rewrite below would otherwise claim.
+    ISOLATED_GOLDEN_HOME.with(|home| {
+        for spelling in home.borrow().iter() {
+            replacements.push((spelling.clone(), "<home>"));
+        }
+    });
     if let Ok(current_exe) = env::current_exe()
         && let Some(target_dir) = current_exe
             .parent()

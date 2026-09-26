@@ -9,7 +9,7 @@
 # Format: <count><TAB><repo-relative path>. Total at filing: 279 in 214 files.
 1	tests/advanced_e2e.rs
 1	tests/advanced_subsystem_logged_e2e.rs
-3	tests/agent_golden_baselines.rs
+2	tests/agent_golden_baselines.rs
 1	tests/agent_profile_e2e.rs
 1	tests/agentsmd_bridge.rs
 1	tests/audit_jsonl_contract.rs
