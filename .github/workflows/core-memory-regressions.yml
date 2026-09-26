@@ -8,6 +8,7 @@ on:
       - src/core/backup*.rs
       - src/core/ask*.rs
       - src/core/resume*.rs
+      - src/core/recall*.rs
       - src/core/jsonl*.rs
       - src/core/context*.rs
       - src/core/curate*.rs
@@ -103,6 +104,7 @@ jobs:
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
+          recall-source-projection core::recall::scan::projection::tests::
           ask-long-evidence core::ask::corpus::admission::long_evidence_tests::
           resume-transcript-privacy core::resume::transcripts::privacy_tests::
           search-producer-integrity core::search::runtime_fallback::tests::
