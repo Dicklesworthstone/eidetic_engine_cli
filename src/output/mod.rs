@@ -3155,6 +3155,22 @@ pub fn render_context_response_json_with_options(
                         build_pack_freshness_facet,
                     );
                 }
+                // GH #60: the typed form of the note's `evidenceFreshness=`
+                // and cross-shard origin, so consumers never parse prose.
+                if let Some(freshness) = &item.evidence_freshness {
+                    obj.field_object("evidenceFreshness", |evidence| {
+                        evidence.field_str("status", &freshness.status);
+                        if let Some(repair) = freshness.repair.as_deref() {
+                            evidence.field_str("repair", repair);
+                        }
+                    });
+                }
+                if let Some(origin) = &item.origin {
+                    obj.field_object("origin", |origin_obj| {
+                        origin_obj.field_str("lane", &origin.lane);
+                        origin_obj.field_str("workspaceId", &origin.workspace_id);
+                    });
+                }
                 if !item.redactions.is_empty() {
                     obj.field_array_of_objects(
                         "redactions",

@@ -212,9 +212,13 @@ pub(crate) fn workspace_memory_policy(workspace_path: &Path) -> Result<MemoryCon
         read_config_file_no_follow(&path).map_err(|error| invalid(&error.to_string()))?;
     ConfigFile::parse(&contents)
         .map(|config| config.memory)
-        // TOML diagnostics can quote configuration values. Report the failure
-        // without echoing potentially private policy contents.
-        .map_err(|_| invalid("the existing workspace configuration is invalid"))
+        // `ConfigParseError` renders positions, key paths and grammar only
+        // (see `toml_syntax_error_summary`), never policy values.
+        .map_err(|error| {
+            invalid(&format!(
+                "the existing workspace configuration is invalid ({error})"
+            ))
+        })
 }
 
 /// Hard cap on `<workspace>/.ee/config.toml` reads in the shared

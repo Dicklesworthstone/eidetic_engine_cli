@@ -2155,7 +2155,10 @@ fn build_profile_config_report(
             .parse::<DocumentMut>()
             .map_err(|source| ProfileConfigError::Parse {
                 path: path.clone(),
-                message: source.to_string(),
+                message: format!(
+                    "invalid TOML config: {}",
+                    crate::config::file::toml_syntax_error_summary(&input, &source)
+                ),
             })?;
     let conflicts = profile_config_conflicts(&document);
 

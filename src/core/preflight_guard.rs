@@ -2213,7 +2213,10 @@ fn parse_workspace_rules(
     let document = body
         .parse::<DocumentMut>()
         .map_err(|error| DomainError::Usage {
-            message: format!("Failed to parse {source_label}: {error}"),
+            message: format!(
+                "Failed to parse {source_label}: {}",
+                crate::config::file::toml_syntax_error_summary(body, &error)
+            ),
             repair: Some(format!(
                 "Fix the TOML syntax in {source_label} or delete the file."
             )),

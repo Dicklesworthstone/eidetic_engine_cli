@@ -5,7 +5,7 @@ use super::*;
 
 #[test]
 fn candidate_pool_cli_distinguishes_omission_from_explicit_hundred() {
-    for command in ["context", "pack"] {
+    for command in ["context", "pack", "orient"] {
         for (flags, expected) in [
             (vec![], None),
             (vec!["--candidate-pool", "100"], Some(100)),
@@ -17,6 +17,7 @@ fn candidate_pool_cli_distinguishes_omission_from_explicit_hundred() {
             let pool = match cli.command.unwrap() {
                 Command::Context(args) => args.candidate_pool,
                 Command::Pack(args) => args.candidate_pool,
+                Command::Orient(args) => args.candidate_pool,
                 _ => panic!("unexpected command"),
             };
             assert_eq!(pool, expected, "{command}");

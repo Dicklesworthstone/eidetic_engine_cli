@@ -3353,7 +3353,19 @@ pub struct EvidenceFreshness {
 /// Per-command cache for provenance file contents used by freshness checks.
 #[derive(Debug, Default)]
 pub struct EvidenceFreshnessFileCache {
-    files: BTreeMap<PathBuf, Result<Option<String>, String>>,
+    files: BTreeMap<PathBuf, Result<Option<String>, ProvenanceReadError>>,
+}
+
+/// Why a provenance file that exists could not serve a text freshness check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProvenanceReadError {
+    /// The file could not be inspected or read (permissions, size cap,
+    /// symlink, TOCTOU): `unreachable_source`.
+    Unreadable(String),
+    /// The file was read but is not UTF-8 text (a PDF, DOCX, image, ...).
+    /// The text-containment verifier cannot judge it: `unsupported_source`
+    /// (GH #58).
+    NotText(String),
 }
 
 impl EvidenceFreshnessFileCache {
@@ -3362,7 +3374,10 @@ impl EvidenceFreshnessFileCache {
         self.files.len()
     }
 
-    fn read_file_text(&mut self, source_path: &Path) -> Result<Option<String>, String> {
+    fn read_file_text(
+        &mut self,
+        source_path: &Path,
+    ) -> Result<Option<String>, ProvenanceReadError> {
         if let Some(cached) = self.files.get(source_path) {
             return cached.clone();
         }
@@ -3474,13 +3489,24 @@ fn assess_memory_evidence_freshness_inner(
                         ),
                     };
                 }
-                Err(message) => {
+                Err(ProvenanceReadError::Unreadable(message)) => {
                     return EvidenceFreshness {
                         status: EvidenceFreshnessStatus::UnreachableSource,
                         provenance_uri: Some(canonical_uri),
                         detail: message,
                         repair: Some(
                             "Fix file permissions or revise the memory provenance URI.".to_owned(),
+                        ),
+                    };
+                }
+                Err(ProvenanceReadError::NotText(message)) => {
+                    return EvidenceFreshness {
+                        status: EvidenceFreshnessStatus::UnsupportedSource,
+                        provenance_uri: Some(canonical_uri),
+                        detail: message,
+                        repair: Some(
+                            "The local verifier checks text files only; inspect this source manually, or cite a text extract of it (for example `file://<extract>.md#L<n>`) when local freshness is required."
+                                .to_owned(),
                         ),
                     };
                 }
@@ -3532,7 +3558,21 @@ fn assess_memory_evidence_freshness_inner(
 
 const MAX_PROVENANCE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, String> {
+fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, ProvenanceReadError> {
+    read_provenance_file_bytes(source_path)
+        .map_err(ProvenanceReadError::Unreadable)?
+        .map(|bytes| {
+            String::from_utf8(bytes).map_err(|error| {
+                ProvenanceReadError::NotText(format!(
+                    "Referenced provenance file {} is not UTF-8 text ({error}), so it cannot be freshness-checked by the local text verifier.",
+                    source_path.display()
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn read_provenance_file_bytes(source_path: &Path) -> Result<Option<Vec<u8>>, String> {
     if let Some(symlink_path) = first_existing_symlink_component(source_path).map_err(|error| {
         format!(
             "Referenced provenance file {} could not be inspected at {}: {}.",
@@ -3649,12 +3689,7 @@ fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, Strin
             symlink_path.display()
         ));
     }
-    String::from_utf8(bytes).map(Some).map_err(|error| {
-        format!(
-            "Referenced provenance file {} could not be read as UTF-8: {error}.",
-            source_path.display()
-        )
-    })
+    Ok(Some(bytes))
 }
 
 fn resolve_provenance_file_path(path: &str, workspace_path: Option<&Path>) -> PathBuf {
@@ -14427,6 +14462,29 @@ mod tests {
             "unreadable directory source",
         )?;
 
+        // GH #58: a readable file that is not UTF-8 text (a PDF, DOCX, ...)
+        // cannot be judged by the text verifier. That is `unsupported_source`,
+        // not the permissions-flavoured `unreachable_source`.
+        std::fs::write(temp.path().join("doc.pdf"), b"\xff\xfe binary page\n")
+            .map_err(|error| error.to_string())?;
+        let binary = assess_memory_evidence_freshness(
+            &freshness_memory("binary page", Some("file://doc.pdf".to_owned())),
+            Some(temp.path()),
+        );
+        ensure(
+            binary.status,
+            EvidenceFreshnessStatus::UnsupportedSource,
+            "non-UTF-8 file source",
+        )?;
+        ensure(
+            binary
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("text") && !repair.contains("permissions")),
+            true,
+            "non-UTF-8 repair names the text-only verifier",
+        )?;
+
         let unsupported = assess_memory_evidence_freshness(
             &freshness_memory(
                 "Freshness source release evidence line",
@@ -14559,8 +14617,12 @@ mod tests {
         let direct = read_provenance_file_text(&source_path)
             .expect_err("oversized provenance file must be refused before allocation");
         assert!(
-            direct.contains(&MAX_PROVENANCE_FILE_BYTES.to_string()),
-            "rejection must cite the cap; got {direct:?}",
+            matches!(
+                &direct,
+                ProvenanceReadError::Unreadable(message)
+                    if message.contains(&MAX_PROVENANCE_FILE_BYTES.to_string())
+            ),
+            "rejection must be unreadable and cite the cap; got {direct:?}",
         );
         // The freshness-check wrapper must propagate the refusal as
         // UnreachableSource (not Fresh, not ChangedSource — both

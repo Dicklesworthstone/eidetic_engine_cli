@@ -6222,6 +6222,8 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
         freshness_facets: Vec::new(),
         attempt_family_multiplicity: None,
         selected_in: PackSelectionPhase::FacilityLocation,
+        evidence_freshness: None,
+        origin: None,
     })
 }
 
@@ -11890,6 +11892,88 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     }
 }
 
+/// The user-global rows this request may read: resolves the store path,
+/// applies the `[memory]` inclusion policy, and reads the store at the
+/// request's `as_of`. `None` means the lane is withheld (the reason, when a
+/// caller asked for `--memory-scope global`, is pushed to `degraded`).
+fn admitted_global_store_memories(
+    options: &SearchOptions,
+    memory_config: &crate::config::MemoryConfig,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Option<(super::global_store::GlobalStorePaths, Vec<StoredMemory>)> {
+    let paths = match super::global_store::default_global_store_paths_from_env() {
+        Ok(paths) => paths,
+        Err(error) => {
+            if matches!(options.memory_scope, MemoryScope::Global) {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                    "global store path resolution failed: {error}"
+                )));
+            }
+            return None;
+        }
+    };
+    // The caller validated this request's policy before retrieval. Missing
+    // config retains opt-in-by-presence; unreadable config never reaches here.
+    let inclusion =
+        super::global_store::resolve_global_inclusion(&super::global_store::GlobalInclusionInput {
+            store_present: paths.database_path.exists(),
+            participating: memory_config.participate.unwrap_or(true),
+            config_enabled: memory_config.include_global.unwrap_or(true),
+            no_global_flag: false,
+        });
+    if !inclusion.included {
+        if matches!(options.memory_scope, MemoryScope::Global) {
+            degraded.push(SearchDegradation::global_memory_disabled(inclusion.reason));
+        }
+        return None;
+    }
+    match super::global_store::read_global_store_memories_at(
+        &paths,
+        options.include_tombstoned,
+        Some(options.as_of.unwrap_or_else(Utc::now)),
+    ) {
+        Ok(memories) => Some((paths, memories)),
+        Err(error) => {
+            // A global store that merely needs migration is an optional lane
+            // being skipped, not a failure to verify the scope of the results
+            // this search is about to return.
+            if error.contains(crate::core::global_store::GLOBAL_STORE_NEEDS_MIGRATION_MARKER) {
+                degraded.push(SearchDegradation::global_lane_migration_required(
+                    &paths.database_path,
+                ));
+            } else {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                    "global store read failed: {error}"
+                )));
+            }
+            None
+        }
+    }
+}
+
+/// User-global rows for a context pack whose workspace retrieval could not
+/// run (no index, or a stale, corrupt or incompatible one). The global lane is
+/// a separate store (ADR 0083), so a workspace index problem must not hide it;
+/// the caller scores these rows with the same deterministic lexical fallback
+/// it applies to workspace rows. The privacy policy is re-read and an
+/// untrustworthy one fails the request instead of enabling the lane.
+pub(crate) fn global_store_fallback_memories(
+    options: &SearchOptions,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Result<Vec<StoredMemory>, SearchError> {
+    if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let memory_config = crate::config::workspace_memory_policy(&options.workspace_path)
+        .map_err(SearchError::Configuration)?;
+    Ok(
+        admitted_global_store_memories(options, &memory_config, degraded)
+            .map(|(_, memories)| memories)
+            .unwrap_or_default(),
+    )
+}
+
 async fn global_store_frankensearch_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
@@ -11906,53 +11990,9 @@ async fn global_store_frankensearch_hits(
     if options.query.trim().is_empty() {
         return Vec::new();
     }
-    let paths = match super::global_store::default_global_store_paths_from_env() {
-        Ok(paths) => paths,
-        Err(error) => {
-            if matches!(options.memory_scope, MemoryScope::Global) {
-                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
-                    "global store path resolution failed: {error}"
-                )));
-            }
-            return Vec::new();
-        }
-    };
-    // The caller validated this request's policy before retrieval. Missing
-    // config retains opt-in-by-presence; unreadable config never reaches here.
-    let inclusion =
-        super::global_store::resolve_global_inclusion(&super::global_store::GlobalInclusionInput {
-            store_present: paths.database_path.exists(),
-            participating: memory_config.participate.unwrap_or(true),
-            config_enabled: memory_config.include_global.unwrap_or(true),
-            no_global_flag: false,
-        });
-    if !inclusion.included {
-        if matches!(options.memory_scope, MemoryScope::Global) {
-            degraded.push(SearchDegradation::global_memory_disabled(inclusion.reason));
-        }
+    let Some((paths, memories)) = admitted_global_store_memories(options, memory_config, degraded)
+    else {
         return Vec::new();
-    }
-    let memories = match super::global_store::read_global_store_memories_at(
-        &paths,
-        options.include_tombstoned,
-        Some(options.as_of.unwrap_or_else(Utc::now)),
-    ) {
-        Ok(memories) => memories,
-        Err(error) => {
-            // A global store that merely needs migration is an optional lane
-            // being skipped, not a failure to verify the scope of the results
-            // this search is about to return.
-            if error.contains(crate::core::global_store::GLOBAL_STORE_NEEDS_MIGRATION_MARKER) {
-                degraded.push(SearchDegradation::global_lane_migration_required(
-                    &paths.database_path,
-                ));
-            } else {
-                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
-                    "global store read failed: {error}"
-                )));
-            }
-            return Vec::new();
-        }
     };
     if memories.is_empty() {
         return Vec::new();
@@ -12082,7 +12122,7 @@ fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
     )
 }
 
-fn global_store_search_metadata(
+pub(crate) fn global_store_search_metadata(
     memory: &StoredMemory,
     reference_time: DateTime<Utc>,
 ) -> serde_json::Value {
