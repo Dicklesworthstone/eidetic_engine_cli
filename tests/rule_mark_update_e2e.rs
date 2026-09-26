@@ -935,7 +935,12 @@ fn native_rule_outcome_changes_rule_once_without_changing_source_memory() -> Tes
                 output.status.success()
                     && response["data"]["failedCount"] == 1
                     && response["data"]["recordedCount"] == 1,
-                format!("{step}: one rejected line must not prevent its valid sibling: {response}"),
+                format!(
+                    "{step}: one rejected line must not prevent its valid sibling: exit {:?}; stdout: {}; stderr: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
             )?;
             let results = &response["data"]["results"];
             ensure(
