@@ -18,7 +18,9 @@ The `ee.subscribe.poll.v1` response includes two ordered arrays:
   invalidate something the consumer previously retained. They include the
   memory/workspace/audit IDs, event cursor and timestamp, changed fields,
   affected filter dimensions, and `reason=prior_filter_membership_unknown`.
-  They do not disclose the actor, tags, level, kind, trust, or source body.
+  Immutable revisions additionally emit `reason=revision_superseded` for the
+  retired predecessor, including when no membership filter was requested.
+  Neither kind discloses the actor, tags, level, kind, trust, or source body.
 
 Process both arrays before acknowledging `nextCursor`. Evict any cached entry
 named by an invalidation and refetch through the normal scoped, lifecycle- and
@@ -50,6 +52,40 @@ bypass source admission. A tombstone can invalidate an identity even when its
 current memory row or filter metadata is unavailable. Consumers needing all
 revocations should not restrict `CHANGED_FIELDS` to unrelated fields or exclude
 relevant events with a moving `SINCE_MS` cutoff.
+
+## Immutable revisions are one cursor unit
+
+`ee memory revise` writes a new memory ID and retires the previous ID in one
+transaction, but its single audit row targets the new ID. Subscription replay
+delivers the successor through the usual delta/filter path and independently
+emits an identity-only retirement notice for the predecessor. Both carry the
+same cursor and audit ID. Process every item with that cursor before advancing;
+deduplicating only by cursor would discard half of a revision. Use the event
+kind and memory ID as well when deduplicating within a page.
+
+Retirement notices have `reason=revision_superseded`, an empty
+`affectedFilters` array, and the transition's changed fields plus
+`superseded_at`. Membership in an old tag/level/trust filter is not claimed:
+evicting an already absent predecessor is harmless. Explicit workspace,
+timestamp and changed-field routing still apply. The successor uses the
+producer's recorded fields, with `content` mapped to `content_hash`; tag-only,
+level-only, typed-field and seal-state revisions are not mislabeled as generic
+content updates.
+
+Both identities must exist in the addressed workspace and agree with the
+recorded logical lineage and revision boundary. Their metadata is checked in
+the same read snapshot as the audit page, in deduplicated 256-ID batches. A
+successor that was subsequently revised remains replayable as history. Missing
+or inconsistent lineage, malformed or ambiguous revision metadata, or a failed
+tag read withholds the entire page; no half-revision is acknowledged.
+
+The raw limit counts audit rows, not emitted notices. A revision can contribute
+two output items, even with `--limit 1`; its two identities never straddle
+pages. Revision audit details are limited to 16 KiB of UTF-8 bytes and are never
+truncated into parseable JSON. An oversized historical reason or missing
+history requires explicit repair or a full authoritative cache resynchronization,
+not silently skipping that event. Ordinary non-revision audit details are not
+loaded by this path.
 
 ## Recovery and limits
 

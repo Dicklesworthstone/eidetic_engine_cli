@@ -25,6 +25,9 @@ use crate::models::{DomainError, MemoryId};
 mod invalidation;
 pub use invalidation::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 
+#[path = "subscribe_revision.rs"]
+mod revision;
+
 fn storage_error(_: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
         message: "Could not read a consistent subscription page; no cursor was acknowledged"
@@ -202,7 +205,9 @@ impl<'a> SubscriptionSnapshot<'a> {
             .connection
             .query(
                 "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
-                    a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class \
+                    a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
+                    CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
+                         THEN a.details ELSE NULL END \
              FROM audit_log a LEFT JOIN memories m ON m.id = a.target_id \
              WHERE a.rowid > ?1 AND a.rowid <= ?4 \
                AND (a.target_type = 'memory' OR (a.target_type IS NULL \
@@ -217,6 +222,8 @@ impl<'a> SubscriptionSnapshot<'a> {
                     SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
                     cursor_sql_value(high_watermark),
                     SqlValue::Text(workspace_id.to_owned()),
+                    SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
+                    SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
                 ],
             )
             .map_err(storage_error)?;
@@ -226,6 +233,7 @@ impl<'a> SubscriptionSnapshot<'a> {
         let mut next_cursor = cursor.min(high_watermark);
         let mut deltas = Vec::new();
         let mut invalidations = Vec::new();
+        let mut revisions = Vec::new();
         // Metadata-excluded events can still invalidate prior membership.
         // Only candidates eligible for a full delta need current tag reads.
         let mut metadata_filter = filter.clone();
@@ -238,7 +246,15 @@ impl<'a> SubscriptionSnapshot<'a> {
             if MemoryId::from_str(&raw.memory_id).is_err() {
                 continue;
             }
-            let delta = materialize_delta(raw, Vec::new());
+            let is_revision = raw.action == audit_actions::MEMORY_REVISE;
+            let mut delta = materialize_delta(raw, Vec::new());
+            if is_revision {
+                revision::collect(
+                    &mut delta,
+                    row.get(10).and_then(SqlValue::as_str),
+                    &mut revisions,
+                )?;
+            }
             if metadata_filter.matches_delta(&delta, since_cutoff) {
                 deltas.push(delta);
             } else if let Some(notice) =
@@ -247,6 +263,13 @@ impl<'a> SubscriptionSnapshot<'a> {
                 invalidations.push(notice);
             }
         }
+        invalidations.extend(revision::retirement_notices(
+            self.connection,
+            workspace_id,
+            &revisions,
+            filter,
+            since_cutoff,
+        )?);
         self.hydrate_tags(&mut deltas)?;
         deltas.retain(|delta| {
             if filter.matches_delta(delta, since_cutoff) {
@@ -262,7 +285,11 @@ impl<'a> SubscriptionSnapshot<'a> {
         });
         // The metadata and tag phases can discover exits in opposite order.
         // Both arrays must retain the durable audit order within this page.
-        invalidations.sort_by_key(|notice| notice.cursor);
+        invalidations.sort_by(|left, right| {
+            left.cursor
+                .cmp(&right.cursor)
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
         if !has_more {
             // Skip only the proven-empty tail of this pinned snapshot. New
             // commits are above this watermark and remain visible next time.
