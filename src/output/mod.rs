@@ -2925,19 +2925,20 @@ pub fn render_context_response_json_with_options(
             pack.field_str("query", &response.data.pack.query);
             if let Some(hash) = &response.data.pack.hash {
                 pack.field_str("hash", hash);
-                // ADR 0087 v2: digest is pack.hash, the composite over the
+                // ADR 0087 v3: digest is pack.hash, the composite over the
                 // component digests listed beside it. numericDomain names the
                 // quantization of every hashed score.
                 let components = response.data.pack_hash_components.as_ref();
                 pack.field_object("snapshotIdentity", |identity| {
                     identity.field_u32("version", crate::pack::PACK_SNAPSHOT_IDENTITY_VERSION);
-                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V2);
+                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V3);
                     identity.field_str("digest", hash);
                     identity.field_str("numericDomain", "q20.12");
                     identity.field_bool("componentDigestsAvailableLocally", components.is_some());
                     if let Some(components) = components {
                         identity.field_object("components", |digests| {
                             digests.field_str("request", &components.request);
+                            digests.field_str("referenceTime", &components.reference_time);
                             digests.field_str("items", &components.items);
                             digests.field_str("omitted", &components.omitted);
                             digests.field_str("degraded", &components.degraded);

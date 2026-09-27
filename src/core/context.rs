@@ -130,9 +130,9 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v7: a cached response carries its snapshot identity, so entries written
-/// under pack-hash input v1 must miss rather than replay (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V7: &str = "ee.pack.l2_cache_key.v7";
+/// v8: bind the effective reference-time domain and miss cached responses
+/// written before pack-hash input v3 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V8: &str = "ee.pack.l2_cache_key.v8";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -1592,10 +1592,11 @@ pub(crate) fn admit_recent_context_memories(
     let connection = DbConnection::open_file_read_only(&database_path)
         .map_err(|error| ContextPackError::Storage(error.to_string()))?;
     let mut degraded = Vec::new();
-    let reference_time = options.as_of.unwrap_or_else(Utc::now);
-    // Preserve the precise row clock for newly committed memories. The
-    // storage query derives a separate canonical bound for lexical validity
-    // columns, so this does not relax author expiry or supersession.
+    let reference_time =
+        context_validity_reference_time(options, &options.filters).unwrap_or_else(Utc::now);
+    // Implicit wall-clock reads preserve precise row timestamps for newly
+    // committed memories; explicit clocks share the pack's millisecond domain.
+    // Storage derives a separate canonical bound for author-validity columns.
     let reference_time_text = crate::core::memory::normalize_row_timestamp(reference_time);
     let candidate_cap = limit.saturating_mul(4).max(limit);
     let mut memories = BTreeMap::new();
@@ -2360,6 +2361,7 @@ fn context_request_from_options_with_runtime_profile(
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     }
     request.task_paths = task_paths::normalize(&options.workspace_path, &options.task_paths)?;
+    request.reference_time = context_validity_reference_time(options, &options.filters);
     Ok(RuntimeProfileCappedRequest {
         request,
         effective_max_tokens,
@@ -2534,10 +2536,7 @@ pub fn explain_why_not(
         None
     };
 
-    let mut effective_filters = options.filters.clone();
-    if effective_filters.temporal.as_of.is_none() {
-        effective_filters.temporal.as_of = options.as_of;
-    }
+    let effective_filters = context_effective_filters(options);
 
     let mut degraded = Vec::new();
     let (read_pool_config, pin_snapshot) =
@@ -2547,7 +2546,7 @@ pub fn explain_why_not(
         read_pool_config,
     );
 
-    let request = ContextRequest::new(ContextRequestInput {
+    let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
         max_tokens: options.max_tokens,
@@ -2557,6 +2556,7 @@ pub fn explain_why_not(
     })
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
+    request.reference_time = context_validity_reference_time(options, &effective_filters);
     let read_snapshot = if pin_snapshot {
         read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
     } else {
@@ -2652,6 +2652,7 @@ pub fn explain_why_not(
         &mut degraded,
         Some(&search_preloaded_memories),
         &task_paths::normalize(&options.workspace_path, &options.task_paths)?,
+        request.reference_time,
     );
 
     let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
@@ -2739,6 +2740,7 @@ pub fn explain_why_not(
                 read_connection,
                 &options.workspace_path,
                 target_memory_id,
+                request.reference_time,
                 &mut degraded,
             )?
         }
@@ -2793,6 +2795,7 @@ fn reconstruct_not_retrieved_candidate(
     connection: &DbConnection,
     workspace_path: &Path,
     memory_id: MemoryId,
+    reference_time: Option<DateTime<Utc>>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Result<PackCandidate, ContextPackError> {
     let memory = connection
@@ -2841,7 +2844,7 @@ fn reconstruct_not_retrieved_candidate(
     let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(&memory, &tags))
         .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded))
-        .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
+        .with_lifecycle(pack_lifecycle_for_memory(&memory, reference_time));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -2875,10 +2878,7 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
     trace.record_elapsed("requestValidate", request_start);
 
-    let mut effective_filters = options.filters.clone();
-    if effective_filters.temporal.as_of.is_none() {
-        effective_filters.temporal.as_of = options.as_of;
-    }
+    let effective_filters = context_effective_filters(options);
 
     if effective_filters.redaction.requests_bypass() {
         return Err(ContextPackError::PolicyDenied(
@@ -3300,15 +3300,8 @@ async fn run_context_pack_with_performance_inner(
         &runtime_profile,
     ) {
         Ok(Some(decision)) => {
-            request = ContextRequest::new(ContextRequestInput {
-                query: request.query.clone(),
-                profile: Some(request.profile),
-                max_tokens: Some(decision.computed_tokens),
-                candidate_pool: Some(request.candidate_pool),
-                max_results: request.max_results,
-                sections: request.sections.clone(),
-            })
-            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+            request.budget = crate::pack::TokenBudget::new(decision.computed_tokens)
+                .map_err(|error| ContextPackError::Pack(error.to_string()))?;
             adaptive_budget_decision = Some(decision);
         }
         Ok(None) => {}
@@ -3335,6 +3328,7 @@ async fn run_context_pack_with_performance_inner(
         &mut degraded,
         Some(&search_preloaded_memories),
         &request.task_paths,
+        request.reference_time,
     );
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
@@ -3408,6 +3402,7 @@ async fn run_context_pack_with_performance_inner(
         options.include_tombstoned,
         &mut candidates,
         &mut degraded,
+        request.reference_time,
     );
     candidate_metrics.subspans.graph_hints = graph_hint_start.elapsed();
     candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
@@ -5168,6 +5163,22 @@ fn fallback_memory_validity_visibility(
     FallbackMemoryVisibility::Visible
 }
 
+fn context_effective_filters(options: &ContextPackOptions) -> crate::models::QueryFilters {
+    let mut filters = options.filters.clone();
+    let reference_time = context_validity_reference_time(options, &filters);
+    filters.temporal.as_of = filters
+        .temporal
+        .as_of
+        .or(options.as_of)
+        .map(crate::pack::canonical_pack_reference_time);
+    if let Some(validity) = filters.temporal.validity.as_mut() {
+        // Search, candidate admission and lifecycle explanations must agree
+        // when --as-of overrides the query-file validity clock.
+        validity.reference_time = reference_time;
+    }
+    filters
+}
+
 fn context_validity_reference_time(
     options: &ContextPackOptions,
     filters: &crate::models::QueryFilters,
@@ -5182,6 +5193,7 @@ fn context_validity_reference_time(
                 .and_then(|v| v.reference_time)
         })
         .or(filters.temporal.as_of)
+        .map(crate::pack::canonical_pack_reference_time)
 }
 
 fn context_include_expired(
@@ -8385,7 +8397,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V7.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V8.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -8407,6 +8419,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         input.redaction_level.as_str().as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "query", input.request.query.as_bytes());
+    hash_pack_reference_time(&mut hasher, input.request.reference_time);
     hash_labeled_bytes(
         &mut hasher,
         "context_profile",
@@ -8670,7 +8683,7 @@ struct PackHashComponents {
     composite_hash: String,
 }
 
-/// The v2 pack hash (ADR 0087 §4, §7, §8).
+/// The v3 pack hash (ADR 0087 §4, §7, §8).
 ///
 /// Each component is its own blake3 hasher, opened with the input schema tag
 /// and the component name, over labeled, length-prefixed fields only
@@ -8737,6 +8750,9 @@ fn compute_pack_hash_components(
     );
     hash_context_task_lens(&mut request_hasher, task_lens);
     task_paths::hash(&mut request_hasher, &request.task_paths);
+
+    let mut reference_time_hasher = pack_hash_component_hasher("reference_time");
+    hash_pack_reference_time(&mut reference_time_hasher, request.reference_time);
 
     let mut items_hasher = pack_hash_component_hasher("items");
     hash_labeled_u64(
@@ -8831,6 +8847,7 @@ fn compute_pack_hash_components(
 
     let digests = crate::pack::PackHashComponentDigests {
         request: finalize_blake3(request_hasher),
+        reference_time: finalize_blake3(reference_time_hasher),
         items: finalize_blake3(items_hasher),
         omitted: finalize_blake3(omitted_hasher),
         degraded: finalize_blake3(degraded_hasher),
@@ -8842,9 +8859,14 @@ fn compute_pack_hash_components(
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V2.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V3.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "reference_time",
+        digests.reference_time.as_bytes(),
+    );
     hash_labeled_bytes(&mut composite_hasher, "items", digests.items.as_bytes());
     if output_options.include_skipped {
         hash_labeled_bytes(&mut composite_hasher, "omitted", digests.omitted.as_bytes());
@@ -8868,12 +8890,12 @@ fn compute_pack_hash_components(
     }
 
     PackHashComponents {
-        composite_hash: finalize_pack_hash_v2(composite_hasher),
+        composite_hash: finalize_blake3(composite_hasher),
         digests,
     }
 }
 
-/// The degraded set the v2 pack hash binds (ADR 0087 §4): non-canonical
+/// The degraded set the v3 pack hash binds (ADR 0087 §4): non-canonical
 /// telemetry codes are dropped, the rest sorted by (code, severity, message,
 /// repair) with exact duplicates removed. Emission order and repetition are
 /// presentation, and timing is telemetry, so neither can fork `pack.hash`,
@@ -8902,7 +8924,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V2.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V3.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
@@ -8910,6 +8932,17 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
 
 fn hash_labeled_count(hasher: &mut blake3::Hasher, label: &str, count: usize) {
     hash_labeled_u64(hasher, label, u64::try_from(count).unwrap_or(u64::MAX));
+}
+
+fn hash_pack_reference_time(hasher: &mut blake3::Hasher, reference_time: Option<DateTime<Utc>>) {
+    if let Some(instant) = reference_time {
+        hash_labeled_bytes(hasher, "mode", b"explicit");
+        let canonical = crate::pack::canonical_pack_reference_time(instant)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        hash_labeled_bytes(hasher, "instant", canonical.as_bytes());
+    } else {
+        hash_labeled_bytes(hasher, "mode", b"wall_clock");
+    }
 }
 
 fn hash_labeled_optional_bytes(hasher: &mut blake3::Hasher, label: &str, value: Option<&[u8]>) {
@@ -9265,12 +9298,7 @@ fn finalize_blake3(hasher: blake3::Hasher) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
-/// The v2 composite `pack.hash` string. Its form is the self-identifying
-/// knob ADR 0087 §8 names, kept in one place.
-fn finalize_pack_hash_v2(hasher: blake3::Hasher) -> String {
-    finalize_blake3(hasher)
-}
-
+/// Record the component digests without exposing their request/body preimages.
 fn log_pack_hash_components(components: &PackHashComponents) {
     let run_index = PACK_HASH_LOG_RUN_INDEX.fetch_add(1, Ordering::Relaxed) + 1;
     crate::obs::log_event(
@@ -9281,6 +9309,10 @@ fn log_pack_hash_components(components: &PackHashComponents) {
         .with_field(
             "pack_request_hash",
             serde_json::Value::String(components.digests.request.clone()),
+        )
+        .with_field(
+            "reference_time_hash",
+            serde_json::Value::String(components.digests.reference_time.clone()),
         )
         .with_field(
             "draft_items_hash",
@@ -9322,6 +9354,13 @@ fn candidates_from_search_with_metrics(
         degraded,
         preloaded_memories,
         &[],
+        filters
+            .temporal
+            .validity
+            .as_ref()
+            .and_then(|validity| validity.reference_time)
+            .or(filters.temporal.as_of)
+            .map(crate::pack::canonical_pack_reference_time),
     )
 }
 
@@ -9335,6 +9374,7 @@ fn candidates_from_search_for_task_paths(
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
     targets: &[String],
+    reference_time: Option<DateTime<Utc>>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let requested = crate::core::workspace::stable_workspace_id(workspace_path);
     let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
@@ -9637,12 +9677,7 @@ fn candidates_from_search_for_task_paths(
                     workspace_path,
                     bound_workspace_id: bound_workspace_id.as_deref(),
                     query: &search_report.query,
-                    validity_reference_time: filters
-                        .temporal
-                        .validity
-                        .as_ref()
-                        .and_then(|validity| validity.reference_time)
-                        .or(filters.temporal.as_of),
+                    validity_reference_time: reference_time,
                     include_tombstoned,
                     freshness_file_cache: &mut freshness_file_cache,
                     rules: &rules_map,
@@ -11302,6 +11337,7 @@ fn apply_graph_hints(
     include_tombstoned: bool,
     candidates: &mut Vec<PackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
+    reference_time: Option<DateTime<Utc>>,
 ) -> GraphHintApplicationMetrics {
     let graph = &filters.graph;
     if graph.is_empty() {
@@ -11437,7 +11473,7 @@ fn apply_graph_hints(
             continue;
         }
         let tags = tags_map.get(&memory_id).cloned().unwrap_or_default();
-        if !graph_memory_matches_filters(memory, &tags, filters) {
+        if !graph_memory_matches_filters(memory, &tags, filters, reference_time) {
             continue;
         }
         let Some(typed_memory_id) = MemoryId::from_str(&memory_id).ok() else {
@@ -11456,7 +11492,10 @@ fn apply_graph_hints(
             degraded,
         ) {
             metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
-            candidates.push(candidate);
+            candidates.push(candidate.with_lifecycle(pack_lifecycle_for_memory(
+                memory,
+                reference_time,
+            )));
         }
     }
 
@@ -11818,9 +11857,10 @@ fn graph_memory_matches_filters(
     memory: &StoredMemory,
     tags: &[String],
     filters: &crate::models::QueryFilters,
+    reference_time: Option<DateTime<Utc>>,
 ) -> bool {
     if !filters.filters.is_empty() {
-        let reference_time = filters.temporal.as_of.unwrap_or_else(Utc::now);
+        let reference_time = reference_time.unwrap_or_else(Utc::now);
         let metadata = memory_fallback_metadata(memory, reference_time);
         if !filters.matches(Some(&metadata)) {
             return false;
@@ -12312,8 +12352,7 @@ fn graph_candidate_from_memory(
     .ok()?;
     let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(memory, tags))
-        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded))
-        .with_lifecycle(pack_lifecycle_for_memory(memory, None));
+        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -13051,7 +13090,10 @@ fn focus_candidate_from_item(
     let candidate = apply_source_signals(candidate, source_signals)
         .with_diversity_key(diversity_key_for_memory(&memory, &tags))
         .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded))
-        .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
+        .with_lifecycle(pack_lifecycle_for_memory(
+            &memory,
+            Some(source.validity_reference_time),
+        ));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,

@@ -1628,6 +1628,88 @@ mod tests {
     }
 
     #[test]
+    fn context_reference_time_uses_one_precedence_and_millisecond_domain() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
+        options.workspace_path = tempdir.path().to_path_buf();
+        options.max_tokens = Some(u32::MAX);
+        options.candidate_pool = Some(u32::MAX);
+        options.as_of = Some(query_time("2026-05-02T00:00:00.123999Z"));
+        options.filters.temporal.as_of = Some(query_time("2026-05-01T00:00:00.456789Z"));
+        options.filters.temporal.validity = Some(QueryTemporalValidity {
+            posture: QueryTemporalValidityPosture::Strict,
+            reference_time: Some(query_time("2026-05-01T12:00:00.789999Z")),
+        });
+        assert_eq!(
+            super::context_effective_filters(&options).temporal.as_of,
+            Some(query_time("2026-05-01T00:00:00.456Z")),
+            "the independent query-file row-history cutoff remains in force"
+        );
+
+        for expected in [
+            Some(query_time("2026-05-02T00:00:00.123Z")),
+            Some(query_time("2026-05-01T12:00:00.789Z")),
+            Some(query_time("2026-05-01T00:00:00.456Z")),
+            None,
+        ] {
+            let capped = super::context_request_from_options_with_runtime_profile(
+                &options,
+                &test_runtime_profile(),
+            )
+            .map_err(|error| error.to_string())?;
+            assert!(capped.tokens_capped && capped.candidate_pool_capped);
+            let request = capped.request;
+            let effective = super::context_effective_filters(&options);
+            assert_eq!(request.reference_time, expected);
+            assert_eq!(
+                super::context_validity_reference_time(&options, &effective),
+                expected,
+                "the search clock must equal the identity clock"
+            );
+            assert_eq!(
+                effective
+                    .temporal
+                    .validity
+                    .as_ref()
+                    .and_then(|v| v.reference_time),
+                expected,
+                "candidate admission must use the same precedence as search"
+            );
+            if options.as_of.take().is_none()
+                && options
+                    .filters
+                    .temporal
+                    .validity
+                    .as_mut()
+                    .and_then(|v| v.reference_time.take())
+                    .is_none()
+            {
+                options.filters.temporal.as_of = None;
+            }
+        }
+
+        options.as_of = Some(query_time("2026-05-02T00:00:00.123999Z"));
+        let effective = super::context_effective_filters(&options);
+        let memory = stored_memory_with_time(
+            "2026-05-01T00:00:00Z",
+            "2026-05-01T00:00:00Z",
+            None,
+            Some("2026-05-02T00:00:00.123500Z"),
+        );
+        assert_eq!(
+            super::temporal_memory_validity_outcome(&memory, &effective.temporal),
+            super::TemporalCandidateOutcome::Include,
+            "selection must use .123Z, not the unbound .123999Z input"
+        );
+        assert_eq!(
+            crate::pack::canonical_pack_reference_time(query_time("1969-12-31T23:59:59.999999Z")),
+            query_time("1969-12-31T23:59:59.999Z"),
+            "pre-epoch instants truncate toward the start of their millisecond"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_pack_l2_bypasses_side_effects_and_explicit_databases() {
         let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
         let filters = crate::models::QueryFilters::default();
@@ -8993,6 +9075,51 @@ pub fn unrelated_context() -> u64 {{
             Some("expired")
         );
 
+        // Keep the DB, candidates and effective budget identical while moving
+        // only the explicit clock. Adaptive budgeting used to rebuild the
+        // request and would silently discard newly bound request fields.
+        std::fs::write(
+            base_options.workspace_path.join(".ee/config.toml"),
+            "[pack]\nadaptive_budget = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let mut timed_options = base_options.clone();
+        timed_options.persist_pack = false;
+        timed_options.max_tokens = None;
+        timed_options.task_paths = vec!["src/lib.rs".to_owned()];
+        timed_options.as_of = Some(query_time("2098-01-01T00:00:00.123456Z"));
+        let first_timed = super::run_context_pack(&timed_options)
+            .map_err(|error| format!("first timed pack failed: {error:?}"))?;
+        assert!(first_timed.data.adaptive_budget.is_some());
+        assert!(!first_timed.data.request.task_paths.is_empty());
+        assert_eq!(
+            first_timed.data.request.reference_time,
+            Some(query_time("2098-01-01T00:00:00.123Z"))
+        );
+        timed_options.as_of = Some(query_time("2098-01-01T00:00:00.124111Z"));
+        let second_timed = super::run_context_pack(&timed_options)
+            .map_err(|error| format!("second timed pack failed: {error:?}"))?;
+        assert_eq!(first_timed.data.pack.items, second_timed.data.pack.items);
+        let first_identity = first_timed
+            .data
+            .pack_hash_components
+            .as_ref()
+            .ok_or_else(|| "first pack is missing component digests".to_owned())?;
+        let second_identity = second_timed
+            .data
+            .pack_hash_components
+            .as_ref()
+            .ok_or_else(|| "second pack is missing component digests".to_owned())?;
+        assert_eq!(
+            first_identity.differing_components(second_identity),
+            ["referenceTime"]
+        );
+        assert_ne!(first_timed.data.pack.hash, second_timed.data.pack.hash);
+        timed_options.as_of = Some(query_time("2098-01-01T00:00:00.123999Z"));
+        let same_millisecond = super::run_context_pack(&timed_options)
+            .map_err(|error| format!("same-millisecond pack failed: {error:?}"))?;
+        assert_eq!(first_timed.data.pack.hash, same_millisecond.data.pack.hash);
+
         let mut replay_options = base_options;
         replay_options.as_of = Some(query_time("2099-06-15T00:00:00Z"));
         let replay_response = super::run_context_pack(&replay_options)
@@ -10407,6 +10534,51 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    #[test]
+    fn pack_hash_v3_names_reference_time_without_changing_other_components() -> Result<(), String> {
+        use super::{ContextPackOutputOptions, compute_pack_hash_components};
+
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let options = ContextPackOutputOptions::default();
+        let hash = |request: &ContextRequest| {
+            compute_pack_hash_components(request, &draft, &[], options, None, None, None)
+        };
+        let wall_clock = hash(&request);
+        assert_eq!(wall_clock.digests, hash(&request).digests);
+        request.reference_time = Some(query_time("2026-05-01T12:00:00.123456Z"));
+        let first = hash(&request);
+        request.reference_time = Some(query_time("2026-05-01T12:00:00.124Z"));
+        let later = hash(&request);
+        for other in [&wall_clock, &later] {
+            assert_eq!(
+                first.digests.differing_components(&other.digests),
+                ["referenceTime"]
+            );
+            assert_ne!(first.composite_hash, other.composite_hash);
+        }
+        request.reference_time = Some(query_time("2026-05-01T08:00:00.123999-04:00"));
+        assert_eq!(first.digests, hash(&request).digests);
+        assert_eq!(first.composite_hash, hash(&request).composite_hash);
+
+        let mut response_draft = draft.clone();
+        response_draft.hash = Some(first.composite_hash.clone());
+        let mut response = crate::pack::ContextResponse::new(request, response_draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        response.data.pack_hash_components = Some(first.digests.clone());
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json(&response))
+                .map_err(|error| error.to_string())?;
+        let identity = &json["data"]["pack"]["snapshotIdentity"];
+        assert_eq!(identity["version"], 3);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v3");
+        assert_eq!(
+            identity["components"]["referenceTime"],
+            first.digests.reference_time
+        );
+        assert_eq!(identity["digest"], first.composite_hash);
+        Ok(())
+    }
+
     /// ADR 0087 §7: a differing input changes its own component digest and
     /// the composite, and no other component. `rendered_text` is derived from
     /// request, items, omissions, degraded and coordination, so it also moves
@@ -10427,6 +10599,7 @@ pub fn unrelated_context() -> u64 {{
             let (l, r) = (&left.digests, &right.digests);
             [
                 ("request", l.request == r.request),
+                ("referenceTime", l.reference_time == r.reference_time),
                 ("items", l.items == r.items),
                 ("omitted", l.omitted == r.omitted),
                 ("degraded", l.degraded == r.degraded),
@@ -10818,6 +10991,18 @@ pub fn unrelated_context() -> u64 {{
             compute_pack_l2_cache_key(&base),
             "same canonical inputs must reproduce the same key"
         );
+
+        let mut timed = base.clone();
+        timed.request.reference_time = Some(query_time("2026-05-01T12:00:00.123456Z"));
+        let timed_key = compute_pack_l2_cache_key(&timed);
+        assert_ne!(
+            key, timed_key,
+            "explicit time must differ from wall-clock mode"
+        );
+        timed.request.reference_time = Some(query_time("2026-05-01T08:00:00.123999-04:00"));
+        assert_eq!(timed_key, compute_pack_l2_cache_key(&timed));
+        timed.request.reference_time = Some(query_time("2026-05-01T12:00:00.124Z"));
+        assert_ne!(timed_key, compute_pack_l2_cache_key(&timed));
 
         let mut changed_query = base.clone();
         changed_query.request = ContextRequest::new(ContextRequestInput {
