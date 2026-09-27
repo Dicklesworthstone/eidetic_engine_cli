@@ -3274,13 +3274,12 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn tombstone_visibility_unavailable(error: &str) -> Self {
+    fn tombstone_visibility_unavailable() -> Self {
         Self {
             code: "tombstone_visibility_unavailable".to_string(),
             severity: "medium".to_string(),
-            message: format!(
-                "Search could not verify tombstone visibility against the memory database: {error}"
-            ),
+            message: "Search could not verify tombstone visibility against the memory database; unverifiable memory hits were withheld."
+                .to_owned(),
             repair: Some("ee doctor --json".to_string()),
         }
     }
@@ -13230,7 +13229,7 @@ fn apply_tombstone_visibility_collecting(
     read_connection: Option<&DbConnection>,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Vec<SearchHit> {
-    if hits.is_empty() {
+    if !hits.iter().any(|hit| hit.doc_id.starts_with("mem_")) {
         return hits;
     }
     if let Some(connection) = read_connection {
@@ -13243,18 +13242,18 @@ fn apply_tombstone_visibility_collecting(
         );
     }
 
-    let explicit_database_path = options.database_path.is_some();
     let database_path = options.resolve_database_path();
-    if !explicit_database_path && !database_path.exists() {
-        return hits;
-    }
     let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
-        Err(error) => {
-            degraded.push(SearchDegradation::tombstone_visibility_unavailable(
-                &error.to_string(),
-            ));
-            return hits;
+        Err(_) => {
+            // An unavailable source cannot authorize a cached memory body,
+            // including when the default store is simply absent. Native
+            // entities retain their separate live-admission boundaries.
+            degraded.push(SearchDegradation::tombstone_visibility_unavailable());
+            return hits
+                .into_iter()
+                .filter(|hit| !hit.doc_id.starts_with("mem_"))
+                .collect();
         }
     };
 
@@ -13305,27 +13304,26 @@ fn apply_tombstone_visibility_with_connection(
     let mut orphaned_filtered = 0usize;
     let mut included = 0usize;
     let mut drift_hints = Vec::new();
-    let mut seal_lookup_error = None;
+    let mut seal_lookup_failed = 0usize;
+    let mut memory_lookup_failed = 0usize;
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
     {
         let mut handle_loaded_memory =
             |mut hit: SearchHit, memory: &crate::db::StoredMemory| -> Option<SearchHit> {
-                // The canonical index projection omits sealed-unrevealed
-                // rows. Keep this read-side guard as defense in depth for
-                // indexes published before that eligibility revision. Seal
-                // sidecar state is authoritative: ordinary content equal to
-                // the placeholder text remains searchable.
-                if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-                    match connection.get_memory_seal(&memory.id) {
-                        Ok(Some(_)) => {
-                            sealed_filtered = sealed_filtered.saturating_add(1);
-                            return None;
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            seal_lookup_error.get_or_insert_with(|| error.to_string());
-                        }
+                // Seal sidecars are authoritative even when a stale or
+                // malformed row carries ordinary body text. Neither the
+                // placeholder spelling nor a cached projection proves that
+                // content was revealed; a failed lookup cannot grant access.
+                match connection.get_memory_seal(&memory.id) {
+                    Ok(Some(seal)) if seal.is_sealed() => {
+                        sealed_filtered = sealed_filtered.saturating_add(1);
+                        return None;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        seal_lookup_failed = seal_lookup_failed.saturating_add(1);
+                        return None;
                     }
                 }
                 if memory.tombstoned_at.is_some() {
@@ -13427,19 +13425,19 @@ fn apply_tombstone_visibility_with_connection(
                             orphaned_filtered = orphaned_filtered.saturating_add(1);
                         }
                     }
-                    Err(error) => {
-                        degraded.push(SearchDegradation::tombstone_visibility_unavailable(
-                            &error.to_string(),
-                        ));
-                        visible_hits.push(hit);
+                    Err(_) => {
+                        // A failed read is not absence and cannot be repaired
+                        // by trusting the index or a preloaded row instead.
+                        memory_lookup_failed = memory_lookup_failed.saturating_add(1);
                     }
                 }
             }
         }
     }
 
-    if let Some(error) = seal_lookup_error {
-        degraded.push(SearchDegradation::tombstone_visibility_unavailable(&error));
+    let source_unavailable_filtered = seal_lookup_failed.saturating_add(memory_lookup_failed);
+    if source_unavailable_filtered > 0 {
+        degraded.push(SearchDegradation::tombstone_visibility_unavailable());
     }
 
     let total_before = visible_hits
@@ -13450,7 +13448,8 @@ fn apply_tombstone_visibility_with_connection(
         .saturating_add(stale_filtered)
         .saturating_add(malformed_filtered)
         .saturating_add(sealed_filtered)
-        .saturating_add(orphaned_filtered);
+        .saturating_add(orphaned_filtered)
+        .saturating_add(source_unavailable_filtered);
     let validity_filtered = expired_filtered
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
@@ -13471,6 +13470,7 @@ fn apply_tombstone_visibility_with_connection(
         malformed_filtered_count = malformed_filtered,
         sealed_filtered_count = sealed_filtered,
         orphaned_filtered_count = orphaned_filtered,
+        source_unavailable_filtered_count = source_unavailable_filtered,
         valid_count = visible_hits.len(),
         "visibility_filter"
     );
@@ -18030,6 +18030,299 @@ mod tests {
         assert!(degraded.iter().any(|entry| {
             entry.code == "search_index_stale" && entry.message.contains("Filtered 1")
         }));
+        Ok(())
+    }
+
+    fn memory_visibility_hit(doc_id: &str, content: &str) -> SearchHit {
+        SearchHit {
+            doc_id: doc_id.to_owned(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({ "content": content })),
+            explanation: None,
+        }
+    }
+
+    #[test]
+    fn memory_visibility_withholds_missing_and_unreadable_source_stores() -> TestResult {
+        const MEMORY: &str = "mem_00000000000000000000000921";
+        const NATIVE: &str = "ses_00000000000000000000000921";
+        const CACHED_BODY: &str = "UNVERIFIED-CACHED-BODY-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let directory = workspace.path().join("private-source-directory");
+        std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
+        let malformed = workspace.path().join("malformed-source.db");
+        std::fs::write(&malformed, b"not a database").map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        for database_path in [
+            None,
+            Some(workspace.path().join("missing-source.db")),
+            Some(directory.clone()),
+            Some(malformed.clone()),
+        ] {
+            options.database_path = database_path;
+            let mut degraded = Vec::new();
+            let visible = apply_tombstone_visibility(
+                &options,
+                vec![
+                    memory_visibility_hit(MEMORY, CACHED_BODY),
+                    memory_visibility_hit(NATIVE, "Native entity has its own admission gate"),
+                ],
+                &mut degraded,
+                None,
+            );
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0].doc_id, NATIVE);
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "tombstone_visibility_unavailable");
+            assert!(degraded[0].message.contains("withheld"));
+            assert!(!degraded[0].message.contains("private-source-directory"));
+            assert!(
+                !serde_json::json!({ "hits": visible, "degraded": degraded })
+                    .to_string()
+                    .contains(CACHED_BODY)
+            );
+
+            let mut assisted_degraded = Vec::new();
+            let assisted = query_assist_visible_candidates(
+                &options,
+                &[memory_visibility_hit(MEMORY, CACHED_BODY)],
+                &mut assisted_degraded,
+                None,
+            );
+            assert!(
+                assisted.is_empty(),
+                "query assistance must not revive a withheld body"
+            );
+            assert!(
+                assisted_degraded
+                    .iter()
+                    .any(|entry| entry.code == "tombstone_visibility_unavailable")
+            );
+        }
+        assert!(!workspace.path().join(".ee").exists());
+        assert!(!workspace.path().join("missing-source.db").exists());
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::read(malformed).map_err(|error| error.to_string())?,
+            b"not a database"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_visibility_read_failure_cannot_reuse_index_or_preloaded_bodies() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000922";
+        const MEMORY: &str = "mem_00000000000000000000000922";
+        const NATIVE: &str = "ev_00000000000000000000000922";
+        const BODY: &str = "SOURCE-LOOKUP-FAILURE-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(MEMORY, &test_memory_input(WORKSPACE, BODY))
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(MEMORY)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "source memory missing".to_owned())?;
+        let mut preloaded = BTreeMap::from([(MEMORY.to_owned(), memory)]);
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        let mut healthy_degraded = Vec::new();
+        let healthy = apply_tombstone_visibility(
+            &options,
+            vec![memory_visibility_hit(MEMORY, BODY)],
+            &mut healthy_degraded,
+            Some(&connection),
+        );
+        assert_eq!(healthy.len(), 1, "positive source authority permits the hit");
+        assert!(healthy_degraded.is_empty());
+
+        connection
+            .execute_raw("ALTER TABLE memories RENAME TO temporarily_unavailable_memories")
+            .map_err(|error| error.to_string())?;
+        assert!(connection.get_memories_batch(&[MEMORY]).is_err());
+        assert!(connection.get_memory(MEMORY).is_err());
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility_collecting(
+            &options,
+            vec![
+                memory_visibility_hit(MEMORY, BODY),
+                memory_visibility_hit(NATIVE, "Typed evidence retains its separate gate"),
+            ],
+            &mut degraded,
+            Some(&connection),
+            Some(&mut preloaded),
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, NATIVE);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "tombstone_visibility_unavailable");
+        assert!(!degraded[0].message.contains("temporarily_unavailable_memories"));
+        assert!(
+            !serde_json::json!({ "hits": visible, "degraded": degraded })
+                .to_string()
+                .contains(BODY)
+        );
+
+        let mut assisted_degraded = Vec::new();
+        assert!(
+            query_assist_visible_candidates(
+                &options,
+                &[memory_visibility_hit(MEMORY, BODY)],
+                &mut assisted_degraded,
+                Some(&connection),
+            )
+            .is_empty()
+        );
+        let mut handoff = PackSearchHandoff {
+            report: rerank_test_report(
+                vec![memory_visibility_hit(MEMORY, BODY)],
+                Vec::new(),
+                false,
+            ),
+            audit_facts: None,
+            cached_local_embedder: None,
+            snapshot: PackSearchSnapshot {
+                workspace_id: WORKSPACE.to_owned(),
+                generation: 0,
+            },
+        };
+        assert!(handoff.revalidate(&options, &connection).is_empty());
+        assert!(handoff.report.results.is_empty());
+        assert_eq!(handoff.report.status, SearchStatus::NoResults);
+        assert!(
+            !handoff.report.data_json().to_string().contains(BODY),
+            "a cached daemon handoff must not reintroduce an unverifiable memory"
+        );
+        connection
+            .execute_raw("ALTER TABLE temporarily_unavailable_memories RENAME TO memories")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_memory(MEMORY)
+                .map_err(|error| error.to_string())?
+                .as_ref(),
+            preloaded.get(MEMORY),
+            "read failures must leave the source row unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_visibility_obeys_seal_authority_independent_of_body_spelling() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000923";
+        const SEALED: &str = "mem_00000000000000000000000923";
+        const PLACEHOLDER: &str = "mem_00000000000000000000000924";
+        const BODY: &str = "UNREVEALED-SOURCE-BODY-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, content) in [
+            (SEALED, BODY),
+            (PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
+        ] {
+            connection
+                .insert_memory(id, &test_memory_input(WORKSPACE, content))
+                .map_err(|error| error.to_string())?;
+        }
+        let before = connection
+            .list_memories(WORKSPACE, None, true)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                SEALED,
+                &format!("blake3:{}", "a".repeat(64)),
+                "2026-01-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        // Explicit lifecycle visibility flags never authorize a closed seal.
+        options.include_tombstoned = true;
+        options.include_expired = true;
+        options.include_future = true;
+        options.include_stale = true;
+        let hits = vec![
+            memory_visibility_hit(SEALED, BODY),
+            memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
+        ];
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(
+            &options,
+            hits.clone(),
+            &mut degraded,
+            Some(&connection),
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].doc_id, PLACEHOLDER,
+            "unsealed placeholder text remains ordinary memory"
+        );
+        assert!(!serde_json::json!(visible).to_string().contains(BODY));
+        assert!(
+            connection
+                .mark_memory_seal_revealed(SEALED, "2026-02-01T00:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            apply_tombstone_visibility(
+                &options,
+                hits.clone(),
+                &mut Vec::new(),
+                Some(&connection),
+            )
+            .len(),
+            2
+        );
+
+        connection
+            .execute_raw("ALTER TABLE memory_seals RENAME TO temporarily_unavailable_seals")
+            .map_err(|error| error.to_string())?;
+        assert!(connection.get_memory_seal(SEALED).is_err());
+        let mut unavailable = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&options, hits, &mut unavailable, Some(&connection));
+        assert!(
+            visible.is_empty(),
+            "unreadable seal authority cannot reveal either body"
+        );
+        assert_eq!(
+            unavailable.len(), 1,
+            "source diagnostics are bounded per visibility pass"
+        );
+        assert_eq!(unavailable[0].code, "tombstone_visibility_unavailable");
+        assert!(!serde_json::json!(unavailable).to_string().contains(BODY));
+        assert_eq!(
+            connection
+                .list_memories(WORKSPACE, None, true)
+                .map_err(|error| error.to_string())?,
+            before
+        );
         Ok(())
     }
 
