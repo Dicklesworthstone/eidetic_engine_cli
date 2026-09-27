@@ -453,9 +453,22 @@ impl ReadConnectionPool {
         metadata: SnapshotPinMetadata,
     ) -> Result<SnapshotPin<'_>> {
         let connection = self.acquire()?;
+        // Own cleanup before BEGIN, the first read, or pin registration can
+        // fail or unwind. A bare pooled connection would otherwise go back to
+        // the idle list with an open or uncertain transaction. The same guard
+        // also abandons the handle if rollback fails during admission.
+        let mut snapshot = SnapshotPin {
+            pool: if pin_snapshot { Some(self) } else { None },
+            connection: Some(connection),
+            snapshot_active: pin_snapshot,
+            pin_id: None,
+            poisoned: Arc::new(AtomicBool::new(false)),
+            acquired_at: Instant::now(),
+            max_pin_duration: self.config.max_pin_duration(),
+        };
         if pin_snapshot {
-            if let Err(error) = connection.begin_read_snapshot() {
-                if let Err(rollback_error) = connection.rollback_read_snapshot() {
+            if let Err(error) = snapshot.connection().begin_read_snapshot() {
+                if let Err(rollback_error) = snapshot.rollback() {
                     tracing::error!(
                         phase = "db_read_pool_begin_snapshot",
                         error = %error,
@@ -465,30 +478,23 @@ impl ReadConnectionPool {
                 }
                 return Err(error);
             }
-        }
-
-        let acquired_at = Instant::now();
-        let (pin_id, poisoned) = if pin_snapshot {
+            // BEGIN DEFERRED alone is not a portable first-read boundary.
+            // Read the schema inside the guarded transaction before returning
+            // a pin: later caller scheduling must not move its database view.
+            // This is bounded, works before migrations, and writes no state.
+            snapshot
+                .connection()
+                .query("SELECT name FROM sqlite_master LIMIT 1", &[])?;
             let (pin_id, poisoned) = self.register_pin(
-                connection.slot_id(),
+                snapshot.connection().slot_id(),
                 metadata,
-                acquired_at,
-                self.config.max_pin_duration(),
+                snapshot.acquired_at,
+                snapshot.max_pin_duration,
             );
-            (Some(pin_id), poisoned)
-        } else {
-            (None, Arc::new(AtomicBool::new(false)))
-        };
-
-        Ok(SnapshotPin {
-            pool: if pin_snapshot { Some(self) } else { None },
-            connection: Some(connection),
-            snapshot_active: pin_snapshot,
-            pin_id,
-            poisoned,
-            acquired_at,
-            max_pin_duration: self.config.max_pin_duration(),
-        })
+            snapshot.pin_id = Some(pin_id);
+            snapshot.poisoned = poisoned;
+        }
+        Ok(snapshot)
     }
 
     #[must_use]
@@ -3100,5 +3106,143 @@ mod tests {
             fanout_p50.saturating_mul(100) <= single_p50.saturating_mul(60),
             "pool_size=8 p50 {fanout_p50}ms should be <= 60% of pool_size=1 p50 {single_p50}ms; single={single_latencies:?} fanout={fanout_latencies:?}",
         );
+    }
+
+    #[test]
+    fn admitted_snapshot_precedes_first_caller_read_at_every_pool_size() {
+        for pool_size in [1, 2, 4, 8] {
+            let (_tempdir, database_path, pool) = file_pool(pool_size);
+            assert_eq!(must(pool.warm(pool_size), "pool warms"), pool_size);
+            let pin = must(pool.pin_snapshot(), "snapshot admission succeeds");
+            // No caller read has touched snapshot_items before this commit.
+            insert_snapshot_item(&database_path, 2, "after_admission");
+            assert_eq!(
+                snapshot_item_count(&pin),
+                1,
+                "pool_size={pool_size}: admission must already hold the view"
+            );
+            drop(pin);
+            let fresh = must(pool.pin_snapshot(), "fresh snapshot admission succeeds");
+            assert_eq!(snapshot_item_count(&fresh), 2);
+            must(fresh.commit(), "fresh snapshot commits");
+            let stats = pool.stats();
+            assert_eq!(stats.active, 0);
+            assert_eq!(stats.active_pins, 0);
+            assert_eq!(stats.idle, pool_size);
+            assert_eq!(stats.release_failures, 0);
+            assert_eq!(stats.ad_hoc_bypass_count, 0);
+        }
+    }
+
+    #[test]
+    fn admitted_ad_hoc_snapshot_precedes_first_caller_read() {
+        let (_tempdir, database_path, mut pool) = file_pool(1);
+        pool.config.acquire_timeout = Duration::ZERO;
+        let held = must(pool.acquire(), "hold the sole pooled slot");
+        let pin = must(pool.pin_snapshot(), "ad-hoc snapshot admission succeeds");
+        assert!(pin.slot_id().is_none());
+        assert_eq!(pool.stats().active_pins, 1);
+        insert_snapshot_item(&database_path, 2, "after_ad_hoc_admission");
+        assert_eq!(snapshot_item_count(&pin), 1);
+        must(pin.rollback(), "ad-hoc snapshot releases");
+        assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().active_pins, 0);
+        drop(held);
+        let fresh = must(pool.pin_snapshot(), "pooled snapshot admission succeeds");
+        assert_eq!(snapshot_item_count(&fresh), 2);
+        drop(fresh);
+        assert_eq!(pool.stats().ad_hoc_bypass_count, 1);
+        assert_eq!(pool.stats().release_failures, 0);
+    }
+
+    #[test]
+    fn snapshot_admission_unwind_releases_transaction_before_pool_reuse() {
+        for ad_hoc in [false, true] {
+            let (_tempdir, database_path, mut pool) = file_pool(1);
+            pool.config.acquire_timeout = Duration::ZERO;
+            let held = ad_hoc.then(|| must(pool.acquire(), "hold pooled slot"));
+            // Fail in the real registration path, after BEGIN and the schema
+            // read but before the public SnapshotPin has been returned.
+            pool.lock_state().next_pin_id = u64::MAX;
+            let failure = catch_unwind(AssertUnwindSafe(|| {
+                let _ = pool.pin_snapshot();
+            }));
+            assert!(failure.is_err(), "registration exhaustion must unwind");
+            let stats = pool.stats();
+            assert_eq!(stats.active_pins, 0);
+            assert_eq!(stats.active, usize::from(ad_hoc));
+            assert_eq!(stats.idle, usize::from(!ad_hoc));
+            assert_eq!(stats.release_failures, 0);
+            assert_eq!(stats.drops, 0);
+            // Test-only recovery from the injected ID exhaustion. The next
+            // snapshot must start successfully, not fail a nested BEGIN.
+            pool.lock_state().next_pin_id = 1;
+            drop(held);
+            insert_snapshot_item(&database_path, 2, "after_failed_admission");
+            let fresh = must(pool.pin_snapshot(), "admission reuses a clean connection");
+            assert_eq!(fresh.slot_id(), Some(1));
+            assert_eq!(snapshot_item_count(&fresh), 2);
+            drop(fresh);
+            assert_eq!(pool.stats().active, 0);
+            assert_eq!(pool.stats().idle, 1);
+            assert_eq!(pool.stats().active_pins, 0);
+            assert_eq!(pool.stats().release_failures, 0);
+        }
+    }
+
+    #[test]
+    fn unpinned_admission_does_not_freeze_first_caller_read() {
+        let (_tempdir, database_path, pool) = file_pool(1);
+        let reader = must(pool.acquire_snapshot(false), "unpinned admission succeeds");
+        assert!(!reader.is_pinned());
+        assert!(pool.active_snapshot_pins().is_empty());
+        insert_snapshot_item(&database_path, 2, "before_first_unpinned_read");
+        assert_eq!(snapshot_item_count(&reader), 2);
+        insert_snapshot_item(&database_path, 3, "before_second_unpinned_read");
+        assert_eq!(snapshot_item_count(&reader), 3);
+        drop(reader);
+        assert_eq!(pool.stats().release_failures, 0);
+        assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn reused_slot_admits_a_new_view_without_leaking_the_previous_one() {
+        let (_tempdir, database_path, pool) = file_pool(1);
+        for round in 1..=3 {
+            let pin = must(pool.pin_snapshot(), "reused slot admits snapshot");
+            assert_eq!(pin.slot_id(), Some(1));
+            insert_snapshot_item(&database_path, round + 1, "after_each_admission");
+            assert_eq!(snapshot_item_count(&pin), round);
+            if round == 2 {
+                must(pin.commit(), "explicit commit releases snapshot");
+            } else {
+                drop(pin);
+            }
+            assert_eq!(pool.stats().active, 0);
+            assert_eq!(pool.stats().active_pins, 0);
+            assert_eq!(pool.stats().idle, 1);
+        }
+        let reader = must(pool.acquire(), "raw reader after snapshot reuse");
+        assert_eq!(snapshot_item_count(&reader), 4);
+        assert_eq!(pool.stats().release_failures, 0);
+    }
+
+    #[test]
+    fn snapshot_admission_works_with_an_empty_unmigrated_schema() {
+        let pool = memory_pool(1, Duration::from_secs(30));
+        let pin = must(pool.pin_snapshot(), "empty schema admits snapshot");
+        assert!(must(
+            pin.query("SELECT name FROM sqlite_master", &[]),
+            "empty schema reads"
+        )
+        .is_empty());
+        must(pin.rollback(), "empty snapshot releases");
+        let connection = must(pool.acquire(), "unmigrated connection remains reusable");
+        assert_eq!(connection.slot_id(), Some(1));
+        must(
+            connection.execute_raw("CREATE TABLE after_empty_pin (id INTEGER PRIMARY KEY)"),
+            "admission does not leave a transaction or create application tables",
+        );
+        assert_eq!(pool.stats().release_failures, 0);
     }
 }
