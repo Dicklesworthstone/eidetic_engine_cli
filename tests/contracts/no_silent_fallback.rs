@@ -87,10 +87,6 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     // Found in src/cli/mesh.rs -- mesh code that lives outside src/mesh/, which
     // is why the bd-zjcx6 sweep did not cover it.
     "bd-xwzeh",
-    // bd-8a19j: the same Err-collapsed-into-absence shape at P2 severity --
-    // a workspace config that FAILS VALIDATION yields default search fusion
-    // weights, indistinguishable from having configured none.
-    "bd-8a19j",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -2841,14 +2837,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let Some(first) = entries.first() else {",
         "An empty batch has no results. Every entry is parsed with parse_daemon_txn_batch_entry(operation)? BEFORE this point, so a batch that is non-empty but malformed returns an error rather than reaching this early return; the empty case is genuinely empty input.",
     ),
-    must_fix_in(
-        "NSF-CORE-SEARCH-FUSION-WEIGHTS-CONFIG",
-        "src/core/search.rs",
-        "resolved_search_fusion_weights",
-        "crate::core::config_surface::merged_workspace_config(workspace_path)",
-        "bd-8a19j",
-        "merged_workspace_config returns Result<MergedConfig, ConfigSurfaceError>, `.map(..)` maps the Ok, and `.unwrap_or_default()` then SWALLOWS THE Err -- so a workspace with no search config and a workspace whose config fails validation produce identical default fusion weights. ConfigSurfaceError's variants are UnknownKey, InvalidPattern, InvalidValue and Environment: errors raised by a config that EXISTS and is wrong. An operator who mistypes a fusion key gets default ranking with no diagnostic. Same shape as bd-zjcx6 and bd-xwzeh at lower severity, and classified the same way on purpose -- consequence should not change the verdict. The correct form is already in the tree at src/core/memory.rs:4112, which propagates the same loader with map_err into DomainError::Configuration.",
-    ),
+    // bd-8a19j: retired after resolved_search_fusion_weights became fallible.
+    // Production, diagnostic search, and shadow tuning now propagate config
+    // failures instead of treating them as absent ranking configuration.
     allowed_in(
         "NSF-CORE-INDEX-RULE-PER-RULE-MAPS",
         "src/core/index.rs",

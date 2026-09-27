@@ -579,7 +579,6 @@
 # the SAME digest every time, so distinct plans or snapshots would share a
 # provenance hash. NSF-SWARM-REPAIR-PLAN-PROVENANCE-HASH is unreachable by type
 # (serializing a serde_json::Value cannot fail).
-1	NSF-CORE-SEARCH-FUSION-WEIGHTS-CONFIG
 2	NSF-CORE-INDEX-RULE-PER-RULE-MAPS
 1	NSF-CORE-INDEX-EMBEDDER-LOG-DIMENSION
 1	NSF-CORE-INDEX-DEGRADED-CODE-OPTIONAL

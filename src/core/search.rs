@@ -7800,6 +7800,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let total_start = Instant::now();
     options.validate()?;
     search_checkpoint(cx)?;
+    // Validate before index reconciliation or model preparation can write state.
+    resolved_search_fusion_weights(&options.workspace_path)?;
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
@@ -9263,6 +9265,9 @@ async fn run_search_inner_with_performance(
         preloaded_memories = Some(&mut transient_preloaded_memories);
     }
     search_checkpoint(cx)?;
+    // Invalid configured ranking must not become default ranking, including
+    // when a missing index would otherwise send callers into lexical fallback.
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
     // Seeded/library callers may supply only paths. Use the same authoritative
     // file connection for binding and visibility instead of leaving this entry
     // point able to retrieve a copied index without checking its store.
@@ -9459,7 +9464,6 @@ async fn run_search_inner_with_performance(
     };
     let rerank_runtime_available = rerank_runtime.is_enabled();
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
         search_checkpoint(cx)?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -9929,6 +9933,7 @@ pub async fn run_diag_search_with_cx(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
+    resolved_search_fusion_weights(&options.workspace_path)?;
     let index_dir = options.resolve_index_dir();
     let fast_embedder = if options.source_mode.uses_embeddings()
         && index_dir.exists()
@@ -10032,6 +10037,7 @@ async fn run_diag_search_in_snapshot(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -10159,7 +10165,6 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(effective_limit);
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     let mut diag_result = diag_search_sync(
         cx,
         &index_dir,
@@ -11720,10 +11725,14 @@ fn unit_weight_or(value: Option<f64>, default: f32) -> f32 {
         .map_or(default, |weight| weight as f32)
 }
 
-pub(crate) fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFusionWeights {
+pub(crate) fn resolved_search_fusion_weights(
+    workspace_path: &Path,
+) -> Result<SearchFusionWeights, SearchError> {
     crate::core::config_surface::merged_workspace_config(workspace_path)
         .map(|config| SearchFusionWeights::from_config(&config.values.search))
-        .unwrap_or_default()
+        .map_err(|error| {
+            SearchError::Configuration(format!("Failed to load search configuration: {error}"))
+        })
 }
 
 /// Which scale the Frankensearch adapter's final score arrives on.
@@ -22652,6 +22661,92 @@ mod tests {
                 .iter()
                 .any(|factor| factor.name == "rerank" && factor.formula == "score = rerank_score")
         );
+    }
+
+    fn fusion_config_test_options(workspace: &Path) -> SearchOptions {
+        SearchOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(workspace.join("missing-index")),
+            query: "configured fusion weights".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        }
+    }
+
+    #[test]
+    fn fusion_config_resolves_valid_explicit_weights() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tempdir.path().join(".ee"))
+            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            tempdir.path().join(".ee/config.toml"),
+            "[search]\nlexical_weight = 0.7\nsemantic_weight = 0.2\ngraph_weight = 0.1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let weights = super::resolved_search_fusion_weights(tempdir.path())
+            .map_err(|error| error.to_string())?;
+        assert!((weights.lexical - 0.7).abs() < f32::EPSILON);
+        assert!((weights.semantic - 0.2).abs() < f32::EPSILON);
+        assert!((weights.graph - 0.1).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn fusion_config_failures_precede_missing_index_fallbacks() -> TestResult {
+        for (label, contents) in [
+            ("syntax", "[search\n"),
+            ("type", "[search]\nlexical_weight = \"not-a-weight\"\n"),
+            ("read", ""),
+        ] {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let config_path = tempdir.path().join(".ee/config.toml");
+            std::fs::create_dir_all(tempdir.path().join(".ee"))
+                .map_err(|error| error.to_string())?;
+            if label == "read" {
+                std::fs::create_dir(&config_path).map_err(|error| error.to_string())?;
+            } else {
+                std::fs::write(&config_path, contents).map_err(|error| error.to_string())?;
+            }
+            assert!(
+                matches!(
+                    super::resolved_search_fusion_weights(tempdir.path()),
+                    Err(SearchError::Configuration(_))
+                ),
+                "{label} config failure must not resolve to default weights"
+            );
+            for source_mode in [
+                SearchSourceMode::LexicalOnly,
+                SearchSourceMode::SemanticOnly,
+                SearchSourceMode::Hybrid,
+            ] {
+                let mut options = fusion_config_test_options(tempdir.path());
+                options.source_mode = source_mode;
+                let seeded = super::run_search_seeded(&options, &Deterministic::from_seed(0));
+                assert!(
+                    matches!(seeded, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by seeded {source_mode:?} search: {seeded:?}"
+                );
+                let diagnostic = super::run_diag_search(&options);
+                assert!(
+                    matches!(diagnostic, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by diagnostic {source_mode:?} search: {diagnostic:?}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

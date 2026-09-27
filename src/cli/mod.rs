@@ -40211,6 +40211,13 @@ where
     ) {
         Ok(report) => report,
         Err(ShadowTuningError::Cancelled(_)) => return ProcessExitCode::Cancelled,
+        Err(ShadowTuningError::Configuration { message }) => {
+            let domain_error = DomainError::Configuration {
+                message,
+                repair: Some(crate::config::MEMORY_POLICY_REPAIR.to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+        }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: error.to_string(),
