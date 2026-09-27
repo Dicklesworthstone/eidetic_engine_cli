@@ -2929,6 +2929,214 @@ fn backup_restore_at_default_redaction_preserves_typed_memory_fields() -> TestRe
     )
 }
 
+/// One memory as `ee backup` sees it on each side of a restore (bd-cjt23).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IdentityRow {
+    content: String,
+    id: String,
+    trust_class: String,
+}
+
+/// What a CLI backup -> restore cycle did to memory identity (bd-cjt23).
+struct IdentityRoundTrip {
+    _staging: tempfile::TempDir,
+    created: JsonValue,
+    restored_report: JsonValue,
+    source: Vec<IdentityRow>,
+    restored: Vec<IdentityRow>,
+}
+
+fn identity_rows(db: &Path, workspace_path: &Path) -> Result<Vec<IdentityRow>, String> {
+    let conn =
+        DbConnection::open_file(db).map_err(|error| format!("open {}: {error}", db.display()))?;
+    let workspace_id = workspace_id_from_db(&conn, workspace_path)?;
+    let mut rows = conn
+        .list_memories(&workspace_id, None, true)
+        .map_err(|error| format!("list_memories {}: {error}", db.display()))?
+        .into_iter()
+        .map(|memory| IdentityRow {
+            content: memory.content,
+            id: memory.id,
+            trust_class: memory.trust_class,
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    Ok(rows)
+}
+
+/// Remember three memories through the CLI, back them up with `redaction`
+/// (`None` = the default), and restore to a fresh side path using the same
+/// workspace's keys.
+fn cli_identity_round_trip(redaction: Option<&str>) -> Result<IdentityRoundTrip, String> {
+    let staging = tempfile::Builder::new()
+        .prefix("ee-cjt23-identity-")
+        .tempdir()
+        .map_err(|error| format!("create temp dir: {error}"))?;
+    let workspace = staging.path().join("ws");
+    let backup_dir = staging.path().join("backups");
+    let side_path = staging.path().join("restored");
+    fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
+    let side_path_arg = side_path.to_string_lossy().into_owned();
+
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    for content in [
+        "Alpha rule: run the formatter before committing.",
+        "Beta fact: the index lives under the workspace store.",
+        "Gamma decision: backups are recovery points.",
+    ] {
+        run_ee(&["remember", content, "--workspace", &ws, "--json"])?;
+    }
+    let source = identity_rows(&workspace.join(".ee/ee.db"), &workspace)?;
+
+    let mut create_args = vec![
+        "backup",
+        "create",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ];
+    if let Some(level) = redaction {
+        create_args.extend(["--redaction", level]);
+    }
+    let created = run_ee(&create_args)?;
+    let backup_id = json_str(&created, "/data/backupId", "backup create")?;
+    let restored_report = run_ee(&[
+        "backup",
+        "restore",
+        backup_id,
+        "--output-dir",
+        &backup_dir_arg,
+        "--side-path",
+        &side_path_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let restored = identity_rows(&side_path.join(".ee/ee.db"), &side_path)?;
+    Ok(IdentityRoundTrip {
+        _staging: staging,
+        created,
+        restored_report,
+        source,
+        restored,
+    })
+}
+
+fn restore_degraded_codes(report: &JsonValue) -> Vec<String> {
+    report
+        .pointer("/data/degraded")
+        .and_then(JsonValue::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A same-lineage restore keeps every (content, id, trust) row, completes, and
+/// names no trust downgrade (bd-cjt23 ruling 2(b) through the real CLI).
+fn ensure_same_lineage_identity(run: &IdentityRoundTrip) -> TestResult {
+    // Empty-world guards: identity and trust comparisons prove nothing on an
+    // empty or already-capped source.
+    ensure_equal(&run.source.len(), &3, "source memories")?;
+    ensure(
+        run.source
+            .iter()
+            .all(|row| row.trust_class == "human_explicit"),
+        format!("the source must hold human_explicit rows: {:?}", run.source),
+    )?;
+    ensure_equal(
+        &run.restored,
+        &run.source,
+        "restored (content, id, trust) rows equal the source rows",
+    )?;
+    ensure_equal(
+        &json_str(&run.restored_report, "/data/status", "backup restore")?,
+        &"completed",
+        "same-lineage restore completes",
+    )?;
+    ensure(
+        !restore_degraded_codes(&run.restored_report)
+            .iter()
+            .any(|code| code == "verified_backup_trust_downgraded"),
+        format!(
+            "no trust downgrade on a same-lineage restore: {:?}",
+            restore_degraded_codes(&run.restored_report)
+        ),
+    )
+}
+
+/// bd-cjt23 ruling 1: a default backup is a recovery point. It uses minimal
+/// redaction, so restoring it with the source workspace's keys keeps every
+/// memory id and `human_explicit` trust.
+#[test]
+fn default_backup_restore_keeps_every_memory_id_and_human_trust() -> TestResult {
+    let run = cli_identity_round_trip(None)?;
+    ensure_equal(
+        &json_str(&run.created, "/data/redactionLevel", "backup create")?,
+        &"minimal",
+        "backup create defaults to minimal redaction",
+    )?;
+    ensure_same_lineage_identity(&run)
+}
+
+/// bd-cjt23 ruling 2(b) through the CLI, independent of which level is the
+/// default: an explicit minimal backup keeps every id and `human_explicit`.
+#[test]
+fn explicit_minimal_backup_restore_keeps_every_memory_id_and_human_trust() -> TestResult {
+    let run = cli_identity_round_trip(Some("minimal"))?;
+    ensure_equal(
+        &json_str(&run.created, "/data/redactionLevel", "backup create")?,
+        &"minimal",
+        "explicit minimal redaction",
+    )?;
+    ensure_same_lineage_identity(&run)
+}
+
+/// bd-cjt23: `--redaction standard` is the shareable backup. It re-mints every
+/// memory id on restore while keeping the content.
+#[test]
+fn explicit_standard_backup_restore_remints_every_memory_id() -> TestResult {
+    let run = cli_identity_round_trip(Some("standard"))?;
+    ensure_equal(
+        &json_str(&run.created, "/data/redactionLevel", "backup create")?,
+        &"standard",
+        "explicit standard redaction",
+    )?;
+    ensure_equal(&run.source.len(), &3, "source memories")?;
+    ensure_equal(&run.restored.len(), &3, "restored memories")?;
+    let contents = |rows: &[IdentityRow]| {
+        let mut contents = rows
+            .iter()
+            .map(|row| row.content.clone())
+            .collect::<Vec<_>>();
+        contents.sort();
+        contents
+    };
+    ensure_equal(
+        &contents(&run.restored),
+        &contents(&run.source),
+        "standard restore keeps the content",
+    )?;
+    let reused = run
+        .restored
+        .iter()
+        .filter(|row| run.source.iter().any(|source| source.id == row.id))
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    ensure(
+        reused.is_empty(),
+        format!("standard restore must re-mint every id; reused {reused:?}"),
+    )
+}
+
 /// A per-kind round-trip world: an initialized workspace plus the paths a
 /// `backup create` / `backup restore --side-path` cycle needs.
 struct KindRoundTrip {
