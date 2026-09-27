@@ -51,7 +51,11 @@ fn record_with_boundary(
     options: &DecideRecordOptions<'_>,
     mut boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<DecideRecordReport, DomainError> {
-    let mut scope = decide_scope(options.workspace_path, options.database_path, options.dry_run)?;
+    let mut scope = decide_scope(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+    )?;
     let now = options.now.unwrap_or_else(Utc::now);
     let fields = prepare_decision_fields(
         options.topic,
@@ -84,7 +88,7 @@ fn record_with_boundary(
     };
     if options.dry_run {
         let preview = remember_memory(&remember_options)?;
-        let existing = load_decisions(&mut scope, false, now)?;
+        let existing = read::load_record_heads(&mut scope, &fields, now)?;
         let predecessor = validate_head(&existing, &fields)?;
         return Ok(DecideRecordReport {
             schema: DECIDE_RECORD_SCHEMA_V1,
@@ -145,7 +149,12 @@ fn record_with_boundary(
                 )
                 .into());
             }
-            let heads = current_heads(&connection, write.workspace_id(), now)?;
+            let heads = read::record_heads_in_current_snapshot(
+                &connection,
+                write.workspace_id(),
+                &fields,
+                now,
+            )?;
             let predecessor = validate_head(&heads, &fields)?;
             record_prepared_remember_txn_write_in_txn(&connection, &write)?;
             boundary(Stage::Memory, &connection)?;
@@ -155,11 +164,9 @@ fn record_with_boundary(
                 )));
             }
             boundary(Stage::Fields, &connection)?;
-            let stored = connection
-                .get_memory(write.memory_id())?
-                .ok_or_else(|| {
-                    decide_storage_error("Decision body is missing from its transaction")
-                })?;
+            let stored = connection.get_memory(write.memory_id())?.ok_or_else(|| {
+                decide_storage_error("Decision body is missing from its transaction")
+            })?;
             let mut report = DecideRecordReport {
                 schema: DECIDE_RECORD_SCHEMA_V1,
                 version: env!("CARGO_PKG_VERSION"),
@@ -268,8 +275,7 @@ fn validate_head<'a>(
                     resource: "current decision memory".to_owned(),
                     id: id.to_owned(),
                     repair: Some(
-                        "Run ee decide list --json and select the current predecessor."
-                            .to_owned(),
+                        "Run ee decide list --json and select the current predecessor.".to_owned(),
                     ),
                 })
         })
@@ -294,42 +300,6 @@ fn validate_head<'a>(
         ));
     }
     Ok(predecessor)
-}
-
-fn current_heads(
-    connection: &DbConnection,
-    workspace: &str,
-    now: DateTime<Utc>,
-) -> Result<Vec<DecideItem>, RecordError> {
-    let rows = connection.query(
-        "SELECT id FROM memories WHERE workspace_id = ?1 AND kind = 'decision' AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
-        &[Value::Text(workspace.to_owned())],
-    )?;
-    let mut heads = Vec::new();
-    for page in rows.chunks(256) {
-        let ids = page
-            .iter()
-            .map(|row| {
-                row.get(0)
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| decide_storage_error("Invalid decision identity"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut memories = connection.get_memories_batch(&ids)?;
-        for id in ids {
-            let memory = memories
-                .remove(id)
-                .ok_or_else(|| decide_storage_error("Missing decision head"))?;
-            if memory.workspace_id != workspace
-                || memory.kind != "decision"
-                || memory.tombstoned_at.is_some()
-            {
-                return Err(decide_storage_error("Invalid decision head ownership").into());
-            }
-            heads.push(memory_to_decide_item(connection, &memory, now)?);
-        }
-    }
-    Ok(heads)
 }
 
 fn memory_audit_id(

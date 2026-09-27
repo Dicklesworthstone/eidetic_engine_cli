@@ -35,6 +35,33 @@ Agents should follow this loop:
 
 Do not create a new topic spelling to bypass fork refusal.
 
+## Source Authority
+
+List and revisit resolve current seals and pending memory-review holds before
+loading decision bodies or structured fields. Held and sealed rows do not
+participate in result counts, topic filtering, limits, or revisit queues.
+`--include-superseded` requests admitted history, not a seal or review bypass.
+Review checks match the exact workspace and native memory target; a rule-target
+hold is not a hold on a decision memory. Resolving every matching pending event
+allows the next snapshot to admit the decision, but cannot reveal a closed seal.
+
+A hidden head is not a vacant topic. Record previews and writer transactions
+check head identity separately from the public list. A pending decision cannot
+be replaced or duplicated through `record`; its private identity and feedback
+details are not included in the refusal. An unrelated pending topic does not
+block a new decision or require decoding its private structured fields.
+
+A sealed current decision is different: its original topic may no longer be
+readable, and tags are not a second authority for that identity. Record and
+preview conservatively refuse while a sealed current head makes topic uniqueness
+unknown. Explicitly reveal that source before recording; do not infer that an
+empty public list proves the workspace has no decision heads. Sealed superseded
+history does not block recording an otherwise eligible current topic.
+
+These checks use the same snapshot as the decision read or the complete writer
+transaction. Missing or malformed authority returns a sanitized error with no
+partial report; no source, feedback, audit, or indexing row is changed by a read.
+
 ## Revisit Hygiene
 
 Use `--revisit-by +90d` for relative day intervals or an explicit RFC3339
