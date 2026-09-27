@@ -196,7 +196,10 @@ mod tests {
         let mut changed = false;
         assert_eq!(body_text(&body, &mut changed), body);
         assert!(!changed);
-        assert_eq!(text(&body, &mut changed), "[REDACTED]");
+        assert_eq!(
+            text(&body, &mut changed),
+            crate::policy::redact_public_replay_text(&body).content
+        );
         assert!(changed, "metadata retains its existing smaller limit");
     }
 

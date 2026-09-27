@@ -21,6 +21,8 @@ use crate::models::{DomainError, MemoryKind};
 
 #[path = "decide_atomic.rs"]
 mod atomic;
+#[path = "decide_read.rs"]
+mod read;
 
 pub const DECIDE_RECORD_SCHEMA_V1: &str = "ee.decide.record.v1";
 pub const DECIDE_LIST_SCHEMA_V1: &str = "ee.decide.list.v1";
@@ -479,35 +481,7 @@ fn load_decisions(
     include_superseded: bool,
     now: DateTime<Utc>,
 ) -> Result<Vec<DecideItem>, DomainError> {
-    if !scope.database_path.exists() {
-        return Ok(Vec::new());
-    }
-    let conn = open_decide_database_read_only(&scope.database_path)?;
-    scope.workspace_id = bound_workspace_id_or_hash(
-        &conn,
-        &scope.workspace_id,
-        &[scope.workspace_path.as_path()],
-    )?;
-    // bd-tmv70: head selection is an IDENTITY question and must stay clock-free.
-    // An earlier attempt bounded this on the caller's `now`, which does not work:
-    // decide expires a predecessor at REAL now while callers may inject a fixed
-    // clock, so an as-of bound in the past still sees the predecessor as in
-    // force. The predecessor is now marked `superseded_at` at record time, which
-    // the identity reader excludes regardless of any clock.
-    let memories = if include_superseded {
-        conn.list_memories_for_retrieval(&scope.workspace_id, None, false)
-    } else {
-        conn.list_memories(&scope.workspace_id, None, false)
-    }
-    .map_err(|error| decide_storage_error(format!("Failed to list decisions: {error}")))?;
-
-    let mut decisions = Vec::new();
-    for memory in memories {
-        if memory.kind == "decision" {
-            decisions.push(memory_to_decide_item(&conn, &memory, now)?);
-        }
-    }
-    Ok(decisions)
+    read::load(scope, include_superseded, now)
 }
 
 fn memory_to_decide_item(
@@ -887,11 +861,8 @@ mod tests {
         let second = decide_record(&second_options).map_err(|error| error.to_string())?;
 
         ensure_equal(&second.decision.chain_depth, &1, "chain depth")?;
-        // `ee decide` supersedes through expire_memory, NOT through
-        // revise_memory, so the predecessor is marked by its author-facing
-        // `valid_to` and NOT by `superseded_at`. That is why this assertion is
-        // correct as originally written and must not be "corrected" to
-        // superseded_at: the two verbs mark a predecessor differently.
+        // Replacement records both lifecycle expiry and revision headship.
+        // valid_to remains visible, but superseded_at controls head selection.
         ensure(
             second
                 .superseded
