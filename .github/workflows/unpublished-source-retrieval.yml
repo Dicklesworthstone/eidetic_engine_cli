@@ -1,0 +1,188 @@
+name: Unpublished source retrieval
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/search*.rs
+      - src/core/index_source_snapshot.rs
+      - .github/workflows/unpublished-source-retrieval.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unpublished-source-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  source-retrieval:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt, clippy
+      - name: Prepare reviewed source against exact preimages
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/unpublished"
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'], 'unpublished')
+          endpoint = 'repos/Dicklesworthstone/eidetic_engine_cli/git/blobs/'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def fetch(sha):
+              result = json.loads(subprocess.check_output(['gh', 'api', endpoint + sha]))
+              data = base64.b64decode(result['content'])
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == sha
+              return data
+          path = 'src/core/search.rs'
+          test = 'src/core/search_unpublished_tests.rs'
+          base = git('rev-parse', 'HEAD')
+          assert base == os.environ['GITHUB_SHA']
+          original = git('rev-parse', 'HEAD:' + path)
+          integrate = not pathlib.Path(test).exists()
+          manifest = {'testedBase': base, 'files': []}
+          if integrate:
+              assert original == '27f436c14ec07f564719e7814860f8b3269698cb', 'Search preimage changed; review before integrating'
+              patch = root / 'reviewed.patch'
+              patch.write_bytes(fetch('02c439474ccd6d9bcc0e7f240c9409fcaa5967fd'))
+              subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+              subprocess.run(['git', 'apply', str(patch)], check=True)
+              pathlib.Path(test).write_bytes(fetch('325c6de9cf90724c3318bfb822140f7b1df69acc'))
+              subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', path, test], check=True)
+              subprocess.run(['git', 'add', '--intent-to-add', '--', test], check=True)
+              manifest['files'] = [
+                  {'path': path, 'baseBlob': original, 'sha': git('hash-object', path)},
+                  {'path': test, 'baseBlob': None, 'sha': git('hash-object', test)},
+              ]
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          (root / 'source.json').write_text(json.dumps(manifest, indent=2))
+          (root / 'applied.patch').write_text(subprocess.check_output(['git', 'diff', '--', path, test], text=True))
+          (root / 'tracked.txt').write_bytes(subprocess.check_output(['git', 'ls-files', '-z']))
+          subprocess.run(['tar', '--null', '-T', str(root / 'tracked.txt'), '-czf', str(root / 'source.tar.gz')], check=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('integrate=' + str(integrate).lower() + '\n')
+          print((root / 'source.json').read_text())
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          name: unpublished-prepared-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unpublished/
+          retention-days: 7
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: unpublished-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Check all targets
+        id: check
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/unpublished/check.log"
+      - name: Verify complete source retrieval and read-only pack
+        id: tests
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log"
+          grep -Fq 'test result: ok. 10 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log"
+      - name: Check strict library lint and changed source formatting
+        id: lint
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/unpublished/clippy.log"
+          rustfmt --edition 2024 --check --config skip_children=true src/core/search.rs src/core/search_unpublished_tests.rs 2>&1 | tee "$RUNNER_TEMP/unpublished/fmt.log"
+      - name: Publish only tested source directly to current main
+        if: ${{ success() && steps.source.outputs.integrate == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, time
+          root = pathlib.Path(os.environ['RUNNER_TEMP'], 'unpublished')
+          manifest = json.loads((root / 'source.json').read_text())
+          endpoint = 'repos/Dicklesworthstone/eidetic_engine_cli'
+          def api(path, data=None, method=None):
+              args = ['gh', 'api', endpoint + path]
+              if method: args += ['--method', method]
+              if data is not None: args += ['--input', '-']
+              return json.loads(subprocess.check_output(args, input=None if data is None else json.dumps(data).encode()))
+          for item in manifest['files']:
+              blob = api('/git/blobs', {'content': pathlib.Path(item['path']).read_text(), 'encoding': 'utf-8'})
+              assert blob['sha'] == item['sha'], 'Tested bytes changed'
+          message = ('feat(search): retrieve complete unpublished source snapshots without rebuilding indexes\n\n'
+              'Use the existing bounded in-memory Frankensearch lexical path when no usable published or retained index exists. '
+              'Preserve typed source identities, live lifecycle/scope admission, strict semantic and historical refusals, '
+              'corruption/symlink errors, cancellation, and complete-corpus size limits. '
+              'Fresh memories, native rules and admitted CASS spans can participate before initial publication; '
+              'a real read-only pack now selects unlinked CASS evidence without creating a memory alias or consuming index jobs.\n\n'
+              'Ten real-store tests, all-target compilation, strict library Clippy and changed-source rustfmt passed. '
+              'Tests cover missing/empty indexes, deferred jobs, native identities, pack selection, mode/corpus boundaries, '
+              'source lifecycle, borrowed snapshots, corrupt bytes, symlinks and cancellation. '
+              'No full-suite or semantic-quality claim.\n\n'
+              'Tested base: ' + manifest['testedBase'] + '\n'
+              'GitHub Actions run: ' + os.environ['GITHUB_RUN_ID'] + '\n'
+              'Publish exact tested blobs on current main only when touched preimages still match; no PR or force push.')
+          for attempt in range(4):
+              head = api('/git/ref/heads/main')['object']['sha']
+              parent = api('/git/commits/' + head)
+              # Read only the exact paths being replaced. Every unrelated main
+              # entry is retained by building on its current tree.
+              for item in manifest['files']:
+                  probe = subprocess.run(['gh', 'api', endpoint + '/contents/' + item['path'] + '?ref=' + head], capture_output=True, text=True)
+                  if item['baseBlob'] is None:
+                      assert probe.returncode != 0 and '404' in probe.stderr, 'New source path now exists or cannot be checked'
+                  else:
+                      assert probe.returncode == 0 and json.loads(probe.stdout)['sha'] == item['baseBlob'], 'Concurrent target change; do not overwrite'
+              tree = api('/git/trees', {'base_tree': parent['tree']['sha'], 'tree': [
+                  {'path': item['path'], 'mode': '100644', 'type': 'blob', 'sha': item['sha']} for item in manifest['files']]})
+              commit = api('/git/commits', {'message': message, 'tree': tree['sha'], 'parents': [head]})
+              result = subprocess.run(['gh', 'api', endpoint + '/git/refs/heads/main', '--method', 'PATCH', '--input', '-'],
+                  input=json.dumps({'sha': commit['sha'], 'force': False}), text=True, capture_output=True)
+              if result.returncode == 0:
+                  assert api('/git/commits/' + commit['sha'])['tree']['sha'] == tree['sha']
+                  (root / 'published.json').write_text(json.dumps({'commit': commit['sha'], 'parent': head, **manifest}, indent=2))
+                  print('Published tested source: ' + commit['sha'])
+                  break
+              if '422' not in result.stderr:
+                  raise RuntimeError(result.stderr)
+              time.sleep(1)
+          else:
+              raise RuntimeError('Main advanced repeatedly; source retained in artifacts, no force push')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: unpublished-results-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/unpublished/*.log
+            ${{ runner.temp }}/unpublished/*.json
+            ${{ runner.temp }}/unpublished/*.patch
+          retention-days: 7
