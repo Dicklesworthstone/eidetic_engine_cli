@@ -12,16 +12,15 @@ use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 
-use super::memory::{
-    ExpireMemoryOptions, MemoryLinkMode, MemoryLinkOptions, RememberMemoryOptions, expire_memory,
-    remember_memory, update_memory_link,
-};
 use super::workspace::{bound_workspace_id_or_hash, stable_workspace_id};
-use crate::db::{DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredMemory};
+use crate::db::{DbConnection, MemoryLinkRelation, StoredMemory};
 use crate::models::memory::{
     extract_typed_memory_fields_json_with_redactor, typed_memory_fields_from_json,
 };
 use crate::models::{DomainError, MemoryKind};
+
+#[path = "decide_atomic.rs"]
+mod atomic;
 
 pub const DECIDE_RECORD_SCHEMA_V1: &str = "ee.decide.record.v1";
 pub const DECIDE_LIST_SCHEMA_V1: &str = "ee.decide.list.v1";
@@ -116,6 +115,10 @@ pub struct DecideRecordReport {
     pub memory_index_job_id: Option<String>,
     pub link_audit_id: Option<String>,
     pub expire_audit_id: Option<String>,
+    /// Ancillary failures after the entire source transition committed.
+    /// Never instruct a caller to repeat a successfully committed decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl DecideRecordReport {
@@ -249,230 +252,7 @@ pub fn parse_revisit_by(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, 
 }
 
 pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordReport, DomainError> {
-    let mut scope = decide_scope(
-        options.workspace_path,
-        options.database_path,
-        options.dry_run,
-    )?;
-    let now = options.now.unwrap_or_else(Utc::now);
-    let fields = prepare_decision_fields(
-        options.topic,
-        options.chosen,
-        &options.alternatives,
-        options.rationale,
-        options.revisit_by,
-        options.supersedes,
-        now,
-    )?;
-
-    let existing_heads = load_decisions(&mut scope, false, now)?;
-    if let Some(supersedes) = options.supersedes {
-        let Some(predecessor) = existing_heads
-            .iter()
-            .find(|item| item.memory_id == supersedes)
-            .cloned()
-            .or_else(|| {
-                load_decision_by_id(&mut scope, supersedes, now)
-                    .ok()
-                    .flatten()
-            })
-        else {
-            return Err(DomainError::NotFound {
-                resource: "decision memory".to_owned(),
-                id: supersedes.to_owned(),
-                repair: Some("Run ee decide list --include-superseded --json.".to_owned()),
-            });
-        };
-        if predecessor.normalized_topic != fields.normalized_topic {
-            return Err(decide_usage_with_details(
-                "decision_supersedes_topic_mismatch",
-                "Superseded decision topic does not match the new decision topic.",
-                json!({
-                    "failureModeCode": "decision_supersedes_topic_mismatch",
-                    "supersedes": supersedes,
-                    "priorTopic": predecessor.topic,
-                    "priorNormalizedTopic": predecessor.normalized_topic,
-                    "newTopic": fields.topic,
-                    "newNormalizedTopic": fields.normalized_topic,
-                }),
-            ));
-        }
-    } else if let Some(prior) = existing_heads
-        .iter()
-        .find(|item| item.normalized_topic == fields.normalized_topic)
-    {
-        return Err(decide_usage_with_details(
-            "decision_topic_requires_supersedes",
-            "A live decision already exists for this normalized topic; use --supersedes to replace it.",
-            json!({
-                "failureModeCode": "decision_topic_requires_supersedes",
-                "priorMemoryId": prior.memory_id,
-                "topic": fields.topic,
-                "normalizedTopic": fields.normalized_topic,
-                "suggestedCommand": format!(
-                    "ee decide record {:?} --chosen <choice> --alternative <other> --rationale <why> --supersedes {} --json",
-                    fields.topic, prior.memory_id
-                ),
-            }),
-        ));
-    }
-
-    let tag_csv = decision_tag_csv(&fields.normalized_topic);
-    let content = decision_content(&fields);
-    let remember = remember_memory(&RememberMemoryOptions {
-        workspace_path: &scope.workspace_path,
-        database_path: Some(&scope.database_path),
-        content: &content,
-        workflow_id: None,
-        level: "semantic",
-        kind: "decision",
-        tags: Some(&tag_csv),
-        confidence: 0.85,
-        source: None,
-        allow_secret_mention: false,
-        valid_from: None,
-        valid_to: None,
-        dry_run: options.dry_run,
-        auto_link: false,
-        propose_candidates: false,
-    })?;
-
-    let memory_id = remember.memory_id.to_string();
-    let mut decision = DecideItem {
-        memory_id: memory_id.clone(),
-        topic: fields.topic.clone(),
-        normalized_topic: fields.normalized_topic.clone(),
-        chosen: fields.chosen.clone(),
-        alternatives: fields.alternatives.clone(),
-        options: fields.options.clone(),
-        rationale: fields.rationale.clone(),
-        supersedes: fields.supersedes.clone(),
-        chain_depth: 0,
-        revisit_by: fields.revisit_by.clone(),
-        revisit_status: revisit_status(fields.revisit_by.as_deref(), now, None),
-        superseded: false,
-        valid_to: None,
-        created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-    };
-
-    if options.dry_run {
-        return Ok(DecideRecordReport {
-            schema: DECIDE_RECORD_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            status: "would_record".to_owned(),
-            dry_run: true,
-            persisted: false,
-            workspace_id: scope.workspace_id,
-            database_path: scope.database_path.display().to_string(),
-            decision,
-            superseded: options.supersedes.map(|id| DecideMemoryRef {
-                memory_id: id.to_owned(),
-                valid_to: None,
-                status: "would_supersede".to_owned(),
-            }),
-            memory_audit_id: None,
-            memory_index_job_id: None,
-            link_audit_id: None,
-            expire_audit_id: None,
-        });
-    }
-
-    store_exact_decision_fields(&scope.database_path, &memory_id, &fields)?;
-
-    let mut superseded = None;
-    let mut link_audit_id = None;
-    let mut expire_audit_id = None;
-    if let Some(target_id) = fields.supersedes.as_deref() {
-        let link = update_memory_link(&MemoryLinkOptions {
-            workspace_path: &scope.workspace_path,
-            database_path: &scope.database_path,
-            memory_id: &memory_id,
-            mode: MemoryLinkMode::Create {
-                target_memory_id: target_id.to_owned(),
-                relation: MemoryLinkRelation::Supersedes,
-                weight: 1.0,
-                confidence: 1.0,
-                directed: true,
-                evidence_count: 1,
-                source: MemoryLinkSource::Agent,
-                metadata_json: Some(
-                    json!({
-                        "schema": "ee.decide.supersede.v1",
-                        "normalizedTopic": fields.normalized_topic,
-                    })
-                    .to_string(),
-                ),
-            },
-            actor: options.actor.or(Some("ee decide record")),
-            dry_run: false,
-            include_tombstoned: false,
-        })?;
-        link_audit_id = link.audit_id;
-
-        let reason = format!(
-            "superseded by decision {} for topic {}",
-            memory_id, fields.normalized_topic
-        );
-        let expired = expire_memory(&ExpireMemoryOptions {
-            workspace_path: &scope.workspace_path,
-            database_path: &scope.database_path,
-            memory_id: target_id,
-            reason: Some(&reason),
-            actor: options.actor.or(Some("ee decide record")),
-            dry_run: false,
-            include_tombstoned: false,
-        })?;
-        expire_audit_id = expired.audit_id.clone();
-        // bd-tmv70: expiring a predecessor is NOT marking it superseded. Before
-        // V123 that distinction did not exist, so `valid_to IS NULL` excluded it
-        // from head listings for free. Now that the two are separate columns, a
-        // predecessor marked only by expiry is still a live head to every
-        // identity reader -- and worse, an expiry stamped at real-now is not even
-        // ordered against an injected clock, so no as-of bound can rescue it.
-        //
-        // The expiry is kept because it is this verb's documented behaviour and
-        // its report field; the supersession marker is ADDED so the revision
-        // chain says what actually happened.
-        if let Some(superseded_at) = expired.valid_to.as_deref() {
-            let supersede_conn = open_decide_database(&scope.database_path)?;
-            supersede_conn
-                .mark_memory_superseded(target_id, superseded_at)
-                .map_err(|error| {
-                    decide_storage_error(format!("Failed to mark predecessor superseded: {error}"))
-                })?;
-        }
-        superseded = Some(DecideMemoryRef {
-            memory_id: target_id.to_owned(),
-            valid_to: expired.valid_to,
-            status: expired.status,
-        });
-    }
-
-    let conn = open_decide_database(&scope.database_path)?;
-    decision.chain_depth = supersede_chain_depth(&conn, &memory_id)?;
-    if let Some(stored) = conn
-        .get_memory(&memory_id)
-        .map_err(|error| decide_storage_error(format!("Failed to reload decision: {error}")))?
-    {
-        decision.created_at = stored.created_at;
-        decision.valid_to = stored.valid_to;
-    }
-
-    Ok(DecideRecordReport {
-        schema: DECIDE_RECORD_SCHEMA_V1,
-        version: env!("CARGO_PKG_VERSION"),
-        status: "recorded".to_owned(),
-        dry_run: false,
-        persisted: remember.persisted,
-        workspace_id: scope.workspace_id,
-        database_path: scope.database_path.display().to_string(),
-        decision,
-        superseded,
-        memory_audit_id: remember.audit_id,
-        memory_index_job_id: remember.index_job_id,
-        link_audit_id,
-        expire_audit_id,
-    })
+    atomic::record(options)
 }
 
 pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, DomainError> {
@@ -692,60 +472,6 @@ fn decision_topic_tag(normalized_topic: &str) -> String {
         &normalized_topic[..prefix_len],
         &digest[..8]
     )
-}
-
-fn store_exact_decision_fields(
-    database_path: &Path,
-    memory_id: &str,
-    fields: &DecisionFields,
-) -> Result<(), DomainError> {
-    let conn = open_decide_database(database_path)?;
-    let typed_fields = json!({
-        "options": fields.options,
-        "chosen": fields.chosen,
-        "rationale": fields.rationale,
-        "supersedes": fields.supersedes,
-        "revisit_by": fields.revisit_by,
-    })
-    .to_string();
-    let changed = conn
-        .set_memory_typed_fields_json(memory_id, Some(&typed_fields))
-        .map_err(|error| {
-            decide_storage_error(format!("Failed to store decision typed fields: {error}"))
-        })?;
-    if changed {
-        Ok(())
-    } else {
-        Err(decide_storage_error(format!(
-            "Failed to store decision typed fields for missing memory {memory_id}"
-        )))
-    }
-}
-
-fn load_decision_by_id(
-    scope: &mut DecideScope,
-    memory_id: &str,
-    now: DateTime<Utc>,
-) -> Result<Option<DecideItem>, DomainError> {
-    if !scope.database_path.exists() {
-        return Ok(None);
-    }
-    let conn = open_decide_database_read_only(&scope.database_path)?;
-    scope.workspace_id = bound_workspace_id_or_hash(
-        &conn,
-        &scope.workspace_id,
-        &[scope.workspace_path.as_path()],
-    )?;
-    let Some(memory) = conn
-        .get_memory(memory_id)
-        .map_err(|error| decide_storage_error(format!("Failed to query decision: {error}")))?
-    else {
-        return Ok(None);
-    };
-    if memory.workspace_id != scope.workspace_id || memory.kind != "decision" {
-        return Ok(None);
-    }
-    memory_to_decide_item(&conn, &memory, now).map(Some)
 }
 
 fn load_decisions(

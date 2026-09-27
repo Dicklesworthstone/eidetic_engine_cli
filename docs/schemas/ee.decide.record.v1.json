@@ -36,6 +36,11 @@
     "memoryIndexJobId": { "type": ["string", "null"] },
     "linkAuditId": { "type": ["string", "null"] },
     "expireAuditId": { "type": ["string", "null"] },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ancillary failures after the complete source transition committed. persisted remains true; inspect the existing memory and durable index job rather than repeating the decision write."
+    },
     "subscribe": { "$ref": "#/$defs/subscribe" }
   },
   "field_presets": {
@@ -64,6 +69,7 @@
       "memoryIndexJobId",
       "linkAuditId",
       "expireAuditId",
+      "warnings",
       "subscribe"
     ],
     "full": ["*"]
