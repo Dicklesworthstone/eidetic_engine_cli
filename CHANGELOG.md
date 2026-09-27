@@ -22,7 +22,7 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 | 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
-| 2026-09-12 → 2026-09-18 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission. |
+| 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh. |
 
 Release surface (as of 2026-09-12):
 
@@ -44,7 +44,7 @@ Release surface (as of 2026-09-12):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.16.0](#0160---2026-09-18) | 2026-09-18 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission |
+| [0.16.0](#0160---2026-09-26) | 2026-09-26 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission, backups that keep ids by default |
 | [0.15.2](#0152---2026-09-12) | 2026-09-12 | yes | Registry-only Cargo installation, read-only WAL correction and rerank storage-failure handling |
 | 0.15.1 | 2026-09-12 | withheld | Crate published; superseded by 0.15.2 after runtime qualification exposed a storage regression |
 | [0.15.0](#0150---2026-09-12) | 2026-09-12 | yes | Daemon retrieval, hook context, native reranking, Windows doctor and dependency updates |
@@ -74,7 +74,7 @@ Versions `0.4.0`–`0.12.0` are **real published releases** (or tags). Prefer th
 GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
-## [0.16.0] - 2026-09-18
+## [0.16.0] - 2026-09-26
 
 ### `ee ask` answers from rules and session evidence, not just memories
 
@@ -100,7 +100,49 @@ came from.
   workspace membership, so a single answer cannot mix two roster states.
 - Cache semantic scoring locally within the process, and use it to admit
   candidates before the contradiction lookup rather than rescoring afterwards.
+  Until fixes on 2026-09-24, a standalone `ee ask` never reached that path.
+  Scoring looked up a request context that the CLI does not create, so every
+  invocation answered from lexical scoring alone, even with a verified local
+  model. Cached-model scoring now runs in a runtime context bounded at 60
+  seconds. A calling agent's cancellation and deadline stay in force during
+  inference. A cancelled run returns an error instead of a lexical answer.
+  `ee ask` still never downloads a model.
 - `ee ask` exposes source-of-truth memory scopes through the public CLI.
+- `ee ask --path <PATH>` answers from directory- and file-scoped native rules
+  that match a literal workspace-relative task target, and cites the rule
+  revision pinned to the read snapshot. `--path` is repeatable, never widens
+  `--memory-scope`, and rejects malformed or unsafe paths as usage errors.
+- Confidence is labelled as a heuristic. `ee.ask.v1` output and query-miss
+  audit details carry a `confidenceCalibration` block (`status:
+  "heuristic_uncalibrated"`, `calibrated: false`, `scoreKind:
+  "ask_span_heuristic_v1"`) that survives the `minimal`, `summary` and
+  `standard` field presets. Answer selection and thresholds are unchanged, and
+  `--require-confidence` is documented as a policy threshold rather than
+  calibrated abstention.
+- Conflicting settings are disclosed instead of merged into agreement. Two
+  affirmative single-valued assignments to one subject are reported as a
+  dispute, with each side cited byte-exact. This applies to numeric values,
+  categorical and boolean values, ISO dates, clock times and RFC 3339
+  timestamps. Different environments, units, ranges, lists, conditionals and
+  compatible restrictions are not treated as conflicts. Timestamps compare by
+  instant across UTC offsets. Two sources that require the same commands in
+  opposite order are reported as an `ordering_alternative` conflict, not as
+  corroboration.
+- Corroboration counts independent sources, not citations. Several excerpts
+  from one file or web document, repeated citations of one Agent Mail message,
+  a rule and its parent memory, and sources giving different numeric values no
+  longer add separate agreeing votes. Candidate admission reserves room for
+  independent sessions, files and documents before repeated excerpts.
+- Superseded revisions and closed seals are filtered before contradiction
+  lookup, evidence admission and scoring, against the full revision history.
+  A linked transcript excerpt can no longer bring back an expired, tombstoned,
+  sealed or withheld parent memory. A native rule whose parent incident was
+  retired can still answer while the parent body stays withheld.
+- Citations withhold provenance whose decoded form names a private path or
+  carries URL credentials, including percent-encoded and nested encodings. Risk
+  and anti-pattern memories that mention a destructive command are kept as
+  evidence; authority-bearing instructions, secrets and PII are still withheld.
+  Fenced code, inline code and ordered lists stay whole inside citations.
 
 ### Retrieval and packing
 
@@ -109,6 +151,143 @@ came from.
 - `ee pack --compact` is shorthand for the lean pack profile.
 - Context deltas are decoded and applied locally against a transactional
   baseline check, and retain native CASS evidence.
+- A procedural rule promoted from a memory now packs in `procedural_rules`
+  beside its source memory. Rule hits hydrate through the source memory's id,
+  so anti-pattern-first selection reserved that memory and coverage-fill then
+  dropped the rule as `redundant_candidate`. Selection now deduplicates by
+  section and memory id.
+- `ee pack`, `ee context` and `ee pack build` accept a repeatable literal
+  `--task-path PATH`. Directory- and file-scoped native rules are admitted only
+  when a task path matches their scope. The explanation names the pattern that
+  admitted them. Normalized targets are bound into the pack hash, stream
+  identity and replay record. Packs without `--task-path` keep their previous
+  output and hash bytes.
+- `ee pack diff` reports `likelyCause: task_paths_changed` when two packs differ
+  only in their task targets, instead of attributing the change to memory or
+  index drift.
+- `ee pack --stream` emits `ee.pack.stream.v1` NDJSON frames for a task query
+  through the pipeline `ee context --stream` already used. It requires JSON or
+  JSONL output and rejects `--output`, `--cursor`, `--since`,
+  `--explain-performance` and `--explain-gaps` rather than ignoring them.
+- Tag, trust, redaction and record-time filters apply to packed native rules
+  themselves, not only to their source memories. Unsigned rules stay advisory
+  in rendering, counts, contradiction handling and Pack DNA trust anchors.
+- A procedural memory of kind failure, anti-pattern or risk is filed under
+  `failures`, so a stored "never do X" can reach the reserved "What NOT to do"
+  slice.
+- The pack contradiction guard keeps a maximal conflict-free subset ordered by
+  trust, freshness and id. A suppressed memory can no longer suppress a
+  compatible neighbour, and detector pair order cannot change the selection.
+- Pack pagination admits native evidence before paging, so totals, offsets,
+  cursors and caps cover the full candidate population. Cached pages built
+  under the old memory-only policy are invalidated.
+- `pack.candidate_pool` in the workspace configuration now sets the default
+  candidate pool for `ee pack` queries and `ee pack build` query files; the CLI
+  previously hard-coded 100. An explicit `--candidate-pool` wins, then the
+  query file, then a task lens, then configuration. `ee config set
+  pack.candidate_pool N` accepts integers from 1 to 4294967295. The
+  soft-deprecated `ee context` keeps its fixed default of 100 (#49).
+- Drift evaluation resolves `HEAD` once per pack or `ee memory drift` report
+  and memoizes commit distances and blob hashes, instead of spawning `git` per
+  selected memory. On a 60-memory fixture (Linux, release builds, nine
+  interleaved runs), `ee pack --read-only` went from 80 to 12 git launches and
+  1,178 ms to 801 ms median; `ee memory drift` went from 240 to 12 launches and
+  1,447 ms to 241 ms. Pack items, hashes and drift reports were byte-identical.
+  These are fixture measurements, not a latency guarantee (#49).
+- Recency admission for packs and resume snapshots pages by identity cursor over
+  lifecycle metadata and loads bodies only for selected rows, replacing an
+  `OFFSET` scan ordered by a computed date. No latency figure is claimed.
+- `pack.hash` uses input schema `ee.pack.hash_input.v2`: labeled,
+  length-delimited components (`request`, `items`, `omitted`, `degraded`,
+  `coordination`, `rendered_text`). `snapshotIdentity` exposes each
+  component's digest, so two packs with different hashes can be compared
+  component by component. Two different flat provenance feeds that hashed
+  identically under v1 now hash apart. ADR 0087 lists exactly what v2 binds and
+  names the issue that owns each component it does not bind yet (store tier,
+  model identity, the `as_of` reference time, configuration slice and others).
+  Hashes from 0.15.x packs are not comparable with 0.16.0 hashes, and pack
+  cache entries from 0.15.x are misses rather than replays.
+- `pack.text` is canonical. A pack-assembly timing overrun still appears in the
+  envelope's `degraded[]` and in `advisoryBanner.degradationCount`, but it no
+  longer changes the shipped text, its degraded-signal count or its banner. A
+  slow run therefore produces the same text as a fast one.
+- A pack in a workspace whose index directory exists but is empty falls back
+  to stored memories, as it does when the index is missing. It previously
+  failed with "No complete index generation is available for the source
+  snapshot".
+- Packs that select user-global memories are persisted, and those items are
+  labeled `lane=global` (#57). An omitted `--candidate-pool` on the `ee
+  context` alias follows `pack.candidate_pool`, as `ee pack` does (#49).
+
+### Search relevance and admission
+
+- `ee search` flags weak semantic evidence. Under the local Model2Vec embedder
+  a hybrid hit's relevance is its RRF rank position, so the relevance floor
+  admitted every candidate and an unrelated query returned all hits with an
+  empty `degraded[]` and `qualityAssessment` `unknown`. When the best
+  `neural_local` score falls below a provisional 0.35 threshold, the hits are
+  still returned, but the search reports `weak_query_recall` and
+  `qualityAssessment` `"weak"`. A correct paraphrase with weak scores can also
+  be flagged. The flag is not raised for hash-fallback, remote-vector or
+  lexical hits.
+- **Contract break:** lexical-only hits report `scoreKind`
+  `query_relative_pool_minmax` instead of `unit_normalized`. The value is
+  min-max normalized over the returned pool, so the strongest hit renders 1.0
+  whatever its raw BM25 score was. `ee.search.document.v1` and four sibling
+  schemas drop `unit_normalized` without a version bump. The raw engine value
+  remains in `lexicalScore`.
+- The default relevance floor (0.05, calibrated on absolute cosine) applies
+  only to scores in that domain. Without an explicit `--relevance-floor`, a
+  lexical hit that matched is admitted and marked uncalibrated; before, its
+  admission could depend on how an unrelated document in the pool scored. An
+  explicit floor still applies to every hit.
+- Results carry a deterministic `calibrationId` in `metadata.scoreCalibration`
+  and on each hit, and retrieval audit rows store it. Explicitly calibrated
+  hits are admitted on the lower bound of their `scoreInterval` rather than the
+  point score.
+- `ee search` hydrates procedural-rule hits from the rule store: full bodies,
+  canonical rule ids, provenance and revision metadata instead of index
+  previews. `--memory-scope verified`, `global`, `self` and `team` now return
+  native rules. Revoked, foreign and stale rules are rejected before relevance
+  filtering.
+- Search, `ee similar`, anchored `ee recall`, `ee resume`, the primer cache and
+  `ee diag search` admit candidates from the source database in one read
+  snapshot before ranking. An out-of-date index entry can no longer surface a
+  superseded revision, closed seal, other workspace or stale global tag. As-of
+  queries still see the revision current at that time. A failed authority read
+  withholds results rather than returning partial output.
+- When the embedder fails during retrieval, hybrid and semantic-only searches
+  fall back to lexical retrieval and report the applied mode and
+  `source_mode_fallback` without the backend's error text.
+  `--strict-source-mode` refuses instead. Producer-identity, dimension,
+  index-integrity and cancellation errors remain errors.
+- `didYouMean` suggestions include the suggested memory's `content`, which had
+  rendered empty in the default `workspace` and `swarm` scopes.
+- Team scope admits producers only through the addressed workspace's roster.
+  Missing, broken or unbound stores authorize no team members.
+- As-of reads compare row timestamps at the precision of the bound. Revision
+  boundaries written by `ee memory revise` no longer drop both revisions and
+  yield an empty pack.
+- Anchored `ee recall` pages code anchors by path and symbol rather than
+  reading a prefix-limited set, and reports incomplete source scans. Stored
+  private fields pass the public-egress redaction policy before previews and
+  budgeting. `ee resume` selects sessions before rendering and reads session
+  state from one snapshot.
+- The OpenAI-compatible remote embedding backend refuses HTTP redirects and
+  keeps server payloads out of diagnostics. Malformed or partially indexed batch
+  responses are rejected instead of assigned by position, and dimension drift is
+  reported as an integrity error that lexical fallback cannot hide.
+- Semantic and hybrid search keep request cancellation and non-recoverable
+  producer failures across the search-library boundary. A swallowed identity,
+  dimension or malformed-response error is refused before reranking or
+  publication, instead of becoming a successful search. Explicit lexical-only
+  retrieval and recovery from a genuine inference outage still work.
+- Index recovery promotes only generations that were previously published. A
+  structurally complete staging build that was never committed is no longer
+  promoted when the active index is missing. When a publication exchange is
+  reversed, the rejected generation can no longer later qualify as retained
+  data, even if its quarantine rename fails. An index-job dry run opens the
+  store read-only, so daemon planning cannot initialize or rewrite a store.
 
 ### Tag backfill
 
@@ -123,6 +302,10 @@ came from.
   autodiscovery and enrollment, and persisted on the enrolled peer. A peer that
   changes address is recognised as the same device instead of re-enrolling as a
   new one.
+- `discovery_lists_unreadable`, raised when mesh refuses to probe peers because
+  its discovery policy cannot be loaded, now has severity `high`. Its previous
+  severity, `error`, was not a valid value and ranked below `info`, so the code
+  was among the first dropped when degradations were truncated.
 
 ### Storage and migrations
 
@@ -135,10 +318,27 @@ came from.
   lexical result `V123` produced.
 - A lexical fallback now auto-requests an index rebuild through the steward
   instead of silently serving degraded retrieval.
+- When live index metadata is missing, malformed or obsolete, or a tier is
+  damaged, search reads a compatible committed generation that the index
+  retained, bounded by the database snapshot, without promoting or rewriting
+  index files. Publication recognizes a published generation stranded by a
+  killed directory exchange and rejects uncommitted staging. Rollback makes its
+  directory changes durable even when quarantine or restoration fails.
+- `ee index rebuild --dry-run` and `ee index reembed --dry-run` are read-only:
+  they capture the corpus from a read snapshot and open no writable storage,
+  initialize no model and make no network call. `ee index status` inspects the
+  configured embedding identity without loading model weights.
+- `ee migrate shard-fanout` uses `EE_SHARDS_DIR` when `--shards-dir` is omitted,
+  matching doctor, status and backup.
 
 ### Reporting and provenance
 
-- `ee version` reports which franken-stack the binary was linked against.
+- `ee version` reports which franken-stack the binary was linked against,
+  stamping every franken-stack crate pinned in `Cargo.lock`, including
+  frankentorch, rather than three summary versions.
+- Provenance URIs keep explicit one-line ranges: `cass-session://` references
+  render `#L<n>-<n>`, `file://` fragments still collapse equal endpoints, and
+  canonical URIs round-trip unchanged through parse and print.
 - Pack provenance records **which entities** a pack selected, not only its
   hash, and build attestation covers the build rather than the commit alone.
 - `ee insights` paginates its sections and skips graph I/O for requests that
@@ -150,6 +350,13 @@ came from.
   token budgeting, provenance, deterministic packing and local persistence.
   Read-only packs do not write search audits or pack records. Missing,
   incompatible or wrong-workspace daemons use the documented local fallback.
+  Read-only packs in embedding source modes (the default hybrid mode, or
+  semantic-only) also use the daemon, but only when it already holds a
+  compatible local model in memory. The daemon never loads, downloads or swaps
+  a model for such a request. A cold, remote or incompatible daemon is
+  refused, the client uses its local path, and the pack names that fallback.
+  On one Linux worker, a read-only hybrid pack through a warm daemon took a
+  median of 708 ms, against 3155 ms for the same pack built locally.
 - Cache successful Model2Vec file verification within the process. Repeated
   warm requests inspect directory and file metadata instead of rereading the
   entire model; changed manifests or file identities still require full
@@ -170,6 +377,12 @@ came from.
 - Wake daemon shutdown through its owned sockets, including shutdown requests
   that arrive before the accept loop starts waiting. Avoid hanging in accept
   and reject queued requests after shutdown begins.
+- The daemon's background maintenance processes the workspace's durable index
+  job queue: pending or retryable jobs are coalesced and published, within the
+  tick's item budget and with shutdown checked before each claim. An explicit
+  rebuild keeps precedence, and a live publisher keeps ownership. One failing
+  maintenance job (decay, team sync) no longer stops the others, so queued
+  indexing is not starved.
 - Generate JSON help and introspection from the actual Clap command tree.
   Nested `--help-json` and `introspect --command` expose the addressed command's
   positionals, options, defaults and available value enums (#42–#44).
@@ -231,6 +444,321 @@ came from.
   `list`, instead of reporting a missing `--relation` for a link creation that
   was never requested. Listing remains `ee memory link <MEMORY_ID>` with the
   target omitted.
+
+### Doctor, status and model health
+
+- `ee init` no longer loads the embedding model just to report whether
+  semantic retrieval is ready. With a verified local model it reports "model
+  verified, not loaded; it loads on the first search" (JSON
+  `semanticRetrieval.state: "model_verified_not_loaded"`, `enabled: false`),
+  because verified files do not prove the weights load. Measured on one Linux
+  worker with a verified model, peak memory during `ee init` fell from 1083 MB
+  to 96 MB. Search still loads and reports the model it uses.
+- On a fresh store, `ee status`, `ee doctor` and `ee health` now agree. An
+  honest hash-embedder fallback (no semantic model) no longer degrades search,
+  pack or overall status. `search_lexical_only` stays in `degraded[]`, now with
+  the repair that works: `ee model fetch`, then `ee index rebuild`. A semantic
+  embedder with no embedded vectors still degrades search. Memories with the
+  `human_explicit` trust class count as attested without an external source
+  URI; tombstones still degrade memory health.
+- `ee doctor --fix` rebuilds a missing or stale search index instead of only
+  recording advisory steps. It builds the corpus from a read-only snapshot,
+  checks every tier away from the live path and publishes the readiness marker
+  last. Each live file change is journaled with a hash-checked backup, so
+  `ee doctor --undo <RUN_ID>` restores the previous index; undo refuses to run
+  over a newer generation. Both index fixers now target the directory the
+  search-index check inspects rather than `.ee/indexes`.
+- Staging an index repair no longer downloads the embedding model. It uses the
+  cached-only lookup that read-only `ee pack` and `ee ask` use, ending at the
+  deterministic hash stack. Previously, `doctor --fix` without a local model
+  could download the default model into the user cache.
+- `ee doctor --fix` reports advisory operations as `guidance_recorded`, not
+  `applied`, and counts them in `guidanceOnlyFixerCount`. `EE-E300` (index
+  missing) dispatches the new `search_index_missing` fixer. A run that leaves a
+  core check unresolved records `completed_partial`, lists it in
+  `unresolvedCoreChecks` and exits 6; advisory-only runs still exit 0.
+- `ee doctor --capabilities --json` adds `fix_dispatch`, one
+  `{finding, op_kind, effect}` entry per finding `--fix` can dispatch, with
+  `effect` `repair` or `guidance`. `--fix-plan` steps gain `fixMode`
+  (`auto_repair`, `auto_guidance` or `manual`) and `fixFinding`, and
+  `fixableIssues` counts only `auto_repair` steps. Several default repairs no
+  longer point back at `ee doctor --fix-plan`.
+- Doctor judges a damaged store from its length and SQLite header without
+  opening it, because any open writes sidecar files. A zero-byte `ee.db`
+  reports the new `EE-E206` (`database_empty`) instead of pending migrations. A
+  truncated or non-SQLite file reports `EE-E202` (`database_corrupted`). A
+  `.ee/` directory without `ee.db` (`EE-E200`) gets `database_missing`
+  guidance. In each case `--fix` records guidance only and writes no store
+  bytes; the truncated and missing cases previously crashed with
+  `doctor_runtime_io`.
+- A failed database inspection is no longer reported as corruption. A writer or
+  engine lock reports `EE-E201` (`database_locked`), migration-history checksum
+  drift reports the new `EE-E702` (`database_migration_drift`), and other open
+  or inspection failures report the new `EE-E207` (`database_unavailable`). All
+  three are guidance-only and block dependent index repair and migration.
+- `ee model fetch` re-mints a stale Model2Vec `.verified` receipt when the
+  model is already present. A `chmod` or `chown` that changed a model file's
+  ctime made every later process re-hash the whole model before loading it.
+  `ee status` and doctor's advisory `embedding_posture` check report the
+  low-severity `embed_model_receipt_stale`, with the repair
+  `ee model fetch embedding-default`.
+- `ee orient --fast` prints `unavailable` rather than `Pack items: 0` and
+  `Dirty paths: 0` when those subsystems produced no data. Only the recency
+  provider decides whether a store is `empty`.
+- `ee status --json` renders `writeGroupCommit.avgBatchSize` as a measured
+  number rather than a six-decimal score.
+- `docs/degraded_codes.md` documents `context_lexical_fallback`,
+  `embed_model_receipt_stale` and the `recall_*` admission codes, among others.
+  The doctor first-aid guide describes what `--fix` actually dispatches, and no
+  longer names environment variables, codes or schemas that do not exist.
+- `ee model fetch` repairs the machine model cache without an initialized
+  workspace, honors `EE_EMBED_DOWNLOAD=off` before any downloader is built, and
+  accepts a verified operator-named model directory offline. Its output is now
+  `ee.model_fetch.v2`: `databasePath` and `registryEntry` are nullable, because
+  a cache-only repair touches no workspace. Scripts that read
+  `ee.model_fetch.v1` must accept the new schema.
+
+### Backup, restore and the user-global store
+
+- `ee backup restore` verifies the restored side store before publishing it.
+  After every recovery writer finishes, one read-only snapshot must match what
+  the backup admitted, by value and identity rather than row count. The check
+  runs again after the restored index is rebuilt. It covers memories, revisions,
+  links, rules, feedback, pack history, CASS sessions and evidence decisions,
+  seals, certificates, journals, index jobs, curation and procedure history,
+  recorder runs and causal evidence. Publication is refused on count-preserving
+  corruption, a missing or partial manifest inventory, and rows from another
+  workspace. Recorder runs active at backup time restore as `abandoned`.
+- Typed memory fields, such as a decision's chosen option, options and revisit
+  condition, survive `ee backup`, `ee export` and `ee import jsonl` as
+  authenticated sidecars redacted with their record. Restored stores keep
+  serving them to `ee decide` and `ee resume`. A lost sidecar or substituted
+  content is refused even when row counts match.
+- Workflow membership survives export, import and backup. `ee export` had
+  omitted `workflow_id` and `ee import jsonl` wrote NULL, which dropped
+  workflow-scoped recall and `why` relationships after a restore that looked
+  successful.
+- Revision history round-trips exactly. Import refuses cyclic, dangling,
+  cross-family or contradictory revision references, and families with two
+  disconnected current heads, before any destination write. Record streams with
+  wrong counts or workspace admission are refused before a directory is created
+  or a database migrated, in both `--dry-run` and applied modes.
+- Redaction is idempotent across backup generations. Restoring a restored,
+  redacted backup previously failed a database CHECK, and canonical references
+  and pseudonyms were rehashed on every generation. Redacted content never
+  regains authority on restore.
+- In a store shared by several workspaces, `ee backup create` backs up the
+  addressed workspace by each durable record's explicit ownership.
+  Cross-workspace links and unowned episodes are reported as incomplete
+  coverage, and records with missing ownership refuse publication, including
+  on `--dry-run`.
+- `ee memory promote-global` commits the global memory, its tags, its index job
+  and the destination audit in one transaction. A retry after a failed origin
+  audit or an interruption repairs without duplicating. Expired, not yet
+  valid, replaced or sealed sources are refused. `--dry-run` creates nothing
+  and reports `alreadyPromoted: true` whenever a twin exists.
+- `ee memory demote-global` writes the tombstone, index repair job and audit
+  together. `ee memory outcome-global` records feedback atomically and reports
+  the confidence delta actually applied. Global-store search and primer reads
+  take body, supersession and seal state from one snapshot.
+- Global promotion carries a memory's structured fields (decision, rule and
+  command payloads) and its attempt-family eligibility, read from the same
+  snapshot as the body. Incomplete, unslotted or conflicting attempt families
+  are refused before the global store is opened. A structured field that holds
+  a secret, including one inside a list or a multiline value, refuses the
+  promotion instead of being silently rewritten. The audit records only a
+  commitment to the payload.
+- Restoring a verified backup keeps each memory's original provenance URI,
+  including its absence. Ordinary JSONL imports still receive import-origin
+  markers.
+- Restoring a verified backup keeps native trust (for example
+  `human_explicit`) when the backup's records authenticate under the key root
+  that authenticated its manifest, including after source key rotation.
+  Private keys are never copied. A signed manifest whose records lack valid
+  native authentication restores with trust capped, and reports one
+  `verified_backup_trust_downgraded` degradation instead of silently
+  downgrading. Ordinary JSONL import still authenticates against the
+  destination's keys.
+- **Behaviour change:** `ee backup create` defaults to `minimal` redaction, so
+  a restored backup keeps every memory ID and its human-assigned trust. Pass
+  `--redaction standard` for a shareable backup; standard backups re-mint IDs
+  on restore. `ee export` still defaults to `standard`, and a workspace
+  `[redaction.defaults] export` setting still governs both.
+
+### Memory revisions and feedback
+
+- `ee memory revise` preserves typed data. A same-kind revision inherits
+  structured fields unless the replacement text overrides them, and `--kind`
+  builds a projection for the new kind. A changed body must pass the same
+  secret policy as `ee remember`, and allowed exceptions are audited in the
+  revision transaction.
+- Validity, expiry and recency compare as exact instants, not by timestamp
+  spelling. `ee remember`, import and restore keep fractional seconds and UTC
+  offsets.
+- `ee outcome` writes the feedback event, its audit, the posterior and any
+  trust transition in one transaction. If learning fails, the idempotency key
+  is rolled back so a retry learns, and a missing target fails instead of
+  recording feedback nothing learned from.
+- One damaged sealed memory no longer breaks `ee ask` and `ee resume` for the
+  whole workspace. A closed seal still withholds its body.
+- Inherited validity timestamps keep their exact instant, nanoseconds
+  included, and revision histories are ordered by parsed instants rather than
+  by timestamp text, so timestamps with different UTC offsets order correctly.
+
+### CASS import and session learning
+
+- `ee import cass` revisits sessions it already imported. With span capture on
+  (the default; `--no-spans` disables it), a session that grew, or that an
+  older importer stored without evidence, is extended under its existing
+  session id. Retained evidence ids, attachments, redaction records and
+  admission decisions are kept. A changed retained excerpt or scope mismatch
+  refuses that session's refresh rather than rewriting history. New spans,
+  audits and a revision-specific index job commit together. Re-importing an
+  unchanged snapshot writes nothing.
+- `ee import cass --since` selects a session by its latest start, end or
+  modification time, so a resumed older session with recent activity is
+  included.
+- Transcript excerpts recognize Claude/OpenAI typed text blocks and Codex
+  event-message bodies, and shorten only the recognized text within a byte
+  allowance shared across blocks. A large early block can no longer erase later
+  evidence.
+- An import requires contiguous single-line evidence from JSONL and paginated
+  `cass view` output before its session transaction begins, and refuses
+  mismatched or malformed locators without echoing paths. Retained evidence per
+  session has a 100 MiB budget across all pages; this bounds retained evidence,
+  not process memory.
+- `ee review session --propose` proposes paired `session_arc_rule` and
+  `session_arc_anti_pattern` candidates from failure-to-repair arcs in imported
+  sessions. Every complete, disjoint episode in a window is recovered, explicit
+  `Failure arc:` / `Fix:` markers pair across lines, and predicted or negated
+  repairs are rejected. Each proposal is still validated and applied with
+  `ee curate validate` and `ee curate apply`. `ee curate show` previews list
+  shared evidence spans and the planned rule-to-anti-pattern link.
+- Policy-shaped lessons spanning two windows carry the observed risk, the
+  mitigation and both source locations instead of failing specificity. The
+  threshold is unchanged.
+- `ee curate apply --json` sets the envelope's `success` from the application
+  outcome. A blocked apply, such as `candidate_requires_validation`, reports
+  `success: false` where it previously reported `true`. The exit code is still
+  0.
+- Applying a reviewed link or contradiction proposal commits the link. It was
+  previously rolled back by a guard meant for memory-only changes. The
+  proposal's identity, workspace, endpoints and expiry are revalidated inside
+  the write transaction, and the audit records the link actually written. A
+  proposal whose content is the structured link payload is no longer rejected
+  by the prose specificity check as `candidate_too_generic`; free-text
+  proposals of those types are still checked.
+- Session learning recognizes an ordinary failure-then-repair arc inside a
+  single transcript window, using the same file-aware subject matching as
+  arcs that span windows. Failures on different files stay separate, each
+  failure is consumed by at most one repair, and ambiguous repairs are
+  rejected.
+
+### Capture and secret screening
+
+- CASS evidence lines and `ee journal` capture content are screened for
+  credentials before the byte cut that produces the stored excerpt, so a
+  credential crossing the truncation boundary cannot be stored as an undetected
+  fragment. External evidence is scrubbed of embedded credentials, and original
+  credential spans are redacted before generic rewrites. Manual-memory policy
+  thresholds are unchanged.
+- `ee remember --from-commit`, `--from-diff` and `--from-worktree` collect the
+  complete change from one NUL-framed comparison, including root commits,
+  first-parent merge deltas and uncommitted changes before the first commit.
+  External diff and textconv are disabled, conflicts and missing shallow history
+  are refused, and the whole diff is screened before budgeting. The stored
+  memory keeps a bounded excerpt; the fingerprint covers the full sanitized
+  diff.
+- Git capture reads locally only. In a partial clone, a missing blob refuses
+  the capture instead of contacting the remote and writing objects.
+- `ee capture suggest` carries the exact `--database`, `--min-confidence` and
+  review `--limit` into the review, accept and reject commands it generates;
+  those commands previously fell back to defaults and could act on the wrong
+  store.
+- Builds with the optional `mcp` feature, which is not in the default feature
+  set, gain an `ee_capture_git` tool. It previews by
+  default and writes only with `dryRun: false` and `allowWrite: true`. `ee_ask`
+  there now passes `--memory-scope` and literal `--path` targets through and
+  always runs `--read-only`.
+- `ee remember` rejects a `file://path:<n>` source (use `#L<n>`) and a batch
+  line with an unknown key, instead of accepting input it would misread (#58,
+  #59).
+- Ingested text that contains an OpenAI key now reports the redaction reason
+  `openai_api_key`, the stable provider code, rather than the generic
+  `api_key`. The secret is redacted either way. A
+  `redaction.allowCategories` list that names only `api_key` no longer admits
+  such spans.
+- `ee preflight` includes learned advice from the workspace's own rule, risk,
+  anti-pattern and failure memories, even for commands that match no built-in
+  pattern. Native procedural rules are cited by rule id. The advice is strictly
+  advisory: preflight's exit-zero contract is unchanged.
+
+### Configuration, evaluation and dependencies
+
+- `ee config get` reads the merged configuration that `ee config show` prints,
+  instead of the smaller key table that `ee config set` validates against, and
+  reports a key with no value as having no value rather than as unknown.
+  `config set` is unchanged.
+- `ee eval run --json` emits `ee.eval.report.v2`. Each fixture reports
+  `verbatim_share` and `paraphrase_mean_precision_at_1`, separating queries
+  whose text appears verbatim in the target memory from paraphrase recall;
+  figures that cannot be measured are `null`. Retrieval eval runs against a
+  seeded store, and per-query search degradations appear in run and report
+  output.
+- rustls is updated to 0.23.45 for RUSTSEC-2026-0285.
+
+### Release verification
+
+- `scripts/release_binary_probe.sh` checks what a published archive actually
+  does. It runs the binary only after the archive's SHA-256 matches the
+  published checksum, in an isolated HOME with downloads off, and writes
+  `ee.release_probe.v1` rows keyed by archive hash and `gitCommit`. Rows cover
+  the walking skeleton, parallel search and pack determinism, rule search and
+  packing beside its source, abstention on an unrelated query, status/doctor
+  agreement, model fallback and receipt freshness, the learn loop and
+  concurrent writes. If the neural backend is not active the verdict is
+  `incomplete`, never pass.
+- The probe is a release-time step, not an automated gate: CI Static runs only
+  its `--self-test`. Against the published v0.15.2 archive it failed
+  `rule_packs_beside_source`, `unrelated_query_abstains` and
+  `status_doctor_agree`. The published 0.16.0 `aarch64-apple-darwin` archive
+  passes all 13 rows, including those three; its report is attached to the
+  GitHub release as `release-probe-aarch64-apple-darwin.json`, keyed by the
+  archive's SHA-256 and by this release commit.
+- **The other five archives were not probed.** The probe must execute the
+  binary, and the operator cutting this release had no Linux or Windows host
+  available to run one on. For those five targets the evidence is this release
+  commit's own verification plus the fact that every target is built from the
+  same source tree — not an executed probe. Treat the `x86_64-apple-darwin`,
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `x86_64-unknown-linux-musl` and `x86_64-pc-windows-msvc` archives as
+  compiled and checksummed but not behaviourally exercised.
+
+### Known limitations
+
+- This release is unsigned. Its assets carry SHA-256 checksums only, without
+  Sigstore signatures or SLSA attestations, so they do not satisfy
+  `--require-provenance`.
+- The library test suite (`cargo test --lib`) still has known failing tests:
+  13 of 11,284 fail at the release candidate, each tracked by an open Beads
+  issue (the census is `bd-rm8wj`). This release does not claim to resolve them.
+- The release commit is not byte-identical to the candidate that run was
+  measured on. It differs by the version numbers, the three version-pinned
+  JSON-contract snapshots, this changelog, and **one product change**:
+  `src/db/mod.rs` regains a `#[cfg(unix)]` gate on the database write-lock
+  path that an earlier commit had displaced, without which the
+  `x86_64-pc-windows-msvc` target does not compile at all (`bd-ajl2b`). That
+  change was verified by a Windows cross-build and a macOS build of this exact
+  file, and by the `db::` library tests — but it was not part of the
+  candidate's full library run, and it is disclosed here rather than folded
+  silently into "version numbers only".
+- Several changes in this release were committed without running their Rust
+  tests at their own commit. For those, the evidence is the release
+  candidate's full library run and the release probe, not a per-commit result.
+- The parallel rows of the release probe can exceed the 60-second CLI deadline
+  on heavily loaded hosts and exit with a `cancelled` deadline error. Each
+  concurrent process loads the embedding model on its own. Tracked in
+  `bd-xayfm`.
 
 ## [0.15.2] - 2026-09-12
 

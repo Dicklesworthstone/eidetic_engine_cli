@@ -777,13 +777,16 @@ fn observe_flock_gate_epoch(lock_file: &mut File, previous: Option<u64>) -> Opti
     read_flock_gate_epoch(lock_file).ok().flatten().or(previous)
 }
 
-#[cfg(unix)]
 /// Inner-message prefixes of the two flock-gate outcomes that mean "another
 /// writer holds the lock": a holder that made no progress, and the hard wait
 /// deadline. Only [`write_lock_stagnant_error`] and
 /// [`write_lock_deadline_error`] build them, and
 /// [`DbError::is_write_lock_contention`] recognizes exactly them, so the
 /// producer and the classifier cannot drift apart (bd-ixxzq).
+///
+/// Both are unconditional: the two constructors below and
+/// [`DbError::is_write_lock_contention`] are cross-platform, and
+/// `core::doctor_database_failure` calls them on every target (bd-ajl2b).
 const WRITE_LOCK_STAGNANT_MESSAGE: &str = "database write lock holder made no progress";
 const WRITE_LOCK_DEADLINE_MESSAGE: &str = "database write lock wait deadline exceeded";
 
@@ -817,6 +820,11 @@ pub(crate) fn write_lock_deadline_error(
     }
 }
 
+/// Unix-only: the body takes the advisory `flock` and publishes the holder
+/// epoch. The `#[cfg(unix)]` here is load-bearing — `edeef7838` once inserted a
+/// block between this attribute and this function, which silently made the
+/// whole flock gate unconditional and broke every Windows build (bd-ajl2b).
+#[cfg(unix)]
 fn lock_database_write_file_with_wait_observer(
     database_path: &Path,
     stagnant_max_wait: Duration,
