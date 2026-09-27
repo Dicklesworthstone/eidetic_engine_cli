@@ -289,3 +289,249 @@ fn missing_timestamp_cells_fail_but_null_is_unbounded() {
     let text = Value::Text(CUTOFF.to_owned());
     assert_eq!(optional_timestamp(Some(&text)).unwrap(), Some(CUTOFF));
 }
+
+#[test]
+fn metadata_paging_exhausts_the_corpus_before_any_body_is_hydrated() {
+    let (_root, db) = fixture();
+    let count = ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1;
+    db.with_transaction(|| {
+        for index in 1..=count {
+            seed(&db, index, None, None);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let pages = std::cell::RefCell::new(Vec::new());
+    let mut hydrated = Vec::new();
+    let snapshot = AskReadSnapshot::begin(&db).unwrap();
+    let memories = load_selected_revisions(
+        &db,
+        WORKSPACE,
+        at(CUTOFF),
+        RevisionSelection::All,
+        |page| {
+            assert_eq!(
+                *pages.borrow(),
+                [ASK_MEMORY_REVISION_PAGE_SIZE, ASK_MEMORY_REVISION_PAGE_SIZE, 1]
+            );
+            hydrated.extend(page.iter().map(|value| (*value).to_owned()));
+        },
+        |count| pages.borrow_mut().push(count),
+    )
+    .unwrap();
+    assert!(db.begin_read_snapshot().is_err(), "the caller still owns its snapshot");
+    snapshot.finish().unwrap();
+    let expected: Vec<_> = (1..=count).map(id).collect();
+    assert_eq!(hydrated, expected);
+    assert_eq!(
+        memories.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn metadata_paging_bounds_inactive_history_without_dropping_late_evidence() {
+    let (_root, db) = fixture();
+    let last = ASK_MEMORY_REVISION_PAGE_SIZE * 3 + 1;
+    db.with_transaction(|| {
+        for index in 1..last {
+            seed(&db, index, None, Some("2020-01-01T00:00:00Z"));
+        }
+        seed(&db, last, None, None);
+        Ok(())
+    })
+    .unwrap();
+    let mut pages = Vec::new();
+    let mut hydrated = Vec::new();
+    let snapshot = AskReadSnapshot::begin(&db).unwrap();
+    let memories = load_selected_revisions(
+        &db,
+        WORKSPACE,
+        at(CUTOFF),
+        RevisionSelection::All,
+        |page| hydrated.extend(page.iter().map(|value| (*value).to_owned())),
+        |count| pages.push(count),
+    )
+    .unwrap();
+    snapshot.finish().unwrap();
+    assert_eq!(pages, [256, 256, 256, 1]);
+    assert_eq!(hydrated, [id(last)]);
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].id, id(last));
+    let corpus = load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).unwrap();
+    let answer = evaluate_ask(
+        &AskRequest {
+            question: BODY.to_owned(),
+            contradictions: corpus.contradictions,
+            native_sources: corpus.native_sources,
+            ..AskRequest::default()
+        },
+        &corpus.candidates,
+    );
+    assert!(!answer.abstained);
+    assert_eq!(answer.citations.len(), 1);
+    assert_eq!(answer.citations[0].memory_id, id(last));
+}
+
+#[test]
+fn metadata_paging_rejects_a_corrupt_hidden_tail_before_reading_a_valid_prefix() {
+    let (_root, db) = fixture();
+    let last = ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1;
+    db.with_transaction(|| {
+        for index in 1..=last {
+            seed(&db, index, None, None);
+        }
+        Ok(())
+    })
+    .unwrap();
+    db.insert_memory_seal(&id(last), &format!("blake3:{}", "a".repeat(64)), CUTOFF)
+        .unwrap();
+    db.execute_raw(&format!(
+        "UPDATE memories SET valid_to = 'PRIVATE-TAIL-CANARY' WHERE id = '{}'",
+        id(last)
+    ))
+    .unwrap();
+    let mut hydrated = 0;
+    let mut pages = Vec::new();
+    let snapshot = AskReadSnapshot::begin(&db).unwrap();
+    let error = load_selected_revisions(
+        &db,
+        WORKSPACE,
+        at(CUTOFF),
+        RevisionSelection::All,
+        |_| hydrated += 1,
+        |count| pages.push(count),
+    )
+    .unwrap_err();
+    assert_eq!(pages, [256, 256]);
+    assert_eq!(hydrated, 0);
+    assert!(!format!("{error:?}").contains("PRIVATE-TAIL-CANARY"));
+    assert!(!format!("{error:?}").contains(&id(last)));
+    assert!(db.begin_read_snapshot().is_err());
+    snapshot.finish().unwrap();
+    assert!(load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).is_err());
+    db.begin_read_snapshot().expect("failed public read released its snapshot");
+    db.commit_read_snapshot().unwrap();
+}
+
+#[test]
+fn metadata_pages_and_body_hydration_share_the_callers_snapshot() {
+    let (root, reader) = fixture();
+    let last = ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1;
+    reader.with_transaction(|| {
+        for index in 1..=last {
+            seed(&reader, index, None, None);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let writer = DbConnection::open_file(&root.path().join("ask.db")).unwrap();
+    let snapshot = AskReadSnapshot::begin(&reader).unwrap();
+    let mut changed = false;
+    let memories = load_selected_revisions(
+        &reader,
+        WORKSPACE,
+        at(CUTOFF),
+        RevisionSelection::All,
+        |_| {},
+        |count| {
+            if !changed {
+                assert_eq!(count, ASK_MEMORY_REVISION_PAGE_SIZE);
+                writer.with_transaction(|| {
+                    writer.execute_raw(&format!(
+                        "UPDATE memories SET valid_to = '2020-01-01T00:00:00Z' WHERE id = '{}'",
+                        id(last)
+                    ))?;
+                    seed(&writer, last + 1, None, None);
+                    Ok(())
+                })
+                .expect("commit after the first metadata page");
+                changed = true;
+            }
+        },
+    )
+    .unwrap();
+    assert!(changed);
+    assert_eq!(memories.len(), last);
+    assert_eq!(memories.last().unwrap().id, id(last));
+    assert!(memories.last().unwrap().valid_to.is_none());
+    snapshot.finish().unwrap();
+    let (next, _) = observed(&reader, CUTOFF);
+    assert_eq!(next.len(), last);
+    assert!(!next.iter().any(|memory| memory.id == id(last)));
+    assert_eq!(next.last().unwrap().id, id(last + 1));
+}
+
+#[test]
+fn command_advice_pages_apply_kind_selection_before_the_page_limit() {
+    let (_root, db) = fixture();
+    let count = ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1;
+    db.with_transaction(|| {
+        for index in 1..=count * 2 {
+            seed(&db, index, None, None);
+            if index % 2 == 0 {
+                db.execute_raw(&format!(
+                    "UPDATE memories SET kind = 'fact', level = 'semantic', valid_from = 'UNRELATED-FACT-CANARY' WHERE id = '{}'",
+                    id(index)
+                ))?;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let snapshot = AskReadSnapshot::begin(&db).unwrap();
+    let mut pages = Vec::new();
+    let memories = load_selected_revisions(
+        &db,
+        WORKSPACE,
+        at(CUTOFF),
+        RevisionSelection::CommandAdvice,
+        |_| {},
+        |count| pages.push(count),
+    )
+    .unwrap();
+    assert_eq!(pages, [256, 256, 1]);
+    let expected: Vec<_> = (1..=count).map(|index| id(index * 2 - 1)).collect();
+    assert_eq!(
+        memories.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(load_command_advice_revisions(&db, WORKSPACE, at(CUTOFF)).unwrap().len(), count);
+    snapshot.finish().unwrap();
+    // The unrestricted path still validates those facts; the kind predicate
+    // does not weaken lifecycle validation for rows selected by an operation.
+    assert!(load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).is_err());
+}
+
+#[test]
+fn empty_and_exact_boundary_metadata_scans_terminate_without_duplicate_bodies() {
+    let (_root, db) = fixture();
+    for count in [0, ASK_MEMORY_REVISION_PAGE_SIZE] {
+        if count > 0 {
+            db.with_transaction(|| {
+                for index in 1..=count {
+                    seed(&db, index, None, None);
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        let snapshot = AskReadSnapshot::begin(&db).unwrap();
+        let mut pages = Vec::new();
+        let mut hydrated = Vec::new();
+        let memories = load_selected_revisions(
+            &db,
+            WORKSPACE,
+            at(CUTOFF),
+            RevisionSelection::All,
+            |page| hydrated.extend(page.iter().map(|value| (*value).to_owned())),
+            |size| pages.push(size),
+        )
+        .unwrap();
+        snapshot.finish().unwrap();
+        let expected_pages = if count == 0 { vec![0] } else { vec![count, 0] };
+        assert_eq!(pages, expected_pages);
+        assert_eq!(memories.len(), count);
+        assert_eq!(hydrated, (1..=count).map(id).collect::<Vec<_>>());
+    }
+}
