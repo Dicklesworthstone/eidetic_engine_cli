@@ -42,6 +42,8 @@ enum SemanticFailure {
 /// Missing, rejected, failed, or malformed models fall back to the complete
 /// lexical evaluation with `semantic_degraded = true`. Cancellation withholds
 /// the operation instead of being turned into an ordinary corpus miss.
+/// Query and span batches must retain one reported model identity and vector
+/// dimension; a detected change discards all intermediate semantic scores.
 pub fn evaluate_ask_with_local_model(
     connection: &DbConnection,
     workspace_id: &str,
@@ -120,6 +122,43 @@ fn finish_evaluation(
     }
 }
 
+/// Freeze the selected producer's reported vector space for one evaluation.
+/// Equal dimensions alone cannot make vectors from different models comparable.
+/// These checks supplement local-model admission; they are not a substitute for
+/// its artifact attestation and cannot detect an unreported change of weights.
+struct SemanticSpace {
+    id: String,
+    model_name: String,
+    dimension: usize,
+}
+
+impl SemanticSpace {
+    fn capture(embedder: &dyn Embedder) -> Result<Self, SemanticFailure> {
+        let space = Self {
+            id: embedder.id().to_owned(),
+            model_name: embedder.model_name().to_owned(),
+            dimension: embedder.dimension(),
+        };
+        space.check(embedder)?;
+        Ok(space)
+    }
+
+    fn check(&self, embedder: &dyn Embedder) -> Result<(), SemanticFailure> {
+        if self.id.trim().is_empty()
+            || self.dimension == 0
+            || !embedder.is_semantic()
+            || embedder.dimension() != self.dimension
+            || embedder.id() != self.id.as_str()
+            || embedder.model_name() != self.model_name.as_str()
+        {
+            // Model descriptors can contain private local paths. Do not put
+            // either the frozen or changed values in reports or diagnostics.
+            return Err(SemanticFailure::Unavailable);
+        }
+        Ok(())
+    }
+}
+
 /// Borrow the admitted bytes. Retain scalars, not a corpus-sized vector matrix.
 /// Equal text can reuse inference, but its different source identities, trust,
 /// confidence and derivation groups remain distinct throughout composition.
@@ -135,16 +174,14 @@ impl<'a> SemanticScores<'a> {
         embedder: &dyn Embedder,
     ) -> Result<Self, SemanticFailure> {
         checkpoint(cx)?;
-        if !embedder.is_semantic() || embedder.dimension() == 0 {
-            return Err(SemanticFailure::Unavailable);
-        }
-        let dimension = embedder.dimension();
+        let space = SemanticSpace::capture(embedder)?;
         let query = embedder
             .embed(cx, question)
             .await
             .map_err(|error| inference_failure(cx, &error))?;
         checkpoint(cx)?;
-        let query_norm = vector_norm_squared(&query, dimension)
+        space.check(embedder)?;
+        let query_norm = vector_norm_squared(&query, space.dimension)
             .filter(|norm| *norm > 0.0)
             .ok_or(SemanticFailure::Unavailable)?;
 
@@ -163,19 +200,19 @@ impl<'a> SemanticScores<'a> {
         let mut by_text = BTreeMap::new();
         for batch in texts.chunks(EMBEDDING_BATCH_SIZE) {
             checkpoint(cx)?;
+            space.check(embedder)?;
             let vectors = embedder
                 .embed_batch(cx, batch)
                 .await
                 .map_err(|error| inference_failure(cx, &error))?;
             checkpoint(cx)?;
-            // A lazy backend may silently switch to hashes. Even a dimension-
-            // compatible fallback must never be reported as semantic inference.
-            if !embedder.is_semantic() || embedder.dimension() != dimension {
-                return Err(SemanticFailure::Unavailable);
-            }
+            // Cancellation wins over descriptor drift. A same-size model
+            // switch must discard earlier scalars too, not mix vector spaces.
+            space.check(embedder)?;
             append_batch(&mut by_text, batch, &vectors, &query, query_norm)?;
         }
         checkpoint(cx)?;
+        space.check(embedder)?;
         Ok(Self { by_text })
     }
 
@@ -269,7 +306,7 @@ mod runtime_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // Execute real hash inference to test the runtime boundary without a model
     // download. The semantic flag selects the scoring branch under test; this
@@ -326,6 +363,109 @@ mod runtime_tests {
         fn is_semantic(&self) -> bool {
             true
         }
+        fn category(&self) -> frankensearch::ModelCategory {
+            self.hash.category()
+        }
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum SpaceChange {
+        Never,
+        Query,
+        Batch(usize),
+    }
+
+    // Real hash inference with a controlled descriptor transition. As with
+    // RuntimeProbe, the semantic flag tests the runtime/scoring boundary only;
+    // this fixture is not evidence of a loaded or evaluated neural model.
+    struct DriftingProbe {
+        hash: crate::search::HashEmbedder,
+        initial_id: &'static str,
+        change_at: SpaceChange,
+        name_only: bool,
+        cancel_on_change: bool,
+        changed: AtomicBool,
+        query_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    impl DriftingProbe {
+        fn new(change_at: SpaceChange) -> Self {
+            Self {
+                hash: crate::search::HashEmbedder::default_256(),
+                initial_id: "runtime-test-space",
+                change_at,
+                name_only: false,
+                cancel_on_change: false,
+                changed: AtomicBool::new(false),
+                query_calls: AtomicUsize::new(0),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn finish_inference(&self, cx: &Cx, stage: SpaceChange) {
+            if self.change_at == stage {
+                self.changed.store(true, Ordering::SeqCst);
+                if self.cancel_on_change {
+                    cx.set_cancel_reason(asupersync::CancelReason::user(
+                        "PRIVATE-SPACE-CANCEL-CANARY",
+                    ));
+                }
+            }
+        }
+    }
+
+    impl Embedder for DriftingProbe {
+        fn embed<'a>(
+            &'a self,
+            cx: &'a Cx,
+            text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            Box::pin(async move {
+                self.query_calls.fetch_add(1, Ordering::SeqCst);
+                let result = self.hash.embed(cx, text).await;
+                self.finish_inference(cx, SpaceChange::Query);
+                result
+            })
+        }
+
+        fn embed_batch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            texts: &'a [&'a str],
+        ) -> frankensearch::SearchFuture<'a, Vec<Vec<f32>>> {
+            Box::pin(async move {
+                let batch = self.batch_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let result = self.hash.embed_batch(cx, texts).await;
+                self.finish_inference(cx, SpaceChange::Batch(batch));
+                result
+            })
+        }
+
+        fn dimension(&self) -> usize {
+            self.hash.dimension()
+        }
+
+        fn id(&self) -> &str {
+            if self.changed.load(Ordering::SeqCst) && !self.name_only {
+                "PRIVATE-MODEL-ID-CANARY"
+            } else {
+                self.initial_id
+            }
+        }
+
+        fn model_name(&self) -> &str {
+            if self.changed.load(Ordering::SeqCst) && self.name_only {
+                "PRIVATE-MODEL-NAME-CANARY"
+            } else {
+                self.hash.model_name()
+            }
+        }
+
+        fn is_semantic(&self) -> bool {
+            true
+        }
+
         fn category(&self) -> frankensearch::ModelCategory {
             self.hash.category()
         }
@@ -457,5 +597,145 @@ mod runtime_tests {
         assert!(previous.checkpoint().is_ok());
         assert!(Cx::current().is_some_and(|active| active.checkpoint().is_ok()));
         assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn multi_batch_fixture() -> (AskRequest, Vec<AskCandidate>) {
+        let (request, source) = fixture();
+        let rows: Vec<_> = (0..EMBEDDING_BATCH_SIZE * 2 + 1)
+            .map(|index| {
+                let mut row = source[0].clone();
+                row.memory_id = format!("runtime-source-{index}");
+                row.content =
+                    format!("Run cargo fmt on source before release variant{index}.");
+                row
+            })
+            .collect();
+        let texts: BTreeSet<_> = rows
+            .iter()
+            .flat_map(|row| {
+                segment_spans(&row.content)
+                    .into_iter()
+                    .map(move |(start, end)| &row.content[start..end])
+            })
+            .collect();
+        assert_eq!(texts.len(), EMBEDDING_BATCH_SIZE * 2 + 1);
+        (request, rows)
+    }
+
+    fn assert_complete_lexical_fallback(
+        request: &AskRequest,
+        rows: &[AskCandidate],
+        actual: &AskReport,
+    ) {
+        assert!(actual.semantic_degraded);
+        let output = super::super::ask_data_json(actual);
+        assert_eq!(
+            output,
+            super::super::ask_data_json(&evaluate_ask(request, rows))
+        );
+        let text = output.to_string();
+        assert!(!text.contains("PRIVATE-MODEL-ID-CANARY"));
+        assert!(!text.contains("PRIVATE-MODEL-NAME-CANARY"));
+    }
+
+    #[test]
+    fn stable_model_space_preserves_semantic_scores_across_all_batches() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        let model = DriftingProbe::new(SpaceChange::Never);
+        let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+        let reference = RuntimeProbe::new(false);
+        let expected = evaluate_with_prepared_model(&request, &rows, &reference, None).unwrap();
+        assert!(!actual.semantic_degraded);
+        assert_eq!(
+            super::super::ask_data_json(&actual),
+            super::super::ask_data_json(&expected)
+        );
+        assert_eq!(model.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.batch_calls.load(Ordering::SeqCst), 3);
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn same_dimension_model_change_after_query_stops_before_source_inference() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        let model = DriftingProbe::new(SpaceChange::Query);
+        let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+        assert_complete_lexical_fallback(&request, &rows, &actual);
+        assert_eq!(model.dimension(), 256);
+        assert!(model.is_semantic());
+        assert_eq!(model.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.batch_calls.load(Ordering::SeqCst), 0);
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn later_model_drift_discards_every_previously_computed_semantic_score() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for changed_batch in [1, 2, 3] {
+            let model = DriftingProbe::new(SpaceChange::Batch(changed_batch));
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.query_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), changed_batch);
+            assert!(Cx::current().is_none());
+        }
+    }
+
+    #[test]
+    fn changed_model_name_cannot_keep_semantic_posture_under_an_unchanged_id() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for stage in [SpaceChange::Query, SpaceChange::Batch(2)] {
+            let mut model = DriftingProbe::new(stage);
+            model.name_only = true;
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.id(), model.initial_id);
+            assert_eq!(model.dimension(), 256);
+            let expected_batches = if stage == SpaceChange::Query { 0 } else { 2 };
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), expected_batches);
+        }
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn missing_model_identity_is_refused_before_any_inference() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        for blank in ["", " \t\n"] {
+            let mut model = DriftingProbe::new(SpaceChange::Never);
+            model.initial_id = blank;
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.query_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), 0);
+        }
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn cancellation_wins_over_concurrent_model_identity_drift_without_disclosure() {
+        let previous = Cx::for_testing();
+        let _ambient = Cx::set_current(Some(previous.clone()));
+        let (request, rows) = multi_batch_fixture();
+        for stage in [SpaceChange::Query, SpaceChange::Batch(2)] {
+            let mut model = DriftingProbe::new(stage);
+            model.cancel_on_change = true;
+            let caller = Cx::for_testing();
+            let error = evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            assert!(!error.to_string().contains("PRIVATE-SPACE-CANCEL-CANARY"));
+            assert!(!error.to_string().contains("PRIVATE-MODEL-ID-CANARY"));
+            assert!(caller.checkpoint().is_err());
+            assert!(previous.checkpoint().is_ok());
+            assert!(Cx::current().is_some_and(|active| active.checkpoint().is_ok()));
+            let expected_batches = if stage == SpaceChange::Query { 0 } else { 2 };
+            assert_eq!(model.query_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), expected_batches);
+        }
     }
 }
