@@ -28,7 +28,10 @@ const WORK_TABLES: &[&str] = &[
 pub(super) struct OperationalExpectation {
     workspace_id: String,
     rows: Rows,
-    audit_ids: BTreeSet<String>,
+    // Signed chunk order, not ID order or reconstructed wall-clock order.
+    // Numeric cursors belong to the restored store and need not equal the
+    // source cursors, but the archive's relative replay order must survive.
+    audit_ids: Vec<String>,
 }
 
 impl OperationalExpectation {
@@ -40,8 +43,9 @@ impl OperationalExpectation {
         let mut expected = Self {
             workspace_id: workspace_id.to_owned(),
             rows: Rows::default(),
-            audit_ids: BTreeSet::new(),
+            audit_ids: Vec::new(),
         };
+        let mut audit_chunks = BTreeMap::new();
         for kind in ["work_history", "artifact_registry", "audit_history"] {
             let count = assets.iter().filter(|asset| asset.kind == kind).count();
             let mut slots = BTreeSet::new();
@@ -124,6 +128,7 @@ impl OperationalExpectation {
                             return Err(recovery_error("Substituted recovered audit history"));
                         }
                         let lengths = [chunk.rows.len(), 0];
+                        let mut audit_ids = Vec::with_capacity(chunk.rows.len());
                         for entry in chunk.rows {
                             let row = entry.row;
                             if row
@@ -135,9 +140,10 @@ impl OperationalExpectation {
                             }
                             // Audits retain their source workspace identity and
                             // chain hashes; the recovery writer does not rekey them.
-                            expected.audit_ids.insert(row.id.clone());
+                            audit_ids.push(row.id.clone());
                             expected.rows.insert("audit_log", &row.id, &row)?;
                         }
+                        audit_chunks.insert(chunk.chunk_index, audit_ids);
                         (
                             chunk.workspace_id,
                             chunk.chunk_index,
@@ -159,6 +165,9 @@ impl OperationalExpectation {
                 source_workspace = Some(source);
             }
         }
+        // Asset enumeration order is not authoritative. The same signed
+        // chunk sequence that drives restore also drives this frozen fence.
+        expected.audit_ids = audit_chunks.into_values().flatten().collect();
         for asset in assets.iter().filter(|asset| asset.kind == "lab_episode") {
             let value = read_restored_derived_json(asset)?;
             if value.get("schema").and_then(serde_json::Value::as_str)
@@ -244,8 +253,45 @@ impl OperationalExpectation {
                 .ok_or_else(|| recovery_error("Restored durable content differs for audit_log"))?;
             actual.insert("audit_log", &row.id, &row)?;
         }
-        self.rows.verify(&actual, &["audit_log"])
+        self.rows.verify(&actual, &["audit_log"])?;
+        verify_audit_order(db, &self.audit_ids)
     }
+}
+
+/// Check the archive's ordered subsequence in the caller's publication snapshot.
+/// Import/rebuild audits and gaps in numeric rowids are legitimate; reordering
+/// captured entries is not. Row hashes do not cover SQLite's implicit rowid,
+/// and per-ID content equality alone therefore cannot establish replay order.
+fn verify_audit_order(db: &DbConnection, expected: &[String]) -> Result<(), DomainError> {
+    use sqlmodel_core::Value;
+
+    let invalid = || recovery_error("Restored durable replay order differs for audit_log");
+    let mut previous = 0_i64;
+    for page in expected.chunks(256) {
+        let parameters = page
+            .iter()
+            .map(|id| Value::Text(id.clone()))
+            .collect::<Vec<_>>();
+        let slots = (1..=page.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, rowid FROM audit_log WHERE id IN ({slots}) ORDER BY rowid ASC"
+        );
+        let rows = db.query(&sql, &parameters).map_err(storage_error)?;
+        if rows.len() != page.len() {
+            return Err(invalid());
+        }
+        for (row, id) in rows.iter().zip(page) {
+            let cursor = row.get(1).and_then(Value::as_i64).ok_or_else(invalid)?;
+            if row.get(0).and_then(Value::as_str) != Some(id.as_str()) || cursor <= previous {
+                return Err(invalid());
+            }
+            previous = cursor;
+        }
+    }
+    Ok(())
 }
 
 fn rebind(value: &mut String, source: &str, target: &str) -> Result<(), DomainError> {
@@ -278,3 +324,313 @@ fn rescreen_journal(row: &mut StoredJournalEntry) -> Result<(), DomainError> {
 #[cfg(test)]
 #[path = "backup_operational_recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod audit_order_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use crate::core::backup::{BackupAuditEntry, hash_bytes, recovery_faults};
+    use crate::db::{CreateAuditInput, CreateWorkspaceInput, StoredAuditEntry};
+    use std::path::Path;
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000091";
+    const BACKUP: &str = "audit-order-fixture";
+
+    fn fixture() -> (tempfile::TempDir, DbConnection) {
+        let root = tempfile::tempdir().expect("temporary store");
+        let path = root.path().canonicalize().expect("physical path");
+        let db = DbConnection::open_file(&path.join("audit.db")).expect("open store");
+        db.migrate().expect("real migrated schema");
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: path.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .expect("workspace");
+        (root, db)
+    }
+
+    fn append(db: &DbConnection, id: &str) -> StoredAuditEntry {
+        db.insert_audit(
+            id,
+            &CreateAuditInput {
+                workspace_id: Some(WORKSPACE.to_owned()),
+                actor: Some("AUDIT_ORDER_PRIVATE_CANARY".to_owned()),
+                action: "backup.order_fixture".to_owned(),
+                target_type: None,
+                target_id: None,
+                details: Some("private fixture annotation".to_owned()),
+            },
+        )
+        .expect("append audit");
+        db.get_audit(id).expect("read audit").expect("inserted audit")
+    }
+
+    fn seed(db: &DbConnection, count: usize) -> Vec<StoredAuditEntry> {
+        db.with_transaction(|| {
+            Ok((0..count)
+                // IDs deliberately run opposite to the durable insertion order.
+                .map(|index| append(db, &format!("audit_{:026}", count - index)))
+                .collect())
+        })
+        .expect("seed audit history")
+    }
+
+    fn assets(
+        root: &Path,
+        rows: &[StoredAuditEntry],
+    ) -> Vec<BackupRestoredDerivedAssetReport> {
+        let count = rows.len().div_ceil(WORK_HISTORY_CHUNK_ROWS).max(1);
+        (0..count)
+            .map(|index| {
+                let chunk = BackupAuditHistory {
+                    schema: AUDIT_HISTORY_SCHEMA.to_owned(),
+                    backup_id: BACKUP.to_owned(),
+                    workspace_id: WORKSPACE.to_owned(),
+                    chunk_index: index,
+                    chunk_count: count,
+                    rows: rows
+                        .iter()
+                        .skip(index * WORK_HISTORY_CHUNK_ROWS)
+                        .take(WORK_HISTORY_CHUNK_ROWS)
+                        .map(|row| BackupAuditEntry {
+                            row: row.clone(),
+                            source_prev_row_hash: row.prev_row_hash.clone(),
+                            source_row_hash: row.this_row_hash.clone(),
+                            transformed: false,
+                        })
+                        .collect(),
+                    authentication: None,
+                };
+                // The production caller authenticates these assets first.
+                // Here the real frozen-expectation reader is tested directly.
+                let path = root.join(format!("audit-{index:08}.json"));
+                std::fs::write(&path, serde_json::to_vec(&chunk).expect("encode chunk"))
+                    .expect("write fixture asset");
+                BackupRestoredDerivedAssetReport {
+                    path: format!("derived/audit-history/{index:08}.json"),
+                    kind: "audit_history".to_owned(),
+                    restore_path: path.to_string_lossy().into_owned(),
+                    lab_episode_path: None,
+                }
+            })
+            .collect()
+    }
+
+    fn expected(root: &Path, rows: &[StoredAuditEntry]) -> OperationalExpectation {
+        let mut assets = assets(root, rows);
+        // Enumeration order cannot replace the signed chunk index order.
+        assets.reverse();
+        OperationalExpectation::from_assets(&assets, BACKUP, WORKSPACE)
+            .expect("freeze archive")
+    }
+
+    fn assert_unchanged(db: &DbConnection, rows: &[StoredAuditEntry]) {
+        for row in rows {
+            assert_eq!(db.get_audit(&row.id).unwrap().as_ref(), Some(row));
+            assert_eq!(crate::db::compute_audit_row_hash(row), {
+                let actual = db.get_audit(&row.id).unwrap().unwrap();
+                crate::db::compute_audit_row_hash(&actual)
+            });
+        }
+    }
+
+    #[test]
+    fn audit_order_fence_keeps_chunk_order_and_all_pages_without_sorting_ids() {
+        let (root, db) = fixture();
+        let rows = seed(&db, 513);
+        let expected = expected(root.path(), &rows);
+        assert_eq!(
+            expected.audit_ids,
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>()
+        );
+        db.begin_read_snapshot().unwrap();
+        expected.verify_connection(&db).expect("complete ordered history");
+        db.commit_read_snapshot().expect("caller still owns snapshot");
+        assert_unchanged(&db, &rows);
+    }
+
+    #[test]
+    fn audit_order_fence_rejects_same_content_and_hashes_in_a_different_replay_order() {
+        let (root, db) = fixture();
+        let rows = seed(&db, 3);
+        let expected = expected(root.path(), &rows);
+        recovery_faults::inject_history_corruption(
+            &db,
+            "audit_log",
+            "UPDATE audit_log SET rowid = 1000000 - rowid",
+        )
+        .expect("reorder below the append-only guard");
+        assert_unchanged(&db, &rows);
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), 3);
+        let error = expected.verify_connection(&db).unwrap_err();
+        assert!(error.message().contains("replay order"));
+        assert!(!error.message().contains("AUDIT_ORDER_PRIVATE_CANARY"));
+        assert!(rows.iter().all(|row| !error.message().contains(&row.id)));
+    }
+
+    #[test]
+    fn audit_order_fence_checks_the_boundary_between_individually_ordered_batches() {
+        let (root, db) = fixture();
+        let rows = seed(&db, 257);
+        let expected = expected(root.path(), &rows);
+        recovery_faults::inject_history_corruption(
+            &db,
+            "audit_log",
+            "UPDATE audit_log SET rowid = rowid + 1000000 WHERE rowid <= 256",
+        )
+        .unwrap();
+        assert_unchanged(&db, &rows);
+        let error = expected.verify_connection(&db).unwrap_err();
+        assert!(error.message().contains("replay order"));
+    }
+
+    #[test]
+    fn audit_order_fence_allows_new_audits_and_noncontiguous_recovery_cursors() {
+        let (root, db) = fixture();
+        let first = append(&db, "audit_00000000000000000000000003");
+        append(&db, "audit_00000000000000000000000009");
+        let last = append(&db, "audit_00000000000000000000000001");
+        let rows = vec![first, last];
+        let expected = expected(root.path(), &rows);
+        recovery_faults::inject_history_corruption(
+            &db,
+            "audit_log",
+            "UPDATE audit_log SET rowid = rowid + 1000000",
+        )
+        .unwrap();
+        append(&db, "audit_00000000000000000000000008");
+        let before = db.count_table_rows("audit_log").unwrap();
+        expected.verify_connection(&db).expect("relative order preserved");
+        assert_eq!(db.count_table_rows("audit_log").unwrap(), before);
+        assert_unchanged(&db, &rows);
+    }
+
+    #[test]
+    fn audit_order_fence_withholds_missing_or_unreadable_history_without_private_details() {
+        let (_root, db) = fixture();
+        let row = append(&db, "audit_00000000000000000000000001");
+        let missing = vec![row.id.clone(), "AUDIT_ORDER_PRIVATE_CANARY".to_owned()];
+        let error = verify_audit_order(&db, &missing).unwrap_err();
+        assert!(!error.message().contains("AUDIT_ORDER_PRIVATE_CANARY"));
+        db.execute_raw("ALTER TABLE audit_log RENAME TO retained_audit_history")
+            .expect("retain rather than delete the unavailable table");
+        let error = verify_audit_order(&db, &[row.id]).unwrap_err();
+        assert!(!error.message().contains("private fixture annotation"));
+        assert!(!error.message().contains("AUDIT_ORDER_PRIVATE_CANARY"));
+        verify_audit_order(&db, &[]).expect("empty history needs no query");
+    }
+
+    #[test]
+    fn audit_order_fence_borrows_the_snapshot_across_a_concurrent_reordering() {
+        let (root, reader) = fixture();
+        let rows = seed(&reader, 3);
+        let expected = expected(root.path(), &rows);
+        let writer = DbConnection::open_file(&root.path().join("audit.db")).unwrap();
+        reader.begin_read_snapshot().unwrap();
+        expected.verify_connection(&reader).unwrap();
+        recovery_faults::inject_history_corruption(
+            &writer,
+            "audit_log",
+            "UPDATE audit_log SET rowid = 1000000 - rowid",
+        )
+        .unwrap();
+        expected.verify_connection(&reader).expect("pinned order retained");
+        reader.commit_read_snapshot().expect("helper did not release snapshot");
+        reader.begin_read_snapshot().unwrap();
+        assert!(expected.verify_connection(&reader).is_err());
+        reader.commit_read_snapshot().expect("failure also preserves caller ownership");
+    }
+
+    #[test]
+    fn audit_order_fence_preserves_the_empty_authenticated_archive_shape() {
+        let (root, db) = fixture();
+        let expected = expected(root.path(), &[]);
+        assert!(expected.audit_ids.is_empty());
+        expected.verify_connection(&db).expect("zero captured audits");
+    }
+
+    #[test]
+    fn audit_order_fence_blocks_post_rebuild_reordering_and_the_backup_remains_recoverable() {
+        use crate::core::backup::{
+            BackupCreateOptions, BackupRestoreOptions, BackupVerifyOptions, WORKSPACE_MARKER,
+            create_backup, restore_backup_to_side_path,
+            restore_backup_to_side_path_with_recovery_hooks, verify_backup,
+        };
+        use std::path::PathBuf;
+
+        let (root, workspace, database) = crate::core::backup::tests::fixture().unwrap();
+        let source = DbConnection::open_file(&database).unwrap();
+        source
+            .insert_audit(
+                "audit_00000000000000000000000092",
+                &CreateAuditInput {
+                    workspace_id: source.list_workspaces().unwrap().first().map(|w| w.id.clone()),
+                    actor: Some("audit-order-recovery".to_owned()),
+                    action: "backup.order_fixture".to_owned(),
+                    target_type: None,
+                    target_id: None,
+                    details: None,
+                },
+            )
+            .unwrap();
+        source.close().unwrap();
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .unwrap();
+        let records = PathBuf::from(&backup.backup_path).join("records.jsonl");
+        let original_hash = hash_bytes(&std::fs::read(&records).unwrap());
+        let mut options = BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&backup.backup_path),
+            side_path: root.path().canonicalize().unwrap().join("order-refused"),
+            restore_graph_cache: false,
+            dry_run: false,
+        };
+        let reached = std::cell::Cell::new(false);
+        let error = restore_backup_to_side_path_with_recovery_hooks(
+            &options,
+            |_| Ok(()),
+            |path| {
+                let db = DbConnection::open_file(path).map_err(storage_error)?;
+                assert!(db.count_table_rows("audit_log").unwrap() >= 2);
+                recovery_faults::inject_history_corruption(
+                    &db,
+                    "audit_log",
+                    "UPDATE audit_log SET rowid = 1000000 - rowid",
+                )?;
+                db.close().map_err(storage_error)?;
+                reached.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(reached.get(), "post-rebuild fault did not execute: {error:?}");
+        assert!(error.message().contains("replay order"), "{error:?}");
+        assert!(!options.side_path.join(WORKSPACE_MARKER).exists());
+        assert_eq!(hash_bytes(&std::fs::read(records).unwrap()), original_hash);
+        assert_eq!(
+            verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace,
+                backup_path: options.backup_path.clone(),
+            })
+            .unwrap()
+            .status,
+            "verified"
+        );
+        options.side_path = root.path().canonicalize().unwrap().join("order-retry");
+        restore_backup_to_side_path(&options).expect("valid history still recovers");
+        assert!(options.side_path.join(WORKSPACE_MARKER).is_dir());
+    }
+}
