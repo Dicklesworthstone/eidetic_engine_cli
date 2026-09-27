@@ -1806,7 +1806,12 @@ impl PackSearchHandoff {
                 .as_ref()
                 .is_some_and(|freshness| freshness.stale))
             && !self.report.degraded.iter().any(|degradation| {
-                if complete_live_snapshot && degradation.code == "index_stale" {
+                // A complete source-only lexical response is useful even before
+                // its first persisted index exists. Integrity failures remain
+                // disqualifying; absence is not corruption or incompatibility.
+                if complete_live_snapshot
+                    && matches!(degradation.code.as_str(), "index_stale" | "index_missing")
+                {
                     return false;
                 }
                 matches!(
@@ -9339,46 +9344,63 @@ async fn run_search_inner_with_performance(
     };
 
     let index_exists_start = Instant::now();
-    // With a source snapshot, the lease can recover from an absent live
-    // directory. Index-only callers and platforms without leases stay strict.
-    if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
-        trace.record_elapsed("search::indexExists", index_exists_start);
-        return Err(SearchError::NoIndex);
+    #[cfg(unix)]
+    let mut generation_lease = None;
+    // Prefer an admitted published/retained generation. Only a genuine
+    // NoIndex result may use source-only retrieval; corruption, incompatible
+    // bytes, symlinks, lease failures and cancellation keep their typed error.
+    let selected_index: Result<PathBuf, SearchError> = async {
+        if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
+            return Err(SearchError::NoIndex);
+        }
+        #[cfg(unix)]
+        let lease = pin_search_generation(cx, &index_dir).await?;
+        #[cfg(unix)]
+        if (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
+            && !lease
+                .has_retained_generation_directory(cx, &index_dir)
+                .map_err(map_index_generation_error)?
+        {
+            return Err(SearchError::NoIndex);
+        }
+        #[cfg(unix)]
+        let selected = match source_generation {
+            Some(generation) => lease
+                .index_for_snapshot(cx, &index_dir, generation)
+                .map_err(map_index_generation_error)?,
+            None => index_dir.clone(),
+        };
+        #[cfg(not(unix))]
+        let selected = index_dir.clone();
+        // Snapshot selection already validated the complete generation.
+        if (!cfg!(unix) || source_generation.is_none())
+            && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&selected)
+        {
+            return Err(index_compatibility_search_error(&selected, reason));
+        }
+        #[cfg(unix)]
+        {
+            // Keep the shared lease through vector/lexical collection, exactly
+            // as on the ordinary indexed path. Source-only retrieval uses none.
+            generation_lease = Some(lease);
+        }
+        Ok(selected)
     }
-    // Metadata, source-mode selection, vector and lexical opens must all see
-    // the same directory contents. Atomic exchange alone protects only one
-    // lookup; the shared lease excludes publication and rollback until collect.
-    #[cfg(unix)]
-    let generation_lease = pin_search_generation(cx, &index_dir).await?;
-    // An empty live directory is as missing as an absent one; a retained
-    // generation still wins over both.
-    #[cfg(unix)]
-    if (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
-        && !generation_lease
-            .has_retained_generation_directory(cx, &index_dir)
-            .map_err(map_index_generation_error)?
-    {
-        trace.record_elapsed("search::indexExists", index_exists_start);
-        return Err(SearchError::NoIndex);
-    }
-    // A shared lease prevents subsequent swaps, but the source snapshot may
-    // have been established BEFORE this publisher committed. Read the newest
-    // valid retained generation the snapshot can actually describe instead.
-    #[cfg(unix)]
-    let index_dir = match source_generation {
-        Some(generation) => generation_lease
-            .index_for_snapshot(cx, &index_dir, generation)
-            .map_err(map_index_generation_error)?,
-        None => index_dir,
+    .await;
+    let (index_dir, unpublished_source) = match selected_index {
+        Ok(selected) => (selected, false),
+        Err(SearchError::NoIndex) if source_generation.is_some() => {
+            // Includes the missing-parent and non-Unix arms that could not
+            // acquire a generation lease. A broken symlink is never absence.
+            crate::core::index::ensure_index_path_has_no_symlinks(
+                &index_dir,
+                "read unpublished search sources",
+            )
+            .map_err(|error| SearchError::IndexIncompatible(error.to_string()))?;
+            (index_dir, true)
+        }
+        Err(error) => return Err(error),
     };
-    // Snapshot selection already validated the complete generation. Do not
-    // reopen every backend for that same validation on the healthy path.
-    if (!cfg!(unix) || source_generation.is_none())
-        && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir)
-    {
-        trace.record_elapsed("search::indexExists", index_exists_start);
-        return Err(index_compatibility_search_error(&index_dir, reason));
-    }
     trace.record_elapsed("search::indexExists", index_exists_start);
 
     let degradation_start = Instant::now();
@@ -9403,11 +9425,19 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
     let live_snapshot_start = Instant::now();
-    let live_snapshot_retrieval = if index_freshness.as_ref().is_some_and(|status| status.stale) {
+    let live_snapshot_retrieval = if unpublished_source
+        || index_freshness.as_ref().is_some_and(|status| status.stale)
+    {
         stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
     } else {
         None
     };
+    // Never run the indexed engines on absent bytes or present a partial
+    // source corpus as complete. Unsupported modes and oversized corpora keep
+    // the existing NoIndex contract (and pack's explicitly degraded fallback).
+    if unpublished_source && live_snapshot_retrieval.is_none() {
+        return Err(SearchError::NoIndex);
+    }
     trace.record_elapsed("search::liveSnapshotRetrieval", live_snapshot_start);
     let source_mode_start = Instant::now();
     let source_mode = if live_snapshot_retrieval.is_some() {
@@ -9571,8 +9601,10 @@ async fn run_search_inner_with_performance(
                 Some(&mut global_source_memories),
                 &mut trace,
                 !capture_deferred_audit,
+                unpublished_source,
             )
             .await;
+            search_checkpoint(cx)?;
             let admitted_global_ids: BTreeSet<String> =
                 global_source_memories.keys().cloned().collect();
             if let Some(preloaded) = preloaded_memories.as_deref_mut() {
@@ -10943,7 +10975,7 @@ fn cached_index_status_for_search(
     Ok(index_status)
 }
 
-/// Replace a stale local generation with one complete, current lexical
+/// Replace a stale or unpublished generation with one complete, current lexical
 /// execution. Every result still passes the ordinary live evidence, revision,
 /// rule, validity, scope and relevance admission below. This never merges
 /// independently scored stale and fresh local pools.
@@ -10957,7 +10989,7 @@ async fn stale_index_live_snapshot_retrieval(
         code: "search_live_snapshot_unavailable".to_owned(),
         severity: "warning".to_owned(),
         message: format!(
-            "The search index is stale and complete live lexical retrieval was unavailable: {reason}. Newly committed content may be absent from this response."
+            "The persisted index could not provide a complete current view and live lexical retrieval was unavailable: {reason}. Newly committed content may be absent from this response."
         ),
         repair: Some("ee index rebuild --workspace .".to_owned()),
     };
@@ -11051,7 +11083,7 @@ async fn stale_index_live_snapshot_retrieval(
         degraded.push(SearchDegradation {
             code: "search_live_snapshot_lexical".to_owned(),
             severity: "warning".to_owned(),
-            message: format!("The persisted search index is stale. This response searched the complete current source snapshot ({0} documents) with in-memory Frankensearch lexical retrieval; semantic retrieval and reranking were not used, and the persisted index was not changed.", documents.len()),
+            message: format!("This response searched the complete current source snapshot ({0} documents) with in-memory Frankensearch lexical retrieval; semantic retrieval and reranking were not used, and the persisted index was not changed.", documents.len()),
             repair: Some("ee index rebuild --workspace .".to_owned()),
         });
         Ok(Some(runtime_fallback::Retrieval {
@@ -11280,6 +11312,10 @@ mod diagnostic_snapshot;
 
 #[path = "search_runtime_fallback.rs"]
 mod runtime_fallback;
+
+#[cfg(all(test, feature = "lexical-bm25"))]
+#[path = "search_unpublished_tests.rs"]
+mod unpublished_tests;
 
 #[path = "search_rule_admission.rs"]
 mod rule_admission;
@@ -11991,6 +12027,7 @@ async fn global_store_frankensearch_hits(
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     trace: &mut SearchPerformanceTrace,
     reconcile: bool,
+    source_only: bool,
 ) -> Vec<SearchHit> {
     if !global_store_participates_in_scope(options.memory_scope) {
         return Vec::new();
@@ -12004,6 +12041,33 @@ async fn global_store_frankensearch_hits(
     };
     if memories.is_empty() {
         return Vec::new();
+    }
+
+    if source_only {
+        // A workspace's first publication must not hide its separate global
+        // store. Reuse positively admitted source rows and the same lexical
+        // engine without requiring or repairing a global derived index.
+        let global_search_start = Instant::now();
+        let result = global_store_live_snapshot_hits(cx, options, &memories).await;
+        trace.record_elapsed("search::globalRetrieve", global_search_start);
+        return match result {
+            Ok(hits) => {
+                degraded.push(SearchDegradation {
+                    code: "search_live_snapshot_lexical".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: format!(
+                        "This response also searched the complete admitted user-global memory snapshot ({} documents) with in-memory Frankensearch lexical retrieval; the global store and persisted index were not changed.",
+                        memories.len()
+                    ),
+                    repair: None,
+                });
+                admit_global_store_search_hits(options, memories, hits, preloaded_memories)
+            }
+            Err(reason) => {
+                degraded.push(SearchDegradation::global_index_unavailable(&reason));
+                Vec::new()
+            }
+        };
     }
 
     let global_options = SearchOptions {
@@ -12101,6 +12165,82 @@ async fn global_store_frankensearch_hits(
     };
     degraded.extend(retrieval_degraded);
 
+    admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories)
+}
+
+async fn global_store_live_snapshot_hits(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    memories: &[StoredMemory],
+) -> Result<Vec<SearchHit>, String> {
+    #[cfg(not(feature = "lexical-bm25"))]
+    {
+        let _ = (cx, options, memories);
+        Err("this build has no lexical backend for global source retrieval".to_owned())
+    }
+    #[cfg(feature = "lexical-bm25")]
+    {
+        use crate::search::LexicalWrite;
+        search_checkpoint(cx).map_err(|error| error.to_string())?;
+        let body_bytes = memories.iter().fold(0_u64, |total, memory| {
+            total.saturating_add(memory.content.len() as u64)
+        });
+        if memories.len() > SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize
+            || body_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES
+        {
+            return Err(
+                "the complete global source corpus exceeds the live retrieval limit".to_owned(),
+            );
+        }
+        let mut documents = Vec::with_capacity(memories.len());
+        let mut projected_bytes = 0_u64;
+        for memory in memories {
+            search_checkpoint(cx).map_err(|error| error.to_string())?;
+            let document = crate::search::memory_to_document(memory).into_indexable();
+            projected_bytes = projected_bytes
+                .saturating_add(document.content.len() as u64)
+                .saturating_add(
+                    serde_json::to_vec(&document.metadata)
+                        .map_err(|error| error.to_string())?
+                        .len() as u64,
+                );
+            if projected_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES {
+                return Err(
+                    "the complete global source corpus exceeds the live retrieval limit".to_owned(),
+                );
+            }
+            documents.push(document);
+        }
+        let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+        for chunk in documents.chunks(32) {
+            search_checkpoint(cx).map_err(|error| error.to_string())?;
+            index
+                .index_documents(cx, chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        index.commit(cx).await.map_err(|error| error.to_string())?;
+        let results = index
+            .search(cx, &options.query, documents.len().max(1))
+            .await
+            .map_err(|error| error.to_string())?;
+        search_checkpoint(cx).map_err(|error| error.to_string())?;
+        let mut hits = search_hits_from_scored_results(
+            results,
+            options.explain,
+            FrankensearchFinalScoreScale::Native,
+        );
+        sort_search_hits_by_score_order(&mut hits);
+        Ok(hits)
+    }
+}
+
+fn admit_global_store_search_hits(
+    options: &SearchOptions,
+    memories: Vec<StoredMemory>,
+    raw_hits: Vec<SearchHit>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+) -> Vec<SearchHit> {
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
     let memories_by_id = memories
         .into_iter()
@@ -15315,6 +15455,10 @@ mod tests {
         }
         let mut missing = options.clone();
         missing.index_dir = Some(root.join("absent-index"));
+        // A complete current-source read now works without an index. Keep
+        // exercising error-path snapshot release with a historical request,
+        // which deliberately cannot use the current-source lexical fallback.
+        missing.as_of = Some(Utc::now());
         assert!(matches!(
             run_context_search_with_preloaded_memories(
                 &missing,
@@ -20108,21 +20252,43 @@ mod tests {
             strict_scope: false,
         };
 
-        let absent = run_search(&options);
+        for empty_directory in [false, true] {
+            if empty_directory {
+                std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+            }
+            let result = run_search(&options);
+            #[cfg(feature = "lexical-bm25")]
+            {
+                let report = result.map_err(|error| error.to_string())?;
+                assert!(
+                    report
+                        .degraded
+                        .iter()
+                        .any(|entry| entry.code == "search_live_snapshot_lexical"),
+                    "an absent or empty index must retrieve complete current sources, got {report:?}"
+                );
+                assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+                assert_eq!(
+                    report.results.first().map(|hit| hit.doc_id.as_str()),
+                    Some("mem_40000000000000000000000002")
+                );
+            }
+            #[cfg(not(feature = "lexical-bm25"))]
+            assert!(
+                matches!(result, Err(SearchError::NoIndex)),
+                "without a lexical backend the absent-index contract is unchanged: {result:?}"
+            );
+        }
         assert!(
-            matches!(absent, Err(SearchError::NoIndex)),
-            "an absent index directory is the missing-index baseline, got {absent:?}"
-        );
-        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
-        let empty = run_search(&options);
-        assert!(
-            matches!(empty, Err(SearchError::NoIndex)),
-            "an empty index directory must match the absent one, got {empty:?}"
+            std::fs::read_dir(&index_dir)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none()
         );
         let diag = super::run_diag_search(&options);
         assert!(
             matches!(diag, Err(SearchError::NoIndex)),
-            "diagnostic search must match ordinary search, got {diag:?}"
+            "diagnostic search inspects persisted index bytes, got {diag:?}"
         );
         #[cfg(unix)]
         {
