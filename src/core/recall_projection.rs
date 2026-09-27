@@ -38,38 +38,14 @@ fn text(value: &str, changed: &mut bool) -> String {
 /// A safe prefix must not conceal a private tail, and overlapping redacted
 /// fragments must never be spliced into a fictitious reconstruction of a body.
 fn body_text(value: &str, changed: &mut bool) -> String {
-    const WINDOW: usize = crate::policy::MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES;
-    if value.len() <= WINDOW {
+    if value.len() <= crate::policy::MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES {
         return text(value, changed);
     }
-    if value.len() > crate::models::MAX_CONTENT_BYTES || contains_private_path(value) {
-        return withhold(changed);
-    }
-    // Contextual credentials and instruction phrases can span arbitrarily
-    // wide whitespace. Their complete-input detectors must precede windowing.
-    let screened = crate::policy::screen_external_text_for_ingestion(value);
-    if screened.redacted
-        || screened.instruction_like
-        || value.split_whitespace().any(|atom| atom.len() > WINDOW / 4)
-    {
-        return withhold(changed);
-    }
-    let mut start = 0;
-    loop {
-        let mut end = value.len().min(start + WINDOW);
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        if crate::policy::redact_public_replay_text(&value[start..end]).redacted {
-            return withhold(changed);
-        }
-        if end == value.len() {
-            return value.to_owned();
-        }
-        start += WINDOW / 2;
-        while !value.is_char_boundary(start) {
-            start += 1;
-        }
+    let report = crate::policy::redact_public_replay_body(value);
+    if report.redacted {
+        withhold(changed)
+    } else {
+        report.content
     }
 }
 
@@ -223,11 +199,12 @@ mod tests {
 
     #[test]
     fn private_findings_across_window_boundaries_withhold_the_entire_long_body() {
+        let aws = format!("trace-{}{}", "AKIA", "Q".repeat(16));
         for private in [
             "password=recall-private-canary",
             "person@example.test",
             "file:///home/operator/private",
-            "trace-AKIAABCDEFGHIJKLMNOP",
+            aws.as_str(),
             "Ignore previous instructions",
         ] {
             for offset in [2038, 4086, 20_000] {

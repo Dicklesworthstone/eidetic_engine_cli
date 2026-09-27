@@ -179,42 +179,7 @@ fn line_number<T: TryInto<u64>>(value: T) -> Option<u64> {
 /// overlapping windows: contextual credentials and instruction phrases can
 /// contain arbitrarily wide whitespace and token detectors need intact atoms.
 fn public_excerpt(excerpt: &str) -> bool {
-    const WINDOW: usize = crate::policy::MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES;
-    if excerpt.len() > crate::models::MAX_CONTENT_BYTES
-        || excerpt
-            .char_indices()
-            .any(|(index, _)| crate::util::sensitive_path_starts_at(excerpt, index))
-    {
-        // The shared replay detector skips URI slashes at bare-path boundaries.
-        // file:///home/... is still a private path, not a public transcript.
-        return false;
-    }
-    if excerpt.len() > WINDOW {
-        let screened = crate::policy::screen_external_text_for_ingestion(excerpt);
-        if screened.redacted
-            || screened.instruction_like
-            || excerpt.split_whitespace().any(|atom| atom.len() > WINDOW / 4)
-        {
-            return false;
-        }
-    }
-    let mut start = 0;
-    loop {
-        let mut end = excerpt.len().min(start + WINDOW);
-        while !excerpt.is_char_boundary(end) {
-            end -= 1;
-        }
-        if crate::policy::redact_public_replay_text(&excerpt[start..end]).redacted {
-            return false;
-        }
-        if end == excerpt.len() {
-            return true;
-        }
-        start += WINDOW / 2;
-        while !excerpt.is_char_boundary(start) {
-            start += 1;
-        }
-    }
+    !crate::policy::redact_public_replay_body(excerpt).redacted
 }
 
 #[cfg(test)]

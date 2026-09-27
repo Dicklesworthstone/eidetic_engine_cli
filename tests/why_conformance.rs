@@ -4,7 +4,11 @@
 //! schema and includes complete explanation fields for storage, retrieval,
 //! and selection decisions.
 
-use ee::db::{CreateProceduralRuleInput, DbConnection, UpdateProceduralRuleLifecycleInput};
+use ee::db::{
+    CreateEvidenceSpanInput, CreateProceduralRuleInput, CreateSessionInput, DbConnection,
+    EvidenceProducerKind, UpdateProceduralRuleLifecycleInput,
+};
+use ee::models::{EvidenceId, SessionId};
 use ee::search::RuleIndexProjection;
 use std::fmt::Debug;
 use std::fs;
@@ -114,11 +118,19 @@ fn native_rule_command(
 }
 
 fn native_rule_output(workspace: &str, args: &[&str]) -> Result<Output, String> {
+    let workspace_path = std::path::Path::new(workspace);
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(["--workspace", workspace])
         .args(args)
         .current_dir(workspace)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env_remove("EE_DB")
+        .env_remove("EE_INDEX_DIR")
         .env("EE_EMBED_DOWNLOAD", "off")
+        .env("XDG_DATA_HOME", workspace_path.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", workspace_path.join("xdg-config"))
+        .env("XDG_CACHE_HOME", workspace_path.join("xdg-cache"))
         .output()
         .map_err(|error| format!("failed native rule command: {error}"))
 }
@@ -539,6 +551,378 @@ fn why_native_rule_redacts_historical_secret_and_path_without_mutation() -> Test
             .map_err(|error| error.to_string())?
             .is_empty(),
         "why redaction does not synthesize memory rows",
+    )?;
+    connection.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn why_long_native_rule_body_is_complete_and_private_tail_is_withheld_without_mutation()
+-> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = workspace_path.to_string_lossy().to_string();
+    native_rule_command(&workspace, &["init"], "long_native_rule_init")?;
+    let content = format!(
+        "{}Résumé café 雪: retain this final release instruction.",
+        "Review the release checklist. ".repeat(200)
+    );
+    ensure(
+        content.len() > 4096 && content.len() < 8192,
+        "fixture exceeds metadata cap and remains within public rule add limit",
+    )?;
+    let added = native_rule_command(
+        &workspace,
+        &["rule", "add", &content],
+        "long_native_rule_add",
+    )?;
+    let rule_id = added["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "long rule add must return its native ruleId".to_owned())?
+        .to_owned();
+    let database = workspace_path.join(".ee/ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let safe_rule = connection
+        .get_procedural_rule(&rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "accepted long rule must exist".to_owned())?;
+    ensure_equal(
+        &safe_rule.content,
+        &content,
+        "public rule add stores the complete body",
+    )?;
+    let workspace_id = safe_rule.workspace_id.clone();
+    let private_rule_id = "rule_00000000000000000000000045";
+    let private_content = format!(
+        "{content} Private tail: password=long-rule-private-canary in /home/operator/private."
+    );
+    // Historical rows can predate ingestion screening. The public reader must
+    // screen the tail without rewriting the stored rule or its revision.
+    connection
+        .insert_procedural_rule(
+            private_rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.clone(),
+                content: private_content,
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "agent_assertion".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let private_rule = connection
+        .get_procedural_rule(private_rule_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "historical long rule must exist".to_owned())?;
+    let audit_before = connection
+        .list_audit_entries(Some(&workspace_id), None)
+        .map_err(|error| error.to_string())?;
+    let generation_before = connection
+        .get_workspace_generation(&workspace_id)
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+    let database_before = fs::read(&database).map_err(|error| error.to_string())?;
+
+    for (row, redacted, artifact) in [
+        (&safe_rule, false, "long_native_rule_public_why"),
+        (&private_rule, true, "long_native_rule_private_why"),
+    ] {
+        let projection =
+            RuleIndexProjection::new(row.clone(), &workspace_path, Vec::new(), Vec::new());
+        for target in [row.id.clone(), format!("result:{}", row.id)] {
+            let why = native_rule_command(&workspace, &["why", &target], artifact)?;
+            ensure_equal(
+                &why["data"]["entity"]["kind"],
+                &serde_json::json!("rule"),
+                "long rule keeps typed identity",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["id"],
+                &serde_json::json!(&row.id),
+                "long rule keeps native ID",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["revision"],
+                &serde_json::json!(projection.entity_revision()),
+                "long rule explanation retains the source revision",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["details"]["redaction"]["egressRedacted"],
+                &serde_json::json!(redacted),
+                "long rule reports actual egress posture",
+            )?;
+            if redacted {
+                let rendered = why.to_string();
+                ensure(
+                    !rendered.contains("long-rule-private-canary")
+                        && !rendered.contains("/home/operator/private")
+                        && !rendered.contains("Review the release checklist."),
+                    "unsafe tail withholds the entire long rule, including its safe prefix",
+                )?;
+                ensure(
+                    why["data"]["content"]
+                        .as_str()
+                        .is_some_and(|body| body.starts_with("[REDACTED:")),
+                    "unsafe long rule has an explicit redaction marker",
+                )?;
+            } else {
+                ensure_equal(
+                    &why["data"]["content"],
+                    &serde_json::json!(&content),
+                    "safe long rule includes the exact Unicode tail, without truncation",
+                )?;
+            }
+        }
+    }
+
+    ensure_equal(
+        &fs::read(&database).map_err(|error| error.to_string())?,
+        &database_before,
+        "long rule explanations leave database bytes unchanged",
+    )?;
+    let connection =
+        DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    for before in [&safe_rule, &private_rule] {
+        let after = connection
+            .get_procedural_rule(&before.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "why must preserve every native rule".to_owned())?;
+        ensure_equal(&after, before, "why preserves the complete native rule row")?;
+    }
+    ensure_equal(
+        &connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?,
+        &audit_before,
+        "long rule explanations do not create audit mutations",
+    )?;
+    ensure_equal(
+        &connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?,
+        &generation_before,
+        "long rule explanations do not advance source generation",
+    )?;
+    connection.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn why_long_cass_evidence_body_and_private_tail_keep_native_provenance_without_mutation()
+-> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = workspace_path.to_string_lossy().to_string();
+    native_rule_command(&workspace, &["init"], "long_native_evidence_init")?;
+    let database = workspace_path.join(".ee/ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let workspace_id = connection
+        .get_workspace_by_path(&workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "native evidence workspace must exist".to_owned())?
+        .id;
+    let content = format!(
+        "{}Résumé café 雪: this final observation belongs to the same source span.",
+        "The release review retained the original observations. ".repeat(130)
+    );
+    ensure(content.len() > 4096, "CASS fixture exceeds metadata limit")?;
+    let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(79001)).to_string();
+    connection
+        .insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.clone(),
+                cass_session_id: "private-upstream-why-session".to_owned(),
+                source_path: Some("/home/operator/private-transcript.jsonl".to_owned()),
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 2,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let session_before = connection
+        .get_session(&session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CASS session must exist".to_owned())?;
+    let mut spans = Vec::new();
+    for (number, excerpt, redacted) in [
+        (79002, content.clone(), false),
+        (
+            79003,
+            format!("{content} Private tail at file:///home/operator/private-evidence."),
+            true,
+        ),
+    ] {
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        connection
+            .insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.clone(),
+                    session_id: session_id.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("private-upstream-why-span-{number}"),
+                    span_kind: "message".to_owned(),
+                    start_line: 12,
+                    end_line: 13,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt: excerpt.clone(),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let span = connection
+            .get_evidence_span(&id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical long evidence must exist".to_owned())?;
+        ensure_equal(
+            &span.excerpt,
+            &excerpt,
+            "fixture retains the entire admitted source",
+        )?;
+        ensure(
+            span.is_direct_pack_admitted_for_session(&workspace_id, &session_before),
+            "both evidence controls must reach the public egress boundary",
+        )?;
+        spans.push((span, redacted));
+    }
+    let audit_before = connection
+        .list_audit_entries(Some(&workspace_id), None)
+        .map_err(|error| error.to_string())?;
+    let generation_before = connection
+        .get_workspace_generation(&workspace_id)
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+    let database_before = fs::read(&database).map_err(|error| error.to_string())?;
+
+    for (span, redacted) in &spans {
+        for target in [span.id.clone(), format!("result:{}", span.id)] {
+            let why = native_rule_command(
+                &workspace,
+                &["why", &target],
+                if *redacted {
+                    "long_native_evidence_private_why"
+                } else {
+                    "long_native_evidence_public_why"
+                },
+            )?;
+            ensure_equal(
+                &why["data"]["found"],
+                &serde_json::json!(true),
+                "native evidence found",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["kind"],
+                &serde_json::json!("evidence_span"),
+                "CASS why retains its native entity kind",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["id"],
+                &serde_json::json!(&span.id),
+                "CASS why retains its evidence ID",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["revision"],
+                &serde_json::json!(span.pack_entity_revision()),
+                "CASS why retains its complete source revision",
+            )?;
+            ensure_equal(
+                &why["data"]["storage"]["provenanceUri"],
+                &serde_json::json!(span.canonical_provenance_uri()),
+                "CASS provenance uses the native session and line range",
+            )?;
+            ensure_equal(
+                &why["data"]["entity"]["details"]["redaction"]["egressRedacted"],
+                &serde_json::json!(redacted),
+                "CASS why names the egress posture",
+            )?;
+            let rendered = why.to_string();
+            ensure(
+                !rendered.contains("private-upstream-why")
+                    && !rendered.contains("/home/operator/private-transcript"),
+                "CASS why never exposes upstream identity or source path",
+            )?;
+            if *redacted {
+                ensure(
+                    !rendered.contains("private-evidence")
+                        && !rendered.contains("The release review retained"),
+                    "private tail withholds the whole long evidence body",
+                )?;
+                ensure(
+                    why["data"]["content"]
+                        .as_str()
+                        .is_some_and(|body| body.starts_with("[REDACTED:")),
+                    "private evidence has an explicit redaction marker",
+                )?;
+            } else {
+                ensure_equal(
+                    &why["data"]["content"],
+                    &serde_json::json!(&content),
+                    "safe evidence returns its exact complete Unicode body",
+                )?;
+            }
+        }
+    }
+
+    ensure_equal(
+        &fs::read(&database).map_err(|error| error.to_string())?,
+        &database_before,
+        "native evidence explanations leave database bytes unchanged",
+    )?;
+    let connection =
+        DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    for (span, _) in &spans {
+        let after = connection
+            .get_evidence_span(&span.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "why must retain native evidence".to_owned())?;
+        ensure_equal(
+            &after,
+            span,
+            "why does not rewrite evidence content or security metadata",
+        )?;
+    }
+    ensure_equal(
+        &connection
+            .get_session(&session_id)
+            .map_err(|error| error.to_string())?,
+        &Some(session_before),
+        "why does not rewrite the source session",
+    )?;
+    ensure_equal(
+        &connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?,
+        &audit_before,
+        "native evidence explanations do not add audit records",
+    )?;
+    ensure_equal(
+        &connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?,
+        &generation_before,
+        "native evidence explanations do not advance source generation",
     )?;
     connection.close().map_err(|error| error.to_string())
 }
