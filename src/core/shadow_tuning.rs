@@ -2823,8 +2823,7 @@ mod tests {
     #[test]
     fn incumbent_configuration_preserves_explicit_weights() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(tempdir.path().join(".ee"))
-            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
         std::fs::write(
             tempdir.path().join(".ee/config.toml"),
             "[search]\nlexical_weight = 0.7\nsemantic_weight = 0.2\ngraph_weight = 0.1\n",
@@ -2842,16 +2841,14 @@ mod tests {
     fn invalid_incumbent_configuration_cannot_become_empty_evidence_abstention() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path();
-        std::fs::create_dir_all(workspace.join(".ee"))
-            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
         std::fs::write(
             workspace.join(".ee/config.toml"),
             "[search]\nlexical_weight = \"not-a-weight\"\n",
         )
         .map_err(|error| error.to_string())?;
         let database = workspace.join(".ee/ee.db");
-        let connection = DbConnection::open_file(&database)
-            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let extraction = LabelExtractionConfig {
             label_window_minutes: DEFAULT_LABEL_WINDOW_MINUTES,

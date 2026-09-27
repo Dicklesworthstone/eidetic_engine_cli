@@ -1884,7 +1884,8 @@ fn public_body_rejection(
         while !content.is_char_boundary(end) {
             end -= 1;
         }
-        if let Some(report) = public_body_window_rejection(&content[start..end], advisory_command_risk)
+        if let Some(report) =
+            public_body_window_rejection(&content[start..end], advisory_command_risk)
         {
             return Some(withheld_public_body(content, report.redacted_reasons));
         }

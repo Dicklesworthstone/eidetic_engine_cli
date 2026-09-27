@@ -1186,7 +1186,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn resume_keeps_long_body_bytes_but_not_oversized_tags() {
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d80)).to_string();

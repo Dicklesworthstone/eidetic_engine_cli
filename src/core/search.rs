@@ -22689,8 +22689,7 @@ mod tests {
     #[test]
     fn fusion_config_resolves_valid_explicit_weights() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(tempdir.path().join(".ee"))
-            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
         std::fs::write(
             tempdir.path().join(".ee/config.toml"),
             "[search]\nlexical_weight = 0.7\nsemantic_weight = 0.2\ngraph_weight = 0.1\n",
@@ -22734,6 +22733,11 @@ mod tests {
             ] {
                 let mut options = fusion_config_test_options(tempdir.path());
                 options.source_mode = source_mode;
+                let ordinary = super::run_search(&options);
+                assert!(
+                    matches!(ordinary, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by ordinary {source_mode:?} search: {ordinary:?}"
+                );
                 let seeded = super::run_search_seeded(&options, &Deterministic::from_seed(0));
                 assert!(
                     matches!(seeded, Err(SearchError::Configuration(_))),
@@ -22743,6 +22747,14 @@ mod tests {
                 assert!(
                     matches!(diagnostic, Err(SearchError::Configuration(_))),
                     "{label} config failure was lost by diagnostic {source_mode:?} search: {diagnostic:?}"
+                );
+                assert!(
+                    !options.resolve_database_path().exists(),
+                    "configuration failure must not create a source store"
+                );
+                assert!(
+                    !options.resolve_index_dir().exists(),
+                    "configuration failure must not prepare an index"
                 );
             }
         }

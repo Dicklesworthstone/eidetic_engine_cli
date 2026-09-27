@@ -3236,37 +3236,6 @@ const fn must_fix(
     }
 }
 
-/// `must_fix`, scoped to one enclosing function (bd-apvhh tranche 3).
-///
-/// The same argument as `allowed_in`, and it matters MORE here. A file-scoped
-/// must_fix in a 7000-line file either over-reaches (claiming sites nobody
-/// judged) or, if the fragment is narrowed to compensate, drifts out of its
-/// finding's context window and owns nothing at all — and a must_fix owning
-/// nothing is worse than no rule, because it names a follow-up bead and so
-/// looks tracked while watching nothing. bd-epvc1 counts eight of those.
-///
-/// My first attempt at NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED was exactly
-/// that failure: `.ok()` was far too broad for the file, and the binding name I
-/// replaced it with sat nine lines above the finding, so the rule owned zero.
-const fn must_fix_in(
-    id: &'static str,
-    file: &'static str,
-    function: &'static str,
-    fragment: &'static str,
-    follow_up: &'static str,
-    reason: &'static str,
-) -> InventoryRule {
-    InventoryRule {
-        id,
-        file,
-        function: Some(function),
-        fragment,
-        disposition: Disposition::MustFix,
-        follow_up: Some(follow_up),
-        reason,
-    }
-}
-
 /// `allowed`, scoped to one enclosing function (bd-apvhh).
 ///
 /// Prefer this over `allowed` for new entries. A file-scoped rule classifies
