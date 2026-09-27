@@ -214,6 +214,19 @@ fn load_bounded(
             let page = stream.page(db, workspace, limit)?;
             stream.done = page.len() < limit;
             scanned += page.len();
+            // A reverse-index match is not authority to reuse advice held for
+            // review. Resolve the page's native memory holds in this same
+            // snapshot before scoring, candidate caps, body hydration or hints.
+            // The shared reader deduplicates IDs and never reads feedback text.
+            let held = crate::core::memory_lifecycle::pending_memory_review_ids(
+                db,
+                workspace,
+                &page
+                    .iter()
+                    .filter_map(|row| row.get(0).and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|_| error())?;
             for row in page {
                 let key = (
                     text(&row, 10)?.to_owned(),
@@ -244,6 +257,10 @@ fn load_bounded(
                 }
                 if let Some(reason) = super::admission::denial(&row, &key.0, workspace, at) {
                     denied.insert(key.0, reason);
+                    continue;
+                }
+                if held.contains(&key.0) {
+                    denied.insert(key.0, "pending_review");
                     continue;
                 }
                 if key.0.parse::<crate::models::MemoryId>().is_err()
@@ -390,6 +407,10 @@ fn load_bounded(
     }
     Ok(Scan { rows, degraded })
 }
+
+#[cfg(test)]
+#[path = "recall_review_tests.rs"]
+mod review_tests;
 
 #[cfg(test)]
 mod tests {

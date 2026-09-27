@@ -107,6 +107,7 @@ jobs:
           done <<'CASES'
           memory-review-authority core::memory_lifecycle::review_admission_tests::
           resume-source-authority core::resume::snapshot::seal_authority_tests::
+          recall-review-authority core::recall::scan::review_tests::
           recall-source-projection core::recall::scan::projection::tests::
           ask-long-evidence core::ask::corpus::admission::long_evidence_tests::
           resume-transcript-privacy core::resume::transcripts::privacy_tests::
