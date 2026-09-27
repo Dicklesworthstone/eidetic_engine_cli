@@ -4095,6 +4095,98 @@ action = "explode"
         );
     }
 
+    /// One sample per `RuleSource` variant. The match has no wildcard, so a new
+    /// variant stops compiling here and brings its author back to this list.
+    fn every_rule_source() -> Vec<RuleSource> {
+        let samples = vec![
+            RuleSource::Builtin {
+                name: "builtin".to_owned(),
+            },
+            RuleSource::WorkspaceFile {
+                path: ".ee/preflight-rules.toml".to_owned(),
+            },
+            RuleSource::ProceduralRule {
+                rule_id: "rule_00000000000000000000000001".to_owned(),
+            },
+            RuleSource::Tripwire {
+                tripwire_id: "trip_00000000000000000000000001".to_owned(),
+            },
+        ];
+        for sample in &samples {
+            match sample {
+                RuleSource::Builtin { .. }
+                | RuleSource::WorkspaceFile { .. }
+                | RuleSource::ProceduralRule { .. }
+                | RuleSource::Tripwire { .. } => {}
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn schema_enumerates_every_rule_source_kind_with_its_id_field() -> Result<(), String> {
+        let schema: JsonValue = serde_json::from_str(include_str!(
+            "../../docs/schemas/ee.preflight.guard.v1.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        let source = &schema["properties"]["matches"]["items"]["properties"]["source"];
+        let strings = |value: &JsonValue| -> Result<std::collections::BTreeSet<String>, String> {
+            value
+                .as_array()
+                .ok_or_else(|| format!("expected an array, got {value}"))?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("expected a string, got {item}"))
+                })
+                .collect()
+        };
+        let enumerated = strings(&source["properties"]["kind"]["enum"])?;
+        let mut branches = std::collections::BTreeMap::new();
+        for branch in source["oneOf"]
+            .as_array()
+            .ok_or("source.oneOf must list one branch per kind")?
+        {
+            let kind = branch["properties"]["kind"]["const"]
+                .as_str()
+                .ok_or_else(|| format!("branch without a const kind: {branch}"))?;
+            branches.insert(kind.to_owned(), strings(&branch["required"])?);
+        }
+
+        let mut emitted = std::collections::BTreeSet::new();
+        for sample in every_rule_source() {
+            let json = serde_json::to_value(&sample).map_err(|error| error.to_string())?;
+            let fields = json
+                .as_object()
+                .ok_or_else(|| format!("RuleSource must serialize as an object: {json}"))?
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(json["kind"].as_str(), Some(sample.kind()));
+            assert_eq!(
+                branches.get(sample.kind()),
+                Some(&fields),
+                "the schema branch for {} must require exactly the emitted fields",
+                sample.kind()
+            );
+            emitted.insert(sample.kind().to_owned());
+        }
+        assert_eq!(
+            enumerated, emitted,
+            "source.kind enum vs RuleSource variants"
+        );
+        assert_eq!(
+            branches
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            emitted,
+            "source.oneOf branches vs RuleSource variants"
+        );
+        Ok(())
+    }
+
     #[test]
     fn json_output_aggregates_duplicate_degraded_codes() {
         let mut report =
