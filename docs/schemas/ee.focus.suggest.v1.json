@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.focus.suggest.v1.json",
   "title": "ee.focus.suggest.v1",
-  "description": "Read-only recommendation surface for `ee focus suggest` (bd-sg5si Phase 1; bd-1idcb Phase 2). Returns the topics, CASS spans, and pre-formatted follow-up queries an agent should pivot attention toward, ranked by `centrality_sum + recency_weight + span_density` over the recent-evidence window. The schema is stable across Phase 1 and Phase 2; the `recommendations` array is populated when the workspace has memories created within `recentHours`. `degraded[]` carries situation-appropriate entries (e.g. `graph_unavailable`, `no_recent_evidence`) only when a real signal is missing — the Phase 1 `focus_suggest_unimplemented` sentinel was retired by Phase 2.",
+  "description": "Read-only recommendation surface for ee focus suggest. Topics are ranked by centrality_sum + recency_weight + span_density over the recent-evidence window. With --from-cass and no explicit task frame, positively admitted, public, unlinked CASS excerpts can seed recommendations even when the workspace has no memories. Transcript-only clusters retain their native EvidenceIds and have zero memory-graph centrality; they never create synthetic memories. Explicit task frames retain their memory-link scope. Missing source storage is reported separately from an empty eligible recency window.",
   "type": "object",
   "required": ["schema", "recommendations", "fromCass", "limit", "recentHours"],
   "additionalProperties": false,
@@ -13,7 +13,7 @@
     },
     "recommendations": {
       "type": "array",
-      "description": "Ranked focus recommendations. Empty in Phase 1; populated by the centrality + recent-CASS scoring pipeline in Phase 2.",
+      "description": "Ranked memory-backed or independent transcript-backed recommendations. Independent transcript topics require fromCass and no taskFrame scope; their complete excerpts pass source admission and public-output screening before a topic preview is derived.",
       "items": {
         "type": "object",
         "required": ["topic", "spanIds", "centralityScore", "rationale", "suggestedQuery"],
@@ -21,11 +21,11 @@
         "properties": {
           "topic": {
             "type": "string",
-            "description": "Short topic label summarizing what the agent should focus on next."
+            "description": "Short source-derived topic label summarizing what the agent should focus on next."
           },
           "spanIds": {
             "type": "array",
-            "description": "CASS span IDs attached to memories in this cluster within the recency window. Populated only when `fromCass` is true AND matching evidence_spans exist; may be empty otherwise. Entries are deduplicated and sorted lexically.",
+            "description": "Native ee EvidenceIds for admitted CASS excerpts supporting this cluster, never upstream CASS identifiers or invented MemoryIds. May represent evidence attached to memory members or independent unlinked excerpts. Populated only when fromCass is true; entries are deduplicated and sorted lexically.",
             "items": {
               "type": "string",
               "minLength": 1
@@ -33,32 +33,32 @@
           },
           "centralityScore": {
             "type": "number",
-            "description": "Graph centrality contribution to the rank. Higher is more central; absolute scale is implementation-dependent."
+            "description": "Memory-graph centrality contribution only, not the composite ranking score. Independent transcript-only topics have zero centrality even though recency and span density can rank them highly."
           },
           "rationale": {
             "type": "string",
-            "description": "Why this topic surfaced. Cites the centrality signal and the recent-CASS evidence."
+            "description": "Why this topic surfaced. Reports actual memory-member and CASS-span counts, graph centrality, and most recent evidence time."
           },
           "suggestedQuery": {
             "type": "string",
-            "description": "Concrete ee command (typically `ee pack` or `ee search`) the agent can run to act on the recommendation. Recommendations emit `ee pack`, the canonical context-pack surface."
+            "description": "Concrete shell-escaped ee pack command using source-derived topic words. No command is executed by this read-only recommendation."
           }
         }
       }
     },
     "fromCass": {
       "type": "boolean",
-      "description": "True when the recommendations were derived from CASS evidence; false when only the durable memory graph contributed."
+      "description": "Echoes the request to include admitted CASS evidence. It does not imply every returned cluster has a transcript contribution; inspect spanIds and rationale."
     },
     "limit": {
       "type": "integer",
       "minimum": 0,
-      "description": "Maximum number of recommendations the response may return. Mirrors `--limit` (default 5)."
+      "description": "Maximum number of recommendations the response may return. Mirrors --limit (default 5)."
     },
     "recentHours": {
       "type": "integer",
       "minimum": 0,
-      "description": "Look-back window in hours for the recent-CASS evidence. Mirrors `--recent-hours` (default 24)."
+      "description": "Look-back window over stored source creation times. Mirrors --recent-hours (default 24); it does not claim the upstream session itself occurred in that window."
     }
   },
   "field_presets": {
@@ -79,11 +79,11 @@
       "schema": "ee.focus.suggest.v1",
       "recommendations": [
         {
-          "topic": "release readiness",
-          "spanIds": ["span_release_audit_2026-05-25", "span_verify_chain_2026-05-25"],
-          "centralityScore": 0.42,
-          "rationale": "PageRank dominator over the last 24h of CASS evidence; six bead closures cite this topic.",
-          "suggestedQuery": "ee pack \"release readiness gate\" --workspace . --max-tokens 4000 --json"
+          "topic": "Release validation needs a review",
+          "spanIds": ["ev_00000000000000000000000001", "ev_00000000000000000000000002"],
+          "centralityScore": 0.0,
+          "rationale": "Centrality 0.0000 aggregated over 0 memory(ies); 2 CASS span(s); most recent evidence at 2026-09-27T12:00:00+00:00.",
+          "suggestedQuery": "ee pack \"Release validation needs a review\" --workspace . --max-tokens 4000 --json"
         }
       ],
       "fromCass": true,
