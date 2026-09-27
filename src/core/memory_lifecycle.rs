@@ -9,6 +9,59 @@
 
 use serde_json::json;
 
+/// Resolve current memory review holds in the caller's source snapshot.
+///
+/// Review status is independent of source validity, historical clocks and
+/// indexed trust. Read only identities in bounded, deduplicated batches: a
+/// rule-target hold never aliases a source memory, and private feedback text
+/// is neither needed nor returned. Empty candidate sets need no authority IO.
+/// This helper never begins, commits or releases the caller's transaction.
+pub(crate) fn pending_memory_review_ids(
+    connection: &crate::db::DbConnection,
+    workspace_id: &str,
+    candidate_ids: &[&str],
+) -> crate::db::Result<std::collections::BTreeSet<String>> {
+    use std::collections::BTreeSet;
+
+    use sqlmodel_core::Value;
+
+    let candidates = candidate_ids.iter().copied().collect::<BTreeSet<_>>();
+    let ids = candidates.into_iter().collect::<Vec<_>>();
+    let mut held = BTreeSet::new();
+    for page in ids.chunks(256) {
+        let slots = (2..page.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND status = 'pending' AND target_id IN ({slots}) ORDER BY target_id ASC"
+        );
+        let mut values = vec![Value::Text(workspace_id.to_owned())];
+        values.extend(page.iter().map(|id| Value::Text((*id).to_owned())));
+        for row in connection
+            .query(&sql, &values)
+            .map_err(|_| review_admission_error())?
+        {
+            let id = row
+                .get(0)
+                .and_then(Value::as_str)
+                .ok_or_else(review_admission_error)?;
+            if page.binary_search(&id).is_err() {
+                return Err(review_admission_error());
+            }
+            held.insert(id.to_owned());
+        }
+    }
+    Ok(held)
+}
+
+fn review_admission_error() -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not verify pending memory review authority".to_owned(),
+    }
+}
+
 /// Read seal authority for a live corpus without reading or exporting bodies.
 ///
 /// The backup reader also checks that a closed seal has placeholder content.
@@ -533,5 +586,160 @@ mod seal_admission_tests {
         assert!(matches!(error, crate::db::DbError::MalformedRow { .. }));
         assert!(!format!("{error:?}").contains("SELECT"));
         assert!(!format!("{error:?}").contains(WORKSPACE));
+    }
+}
+
+#[cfg(test)]
+mod review_admission_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::pending_memory_review_ids;
+    use crate::db::{CreateFeedbackQuarantineInput, CreateWorkspaceInput, DbConnection};
+    use std::collections::BTreeSet;
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000901";
+    const OTHER: &str = "wsp_00000000000000000000000902";
+
+    fn fixture() -> DbConnection {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        for workspace in [WORKSPACE, OTHER] {
+            db.insert_workspace(
+                workspace,
+                &CreateWorkspaceInput {
+                    path: format!("/review-admission/{workspace}"),
+                    name: None,
+                },
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn hold(db: &DbConnection, number: u32, workspace: &str, kind: &str, target: &str) {
+        db.insert_feedback_quarantine(
+            &format!("fq_{number:026}"),
+            &CreateFeedbackQuarantineInput {
+                workspace_id: workspace.to_owned(),
+                source_id: "PRIVATE-REVIEW-SOURCE".to_owned(),
+                target_type: kind.to_owned(),
+                target_id: target.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+                reason: "PRIVATE-REVIEW-REASON".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn holds_bind_exact_native_ownership_and_only_pending_events() {
+        let db = fixture();
+        let memory = "mem_00000000000000000000000901";
+        hold(&db, 1, OTHER, "memory", memory);
+        hold(&db, 2, WORKSPACE, "rule", memory);
+        assert!(
+            pending_memory_review_ids(&db, WORKSPACE, &[memory])
+                .unwrap()
+                .is_empty()
+        );
+        hold(&db, 3, WORKSPACE, "memory", memory);
+        hold(&db, 4, WORKSPACE, "memory", memory);
+        assert_eq!(
+            pending_memory_review_ids(&db, WORKSPACE, &[memory, memory]).unwrap(),
+            BTreeSet::from([memory.to_owned()])
+        );
+        assert!(
+            db.update_feedback_quarantine_status(
+                &format!("fq_{:026}", 3),
+                "released",
+                Some("operator"),
+                None,
+            )
+            .unwrap()
+        );
+        assert!(
+            !pending_memory_review_ids(&db, WORKSPACE, &[memory])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.update_feedback_quarantine_status(
+                &format!("fq_{:026}", 4),
+                "rejected",
+                Some("operator"),
+                None,
+            )
+            .unwrap()
+        );
+        assert!(
+            pending_memory_review_ids(&db, WORKSPACE, &[memory])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn review_lookup_pages_and_deduplicates_without_interpreting_bound_values() {
+        let db = fixture();
+        let ids = (1000..1513)
+            .map(|id| format!("mem_{id:026}"))
+            .collect::<Vec<_>>();
+        let mut expected = BTreeSet::new();
+        for (number, index) in [0, 255, 256, 512].into_iter().enumerate() {
+            hold(&db, number as u32 + 1, WORKSPACE, "memory", &ids[index]);
+            expected.insert(ids[index].clone());
+        }
+        let mut candidates = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        candidates.extend([ids[0].as_str(), "' OR 1 = 1 --"]);
+        assert_eq!(
+            pending_memory_review_ids(&db, WORKSPACE, &candidates).unwrap(),
+            expected
+        );
+        assert!(
+            pending_memory_review_ids(&db, "' OR 1 = 1 --", &candidates)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn empty_candidates_need_no_storage_and_nonempty_failure_is_sanitized() {
+        let db = DbConnection::open_memory().unwrap();
+        assert!(
+            pending_memory_review_ids(&db, WORKSPACE, &[])
+                .unwrap()
+                .is_empty()
+        );
+        let error = pending_memory_review_ids(&db, WORKSPACE, &["PRIVATE-CANDIDATE"]).unwrap_err();
+        let diagnostic = format!("{error:?}");
+        assert!(diagnostic.contains("pending memory review authority"));
+        assert!(!diagnostic.contains("PRIVATE-CANDIDATE"));
+        assert!(!diagnostic.contains("feedback_quarantine"));
+    }
+
+    #[test]
+    fn review_lookup_does_not_finish_or_replace_the_callers_snapshot() {
+        let db = fixture();
+        let memory = "mem_00000000000000000000000901";
+        hold(&db, 1, WORKSPACE, "memory", memory);
+        db.begin_read_snapshot().unwrap();
+        assert_eq!(
+            pending_memory_review_ids(&db, WORKSPACE, &[memory])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db.begin_read_snapshot().is_err());
+        db.rollback_read_snapshot().unwrap();
+        db.begin_read_snapshot().unwrap();
+        db.rollback_read_snapshot().unwrap();
     }
 }

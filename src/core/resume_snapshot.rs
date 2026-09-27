@@ -98,6 +98,23 @@ fn load_with_boundary(
         .collect();
         current_memories.retain(|memory| !closed.contains(&memory.id));
     }
+    // The same current review hold enforced by search/ask must also apply to
+    // the session bundle. Remove held identities before reading tags, typed
+    // decisions or linked transcript history so none can reintroduce them as
+    // queued work, staleness hints, counts or source evidence.
+    let held = crate::core::memory_lifecycle::pending_memory_review_ids(
+        connection,
+        &workspace_id,
+        &current_memories
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| DomainError::Storage {
+        message: "Could not verify resume memory review authority; bundle withheld".to_owned(),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    })?;
+    current_memories.retain(|memory| !held.contains(&memory.id));
     let ids: Vec<&str> = current_memories
         .iter()
         .map(|memory| memory.id.as_str())
@@ -328,6 +345,40 @@ mod seal_authority_tests {
             )
             .unwrap()
         }
+
+        fn hold(&self, number: u32, workspace: &str, kind: &str) -> String {
+            let id = format!("fq_{number:026}");
+            self.writer
+                .insert_feedback_quarantine(
+                    &id,
+                    &crate::db::CreateFeedbackQuarantineInput {
+                        workspace_id: workspace.to_owned(),
+                        source_id: "PRIVATE-RESUME-REVIEW-SOURCE".to_owned(),
+                        target_type: kind.to_owned(),
+                        target_id: SEALED.to_owned(),
+                        signal: "harmful".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        proposed_event_id: None,
+                        recorded_at: TIME.to_owned(),
+                        reason: "PRIVATE-RESUME-REVIEW-REASON".to_owned(),
+                        event_reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                    },
+                )
+                .unwrap();
+            id
+        }
+
+        fn review(&self, id: &str, status: &str) {
+            assert!(
+                self.writer
+                    .update_feedback_quarantine_status(id, status, Some("operator"), None)
+                    .unwrap()
+            );
+        }
     }
 
     fn reference_time() -> DateTime<Utc> {
@@ -451,6 +502,233 @@ mod seal_authority_tests {
             .begin_read_snapshot()
             .expect("snapshot released");
         fixture.reader.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn pending_review_withholds_every_resume_projection_without_source_writes() {
+        let fixture = Fixture::new();
+        fixture.seed(PUBLIC, "Completed release validation.", false);
+        fixture.hold(1, &fixture.workspace_id, "memory");
+        let before = fixture.writer.get_memory(SEALED).unwrap().unwrap();
+        let generation = fixture
+            .writer
+            .get_workspace_generation(&fixture.workspace_id)
+            .unwrap();
+        let audits = fixture.writer.count_table_rows("audit_log").unwrap();
+        let state = fixture.load();
+        assert_hidden(&state);
+        assert_eq!(state.all_live.len(), 1);
+        let report = super::super::build_resume_report(&fixture.options()).unwrap();
+        assert_eq!(report.episodic_total, 1);
+        assert_eq!(report.sessions[0].label, "session-public");
+        assert_eq!(report.open_loops.revisit_decisions_total, 0);
+        assert_eq!(report.open_loops.tagged_items_total, 0);
+        let public = serde_json::to_string(&report).unwrap();
+        for hidden in [
+            SEALED,
+            "reserved choice",
+            "session-reserved",
+            "PRIVATE-RESUME-REVIEW",
+        ] {
+            assert!(!public.contains(hidden));
+        }
+        assert_eq!(fixture.writer.get_memory(SEALED).unwrap().unwrap(), before);
+        assert_eq!(
+            fixture
+                .writer
+                .get_workspace_generation(&fixture.workspace_id)
+                .unwrap(),
+            generation
+        );
+        assert_eq!(fixture.writer.count_table_rows("audit_log").unwrap(), audits);
+        assert!(!fixture.workspace.join(".ee/index").exists());
+    }
+
+    #[test]
+    fn review_release_restores_work_only_after_all_holds_and_seals_clear() {
+        let fixture = Fixture::new();
+        let first = fixture.hold(1, &fixture.workspace_id, "memory");
+        let second = fixture.hold(2, &fixture.workspace_id, "memory");
+        assert_hidden(&fixture.load());
+        fixture.review(&first, "released");
+        assert_hidden(&fixture.load());
+        fixture.seal();
+        fixture.review(&second, "rejected");
+        assert_hidden(&fixture.load());
+        fixture.reveal();
+        let state = fixture.load();
+        assert_eq!(state.all_live[0].id, SEALED);
+        assert!(state.tags.contains_key(SEALED));
+        assert!(state.typed_decision_fields.contains_key(SEALED));
+    }
+
+    #[test]
+    fn foreign_and_rule_target_reviews_cannot_hold_a_resume_memory() {
+        let fixture = Fixture::new();
+        let other = "wsp_00000000000000000000000903";
+        fixture
+            .writer
+            .insert_workspace(
+                other,
+                &CreateWorkspaceInput {
+                    path: fixture.workspace.join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        fixture.hold(1, other, "memory");
+        fixture.hold(2, &fixture.workspace_id, "rule");
+        assert_eq!(fixture.load().all_live[0].id, SEALED);
+    }
+
+    #[test]
+    fn hold_and_review_transitions_belong_to_the_next_resume_snapshot() {
+        let fixture = Fixture::new();
+        let mut review_id = None;
+        let captured = load_with_boundary(
+            &fixture.reader,
+            &fixture.options(),
+            &fixture.workspace,
+            reference_time(),
+            || {
+                review_id = Some(fixture.hold(1, &fixture.workspace_id, "memory"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(captured.all_live[0].id, SEALED);
+        assert_hidden(&fixture.load());
+        let captured = load_with_boundary(
+            &fixture.reader,
+            &fixture.options(),
+            &fixture.workspace,
+            reference_time(),
+            || {
+                fixture.review(review_id.as_deref().unwrap(), "released");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_hidden(&captured);
+        assert_eq!(fixture.load().all_live[0].id, SEALED);
+        fixture.reader.begin_read_snapshot().unwrap();
+        fixture.reader.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn held_decision_sidecars_are_not_decoded_and_missing_authority_withholds_the_bundle() {
+        let fixture = Fixture::new();
+        fixture.hold(1, &fixture.workspace_id, "memory");
+        fixture
+            .writer
+            .execute_raw(&format!(
+                "UPDATE memories SET typed_fields_json = '{{\"chosen\":3,\"rationale\":\"PRIVATE-MALFORMED-DECISION\"}}' WHERE id = '{SEALED}'"
+            ))
+            .unwrap();
+        assert_hidden(&fixture.load());
+        fixture
+            .writer
+            .execute_raw("ALTER TABLE feedback_quarantine RENAME TO private_unavailable_review")
+            .unwrap();
+        let error = load(
+            &fixture.reader,
+            &fixture.options(),
+            &fixture.workspace,
+            reference_time(),
+        );
+        let Err(error) = error else {
+            panic!("missing review authority admitted a resume")
+        };
+        let diagnostic = format!("{error:?}");
+        assert!(diagnostic.contains("review authority"));
+        assert!(!diagnostic.contains("PRIVATE-MALFORMED-DECISION"));
+        assert!(!diagnostic.contains("private_unavailable_review"));
+        fixture.reader.begin_read_snapshot().unwrap();
+        fixture.reader.rollback_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn held_memory_cannot_return_as_linked_transcript_history() {
+        use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind};
+
+        let fixture = Fixture::new();
+        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(901)).to_string();
+        fixture
+            .writer
+            .insert_session(
+                &session,
+                &CreateSessionInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    cass_session_id: "resume-review-session".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: Some(TIME.to_owned()),
+                    ended_at: Some(TIME.to_owned()),
+                    message_count: 2,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(b"resume-review-session").to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        let mut evidence = Vec::new();
+        for (number, parent) in [(902_u32, Some(SEALED.to_owned())), (903, None)] {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(number)))
+                .to_string();
+            let body = "Previous session completed release validation.";
+            fixture
+                .writer
+                .insert_evidence_span(
+                    &id,
+                    &CreateEvidenceSpanInput {
+                        workspace_id: fixture.workspace_id.clone(),
+                        session_id: session.clone(),
+                        memory_id: parent,
+                        producer_kind: EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("resume-review-span-{number}"),
+                        span_kind: crate::cass::CassSpanKind::Message.as_str().to_owned(),
+                        start_line: number,
+                        end_line: number,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some("assistant".to_owned()),
+                        excerpt: body.to_owned(),
+                        content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )
+                .unwrap();
+            let span = fixture.writer.get_evidence_span(&id).unwrap().unwrap();
+            assert!(span.is_direct_pack_admitted_for_session(
+                &fixture.workspace_id,
+                &fixture.writer.get_session(&session).unwrap().unwrap(),
+            ));
+            evidence.push(span);
+        }
+        assert_eq!(fixture.load().transcript_history.evidence_total, 2);
+        let hold = fixture.hold(1, &fixture.workspace_id, "memory");
+        let state = fixture.load();
+        assert_hidden(&state);
+        assert_eq!(state.transcript_history.evidence_total, 1);
+        assert_eq!(
+            state.transcript_history.sessions[0].items[0].evidence_id,
+            evidence[1].id
+        );
+        assert!(
+            !serde_json::to_string(&state.transcript_history)
+                .unwrap()
+                .contains(&evidence[0].id)
+        );
+        fixture.review(&hold, "released");
+        assert_eq!(fixture.load().transcript_history.evidence_total, 2);
+        for span in evidence {
+            assert_eq!(
+                fixture.writer.get_evidence_span(&span.id).unwrap().unwrap(),
+                span
+            );
+        }
     }
 }
 
