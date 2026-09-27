@@ -136,33 +136,84 @@ fn name(path: &Path) -> Result<&std::ffi::OsStr, StoreAuthError> {
 }
 
 pub(super) fn ensure_hardened_dir(keys_dir: &Path) -> Result<(), StoreAuthError> {
-    // Refuse redirection before mkdir/chmod, not after changing another tree.
     reject_symlink_components(keys_dir, keys_dir)?;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        create_key_directory_with(keys_dir, |path, directory| {
+            directory.sync_all().map_err(|error| io_error(path, error))
+        })
     }
-    builder
-        .create(keys_dir)
+    #[cfg(not(unix))]
+    {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .create(keys_dir)
+            .map_err(|error| io_error(keys_dir, error))
+    }
+}
+
+/// Create through held parent descriptors, never through a re-resolved full
+/// path after the symlink check. Persist each directory and its parent entry
+/// before descending. Existing entries receive the same barriers: a retry or
+/// concurrent creator may encounter a directory whose first barrier failed.
+/// Only the final key directory is chmod'ed; existing ancestors keep their mode.
+#[cfg(unix)]
+fn create_key_directory_with(
+    keys_dir: &Path,
+    mut sync: impl FnMut(&Path, &File) -> Result<(), StoreAuthError>,
+) -> Result<(), StoreAuthError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Component;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let start = if keys_dir.is_absolute() { "/" } else { "." };
+    let mut directory = File::from(
+        rustix::fs::open(start, flags, Mode::empty())
+            .map_err(|error| io_error(keys_dir, error))?,
+    );
+    let mut current = std::path::PathBuf::from(start);
+    for component in keys_dir.components() {
+        let (name, may_create) = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => (name, true),
+            Component::ParentDir => (std::ffi::OsStr::new(".."), false),
+            Component::Prefix(_) => {
+                return Err(recovery_error("unsupported key-directory prefix"));
+            }
+        };
+        let next_path = current.join(name);
+        let descriptor = match rustix::fs::openat(&directory, name, flags, Mode::empty()) {
+            Ok(descriptor) => descriptor,
+            Err(error) if may_create && error == rustix::io::Errno::NOENT => {
+                match rustix::fs::mkdirat(&directory, name, Mode::RWXU) {
+                    Ok(()) => {}
+                    Err(error) if error == rustix::io::Errno::EXIST => {}
+                    Err(error) => return Err(io_error(&next_path, error)),
+                }
+                // A racing mkdir is harmless; a racing symlink is not. Open
+                // with NOFOLLOW even when mkdir reported that the name exists.
+                rustix::fs::openat(&directory, name, flags, Mode::empty())
+                    .map_err(|error| io_error(&next_path, error))?
+            }
+            Err(error) => return Err(io_error(&next_path, error)),
+        };
+        let child = File::from(descriptor);
+        sync(&next_path, &child)?;
+        sync(&current, &directory)?;
+        directory = child;
+        current = next_path;
+    }
+    check_owner(
+        keys_dir,
+        &directory
+            .metadata()
+            .map_err(|error| io_error(keys_dir, error))?,
+    )?;
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
         .map_err(|error| io_error(keys_dir, error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = open_directory(keys_dir)?;
-        check_owner(
-            keys_dir,
-            &directory
-                .metadata()
-                .map_err(|error| io_error(keys_dir, error))?,
-        )?;
-        directory
-            .set_permissions(fs::Permissions::from_mode(0o700))
-            .map_err(|error| io_error(keys_dir, error))?;
-    }
-    Ok(())
+    sync(keys_dir, &directory)
 }
 
 pub(super) fn enforce_owner_only_dir(path: &Path) -> Result<(), StoreAuthError> {
@@ -443,6 +494,163 @@ mod tests {
                 .expect("physical temporary root"),
         )
         .expect("temporary directory")
+    }
+
+    #[cfg(unix)]
+    mod directory_creation {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        fn sync(path: &Path, directory: &File) -> Result<(), StoreAuthError> {
+            directory.sync_all().map_err(|error| io_error(path, error))
+        }
+
+        fn mode(path: &Path) -> u32 {
+            fs::metadata(path)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        #[test]
+        fn key_directory_bootstrap_persists_each_child_and_parent_before_returning() {
+            let root = fixture();
+            let project = root.path().join("new-project");
+            let marker = project.join(".ee");
+            let keys = marker.join("keys");
+            let mut barriers = Vec::new();
+            create_key_directory_with(&keys, |path, directory| {
+                barriers.push(path.to_path_buf());
+                sync(path, directory)
+            })
+            .expect("durable directory bootstrap");
+            for child in [&project, &marker, &keys] {
+                assert_eq!(mode(child), 0o700);
+                assert!(barriers.windows(2).any(|pair| {
+                    pair[0].as_path() == child.as_path()
+                        && Some(pair[1].as_path()) == child.parent()
+                }));
+            }
+            assert_eq!(barriers.last(), Some(&keys));
+            assert!(!keys.join(KEY_FILE_NAME).exists());
+            let created = StoreAuthRoot::create(&keys).expect("initialize after bootstrap");
+            assert_eq!(
+                created.current_key_id(),
+                StoreAuthRoot::open(&keys).expect("reopen root").current_key_id()
+            );
+        }
+
+        #[test]
+        fn key_directory_bootstrap_hardens_only_the_requested_leaf() {
+            let root = fixture();
+            let project = root.path().join("project");
+            let keys = project.join("keys");
+            fs::create_dir_all(&keys).expect("existing tree");
+            fs::set_permissions(&project, fs::Permissions::from_mode(0o750)).expect("parent mode");
+            fs::set_permissions(&keys, fs::Permissions::from_mode(0o755)).expect("leaf mode");
+            let original = fs::metadata(&project).expect("parent inode").ino();
+            ensure_hardened_dir(&keys).expect("harden actual leaf descriptor");
+            assert_eq!(mode(&project), 0o750);
+            assert_eq!(fs::metadata(&project).expect("same inode").ino(), original);
+            assert_eq!(mode(&keys), 0o700);
+        }
+
+        #[test]
+        fn key_directory_bootstrap_does_not_follow_a_swapped_ancestor() {
+            let root = fixture();
+            let project = root.path().join("project");
+            let retained = root.path().join("retained-project");
+            let outside = root.path().join("outside");
+            fs::create_dir(&project).expect("project");
+            fs::create_dir(&outside).expect("outside");
+            let keys = project.join(".ee/keys");
+            let mut swapped = false;
+            create_key_directory_with(&keys, |path, directory| {
+                if path == project.as_path() && !swapped {
+                    fs::rename(&project, &retained).map_err(|error| io_error(path, error))?;
+                    symlink(&outside, &project).map_err(|error| io_error(path, error))?;
+                    swapped = true;
+                    assert_eq!(
+                        directory.metadata().expect("held descriptor").ino(),
+                        fs::metadata(&retained).expect("retained inode").ino()
+                    );
+                }
+                sync(path, directory)
+            })
+            .expect("descriptor remains bound to the opened tree");
+            assert!(swapped);
+            assert!(!outside.join(".ee").exists());
+            assert!(retained.join(".ee/keys").is_dir());
+            assert_eq!(mode(&retained.join(".ee/keys")), 0o700);
+            // The enclosing constructor's file boundary rechecks the path;
+            // it must not issue a root for the substituted namespace.
+            assert!(StoreAuthRoot::create(&keys).is_err());
+            assert!(!retained.join(".ee/keys").join(KEY_FILE_NAME).exists());
+        }
+
+        #[test]
+        fn key_directory_bootstrap_retries_failed_child_and_parent_barriers() {
+            for fail_parent in [false, true] {
+                let root = fixture();
+                let marker = root.path().join("new-project/.ee");
+                let keys = marker.join("keys");
+                let failed_path = if fail_parent { &marker } else { &keys };
+                let error = create_key_directory_with(&keys, |path, directory| {
+                    if path == failed_path.as_path() && keys.is_dir() {
+                        return Err(io_error(path, "injected directory persistence failure"));
+                    }
+                    sync(path, directory)
+                })
+                .expect_err("bootstrap durability must not be assumed");
+                assert!(matches!(error, StoreAuthError::Io { .. }));
+                assert!(keys.is_dir(), "incomplete directory work is retained");
+                assert!(!keys.join(KEY_FILE_NAME).exists());
+                let mut barriers = Vec::new();
+                create_key_directory_with(&keys, |path, directory| {
+                    barriers.push(path.to_path_buf());
+                    sync(path, directory)
+                })
+                .expect("retry persists already-existing directories too");
+                assert!(barriers.windows(2).any(|pair| {
+                    pair[0].as_path() == keys.as_path()
+                        && pair[1].as_path() == marker.as_path()
+                }));
+                let created = StoreAuthRoot::open_or_create(&keys).expect("usable after retry");
+                assert_eq!(
+                    created.current_key_id(),
+                    StoreAuthRoot::open(&keys).expect("reopen root").current_key_id()
+                );
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+        #[test]
+        fn key_directory_bootstrap_allows_concurrent_first_time_creators() {
+            let root = fixture();
+            let keys = root.path().join("new-project/.ee/keys");
+            let gate = std::sync::Barrier::new(8);
+            let ids = std::thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for _ in 0..8 {
+                    let gate = &gate;
+                    let keys = &keys;
+                    workers.push(scope.spawn(move || {
+                        gate.wait();
+                        StoreAuthRoot::open_or_create(keys)
+                            .expect("concurrent directory and root creation")
+                            .current_key_id()
+                    }));
+                }
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("creator finished"))
+                    .collect::<Vec<_>>()
+            });
+            let root = StoreAuthRoot::open(&keys).expect("complete root");
+            assert_eq!(ids.len(), 8);
+            assert!(ids.iter().all(|id| *id == root.current_key_id()));
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
