@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::core::memory_scope::team_provenance_from_memory;
 use crate::db::{DatabaseLocation, DbConnection, StoredMemory};
 use crate::models::{DomainError, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, TrustClass};
-use crate::policy::redact_public_replay_text;
+use crate::policy::{public_evidence_body, redact_public_replay_text};
 
 use super::super::AskCandidate;
 
@@ -172,112 +172,6 @@ fn public_text(value: &str) -> bool {
         && !value
             .char_indices()
             .any(|(index, _)| crate::util::sensitive_path_starts_at(value, index))
-}
-
-/// Risk and anti-pattern bodies are memory evidence, not shell policy. Keep
-/// the shared secret/PII/path guards and reject authority-bearing instructions,
-/// but do not hide a useful warning just because it mentions a risky command.
-/// Labels and provenance deliberately retain the stricter public-text policy.
-/// The caller still enforces scope, lifecycle, trust and native admission;
-/// nothing here grants execution permission or rewrites the quoted bytes.
-fn public_evidence_body(value: &str) -> bool {
-    use crate::policy::{MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, detect_instruction_like_content};
-
-    // The public-replay limit bounds small metadata fields, not memory or CASS
-    // bodies. Those producers accept 64 KiB. Never replace a long body with a
-    // prefix: the omitted tail can contain the answer, opposition or a secret.
-    if value.len() > crate::models::MAX_CONTENT_BYTES {
-        return false;
-    }
-    if value.len() <= MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES {
-        return public_evidence_window(value);
-    }
-
-    // Contextual credentials, PEM blocks and authority instructions can span
-    // arbitrarily much whitespace. Screen the COMPLETE bounded input before
-    // making the smaller public-egress checks; windowing alone is insufficient.
-    if crate::policy::screen_external_text_for_ingestion(value).redacted {
-        return false;
-    }
-    let instructions = detect_instruction_like_content(value);
-    if instructions.is_instruction_like
-        && instructions.signals.iter().any(|signal| {
-            !matches!(
-                signal.kind,
-                crate::policy::InstructionSignalKind::ToolCoercion
-                    | crate::policy::InstructionSignalKind::DestructiveCommand
-            )
-        })
-    {
-        return false;
-    }
-
-    // Embedded JWT/entropy/label detectors must see complete token
-    // neighborhoods, including their delimiters. Refuse oversized atoms
-    // instead of claiming that fragments have established their safety.
-    let overlap = MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES / 2;
-    if value.split_whitespace().any(|atom| atom.len() > overlap / 2) {
-        return false;
-    }
-    let mut start = 0;
-    loop {
-        let mut end = value.len().min(start + MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES);
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        if !public_evidence_window(&value[start..end]) {
-            return false;
-        }
-        if end == value.len() {
-            return true;
-        }
-        start += overlap;
-        while !value.is_char_boundary(start) {
-            start += 1;
-        }
-    }
-}
-
-/// Keep the strict, shared egress policy for each complete bounded window.
-/// Only command-risk findings are advisory; no secret/PII/path finding, unknown
-/// reason or authority signal is excused, and no evidence byte is rewritten.
-fn public_evidence_window(value: &str) -> bool {
-    use crate::policy::InstructionSignalKind;
-
-    if value
-        .char_indices()
-        .any(|(index, _)| crate::util::sensitive_path_starts_at(value, index))
-    {
-        return false;
-    }
-    let report = redact_public_replay_text(value);
-    if !report.redacted {
-        return true;
-    }
-    let instruction = crate::policy::detect_instruction_like_content(value);
-    if !instruction.authority_signal_codes().is_empty() {
-        return false;
-    }
-    let advisory_codes: Vec<_> = instruction
-        .signals
-        .iter()
-        .filter(|signal| {
-            matches!(
-                signal.kind,
-                InstructionSignalKind::ToolCoercion | InstructionSignalKind::DestructiveCommand
-            )
-        })
-        .map(|signal| signal.code)
-        .collect();
-    // An advisory signal is not an exemption from another redaction reason.
-    // Unknown/future reasons fail closed too; only the actual shared detector's
-    // command-risk signals and their umbrella reason can be disregarded.
-    !advisory_codes.is_empty()
-        && !report.redacted_reasons.is_empty()
-        && report
-            .redacted_reasons
-            .iter()
-            .all(|reason| *reason == "instruction_like_content" || advisory_codes.contains(reason))
 }
 
 fn public_label(value: &str) -> String {

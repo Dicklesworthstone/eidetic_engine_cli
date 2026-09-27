@@ -35,6 +35,9 @@ use serde::Serialize;
 use crate::db::{DbConnection, StoredEvidenceSpan, StoredMemory};
 use crate::models::DomainError;
 
+#[path = "focus_suggest_cass.rs"]
+mod cass_topics;
+
 /// Schema id pinned in `docs/schemas/ee.focus.suggest.v1.json`.
 pub const FOCUS_SUGGEST_SCHEMA_V1: &str = "ee.focus.suggest.v1";
 
@@ -111,7 +114,7 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     }
 
     let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+        DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
@@ -231,7 +234,10 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         None => recent,
     };
 
-    if scoped.is_empty() {
+    // An unscoped CASS request can stand on positively admitted transcript
+    // evidence alone. Explicit task frames retain their memory-link boundary;
+    // an unrelated unlinked span must never widen a requested frame.
+    if scoped.is_empty() && (!options.from_cass || task_frame_scope.is_some()) {
         // Distinguish "the recency window itself was empty" from "the
         // recency window had memories but none were linked from the
         // task frame". The first repair is `--recent-hours` / `ee
@@ -307,9 +313,34 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         Vec::new()
     };
 
-    let pagerank = compute_pagerank_scores(&connection, &mut degraded);
+    // Native transcripts have no memory-graph node. Zero centrality is an
+    // honest signal, not a reason to fabricate memories or scan an unrelated
+    // graph merely to produce a graph_empty advisory.
+    let pagerank = if scoped.is_empty() {
+        BTreeMap::new()
+    } else {
+        compute_pagerank_scores(&connection, &mut degraded)
+    };
 
     let recommendations = score_and_emit_topics(&scoped, &spans, &pagerank, now, options);
+
+    if scoped.is_empty()
+        && recommendations.is_empty()
+        && options.limit > 0
+        && !degraded.iter().any(|entry| entry.code == "cass_unavailable")
+    {
+        degraded.push(FocusSuggestDegradation {
+            code: "no_recent_evidence".to_owned(),
+            severity: "info".to_owned(),
+            message: format!(
+                "No eligible public memories or independent CASS excerpts were available within the last {} hour(s).",
+                options.recent_hours
+            ),
+            repair: Some(
+                "Increase --recent-hours or import additional screened CASS evidence.".to_owned(),
+            ),
+        });
+    }
 
     Ok(FocusSuggestReport {
         recommendations,
@@ -509,19 +540,37 @@ fn score_and_emit_topics(
     }
 
     for span in spans {
-        let Some(memory_id) = span.memory_id.as_deref() else {
-            continue;
-        };
         // Public provenance uses ee's opaque evidence id. Upstream CASS
         // identifiers are storage-internal and never projected.
         if span.id.is_empty() {
             continue;
         }
-        for cluster in clusters.values_mut() {
-            if cluster.member_ids.iter().any(|id| id == memory_id) {
-                cluster.span_ids.push(span.id.clone());
-                break;
+        if let Some(memory_id) = span.memory_id.as_deref() {
+            // Linked evidence keeps its parent's admission. It must not become
+            // an independent topic when that memory was excluded by scope or
+            // lifecycle. Independent spans have no such memory alias.
+            for cluster in clusters.values_mut() {
+                if cluster.member_ids.iter().any(|id| id == memory_id) {
+                    cluster.span_ids.push(span.id.clone());
+                    break;
+                }
             }
+        } else if options.from_cass && options.task_frame_id.is_none()
+            && let Some(topic) = cass_topics::topic(span)
+        {
+            let cluster = clusters.entry(topic.key).or_insert_with(|| TopicCluster {
+                topic_label: topic.label,
+                member_ids: Vec::new(),
+                centrality_sum: 0.0,
+                most_recent_at: None,
+                span_ids: Vec::new(),
+            });
+            cluster.span_ids.push(span.id.clone());
+            cluster.most_recent_at = Some(
+                cluster.most_recent_at.map_or(topic.created_at, |existing| {
+                    existing.max(topic.created_at)
+                }),
+            );
         }
     }
 
@@ -611,7 +660,7 @@ fn score_and_emit_topics(
                 recency_str,
             );
             // Emit `ee pack`, the canonical context-pack surface. Per
-            // AGENTS.md, `ee pack "<task>"` is the post-triad-promotion
+            // AGENTS.md, `ee pack \"<task>\"` is the post-triad-promotion
             // command an agent should run to act on a recommendation.
             let suggested_query = format!(
                 "ee pack \"{}\" --workspace . --max-tokens 4000 --json",
@@ -784,8 +833,8 @@ mod tests {
     fn topic_key_does_not_collapse_distinct_empty_preview_memories() {
         // `content_preview_tokens` returns "" because none of the chars
         // in "🚨🚨🚨" or "!!! ???" are `is_alphanumeric()`.
-        let a = memory_with("01", "fact", "🚨🚨🚨", "2026-05-26T11:00:00Z");
-        let b = memory_with("02", "fact", "!!! ???", "2026-05-26T10:30:00Z");
+        let a = memory_with("01", "fact", "🚨🚨🚨", "2026-05-26T11:30:00Z");
+        let b = memory_with("02", "fact", "!!! ???", "2026-05-26T11:30:00Z");
         assert!(content_preview_tokens(&a.content, TOPIC_PREVIEW_CHARS).is_empty());
         assert!(content_preview_tokens(&b.content, TOPIC_PREVIEW_CHARS).is_empty());
         let key_a = topic_key_for_memory(&a);

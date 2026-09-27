@@ -3274,13 +3274,12 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn tombstone_visibility_unavailable(error: &str) -> Self {
+    fn tombstone_visibility_unavailable() -> Self {
         Self {
             code: "tombstone_visibility_unavailable".to_string(),
             severity: "medium".to_string(),
-            message: format!(
-                "Search could not verify tombstone visibility against the memory database: {error}"
-            ),
+            message: "Search could not verify tombstone visibility against the memory database; unverifiable memory hits were withheld."
+                .to_owned(),
             repair: Some("ee doctor --json".to_string()),
         }
     }
@@ -7800,6 +7799,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let total_start = Instant::now();
     options.validate()?;
     search_checkpoint(cx)?;
+    // Validate before index reconciliation or model preparation can write state.
+    resolved_search_fusion_weights(&options.workspace_path)?;
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
@@ -9263,6 +9264,9 @@ async fn run_search_inner_with_performance(
         preloaded_memories = Some(&mut transient_preloaded_memories);
     }
     search_checkpoint(cx)?;
+    // Invalid configured ranking must not become default ranking, including
+    // when a missing index would otherwise send callers into lexical fallback.
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
     // Seeded/library callers may supply only paths. Use the same authoritative
     // file connection for binding and visibility instead of leaving this entry
     // point able to retrieve a copied index without checking its store.
@@ -9459,7 +9463,6 @@ async fn run_search_inner_with_performance(
     };
     let rerank_runtime_available = rerank_runtime.is_enabled();
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
         search_checkpoint(cx)?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -9929,6 +9932,7 @@ pub async fn run_diag_search_with_cx(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
+    resolved_search_fusion_weights(&options.workspace_path)?;
     let index_dir = options.resolve_index_dir();
     let fast_embedder = if options.source_mode.uses_embeddings()
         && index_dir.exists()
@@ -10032,6 +10036,7 @@ async fn run_diag_search_in_snapshot(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -10159,7 +10164,6 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(effective_limit);
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     let mut diag_result = diag_search_sync(
         cx,
         &index_dir,
@@ -11720,10 +11724,14 @@ fn unit_weight_or(value: Option<f64>, default: f32) -> f32 {
         .map_or(default, |weight| weight as f32)
 }
 
-pub(crate) fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFusionWeights {
+pub(crate) fn resolved_search_fusion_weights(
+    workspace_path: &Path,
+) -> Result<SearchFusionWeights, SearchError> {
     crate::core::config_surface::merged_workspace_config(workspace_path)
         .map(|config| SearchFusionWeights::from_config(&config.values.search))
-        .unwrap_or_default()
+        .map_err(|error| {
+            SearchError::Configuration(format!("Failed to load search configuration: {error}"))
+        })
 }
 
 /// Which scale the Frankensearch adapter's final score arrives on.
@@ -13221,7 +13229,7 @@ fn apply_tombstone_visibility_collecting(
     read_connection: Option<&DbConnection>,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Vec<SearchHit> {
-    if hits.is_empty() {
+    if !hits.iter().any(|hit| hit.doc_id.starts_with("mem_")) {
         return hits;
     }
     if let Some(connection) = read_connection {
@@ -13234,18 +13242,18 @@ fn apply_tombstone_visibility_collecting(
         );
     }
 
-    let explicit_database_path = options.database_path.is_some();
     let database_path = options.resolve_database_path();
-    if !explicit_database_path && !database_path.exists() {
-        return hits;
-    }
     let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
-        Err(error) => {
-            degraded.push(SearchDegradation::tombstone_visibility_unavailable(
-                &error.to_string(),
-            ));
-            return hits;
+        Err(_) => {
+            // An unavailable source cannot authorize a cached memory body,
+            // including when the default store is simply absent. Native
+            // entities retain their separate live-admission boundaries.
+            degraded.push(SearchDegradation::tombstone_visibility_unavailable());
+            return hits
+                .into_iter()
+                .filter(|hit| !hit.doc_id.starts_with("mem_"))
+                .collect();
         }
     };
 
@@ -13296,27 +13304,26 @@ fn apply_tombstone_visibility_with_connection(
     let mut orphaned_filtered = 0usize;
     let mut included = 0usize;
     let mut drift_hints = Vec::new();
-    let mut seal_lookup_error = None;
+    let mut seal_lookup_failed = 0usize;
+    let mut memory_lookup_failed = 0usize;
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
     {
         let mut handle_loaded_memory =
             |mut hit: SearchHit, memory: &crate::db::StoredMemory| -> Option<SearchHit> {
-                // The canonical index projection omits sealed-unrevealed
-                // rows. Keep this read-side guard as defense in depth for
-                // indexes published before that eligibility revision. Seal
-                // sidecar state is authoritative: ordinary content equal to
-                // the placeholder text remains searchable.
-                if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-                    match connection.get_memory_seal(&memory.id) {
-                        Ok(Some(_)) => {
-                            sealed_filtered = sealed_filtered.saturating_add(1);
-                            return None;
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            seal_lookup_error.get_or_insert_with(|| error.to_string());
-                        }
+                // Seal sidecars are authoritative even when a stale or
+                // malformed row carries ordinary body text. Neither the
+                // placeholder spelling nor a cached projection proves that
+                // content was revealed; a failed lookup cannot grant access.
+                match connection.get_memory_seal(&memory.id) {
+                    Ok(Some(seal)) if seal.is_sealed() => {
+                        sealed_filtered = sealed_filtered.saturating_add(1);
+                        return None;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        seal_lookup_failed = seal_lookup_failed.saturating_add(1);
+                        return None;
                     }
                 }
                 if memory.tombstoned_at.is_some() {
@@ -13418,19 +13425,19 @@ fn apply_tombstone_visibility_with_connection(
                             orphaned_filtered = orphaned_filtered.saturating_add(1);
                         }
                     }
-                    Err(error) => {
-                        degraded.push(SearchDegradation::tombstone_visibility_unavailable(
-                            &error.to_string(),
-                        ));
-                        visible_hits.push(hit);
+                    Err(_) => {
+                        // A failed read is not absence and cannot be repaired
+                        // by trusting the index or a preloaded row instead.
+                        memory_lookup_failed = memory_lookup_failed.saturating_add(1);
                     }
                 }
             }
         }
     }
 
-    if let Some(error) = seal_lookup_error {
-        degraded.push(SearchDegradation::tombstone_visibility_unavailable(&error));
+    let source_unavailable_filtered = seal_lookup_failed.saturating_add(memory_lookup_failed);
+    if source_unavailable_filtered > 0 {
+        degraded.push(SearchDegradation::tombstone_visibility_unavailable());
     }
 
     let total_before = visible_hits
@@ -13441,7 +13448,8 @@ fn apply_tombstone_visibility_with_connection(
         .saturating_add(stale_filtered)
         .saturating_add(malformed_filtered)
         .saturating_add(sealed_filtered)
-        .saturating_add(orphaned_filtered);
+        .saturating_add(orphaned_filtered)
+        .saturating_add(source_unavailable_filtered);
     let validity_filtered = expired_filtered
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
@@ -13462,6 +13470,7 @@ fn apply_tombstone_visibility_with_connection(
         malformed_filtered_count = malformed_filtered,
         sealed_filtered_count = sealed_filtered,
         orphaned_filtered_count = orphaned_filtered,
+        source_unavailable_filtered_count = source_unavailable_filtered,
         valid_count = visible_hits.len(),
         "visibility_filter"
     );
@@ -18021,6 +18030,299 @@ mod tests {
         assert!(degraded.iter().any(|entry| {
             entry.code == "search_index_stale" && entry.message.contains("Filtered 1")
         }));
+        Ok(())
+    }
+
+    fn memory_visibility_hit(doc_id: &str, content: &str) -> SearchHit {
+        SearchHit {
+            doc_id: doc_id.to_owned(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({ "content": content })),
+            explanation: None,
+        }
+    }
+
+    #[test]
+    fn memory_visibility_withholds_missing_and_unreadable_source_stores() -> TestResult {
+        const MEMORY: &str = "mem_00000000000000000000000921";
+        const NATIVE: &str = "ses_00000000000000000000000921";
+        const CACHED_BODY: &str = "UNVERIFIED-CACHED-BODY-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let directory = workspace.path().join("private-source-directory");
+        std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
+        let malformed = workspace.path().join("malformed-source.db");
+        std::fs::write(&malformed, b"not a database").map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        for database_path in [
+            None,
+            Some(workspace.path().join("missing-source.db")),
+            Some(directory.clone()),
+            Some(malformed.clone()),
+        ] {
+            options.database_path = database_path;
+            let mut degraded = Vec::new();
+            let visible = apply_tombstone_visibility(
+                &options,
+                vec![
+                    memory_visibility_hit(MEMORY, CACHED_BODY),
+                    memory_visibility_hit(NATIVE, "Native entity has its own admission gate"),
+                ],
+                &mut degraded,
+                None,
+            );
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0].doc_id, NATIVE);
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "tombstone_visibility_unavailable");
+            assert!(degraded[0].message.contains("withheld"));
+            assert!(!degraded[0].message.contains("private-source-directory"));
+            assert!(
+                !serde_json::json!({ "hits": visible, "degraded": degraded })
+                    .to_string()
+                    .contains(CACHED_BODY)
+            );
+
+            let mut assisted_degraded = Vec::new();
+            let assisted = query_assist_visible_candidates(
+                &options,
+                &[memory_visibility_hit(MEMORY, CACHED_BODY)],
+                &mut assisted_degraded,
+                None,
+            );
+            assert!(
+                assisted.is_empty(),
+                "query assistance must not revive a withheld body"
+            );
+            assert!(
+                assisted_degraded
+                    .iter()
+                    .any(|entry| entry.code == "tombstone_visibility_unavailable")
+            );
+        }
+        assert!(!workspace.path().join(".ee").exists());
+        assert!(!workspace.path().join("missing-source.db").exists());
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::read(malformed).map_err(|error| error.to_string())?,
+            b"not a database"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_visibility_read_failure_cannot_reuse_index_or_preloaded_bodies() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000922";
+        const MEMORY: &str = "mem_00000000000000000000000922";
+        const NATIVE: &str = "ev_00000000000000000000000922";
+        const BODY: &str = "SOURCE-LOOKUP-FAILURE-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(MEMORY, &test_memory_input(WORKSPACE, BODY))
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(MEMORY)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "source memory missing".to_owned())?;
+        let mut preloaded = BTreeMap::from([(MEMORY.to_owned(), memory)]);
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        let mut healthy_degraded = Vec::new();
+        let healthy = apply_tombstone_visibility(
+            &options,
+            vec![memory_visibility_hit(MEMORY, BODY)],
+            &mut healthy_degraded,
+            Some(&connection),
+        );
+        assert_eq!(healthy.len(), 1, "positive source authority permits the hit");
+        assert!(healthy_degraded.is_empty());
+
+        connection
+            .execute_raw("ALTER TABLE memories RENAME TO temporarily_unavailable_memories")
+            .map_err(|error| error.to_string())?;
+        assert!(connection.get_memories_batch(&[MEMORY]).is_err());
+        assert!(connection.get_memory(MEMORY).is_err());
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility_collecting(
+            &options,
+            vec![
+                memory_visibility_hit(MEMORY, BODY),
+                memory_visibility_hit(NATIVE, "Typed evidence retains its separate gate"),
+            ],
+            &mut degraded,
+            Some(&connection),
+            Some(&mut preloaded),
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, NATIVE);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "tombstone_visibility_unavailable");
+        assert!(!degraded[0].message.contains("temporarily_unavailable_memories"));
+        assert!(
+            !serde_json::json!({ "hits": visible, "degraded": degraded })
+                .to_string()
+                .contains(BODY)
+        );
+
+        let mut assisted_degraded = Vec::new();
+        assert!(
+            query_assist_visible_candidates(
+                &options,
+                &[memory_visibility_hit(MEMORY, BODY)],
+                &mut assisted_degraded,
+                Some(&connection),
+            )
+            .is_empty()
+        );
+        let mut handoff = PackSearchHandoff {
+            report: rerank_test_report(
+                vec![memory_visibility_hit(MEMORY, BODY)],
+                Vec::new(),
+                false,
+            ),
+            audit_facts: None,
+            cached_local_embedder: None,
+            snapshot: PackSearchSnapshot {
+                workspace_id: WORKSPACE.to_owned(),
+                generation: 0,
+            },
+        };
+        assert!(handoff.revalidate(&options, &connection).is_empty());
+        assert!(handoff.report.results.is_empty());
+        assert_eq!(handoff.report.status, SearchStatus::NoResults);
+        assert!(
+            !handoff.report.data_json().to_string().contains(BODY),
+            "a cached daemon handoff must not reintroduce an unverifiable memory"
+        );
+        connection
+            .execute_raw("ALTER TABLE temporarily_unavailable_memories RENAME TO memories")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_memory(MEMORY)
+                .map_err(|error| error.to_string())?
+                .as_ref(),
+            preloaded.get(MEMORY),
+            "read failures must leave the source row unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_visibility_obeys_seal_authority_independent_of_body_spelling() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000923";
+        const SEALED: &str = "mem_00000000000000000000000923";
+        const PLACEHOLDER: &str = "mem_00000000000000000000000924";
+        const BODY: &str = "UNREVEALED-SOURCE-BODY-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, content) in [
+            (SEALED, BODY),
+            (PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
+        ] {
+            connection
+                .insert_memory(id, &test_memory_input(WORKSPACE, content))
+                .map_err(|error| error.to_string())?;
+        }
+        let before = connection
+            .list_memories(WORKSPACE, None, true)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                SEALED,
+                &format!("blake3:{}", "a".repeat(64)),
+                "2026-01-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        // Explicit lifecycle visibility flags never authorize a closed seal.
+        options.include_tombstoned = true;
+        options.include_expired = true;
+        options.include_future = true;
+        options.include_stale = true;
+        let hits = vec![
+            memory_visibility_hit(SEALED, BODY),
+            memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
+        ];
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(
+            &options,
+            hits.clone(),
+            &mut degraded,
+            Some(&connection),
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].doc_id, PLACEHOLDER,
+            "unsealed placeholder text remains ordinary memory"
+        );
+        assert!(!serde_json::json!(visible).to_string().contains(BODY));
+        assert!(
+            connection
+                .mark_memory_seal_revealed(SEALED, "2026-02-01T00:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            apply_tombstone_visibility(
+                &options,
+                hits.clone(),
+                &mut Vec::new(),
+                Some(&connection),
+            )
+            .len(),
+            2
+        );
+
+        connection
+            .execute_raw("ALTER TABLE memory_seals RENAME TO temporarily_unavailable_seals")
+            .map_err(|error| error.to_string())?;
+        assert!(connection.get_memory_seal(SEALED).is_err());
+        let mut unavailable = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&options, hits, &mut unavailable, Some(&connection));
+        assert!(
+            visible.is_empty(),
+            "unreadable seal authority cannot reveal either body"
+        );
+        assert_eq!(
+            unavailable.len(), 1,
+            "source diagnostics are bounded per visibility pass"
+        );
+        assert_eq!(unavailable[0].code, "tombstone_visibility_unavailable");
+        assert!(!serde_json::json!(unavailable).to_string().contains(BODY));
+        assert_eq!(
+            connection
+                .list_memories(WORKSPACE, None, true)
+                .map_err(|error| error.to_string())?,
+            before
+        );
         Ok(())
     }
 
@@ -22652,6 +22954,104 @@ mod tests {
                 .iter()
                 .any(|factor| factor.name == "rerank" && factor.formula == "score = rerank_score")
         );
+    }
+
+    fn fusion_config_test_options(workspace: &Path) -> SearchOptions {
+        SearchOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(workspace.join("missing-index")),
+            query: "configured fusion weights".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        }
+    }
+
+    #[test]
+    fn fusion_config_resolves_valid_explicit_weights() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            tempdir.path().join(".ee/config.toml"),
+            "[search]\nlexical_weight = 0.7\nsemantic_weight = 0.2\ngraph_weight = 0.1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let weights = super::resolved_search_fusion_weights(tempdir.path())
+            .map_err(|error| error.to_string())?;
+        assert!((weights.lexical - 0.7).abs() < f32::EPSILON);
+        assert!((weights.semantic - 0.2).abs() < f32::EPSILON);
+        assert!((weights.graph - 0.1).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn fusion_config_failures_precede_missing_index_fallbacks() -> TestResult {
+        for (label, contents) in [
+            ("syntax", "[search\n"),
+            ("type", "[search]\nlexical_weight = \"not-a-weight\"\n"),
+            ("read", ""),
+        ] {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let config_path = tempdir.path().join(".ee/config.toml");
+            std::fs::create_dir_all(tempdir.path().join(".ee"))
+                .map_err(|error| error.to_string())?;
+            if label == "read" {
+                std::fs::create_dir(&config_path).map_err(|error| error.to_string())?;
+            } else {
+                std::fs::write(&config_path, contents).map_err(|error| error.to_string())?;
+            }
+            assert!(
+                matches!(
+                    super::resolved_search_fusion_weights(tempdir.path()),
+                    Err(SearchError::Configuration(_))
+                ),
+                "{label} config failure must not resolve to default weights"
+            );
+            for source_mode in [
+                SearchSourceMode::LexicalOnly,
+                SearchSourceMode::SemanticOnly,
+                SearchSourceMode::Hybrid,
+            ] {
+                let mut options = fusion_config_test_options(tempdir.path());
+                options.source_mode = source_mode;
+                let ordinary = super::run_search(&options);
+                assert!(
+                    matches!(ordinary, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by ordinary {source_mode:?} search: {ordinary:?}"
+                );
+                let seeded = super::run_search_seeded(&options, &Deterministic::from_seed(0));
+                assert!(
+                    matches!(seeded, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by seeded {source_mode:?} search: {seeded:?}"
+                );
+                let diagnostic = super::run_diag_search(&options);
+                assert!(
+                    matches!(diagnostic, Err(SearchError::Configuration(_))),
+                    "{label} config failure was lost by diagnostic {source_mode:?} search: {diagnostic:?}"
+                );
+                assert!(
+                    !options.resolve_database_path().exists(),
+                    "configuration failure must not create a source store"
+                );
+                assert!(
+                    !options.resolve_index_dir().exists(),
+                    "configuration failure must not prepare an index"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

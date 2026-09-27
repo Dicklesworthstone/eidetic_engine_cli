@@ -168,7 +168,12 @@ impl OperationalExpectation {
         // Asset enumeration order is not authoritative. The same signed
         // chunk sequence that drives restore also drives this frozen fence.
         expected.audit_ids = audit_chunks.into_values().flatten().collect();
-        for asset in assets.iter().filter(|asset| asset.kind == "lab_episode") {
+        // Frozen lab files share the asset kind but are copied as files, not
+        // rehydrated into task_episodes. Match the recovery writer's dispatch
+        // boundary so a valid frozen companion cannot block durable recovery.
+        for asset in assets.iter().filter(|asset| {
+            asset.kind == "lab_episode" && asset.path.starts_with("derived/lab/episodes/")
+        }) {
             let value = read_restored_derived_json(asset)?;
             if value.get("schema").and_then(serde_json::Value::as_str)
                 != Some("ee.backup.derived.lab_episode.v1")

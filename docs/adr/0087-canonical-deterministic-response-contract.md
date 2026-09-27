@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-24
-Updated: 2026-09-24 (pack-hash input v2)
+Updated: 2026-09-27 (pack-hash input v3, reference-time binding)
 Bead: bd-reality-core-convergence-1azkt.1
 Depends-on: ADR 0084 (hotset manifest), ADR 0085 (typed pack entity identity)
 
@@ -32,6 +32,11 @@ a43c82613) found the v1 hash weaker than this ADR claimed:
 A literal, scoped contract must precede any fix (reality-check finding). v2 is
 that contract for the pack hash: it states exactly which components are bound
 and names the bead that owns every component that is not.
+
+v3 adds the effective reference-time domain (S7, `bd-pack-identity-asof-35viu`).
+Two requests with different explicit clocks now have different identities even
+when they select exactly the same items. An omitted clock binds an explicit
+wall-clock marker; it does not bind a volatile per-run clock reading.
 
 ## Decision
 
@@ -91,15 +96,16 @@ The full target identity is S1–S10:
 | S9 | execution domain | target triple class, CPU feature class relevant to declared numeric paths, binary/toolchain digest, enabled features |
 | S10 | serialization versions | `ee.pack.v2`, hash input schema, canonical-hash construction |
 
-#### 2a. What v2 binds, literally
+#### 2a. What v3 binds, literally
 
-`pack.hash` under input schema `ee.pack.hash_input.v2` is a function of
+`pack.hash` under input schema `ee.pack.hash_input.v3` is a function of
 exactly these components and nothing else
 (`compute_pack_hash_components`, `src/core/context.rs`):
 
-| v2 component | Binds |
+| v3 component | Binds |
 |---|---|
 | `request` | query bytes (trimmed, no NFC), request profile, `budget.max_tokens`, output profile, resource profile, the five `include_*` output flags, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
+| `reference_time` | S7: `mode=explicit` and the effective UTC millisecond reference instant, or `mode=wall_clock` when no explicit clock was supplied |
 | `items` | `used_tokens`; every selected item (id, rank, section, content, estimated tokens, Q20.12 relevance/utility/proximity/score breakdown, attempt-family multiplicity, why, selection phase, provenance URIs and notes, diversity key, trust class and subclass, the procedural-rule posture policy, tombstone, lifecycle, redactions, freshness facets and anchors); every evidence span with Q20.12 scores |
 | `omitted` | every omission (id, estimated tokens, reason, attempt-family multiplicity) |
 | `degraded` | the canonical degraded set: telemetry codes dropped, sorted by (code, severity, message, repair), exact duplicates removed |
@@ -107,27 +113,26 @@ exactly these components and nothing else
 | `rendered_text` | the pack-layer markdown rendered from `request`, `items`, `omitted`, the canonical degraded set and `coordination` |
 
 The composite is blake3 over the schema tag and the tagged component
-digests, in this order: `request`, `items`, `omitted` (only when skipped items
+digests, in this order: `request`, `reference_time`, `items`, `omitted` (only when skipped items
 are shown), `degraded`, `coordination`, `rendered_text` (only when the text is
 shown). Equal composites therefore mean equal bound components, and a
 differing composite is localized by comparing the component digests.
 
-#### 2b. What v2 does not bind, and who owns it
+#### 2b. What v3 does not bind, and who owns it
 
-| Component | Status in v2 | Owning bead |
+| Component | Status in v3 | Owning bead |
 |---|---|---|
 | S1 store tiers / scope identity | not bound | `bd-pack-identity-tiers-vxx8l` |
 | S2 index manifest / entity-revision root | not bound | `bd-reality-core-convergence-1azkt.2` |
 | S3 retrieval subsystem identities (lexical cache, L2 candidate set, PPR/plan caches) | not bound | `bd-reality-core-convergence-1azkt.2` (lexical cache), `bd-reality-core-convergence-1azkt.3` (cache identity under concurrency) |
 | S4 model identity | not bound | `bd-reality-core-convergence-1azkt.2` |
 | S6 effective config slice (candidate pool, max results, sections, speed, source mode, filters, include-tombstoned/expired/future, relevance floor, seed) | not bound except through selected items | `bd-pack-identity-config-slice-188z4` |
-| S7 reference time (`as_of`, or the silent `Utc::now` at `context.rs` `reference_time`) | not bound | `bd-pack-identity-asof-35viu` |
 | S8 authorization / capability / agent | not bound | `bd-pack-identity-authz-ctr51` |
 | S8 trust / redaction / security policy epochs | per-item results bound, policy versions not | `bd-pack-identity-trust-epochs-b7cq9` |
 | S9 execution domain | not bound; see §3 | `bd-pack-identity-exec-domain-junoz` |
 | S5 tokenizer identity, Unicode normalization, locale, line endings | query hashed as trimmed bytes; nothing normalized; tokenizer not bound | `bd-pack-identity-unicode-gitmy` |
 | Selection thresholds/ties on Q20.12; one score domain for JSON | not done | `bd-reality-core-convergence-1azkt.11` |
-| Cross-process and cross-host determinism gates | not in v2 | `bd-reality-core-convergence-1azkt.3` |
+| Cross-process and cross-host determinism gates | not established by v3 | `bd-reality-core-convergence-1azkt.3` |
 
 ### 3. Numeric execution domain
 
@@ -153,7 +158,7 @@ targets. That execution domain is owned by
 - Every field is fed as `len(label) u64 LE ‖ label ‖ len(value) u64 LE ‖ value`
   (`hash_labeled_bytes`). Optional fields add a labeled presence flag, and
   repeated fields a labeled count.
-- Every component opens with the labeled schema tag `ee.pack.hash_input.v2`
+- Every component opens with the labeled schema tag `ee.pack.hash_input.v3`
   and its component name.
 - The composite is `blake3` over the labeled schema tag and the labeled
   component digests (§2a).
@@ -163,7 +168,22 @@ targets. That execution domain is owned by
   `bd-pack-identity-unicode-gitmy`.
 - Degraded entries: canonicalized in the hash input as in §2a. Emission order
   in `degraded[]` is a separate, presentational contract.
-- No timestamps are hash inputs in v2.
+- Reference-time precedence is explicit CLI `as_of`, then query-file
+  `temporal.validity.reference_time`, then query-file `temporal.as_of`.
+  The resolved instant is truncated toward the start of its millisecond and
+  serialized as UTC RFC 3339 with exactly three fractional digits and `Z`.
+  Equivalent offsets and sub-millisecond spellings bind identically. Search,
+  candidate validity checks and lifecycle explanations use that same
+  millisecond domain. The independent query-file row-history cutoff remains
+  a row-history filter; when present, it is also truncated to milliseconds.
+  Existing whole-second row-bound inclusion semantics are retained.
+- An absent explicit reference time is encoded as `mode=wall_clock`, with no
+  `instant` field. Wall-clock runs are not historical replays; selected items
+  and their lifecycle facets still bind any outcome changes. The L2 cache
+  continues to bypass implicit-clock requests.
+- Budget capping and adaptive budgeting preserve the resolved clock and task
+  paths. A budget change cannot silently turn an explicit clock into wall-clock
+  mode.
 
 ### 5. Volatile-data firewall
 
@@ -182,10 +202,13 @@ text; a digest reveals neither.
 
 ### 7. Differing-state diagnostics
 
-`snapshotIdentity.components` names six components. Comparing two responses
-field by field names the component that differs; `renderedText` is derived
-from the others and moves exactly when a rendered input moves. No CLI
-comparator is part of v2.
+`snapshotIdentity.components` names seven components. Comparing two responses
+field by field names the component that differs; the typed
+`PackHashComponentDigests::differing_components` comparator uses those public
+field names, including `referenceTime`. `renderedText` moves when a rendered
+input moves; changing only the clock can move `referenceTime` and the composite
+while leaving the rendered text and selected items identical. No CLI comparator
+is part of v3.
 
 ### 8. Versioning and migration
 
@@ -193,13 +216,14 @@ comparator is part of v2.
 
 ```json
 {
-  "version": 2,
-  "inputSchema": "ee.pack.hash_input.v2",
+  "version": 3,
+  "inputSchema": "ee.pack.hash_input.v3",
   "digest": "<pack.hash>",
   "numericDomain": "q20.12",
   "componentDigestsAvailableLocally": true,
   "components": {
-    "request": "blake3:…", "items": "blake3:…", "omitted": "blake3:…",
+    "request": "blake3:…", "referenceTime": "blake3:…",
+    "items": "blake3:…", "omitted": "blake3:…",
     "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…"
   }
 }
@@ -213,12 +237,13 @@ comparator is part of v2.
   `ee.pack.diff.v2` and `ee.pack.replay.v2` publish `packHash` with the pattern
   `^blake3:[0-9a-f]{64}$`. The version travels beside the hash in every emitted
   pack (`version`, `inputSchema`), and the schema tag is bound into the
-  preimage, so a v1 and a v2 digest cannot coincide by construction.
-- `pack_records.pack_hash` has no version column. Rows written before v2 carry
-  v1 hashes and are not comparable with v2 hashes; nothing in the row says
+  preimage, so versions use separate hash domains.
+- `pack_records.pack_hash` has no version column. Rows written before v3 carry
+  v1 or v2 hashes and are not comparable with v3 hashes; nothing in the row says
   which it is. This is accepted and documented; no migration.
-- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v7`, so a
-  response cached under v1 misses rather than replaying a v1 identity.
+- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v8`, so a
+  response cached under an older identity schema misses. Its key also binds
+  the effective reference-time domain directly.
 - Bump rule: any change to §2a membership, §3 quantization or §4 encoding
   bumps `snapshotIdentity.version` and the input schema tag, and forks
   digests. No compatibility shim, no dual hash.
@@ -228,14 +253,15 @@ comparator is part of v2.
 | Layer | Harness | Asserts |
 |---|---|---|
 | Unit | `src/core/context_test_module.rs` `pack_hash_v2_*` | the flat-feed provenance collision is separated (red first against v1); each differing input moves its own component and the composite only; timing, order and repetition move nothing; evidence scores quantize |
-| Property | `tests/pack_hash_property.rs` (in `integration_property`) | no elapsed reading moves `pack.hash`, nor one byte of the shipped `pack.text` (red first against the phase-1 tip); the timing entry stays in the envelope's `degraded[]`; degraded order and repetition never move the hash; sub-quantum noise never does and a one-quantum step always does; a pinned v2 digest vector, checked on two RCH workers |
+| Reference time | `context_reference_time_uses_one_precedence_and_millisecond_domain`, `pack_hash_v3_names_reference_time_without_changing_other_components`, `context_pack_validity_window_honors_as_of_and_include_future`, `pack_l2_cache_key_tracks_canonical_inputs` | precedence and actual selection share millisecond precision; wall-clock and explicit modes differ; offsets/sub-millisecond values canonicalize; identical selected items still distinguish different clocks; adaptive budgeting preserves identity; the comparator names `referenceTime`; L2 keys distinguish clocks |
+| Property | `tests/pack_hash_property.rs` (in `integration_property`) | no elapsed reading moves `pack.hash`, nor one byte of the shipped `pack.text` (red first against the phase-1 tip); the timing entry stays in the envelope's `degraded[]`; degraded order and repetition never move the hash; sub-quantum noise never does and a one-quantum step always does; a pinned v3 digest vector for comparison on two RCH workers |
 | Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
 
 None of these tests uses a test-side normalizer.
 
 ## Consequences
 
-- Every pack hash changes once (v1 to v2). Goldens pinning `pack.hash` or
+- Every pack hash changes once (v2 to v3). Goldens pinning `pack.hash` or
   `snapshotIdentity` move, and their diffs are limited to those fields.
 - Cross-machine pack equality is a declared, bounded claim (§3), not an
   accident.

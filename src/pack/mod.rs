@@ -1636,6 +1636,9 @@ impl ContextRequestInput {
 pub struct ContextRequest {
     /// Normalized literal task targets, empty for historical/unscoped requests.
     pub task_paths: Vec<String>,
+    /// Effective explicit lifecycle clock, at UTC millisecond precision.
+    /// `None` binds the wall-clock mode rather than a per-run clock reading.
+    pub reference_time: Option<chrono::DateTime<chrono::Utc>>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1675,6 +1678,7 @@ impl ContextRequest {
 
         Ok(Self {
             task_paths: Vec::new(),
+            reference_time: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -1687,6 +1691,17 @@ impl ContextRequest {
     pub fn from_query(query: impl Into<String>) -> Result<Self, PackValidationError> {
         Self::new(ContextRequestInput::for_query(query))
     }
+}
+
+/// Truncate an explicit pack reference time to the millisecond domain shared
+/// by selection and snapshot identity (ADR 0087 S7). Subtracting only the
+/// fractional remainder also handles instants before the Unix epoch.
+#[must_use]
+pub(crate) fn canonical_pack_reference_time(
+    instant: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    let submillisecond_nanos = instant.timestamp_subsec_nanos() % 1_000_000;
+    instant - chrono::Duration::nanoseconds(i64::from(submillisecond_nanos))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3636,21 +3651,42 @@ pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
 
 /// The pack-hash input schema (ADR 0087 §8). Every component and the composite
 /// bind this tag, and the snapshot identity reports its version.
-pub const PACK_HASH_INPUT_SCHEMA_V2: &str = "ee.pack.hash_input.v2";
-pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 2;
+pub const PACK_HASH_INPUT_SCHEMA_V3: &str = "ee.pack.hash_input.v3";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 3;
 
-/// The component digests behind a v2 `pack.hash` (ADR 0087 §7). Each is a
+/// The component digests behind a v3 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
 /// carries a raw input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackHashComponentDigests {
     pub request: String,
+    pub reference_time: String,
     pub items: String,
     pub omitted: String,
     pub degraded: String,
     pub coordination: String,
     pub rendered_text: String,
 }
+
+impl PackHashComponentDigests {
+    /// Name differing canonical components using their public JSON field names.
+    #[must_use]
+    pub fn differing_components(&self, other: &Self) -> Vec<&'static str> {
+        [
+            ("request", self.request == other.request),
+            ("referenceTime", self.reference_time == other.reference_time),
+            ("items", self.items == other.items),
+            ("omitted", self.omitted == other.omitted),
+            ("degraded", self.degraded == other.degraded),
+            ("coordination", self.coordination == other.coordination),
+            ("renderedText", self.rendered_text == other.rendered_text),
+        ]
+        .into_iter()
+        .filter_map(|(name, equal)| (!equal).then_some(name))
+        .collect()
+    }
+}
+
 pub const PACK_CONCURRENT_LIMIT_REACHED_CODE: &str = "pack_concurrent_limit_reached";
 pub const PACK_BUDGET_TOO_SMALL_CODE: &str = "pack_budget_too_small";
 pub const CONSENSUS_SCHEMA_V1: &str = "ee.consensus.v1";
@@ -4564,7 +4600,7 @@ pub struct ContextResponseData {
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
-    /// The per-component digests behind `pack.hash` (ADR 0087 v2), when this
+    /// The per-component digests behind `pack.hash` (ADR 0087 v3), when this
     /// process computed them. `None` for a response served from the L2 cache,
     /// whose stored JSON already carries its own snapshot identity.
     pub pack_hash_components: Option<PackHashComponentDigests>,

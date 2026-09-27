@@ -543,16 +543,26 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
     ))
 }
 
+/// Read the native task file without selecting, activating, or rewriting a
+/// frame. Resume projects a bounded public view and never replays commands.
+pub(crate) fn read_task_frames_for_resume(
+    workspace_path: &Path,
+) -> Result<Vec<TaskFrameRecord>, DomainError> {
+    let store = read_store(&task_frame_store_path(workspace_path))?;
+    if store.schema != TASK_FRAME_STORE_SCHEMA_V1 {
+        return Err(DomainError::Storage {
+            message: "Unsupported task-frame store schema for resume.".to_owned(),
+            repair: Some("Inspect the task-frame store with its producing binary.".to_owned()),
+        });
+    }
+    Ok(store.frames)
+}
+
 fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> {
     ensure_no_symlink_components(store_path, "read")?;
     let metadata = match fs::symlink_metadata(store_path) {
         Ok(metadata) => metadata,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(TaskFrameStoreDocument::default());
         }
         Err(error) => {
@@ -643,14 +653,23 @@ fn open_store_file_for_read(store_path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     configure_task_frame_open_no_follow(&mut options);
-    options.open(store_path)
+    let file = options.open(store_path)?;
+    // Validate the opened inode, not just the earlier pathname. NONBLOCK on
+    // Unix lets a swapped FIFO reach this check without waiting for a writer.
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "task-frame store is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
 fn configure_task_frame_open_no_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options.custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
@@ -1826,5 +1845,12 @@ mod tests {
                 .iter()
                 .all(|command| !command.starts_with("ee handoff resume "))
         );
+    }
+
+    #[test]
+    fn final_task_read_rejects_an_opened_directory() -> TestResult {
+        let workspace = temp_workspace("opened-directory")?;
+        assert!(open_store_file_for_read(&workspace).is_err());
+        Ok(())
     }
 }

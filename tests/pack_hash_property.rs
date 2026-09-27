@@ -1,4 +1,4 @@
-//! ADR 0087 v2 pack-hash properties (bd-reality-core-convergence-1azkt.1).
+//! ADR 0087 v3 pack-hash properties (bd-pack-identity-asof-35viu).
 //!
 //! Every property here reads the product's own output as it is. There is no
 //! test-side normalizer: a comparison that scrubbed timing first could not
@@ -19,13 +19,14 @@ use ee::pack::{
 use proptest::prelude::*;
 use uuid::Uuid;
 
+// Keep the original fixture bytes so the version bump changes only hashing.
 const QUERY: &str = "pack hash v2 property";
 
-/// The v2 `pack.hash` of [`pinned_fixture`], identical on every declared
+/// The v3 `pack.hash` of [`pinned_fixture`], identical on every declared
 /// target. A change here is a deliberate `snapshotIdentity.version` bump
 /// (ADR 0087 §8), never a re-pin to make a run green.
-const PINNED_V2_PACK_HASH: &str =
-    "blake3:0c0583d78304d331f6ed2db2591101037cad73a4f02e3f40ab7299b63fd58157";
+const PINNED_V3_PACK_HASH: &str =
+    "blake3:37f24b6854a5f79c40be11fa0475f2677058fd91483275cfe6b5a6cb407f02d3";
 
 fn fixture(relevance: f32) -> Result<(ContextRequest, PackDraft), String> {
     let request = ContextRequest::from_query(QUERY).map_err(|error| error.to_string())?;
@@ -120,16 +121,16 @@ fn resource_profiles() -> impl Strategy<Value = PackResourceProfile> {
     ]
 }
 
-/// The pinned digest vector: one fixed input, one fixed v2 hash. Run on two
+/// The pinned digest vector: one fixed input, one fixed v3 hash. Run on two
 /// RCH workers, this is the cross-host half of ADR 0087 §9.
 #[test]
-fn pinned_v2_pack_hash_digest_vector() -> Result<(), String> {
+fn pinned_v3_pack_hash_digest_vector() -> Result<(), String> {
     let (request, draft) = pinned_fixture()?;
     let hash = compute_pack_hash(&request, &draft, &canonical_degraded()?);
-    println!("pack_hash_property pinned_v2_pack_hash={hash}");
-    if hash != PINNED_V2_PACK_HASH {
+    println!("pack_hash_property pinned_v3_pack_hash={hash}");
+    if hash != PINNED_V3_PACK_HASH {
         return Err(format!(
-            "v2 pack hash of the pinned fixture is {hash}, pinned {PINNED_V2_PACK_HASH}"
+            "v3 pack hash of the pinned fixture is {hash}, pinned {PINNED_V3_PACK_HASH}"
         ));
     }
     Ok(())
@@ -277,6 +278,31 @@ fn shipped_text_and_banner_disagree_by_exactly_the_volatile_entries() -> Result<
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// S7: even unchanged selected content has a distinct identity at a
+    /// different explicit lifecycle clock, or in wall-clock mode.
+    #[test]
+    fn reference_time_binds_identity_without_changing_selected_content(
+        milliseconds in -631_152_000_000_i64..4_102_444_800_000_i64,
+        step_ms in 1_i64..86_400_001_i64,
+    ) {
+        let (mut request, draft) = fixture(0.9).map_err(TestCaseError::fail)?;
+        let canonical = canonical_degraded().map_err(TestCaseError::fail)?;
+        let wall_clock = compute_pack_hash(&request, &draft, &canonical);
+        request.reference_time = Some(
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
+                .ok_or_else(|| TestCaseError::fail("valid first reference time"))?,
+        );
+        let first = compute_pack_hash(&request, &draft, &canonical);
+        request.reference_time = Some(
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds + step_ms)
+                .ok_or_else(|| TestCaseError::fail("valid second reference time"))?,
+        );
+        let second = compute_pack_hash(&request, &draft, &canonical);
+        prop_assert_ne!(&wall_clock, &first);
+        prop_assert_ne!(&wall_clock, &second);
+        prop_assert_ne!(&first, &second);
+    }
 
     /// ADR 0087 §1 (T2): `pack.text` is canonical. No elapsed reading, on any
     /// resource profile, changes one byte of the shipped text, its degraded

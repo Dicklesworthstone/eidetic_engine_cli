@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::core::backup::*;
-use crate::db::{CreateTaskEpisodeInput, StoredArtifact, StoredArtifactLink, StoredSearchIndexJob};
+use crate::db::{
+    CreateTaskEpisodeInput, StoredArtifact, StoredArtifactLink, StoredEpisodeAction,
+    StoredSearchIndexJob, StoredTaskEpisode,
+};
 use crate::models::{MemoryId, WorkspaceId};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -10,6 +13,150 @@ use uuid::Uuid;
 type TestResult = Result<(), String>;
 const AUDIT_ID: &str = "audit_00000000000000000000000001";
 const TIME: &str = "2026-09-01T00:00:00Z";
+
+fn task_episode_assets(
+    root: &Path,
+    workspace_id: &str,
+) -> Result<(StoredTaskEpisode, Vec<BackupRestoredDerivedAssetReport>), String> {
+    let episode = StoredTaskEpisode {
+        id: "ep_000000000000000000000000001".to_owned(),
+        workspace_id: Some(workspace_id.to_owned()),
+        session_id: None,
+        task_input: "Preserve the failed Orbitgate release".to_owned(),
+        retrieved_memory_ids: vec![MemoryId::from_uuid(Uuid::from_u128(2)).to_string()],
+        context_pack_id: None,
+        actions: vec![StoredEpisodeAction {
+            action_type: "verify".to_owned(),
+            target_id: Some("release".to_owned()),
+            details: Some("The verification command failed.".to_owned()),
+            timestamp: TIME.to_owned(),
+        }],
+        outcome: "failure".to_owned(),
+        outcome_details: Some("Keep the source failure unchanged.".to_owned()),
+        started_at: TIME.to_owned(),
+        ended_at: Some(TIME.to_owned()),
+        duration_ms: Some(75),
+        agent: Some("RecoveryAgent".to_owned()),
+        episode_hash: Some(hash_bytes(b"original episode")),
+        created_at: TIME.to_owned(),
+    };
+    let durable = root.join("durable-episode.json");
+    std::fs::write(
+        &durable,
+        serde_json::to_vec(&task_episode_json(
+            &episode,
+            TIME,
+            RedactionLevel::None,
+            &BTreeMap::new(),
+        ))
+        .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let frozen = root.join("frozen-episode.json");
+    std::fs::write(
+        &frozen,
+        b"{\n  \"schema\": \"ee.lab.frozen_episode.v1\",\n  \"episode_id\": \"ep_frozen_companion\"\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((
+        episode,
+        vec![
+            BackupRestoredDerivedAssetReport {
+                path: "derived/lab/episode_files/workspace/frozen.json".to_owned(),
+                kind: "lab_episode".to_owned(),
+                restore_path: frozen.to_string_lossy().into_owned(),
+                lab_episode_path: None,
+            },
+            BackupRestoredDerivedAssetReport {
+                path: "derived/lab/episodes/durable.json".to_owned(),
+                kind: "lab_episode".to_owned(),
+                restore_path: durable.to_string_lossy().into_owned(),
+                lab_episode_path: None,
+            },
+        ],
+    ))
+}
+
+#[test]
+fn operational_fence_accepts_frozen_files_beside_durable_task_episodes() -> TestResult {
+    let (root, _workspace, database) =
+        crate::core::backup::tests::fixture().map_err(|e| e.message())?;
+    let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+    let (episode, assets) = task_episode_assets(root.path(), &workspace_id)?;
+    let bytes = assets
+        .iter()
+        .map(|asset| std::fs::read(&asset.restore_path))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let expected = OperationalExpectation::from_assets(&assets, "episode-fixture", &workspace_id)
+        .map_err(|e| e.message())?;
+    assert_eq!(
+        restore_task_episode_assets(&database, &assets).map_err(|e| e.message())?,
+        1,
+        "a frozen companion must not become an extra durable episode"
+    );
+    let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+    assert_eq!(
+        db.get_task_episode(&episode.id).map_err(|e| e.to_string())?,
+        Some(episode),
+        "recovery must preserve every durable episode field, including workspace and failure"
+    );
+    expected.verify_connection(&db).map_err(|e| e.message())?;
+    for (asset, before) in assets.iter().zip(bytes) {
+        assert_eq!(
+            std::fs::read(&asset.restore_path).map_err(|e| e.to_string())?,
+            before,
+            "the fence and row writer must preserve the authenticated asset bytes"
+        );
+    }
+    db.close().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn operational_fence_still_rejects_malformed_or_foreign_durable_episodes() -> TestResult {
+    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+    let (episode, assets) = task_episode_assets(root.path(), &workspace_id)?;
+    let durable = assets
+        .iter()
+        .find(|asset| asset.path.starts_with("derived/lab/episodes/"))
+        .ok_or("durable episode fixture is missing")?;
+    let original = task_episode_json(&episode, TIME, RedactionLevel::None, &BTreeMap::new());
+    for (field, value, reason) in [
+        (
+            "schema",
+            serde_json::json!("ee.lab.frozen_episode.v1"),
+            "Unsupported",
+        ),
+        ("episode", serde_json::Value::Null, "Invalid"),
+        ("episode.id", serde_json::Value::Null, "Missing"),
+        (
+            "episode.workspaceId",
+            serde_json::json!(WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string()),
+            "Foreign",
+        ),
+    ] {
+        let mut changed = original.clone();
+        if let Some(field) = field.strip_prefix("episode.") {
+            changed["episode"][field] = value;
+        } else {
+            changed[field] = value;
+        }
+        std::fs::write(
+            &durable.restore_path,
+            serde_json::to_vec(&changed).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let error = OperationalExpectation::from_assets(&assets, "episode-fixture", &workspace_id)
+            .err()
+            .ok_or("accepted invalid durable task episode beside a frozen companion")?;
+        assert!(error.message().contains(reason), "{}", error.message());
+        assert!(!error.message().contains(&episode.id));
+        assert!(!error.message().contains(&workspace_id));
+    }
+    Ok(())
+}
 
 fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
     let memory = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();

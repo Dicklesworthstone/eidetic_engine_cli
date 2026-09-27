@@ -40,7 +40,7 @@ use asupersync::Cx;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::core::search::{
-    SearchDedupMode, SearchFusionWeights, SearchHit, SearchOptions, SearchSourceMode,
+    SearchDedupMode, SearchError, SearchFusionWeights, SearchHit, SearchOptions, SearchSourceMode,
     resolved_search_fusion_weights, run_search_with_read_connection_seeded_with_cx,
     search_hit_meets_relevance_floor, sort_search_hits_by_score_order,
 };
@@ -166,6 +166,8 @@ pub struct LabelExtractionReport {
 pub enum ShadowTuningError {
     /// Cooperative cancellation observed at a checkpoint.
     Cancelled(asupersync::CancelReason),
+    /// The configured incumbent ranking could not be resolved.
+    Configuration { message: String },
     /// Storage read or stored-state integrity failure.
     Storage { message: String },
 }
@@ -175,6 +177,9 @@ impl std::fmt::Display for ShadowTuningError {
         match self {
             Self::Cancelled(reason) => {
                 write!(f, "shadow-tuning label extraction cancelled: {reason:?}")
+            }
+            Self::Configuration { message } => {
+                write!(f, "shadow-tuning configuration error: {message}")
             }
             Self::Storage { message } => {
                 write!(f, "shadow-tuning storage error: {message}")
@@ -593,9 +598,12 @@ impl TuningWeights {
     }
 
     /// The incumbent vector actually in effect for a workspace.
-    #[must_use]
-    pub fn incumbent_for_workspace(workspace_path: &Path) -> Self {
-        Self::from_fusion(resolved_search_fusion_weights(workspace_path))
+    pub fn incumbent_for_workspace(workspace_path: &Path) -> Result<Self, ShadowTuningError> {
+        resolved_search_fusion_weights(workspace_path)
+            .map(Self::from_fusion)
+            .map_err(|error| ShadowTuningError::Configuration {
+                message: error.to_string(),
+            })
     }
 
     fn from_fusion(weights: SearchFusionWeights) -> Self {
@@ -704,7 +712,11 @@ pub async fn collect_query_replays_with_cx(
             determinism.shared_child("search.rerank"),
         )
         .await
-        .map_err(|error| storage_error("replay search failed", &error))?;
+        .map_err(|error| match error {
+            SearchError::Configuration(message) => ShadowTuningError::Configuration { message },
+            SearchError::Cancelled(reason) => ShadowTuningError::Cancelled(reason),
+            error => storage_error("replay search failed", &error),
+        })?;
         replays.push(QueryReplay {
             query: query.clone(),
             hits: report.results,
@@ -1216,6 +1228,8 @@ pub async fn run_retrieval_tuning_with_cx(
     extraction: &LabelExtractionConfig,
     gate: &RetrievalTuningGateConfig,
 ) -> Result<RetrievalTuningReport, ShadowTuningError> {
+    shadow_checkpoint(cx)?;
+    let incumbent = TuningWeights::incumbent_for_workspace(workspace_path)?;
     let labels = extract_labeled_triples(cx, connection, workspace_id, extraction, as_of)?;
     let db_generation = connection
         .get_workspace_generation(workspace_id)
@@ -1238,7 +1252,6 @@ pub async fn run_retrieval_tuning_with_cx(
         as_of,
     )
     .await?;
-    let incumbent = TuningWeights::incumbent_for_workspace(workspace_path);
     let evaluation = evaluate_fusion_candidates(cx, &replays.replays, &labels.triples, incumbent)?;
     assemble_retrieval_tuning_report(labels, Some(evaluation), db_generation, gate)
 }
@@ -2804,6 +2817,65 @@ mod tests {
         {
             Err(PromoteRefusal::StaleGeneration { report: 5, .. }) => Ok(()),
             other => Err(format!("stale report must refuse: {other:?}")),
+        }
+    }
+
+    #[test]
+    fn incumbent_configuration_preserves_explicit_weights() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            tempdir.path().join(".ee/config.toml"),
+            "[search]\nlexical_weight = 0.7\nsemantic_weight = 0.2\ngraph_weight = 0.1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let weights = TuningWeights::incumbent_for_workspace(tempdir.path())
+            .map_err(|error| error.to_string())?;
+        assert!((weights.lexical - 0.7).abs() < f32::EPSILON);
+        assert!((weights.semantic - 0.2).abs() < f32::EPSILON);
+        assert!((weights.graph - 0.1).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_incumbent_configuration_cannot_become_empty_evidence_abstention() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path();
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace.join(".ee/config.toml"),
+            "[search]\nlexical_weight = \"not-a-weight\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let extraction = LabelExtractionConfig {
+            label_window_minutes: DEFAULT_LABEL_WINDOW_MINUTES,
+        };
+        let gate = RetrievalTuningGateConfig::default();
+        let result = crate::core::run_cli_with_cx(
+            std::time::Duration::from_secs(30),
+            |cx| async move {
+                run_retrieval_tuning_with_cx(
+                    &cx,
+                    &connection,
+                    workspace,
+                    &database,
+                    WORKSPACE,
+                    ts(0),
+                    &extraction,
+                    &gate,
+                )
+                .await
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        match result {
+            Err(ShadowTuningError::Configuration { .. }) => Ok(()),
+            other => Err(format!(
+                "invalid incumbent config must fail before the empty evidence gate: {other:?}"
+            )),
         }
     }
 

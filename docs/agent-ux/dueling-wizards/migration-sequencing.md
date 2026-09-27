@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V125`. The next
-planned allocation starts at `V126`. `V094_MEMORY_ATTEMPT_FAMILY` and
+The current compiled migration tail in `src/db/mod.rs` is `V126`. The next
+planned allocation starts at `V127`. `V094_MEMORY_ATTEMPT_FAMILY` and
 `V095_ATTEMPT_FAMILY_LEDGER` are non-initiative attempt-family migrations
 (bd-multiplicity-aware-trust-p0u7g), and `V096_MEMORY_SENTINEL_POLARITY` is the
 shipped inverse-sentinel migration (bd-wake-on-condition-inverse-sentinel-65uci).
@@ -46,9 +46,9 @@ needed the actual next compiled slot, then moved together again to
 compiled as `V099` and `V100`, then to `V102`-`V104` when the forward-only
 attempt-family immutability repair compiled as `V101`, then to `V105`-`V107`
 when the graph-intelligence projections and the T2.0 origin stream compiled
-as `V102`-`V104`, and now to `V126`-`V128` after the team, curation-repair,
-and evidence-feedback migrations compiled through `V125`. This preserves
-their order and ownership without inserting placeholder migrations. Runtime
+as `V102`-`V104`, and now to `V127`-`V129` after the team, curation-repair,
+evidence-feedback, and native pack-reference migrations compiled through `V126`.
+This preserves their order and ownership without inserting placeholder migrations. Runtime
 migration versions cannot skip a reservation: the schema-version watermark
 would advance past the hole and make a later migration at that version
 permanently unreachable.
@@ -94,7 +94,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V125`, update
+Do not reuse migration numbers. If the compiled tail moves past `V126`, update
 this registry in the same change that adds the runtime migration.
 
 ### V085 legacy-evidence remediation
@@ -186,9 +186,9 @@ does not rewrite either the V088 history record or already canonical rows.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V122` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V123` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V124` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V127` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V128` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V129` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
@@ -196,11 +196,20 @@ It upgrades a populated V083 database, preserves the parent plus all four FK
 children and indexes, checks FK/integrity posture and row admission order, and
 proves all six canonical profiles plus `contradiction_suppressed` persist.
 
+`V126_TYPED_PACK_AUXILIARY_IDENTITY` extends native foreign keys to
+`pack_omissions` and `pack_candidate_impressions`, and binds native pack
+references to their source workspace. Its upgrade coverage is
+`db::tests::v126_auxiliary_identity_preserves_legacy_rows_order_and_ledger_bytes`.
+The existing pack-history backup asset retains the same memory writer fields;
+historical pack hashes and compressed or uncompressed replay bytes are unchanged.
+Native rule/evidence writers and typed replay remain the coordinated public v3
+migration under `bd-vp087`.
+
 ## Transition Matrix
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V125` at
+migration constant and stay at or behind the current compiled tail (`V126` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.

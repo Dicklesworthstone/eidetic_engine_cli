@@ -62,24 +62,39 @@ jobs:
           base = git('rev-parse', 'HEAD')
           assert base == os.environ['GITHUB_SHA']
           original = git('rev-parse', 'HEAD:' + path)
+          focus = ['src/core/focus_suggest.rs', 'src/core/focus_suggest_cass.rs']
+          focus_preimages = {name: git('rev-parse', 'HEAD:' + name) for name in focus}
           integrate = not pathlib.Path(test).exists()
           manifest = {'testedBase': base, 'files': []}
           if integrate:
-              assert original == '27f436c14ec07f564719e7814860f8b3269698cb', 'Search preimage changed; review before integrating'
+              assert original == 'd07c9405dd603c329e1ae91f02fffd9a7eba3bc8', 'Search preimage changed; review before integrating'
               patch = root / 'reviewed.patch'
               patch.write_bytes(fetch('02c439474ccd6d9bcc0e7f240c9409fcaa5967fd'))
               subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
               subprocess.run(['git', 'apply', str(patch)], check=True)
               pathlib.Path(test).write_bytes(fetch('325c6de9cf90724c3318bfb822140f7b1df69acc'))
+              handoff = root / 'handoff.patch'
+              handoff.write_bytes(fetch('afb7785d3f2b9abd4e4651953c142f32e0202170'))
+              subprocess.run(['git', 'apply', '--check', str(handoff)], check=True)
+              subprocess.run(['git', 'apply', str(handoff)], check=True)
               subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', path, test], check=True)
+              intermediate = git('hash-object', path)
+              controls = root / 'legacy-controls.patch'
+              controls.write_bytes(fetch('1824c6ef71c540cc533d2a9a63390cc981a88d12'))
+              subprocess.run(['git', 'apply', '--check', str(controls)], check=True)
+              subprocess.run(['git', 'apply', str(controls)], check=True)
+              subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', path, test, *focus], check=True)
               subprocess.run(['git', 'add', '--intent-to-add', '--', test], check=True)
               manifest['files'] = [
-                  {'path': path, 'baseBlob': original, 'sha': git('hash-object', path)},
+                  {'path': path, 'baseBlob': original, 'alsoBaseBlobs': [intermediate], 'sha': git('hash-object', path)},
                   {'path': test, 'baseBlob': None, 'sha': git('hash-object', test)},
               ]
+              for name in focus:
+                  if git('hash-object', name) != focus_preimages[name]:
+                      manifest['files'].append({'path': name, 'baseBlob': focus_preimages[name], 'sha': git('hash-object', name)})
           subprocess.run(['git', 'diff', '--check'], check=True)
           (root / 'source.json').write_text(json.dumps(manifest, indent=2))
-          (root / 'applied.patch').write_text(subprocess.check_output(['git', 'diff', '--', path, test], text=True))
+          (root / 'applied.patch').write_text(subprocess.check_output(['git', 'diff', '--', path, test, *focus], text=True))
           (root / 'tracked.txt').write_bytes(subprocess.check_output(['git', 'ls-files', '-z']))
           subprocess.run(['tar', '--null', '-T', str(root / 'tracked.txt'), '-czf', str(root / 'source.tar.gz')], check=True)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
@@ -111,13 +126,24 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log"
-          grep -Fq 'test result: ok. 10 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log"
+          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log"
+          while read -r label filter; do
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/unpublished/$label.log" 2>&1
+            tail -n 80 "$RUNNER_TEMP/unpublished/$label.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/$label.log"
+          done <<'CASES'
+          stale-source stale_read_only_search_retrieves_current_memory_and_rule_corpus_without_writes
+          strict-source live_snapshot_fallback_preserves_strict_source_mode_and_cancellation
+          empty-source empty_index_directory_keeps_missing_index_fallback_under_source_snapshot
+          epoch-refusal search_refuses_pre_security_epoch_index_before_open
+          focus core::focus_suggest::
+          CASES
       - name: Check strict library lint and changed source formatting
         id: lint
         run: |
           set -euo pipefail
           cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/unpublished/clippy.log"
-          rustfmt --edition 2024 --check --config skip_children=true src/core/search.rs src/core/search_unpublished_tests.rs 2>&1 | tee "$RUNNER_TEMP/unpublished/fmt.log"
+          rustfmt --edition 2024 --check --config skip_children=true src/core/search.rs src/core/search_unpublished_tests.rs src/core/focus_suggest.rs src/core/focus_suggest_cass.rs 2>&1 | tee "$RUNNER_TEMP/unpublished/fmt.log"
       - name: Publish only tested source directly to current main
         if: ${{ success() && steps.source.outputs.integrate == 'true' }}
         env:
@@ -143,9 +169,14 @@ jobs:
               'corruption/symlink errors, cancellation, and complete-corpus size limits. '
               'Fresh memories, native rules and admitted CASS spans can participate before initial publication; '
               'a real read-only pack now selects unlinked CASS evidence without creating a memory alias or consuming index jobs.\n\n'
-              'Ten real-store tests, all-target compilation, strict library Clippy and changed-source rustfmt passed. '
+              'Twelve real-store tests, all-target compilation, strict library Clippy and changed-source rustfmt passed. '
               'Tests cover missing/empty indexes, deferred jobs, native identities, pack selection, mode/corpus boundaries, '
               'source lifecycle, borrowed snapshots, corrupt bytes, symlinks and cancellation. '
+              'Complete source-only pack handoffs now tolerate index absence, not integrity failures, '
+              'and retain request and source-generation checks through serialization. '
+              'Four existing stale/empty/index-integrity controls and the complete focus unit suite passed as well. '
+              'Update prior missing-index expectations to require real source results; retain historical error cleanup and diagnostic persisted-index checks. '
+              'Include only formatter-produced focus changes, whose behavior was already committed independently. '
               'No full-suite or semantic-quality claim.\n\n'
               'Tested base: ' + manifest['testedBase'] + '\n'
               'GitHub Actions run: ' + os.environ['GITHUB_RUN_ID'] + '\n'
@@ -158,9 +189,12 @@ jobs:
               for item in manifest['files']:
                   probe = subprocess.run(['gh', 'api', endpoint + '/contents/' + item['path'] + '?ref=' + head], capture_output=True, text=True)
                   if item['baseBlob'] is None:
-                      assert probe.returncode != 0 and '404' in probe.stderr, 'New source path now exists or cannot be checked'
+                      # A previous verified source-only delivery can already
+                      # have published the same tests; never overwrite others.
+                      assert (probe.returncode != 0 and '404' in probe.stderr) or (probe.returncode == 0 and json.loads(probe.stdout)['sha'] == item['sha']), 'New source path changed or cannot be checked'
                   else:
-                      assert probe.returncode == 0 and json.loads(probe.stdout)['sha'] == item['baseBlob'], 'Concurrent target change; do not overwrite'
+                      allowed = [item['baseBlob'], *item.get('alsoBaseBlobs', [])]
+                      assert probe.returncode == 0 and json.loads(probe.stdout)['sha'] in allowed, 'Concurrent target change; do not overwrite'
               tree = api('/git/trees', {'base_tree': parent['tree']['sha'], 'tree': [
                   {'path': item['path'], 'mode': '100644', 'type': 'blob', 'sha': item['sha']} for item in manifest['files']]})
               commit = api('/git/commits', {'message': message, 'tree': tree['sha'], 'parents': [head]})

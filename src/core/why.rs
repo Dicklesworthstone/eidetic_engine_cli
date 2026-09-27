@@ -1418,7 +1418,7 @@ fn load_rule_why_report(
                 }),
             ),
         };
-    let egress = crate::policy::redact_public_replay_text(&rule.content);
+    let egress = crate::policy::redact_public_replay_body(&rule.content);
     let content = redact_why_absolute_path_like_segments(&egress.content);
     let paths_redacted = content != egress.content;
     let trust_valid = TrustClass::from_str(&rule.trust_class).is_ok();
@@ -1550,7 +1550,7 @@ fn explain_evidence_with_connection(
         return WhyReport::not_found(evidence_id.to_owned());
     }
 
-    let egress = crate::policy::redact_public_replay_text(&span.excerpt);
+    let egress = crate::policy::redact_public_replay_body(&span.excerpt);
     let redaction_classes =
         serde_json::from_str::<Vec<String>>(&span.redaction_classes_json).unwrap_or_default();
     let latest_pack_selection =

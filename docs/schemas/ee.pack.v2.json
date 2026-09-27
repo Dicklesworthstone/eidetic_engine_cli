@@ -94,17 +94,18 @@
                 "componentDigestsAvailableLocally"
               ],
               "properties": {
-                "version": { "type": "integer", "const": 2 },
-                "inputSchema": { "type": "string", "const": "ee.pack.hash_input.v2" },
+                "version": { "type": "integer", "const": 3 },
+                "inputSchema": { "type": "string", "const": "ee.pack.hash_input.v3" },
                 "digest": { "type": "string", "minLength": 1 },
                 "numericDomain": { "type": "string", "const": "q20.12" },
                 "componentDigestsAvailableLocally": { "type": "boolean" },
                 "components": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["request", "items", "omitted", "degraded", "coordination", "renderedText"],
+                  "required": ["request", "referenceTime", "items", "omitted", "degraded", "coordination", "renderedText"],
                   "properties": {
                     "request": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "referenceTime": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$", "description": "Digest of the effective explicit UTC millisecond reference time, or the wall-clock mode marker." },
                     "items": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
                     "omitted": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
                     "degraded": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },

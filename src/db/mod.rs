@@ -10953,6 +10953,305 @@ UPDATE memories
     "blake3:v125_supersession_rederive_2026_09_16",
 );
 
+/// Finish the native identity storage boundary for omissions and impressions.
+///
+/// V122 converted selected items only. Omitted entities still cascaded away
+/// with their source memory, and impressions had no source foreign key. Keep
+/// old memory writers and replay bytes intact while giving all three tables
+/// the same native source constraints. Public v3 writers and typed replay must
+/// still land together; this migration does not turn memory aliases into rules.
+pub const V126_TYPED_PACK_AUXILIARY_IDENTITY: Migration = Migration::new(
+    126,
+    "typed_pack_auxiliary_identity",
+    r#"
+-- Historical impressions were unconstrained strings. Refuse an orphan instead
+-- of inventing a memory, dropping evidence, or silently weakening the new FK.
+CREATE TABLE pack_native_identity_guard_v126 (invalid_rows INTEGER NOT NULL);
+CREATE TRIGGER pack_native_identity_guard_v126_refuse
+BEFORE INSERT ON pack_native_identity_guard_v126
+WHEN NEW.invalid_rows > 0
+BEGIN
+    SELECT RAISE(ABORT, 'bd-vp087/V126: pack history contains an orphan, malformed identity, or cross-workspace native reference. Inspect pack_omissions, pack_candidate_impressions, pack_items, and pack_evidence_items against their source rows before retrying; historical rows were not rewritten.');
+END;
+
+INSERT INTO pack_native_identity_guard_v126
+SELECT COUNT(*) FROM pack_omissions po
+LEFT JOIN memories m ON m.id = po.memory_id
+WHERE m.id IS NULL OR NOT (po.memory_id GLOB 'mem_*' AND length(po.memory_id) = 30);
+
+INSERT INTO pack_native_identity_guard_v126
+SELECT COUNT(*) FROM pack_candidate_impressions pi
+LEFT JOIN memories m ON m.id = pi.memory_id
+LEFT JOIN pack_records pr ON pr.id = pi.pack_id
+WHERE m.id IS NULL OR pr.id IS NULL OR pi.workspace_id <> pr.workspace_id
+   OR NOT (pi.memory_id GLOB 'mem_*' AND length(pi.memory_id) = 30);
+
+INSERT INTO pack_native_identity_guard_v126
+SELECT COUNT(*) FROM pack_items pi
+JOIN pack_records pr ON pr.id = pi.pack_id
+WHERE (pi.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r WHERE r.id = pi.rule_id AND r.workspace_id = pr.workspace_id
+)) OR (pi.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    WHERE e.id = pi.evidence_span_id AND e.workspace_id = pr.workspace_id AND s.workspace_id = pr.workspace_id
+));
+
+INSERT INTO pack_native_identity_guard_v126
+SELECT COUNT(*) FROM pack_evidence_items pi
+JOIN pack_records pr ON pr.id = pi.pack_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    WHERE e.id = pi.evidence_id AND e.workspace_id = pr.workspace_id AND s.workspace_id = pr.workspace_id
+);
+
+DROP TRIGGER pack_native_identity_guard_v126_refuse;
+DROP TABLE pack_native_identity_guard_v126;
+
+CREATE TABLE pack_omissions_v126_new (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT REFERENCES memories(id) ON DELETE RESTRICT,
+    rule_id TEXT REFERENCES procedural_rules(id) ON DELETE RESTRICT,
+    evidence_span_id TEXT REFERENCES evidence_spans(id) ON DELETE RESTRICT,
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    reason TEXT NOT NULL CHECK (reason IN (
+        'token_budget_exceeded', 'redundant_candidate', 'below_relevance_floor',
+        'excluded_by_policy', 'excluded_by_filter', 'contradiction_suppressed'
+    )),
+    CHECK (
+        (CASE WHEN memory_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN rule_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN evidence_span_id IS NULL THEN 0 ELSE 1 END) = 1
+    ),
+    CHECK (memory_id IS NULL OR (memory_id GLOB 'mem_*' AND length(memory_id) = 30)),
+    CHECK (rule_id IS NULL OR (rule_id GLOB 'rule_*' AND length(rule_id) = 31)),
+    CHECK (evidence_span_id IS NULL OR (evidence_span_id GLOB 'ev_*' AND length(evidence_span_id) = 29)),
+    UNIQUE (pack_id, memory_id),
+    UNIQUE (pack_id, rule_id),
+    UNIQUE (pack_id, evidence_span_id)
+);
+INSERT INTO pack_omissions_v126_new (pack_id, memory_id, estimated_tokens, reason)
+SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions ORDER BY rowid;
+DROP TABLE pack_omissions;
+ALTER TABLE pack_omissions_v126_new RENAME TO pack_omissions;
+CREATE INDEX idx_pack_omissions_memory ON pack_omissions(memory_id);
+CREATE INDEX idx_pack_omissions_rule ON pack_omissions(rule_id);
+CREATE INDEX idx_pack_omissions_evidence_span ON pack_omissions(evidence_span_id);
+
+CREATE TABLE pack_candidate_impressions_v126_new (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT REFERENCES memories(id) ON DELETE RESTRICT,
+    rule_id TEXT REFERENCES procedural_rules(id) ON DELETE RESTRICT,
+    evidence_span_id TEXT REFERENCES evidence_spans(id) ON DELETE RESTRICT,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    query_hash TEXT NOT NULL CHECK (
+        length(query_hash) = 71 AND substr(query_hash, 1, 7) = 'blake3:'
+    ),
+    lens_hash TEXT NOT NULL CHECK (
+        length(lens_hash) = 71 AND substr(lens_hash, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER CHECK (rank IS NULL OR rank >= 0),
+    section TEXT CHECK (section IS NULL OR length(trim(section)) > 0),
+    token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+    selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+    omission_reason TEXT CHECK (omission_reason IS NULL OR length(trim(omission_reason)) > 0),
+    db_generation INTEGER NOT NULL CHECK (db_generation >= 0),
+    index_generation INTEGER CHECK (index_generation IS NULL OR index_generation >= 0),
+    graph_generation INTEGER CHECK (graph_generation IS NULL OR graph_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    CHECK (
+        (CASE WHEN memory_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN rule_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN evidence_span_id IS NULL THEN 0 ELSE 1 END) = 1
+    ),
+    CHECK (memory_id IS NULL OR (memory_id GLOB 'mem_*' AND length(memory_id) = 30)),
+    CHECK (rule_id IS NULL OR (rule_id GLOB 'rule_*' AND length(rule_id) = 31)),
+    CHECK (evidence_span_id IS NULL OR (evidence_span_id GLOB 'ev_*' AND length(evidence_span_id) = 29)),
+    CHECK (rule_id IS NULL OR selected = 0 OR section = 'procedural_rules'),
+    CHECK (evidence_span_id IS NULL OR selected = 0 OR section = 'evidence'),
+    CHECK (
+        (selected = 1 AND rank IS NOT NULL AND section IS NOT NULL AND omission_reason IS NULL)
+        OR (selected = 0 AND rank IS NULL AND section IS NULL AND omission_reason IS NOT NULL)
+    ),
+    UNIQUE (pack_id, memory_id),
+    UNIQUE (pack_id, rule_id),
+    UNIQUE (pack_id, evidence_span_id)
+);
+INSERT INTO pack_candidate_impressions_v126_new (
+    pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
+    token_estimate, selected, omission_reason, db_generation,
+    index_generation, graph_generation, created_at
+)
+SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
+       token_estimate, selected, omission_reason, db_generation,
+       index_generation, graph_generation, created_at
+FROM pack_candidate_impressions ORDER BY rowid;
+DROP TABLE pack_candidate_impressions;
+ALTER TABLE pack_candidate_impressions_v126_new RENAME TO pack_candidate_impressions;
+CREATE INDEX idx_pack_candidate_impressions_memory
+    ON pack_candidate_impressions(memory_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_rule
+    ON pack_candidate_impressions(rule_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_evidence_span
+    ON pack_candidate_impressions(evidence_span_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_workspace
+    ON pack_candidate_impressions(workspace_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_query_lens
+    ON pack_candidate_impressions(query_hash, lens_hash, memory_id);
+
+-- Source FKs prove existence, while these guards bind native rule/evidence
+-- provenance to the pack workspace. Existing explicit cross-shard memory
+-- references retain their current admission policy.
+CREATE TRIGGER pack_items_native_workspace_insert
+BEFORE INSERT ON pack_items
+WHEN (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack item source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_items_native_workspace_update
+BEFORE UPDATE OF pack_id, rule_id, evidence_span_id ON pack_items
+WHEN (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack item source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_omissions_native_workspace_insert
+BEFORE INSERT ON pack_omissions
+WHEN (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack omission source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_omissions_native_workspace_update
+BEFORE UPDATE OF pack_id, rule_id, evidence_span_id ON pack_omissions
+WHEN (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack omission source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_impressions_native_workspace_insert
+BEFORE INSERT ON pack_candidate_impressions
+WHEN NOT EXISTS (
+    SELECT 1 FROM pack_records p WHERE p.id = NEW.pack_id AND p.workspace_id = NEW.workspace_id
+) OR (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r WHERE r.id = NEW.rule_id AND r.workspace_id = NEW.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = NEW.workspace_id AND s.workspace_id = NEW.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'pack impression and native source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_impressions_native_workspace_update
+BEFORE UPDATE OF pack_id, workspace_id, rule_id, evidence_span_id ON pack_candidate_impressions
+WHEN NOT EXISTS (
+    SELECT 1 FROM pack_records p WHERE p.id = NEW.pack_id AND p.workspace_id = NEW.workspace_id
+) OR (NEW.rule_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM procedural_rules r WHERE r.id = NEW.rule_id AND r.workspace_id = NEW.workspace_id
+)) OR (NEW.evidence_span_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    WHERE e.id = NEW.evidence_span_id AND e.workspace_id = NEW.workspace_id AND s.workspace_id = NEW.workspace_id
+))
+BEGIN
+    SELECT RAISE(ABORT, 'pack impression and native source must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_evidence_items_workspace_insert
+BEFORE INSERT ON pack_evidence_items
+WHEN NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'pack evidence and session must belong to the pack workspace');
+END;
+CREATE TRIGGER pack_evidence_items_workspace_update
+BEFORE UPDATE OF pack_id, evidence_id ON pack_evidence_items
+WHEN NOT EXISTS (
+    SELECT 1 FROM evidence_spans e JOIN sessions s ON s.id = e.session_id
+    JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE e.id = NEW.evidence_id AND e.workspace_id = p.workspace_id AND s.workspace_id = p.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'pack evidence and session must belong to the pack workspace');
+END;
+
+-- A later source or parent UPDATE must not invalidate an already checked
+-- child. Workspace/session identity is immutable while pack history uses it;
+-- lifecycle transitions and content revisions remain ordinary source writes.
+CREATE TRIGGER pack_records_native_workspace_update
+BEFORE UPDATE OF workspace_id ON pack_records
+WHEN NEW.workspace_id <> OLD.workspace_id AND (
+    EXISTS (SELECT 1 FROM pack_items WHERE pack_id = OLD.id AND (rule_id IS NOT NULL OR evidence_span_id IS NOT NULL))
+    OR EXISTS (SELECT 1 FROM pack_omissions WHERE pack_id = OLD.id AND (rule_id IS NOT NULL OR evidence_span_id IS NOT NULL))
+    OR EXISTS (SELECT 1 FROM pack_candidate_impressions WHERE pack_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_evidence_items WHERE pack_id = OLD.id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'pack workspace is bound to its recorded native references and impressions');
+END;
+CREATE TRIGGER procedural_rules_pack_workspace_update
+BEFORE UPDATE OF workspace_id ON procedural_rules
+WHEN NEW.workspace_id <> OLD.workspace_id AND (
+    EXISTS (SELECT 1 FROM pack_items WHERE rule_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_omissions WHERE rule_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_candidate_impressions WHERE rule_id = OLD.id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'rule workspace is bound to its recorded pack references');
+END;
+CREATE TRIGGER evidence_spans_pack_identity_update
+BEFORE UPDATE OF workspace_id, session_id ON evidence_spans
+WHEN (NEW.workspace_id <> OLD.workspace_id OR NEW.session_id <> OLD.session_id) AND (
+    EXISTS (SELECT 1 FROM pack_items WHERE evidence_span_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_omissions WHERE evidence_span_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_candidate_impressions WHERE evidence_span_id = OLD.id)
+    OR EXISTS (SELECT 1 FROM pack_evidence_items WHERE evidence_id = OLD.id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'evidence workspace and session are bound to recorded pack references');
+END;
+CREATE TRIGGER sessions_pack_workspace_update
+BEFORE UPDATE OF workspace_id ON sessions
+WHEN NEW.workspace_id <> OLD.workspace_id AND EXISTS (
+    SELECT 1 FROM evidence_spans e WHERE e.session_id = OLD.id AND (
+        EXISTS (SELECT 1 FROM pack_items WHERE evidence_span_id = e.id)
+        OR EXISTS (SELECT 1 FROM pack_omissions WHERE evidence_span_id = e.id)
+        OR EXISTS (SELECT 1 FROM pack_candidate_impressions WHERE evidence_span_id = e.id)
+        OR EXISTS (SELECT 1 FROM pack_evidence_items WHERE evidence_id = e.id)
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'session workspace is bound to recorded evidence pack references');
+END;
+"#,
+    "blake3:v126_typed_pack_auxiliary_identity_2026_09_27",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11080,6 +11379,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V123_MEMORY_SUPERSEDED_AT,
     V124_TIMESTAMP_SPELLING_REPAIR,
     V125_SUPERSESSION_REDERIVE,
+    V126_TYPED_PACK_AUXILIARY_IDENTITY,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -41483,6 +41783,633 @@ mod tests {
             super::is_pack_trust_class("peer_human_attested"),
             "pack writer accepts peer_human_attested",
         )
+    }
+
+    const V126_WORKSPACE: &str = "wsp_01234567890123456789012345";
+    const V126_OTHER_WORKSPACE: &str = "wsp_11234567890123456789012345";
+    const V126_PACK: &str = "pack_12600000000000000000000001";
+    const V126_OTHER_PACK: &str = "pack_12600000000000000000000002";
+    const V126_MEMORY: &str = "mem_12600000000000000000000001";
+    const V126_OTHER_MEMORY: &str = "mem_12600000000000000000000002";
+    const V126_RULE: &str = "rule_12600000000000000000000001";
+    const V126_OTHER_RULE: &str = "rule_12600000000000000000000002";
+    const V126_EVIDENCE: &str = "ev_12600000000000000000000001";
+    const V126_OTHER_EVIDENCE: &str = "ev_12600000000000000000000002";
+    const V126_SESSION: &str = "sess_12600000000000000000000001";
+    const V126_OTHER_SESSION: &str = "sess_12600000000000000000000002";
+    const V126_REPLACEMENT_SESSION: &str = "sess_12600000000000000000000003";
+
+    fn v126_pack_input(workspace_id: &str, label: &str) -> super::CreatePackRecordInput {
+        super::CreatePackRecordInput {
+            task_paths: vec!["src/db/mod.rs".to_owned()],
+            workspace_id: workspace_id.to_owned(),
+            query: label.to_owned(),
+            profile: "balanced".to_owned(),
+            max_tokens: 512,
+            used_tokens: 0,
+            item_count: 0,
+            omitted_count: 0,
+            pack_hash: pack_test_hash(label),
+            degraded_json: None,
+            created_by: Some("v126-migration-test".to_owned()),
+        }
+    }
+
+    fn v126_seed_native_pack_sources(connection: &DbConnection) -> TestResult {
+        setup_workspace(connection)?;
+        connection.insert_workspace(
+            V126_OTHER_WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/tmp/v126-other-workspace".to_owned(),
+                name: Some("V126 other workspace".to_owned()),
+            },
+        )?;
+        for (workspace_id, pack_id, memory_id, rule_id, session_id, evidence_id) in [
+            (
+                V126_WORKSPACE,
+                V126_PACK,
+                V126_MEMORY,
+                V126_RULE,
+                V126_SESSION,
+                V126_EVIDENCE,
+            ),
+            (
+                V126_OTHER_WORKSPACE,
+                V126_OTHER_PACK,
+                V126_OTHER_MEMORY,
+                V126_OTHER_RULE,
+                V126_OTHER_SESSION,
+                V126_OTHER_EVIDENCE,
+            ),
+        ] {
+            connection.insert_memory(
+                memory_id,
+                &test_memory_input(workspace_id, "Preserve native pack source identity."),
+            )?;
+            connection.insert_procedural_rule(
+                rule_id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.to_owned(),
+                    content: "Native rules retain independent pack provenance.".to_owned(),
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )?;
+            let mut session = session_input(session_id);
+            session.workspace_id = workspace_id.to_owned();
+            connection.insert_session(session_id, &session)?;
+            let mut evidence = evidence_span_input(session_id, evidence_id, 1);
+            evidence.workspace_id = workspace_id.to_owned();
+            connection.insert_evidence_span(evidence_id, &evidence)?;
+            connection.insert_pack_record_at(
+                pack_id,
+                &v126_pack_input(workspace_id, pack_id),
+                &[],
+                &[],
+                "2026-09-27T12:00:00Z",
+            )?;
+        }
+        connection.insert_session(
+            V126_REPLACEMENT_SESSION,
+            &session_input("v126-same-workspace-replacement"),
+        )?;
+        Ok(())
+    }
+
+    fn v126_query_values(
+        connection: &DbConnection,
+        sql: &str,
+    ) -> std::result::Result<Vec<Vec<Value>>, DbError> {
+        connection.query(sql, &[]).map(|rows| {
+            rows.into_iter()
+                .map(|row| row.iter().map(|(_, value)| value.clone()).collect())
+                .collect()
+        })
+    }
+
+    fn v126_insert_native_child(
+        connection: &DbConnection,
+        table: &str,
+        pack_id: &str,
+        workspace_id: &str,
+        entity_column: &str,
+        entity_id: &str,
+    ) -> std::result::Result<(), DbError> {
+        let section = if entity_column == "rule_id" || entity_column == "memory_id" {
+            "procedural_rules"
+        } else {
+            "evidence"
+        };
+        let mut params = vec![
+            Value::Text(pack_id.to_owned()),
+            Value::Text(entity_id.to_owned()),
+        ];
+        let sql = match table {
+            "pack_items" => format!(
+                "INSERT INTO pack_items (pack_id, {entity_column}, rank, section, estimated_tokens, relevance, utility, why) VALUES (?1, ?2, 1, '{section}', 50, 0.8, 0.7, 'native migration fixture')"
+            ),
+            "pack_omissions" => format!(
+                "INSERT INTO pack_omissions (pack_id, {entity_column}, estimated_tokens, reason) VALUES (?1, ?2, 50, 'token_budget_exceeded')"
+            ),
+            "pack_candidate_impressions" => {
+                params.extend([
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(pack_test_hash("v126-query")),
+                    Value::Text(pack_test_hash("v126-lens")),
+                ]);
+                format!(
+                    "INSERT INTO pack_candidate_impressions (pack_id, {entity_column}, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, '{section}', 50, 1, NULL, 7, 5, NULL, '2026-09-27T12:00:00Z')"
+                )
+            }
+            "pack_evidence_items" => {
+                params.push(Value::Text(pack_test_hash("v126-evidence-revision")));
+                "INSERT INTO pack_evidence_items (pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES (?1, ?2, ?3, 1, 'evidence', 50, 0.8, 0.7, 'native migration fixture', '{}', 'cass_evidence')".to_owned()
+            }
+            _ => {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!("unknown V126 fixture table: {table}"),
+                });
+            }
+        };
+        connection.execute_for(DbOperation::Execute, &sql, &params)?;
+        Ok(())
+    }
+
+    #[test]
+    fn v126_auxiliary_identity_preserves_legacy_rows_order_and_ledger_bytes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 125)?;
+        setup_workspace(&connection)?;
+        let memory_ids = (1..=5)
+            .map(|ordinal| format!("mem_{ordinal:026}"))
+            .collect::<Vec<_>>();
+        for memory_id in &memory_ids {
+            insert_pack_test_memory(&connection, memory_id, "V126 durable source memory.")?;
+        }
+        for (pack_id, compressed) in [(V126_PACK, false), (V126_OTHER_PACK, true)] {
+            let item_count = if compressed { 4 } else { 1 };
+            let mut items = Vec::new();
+            for (ordinal, memory_id) in memory_ids.iter().take(item_count).enumerate() {
+                let mut item = pack_item_input(pack_id, memory_id, ordinal as u32 + 1);
+                if compressed {
+                    item.why = "Preserve this independently witnessed native source. ".repeat(50);
+                }
+                items.push(item);
+            }
+            let omissions = vec![pack_omission_input_with_reason(
+                pack_id,
+                &memory_ids[4],
+                "contradiction_suppressed",
+            )];
+            let input = super::CreatePackRecordInput {
+                used_tokens: item_count as u32 * 50,
+                item_count: item_count as u32,
+                omitted_count: 1,
+                ..v126_pack_input(V126_WORKSPACE, pack_id)
+            };
+            let created_at = "2026-09-27T12:00:00Z";
+            connection.insert_pack_record_at(pack_id, &input, &items, &omissions, created_at)?;
+            let (canonical_json, ledger_hash) = super::build_uncompressed_pack_selection_ledger(
+                pack_id,
+                &input,
+                &items,
+                &[],
+                &omissions,
+                created_at,
+                None,
+            )?;
+            let stored_json = if compressed {
+                super::store_pack_selection_ledger_json(&canonical_json, &ledger_hash)?
+            } else {
+                canonical_json
+            };
+            ensure_equal(
+                &super::pack_ledger_storage_summary(Some(&stored_json))["mode"],
+                &serde_json::json!(if compressed {
+                    "compressed_in_row"
+                } else {
+                    "uncompressed_in_row"
+                }),
+                "V126 fixture exercises the requested ledger representation",
+            )?;
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE pack_records SET ledger_json = ?1, ledger_hash = ?2 WHERE id = ?3",
+                &[
+                    Value::Text(stored_json),
+                    Value::Text(ledger_hash),
+                    Value::Text(pack_id.to_owned()),
+                ],
+            )?;
+        }
+        connection.execute_raw(
+            "UPDATE pack_candidate_impressions SET db_generation = 17, index_generation = 13, graph_generation = 11 WHERE selected = 0",
+        )?;
+        let snapshots = [
+            (
+                "parents and ledger bytes",
+                "SELECT rowid, id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by, ledger_json, ledger_hash FROM pack_records ORDER BY rowid",
+            ),
+            (
+                "selected items",
+                "SELECT pack_id, memory_id, rule_id, evidence_span_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass FROM pack_items ORDER BY rowid",
+            ),
+            (
+                "omissions",
+                "SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions ORDER BY rowid",
+            ),
+            (
+                "selected and omitted impressions",
+                "SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at FROM pack_candidate_impressions ORDER BY rowid",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, sql)| {
+            v126_query_values(&connection, sql).map(|values| (label, sql, values))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+        let result = connection.migrate()?;
+        ensure(
+            result.applied().contains(&126),
+            "V126 must be applied to the real legacy fixture",
+        )?;
+        for (label, sql, values) in snapshots {
+            ensure_equal(
+                &v126_query_values(&connection, sql)?,
+                &values,
+                &format!("V126 preserves exact {label} values and row order"),
+            )?;
+        }
+        for table in ["pack_omissions", "pack_candidate_impressions"] {
+            let rows = connection.query(
+                &format!("SELECT COUNT(*) FROM {table} WHERE memory_id IS NULL OR rule_id IS NOT NULL OR evidence_span_id IS NOT NULL"),
+                &[],
+            )?;
+            ensure_equal(
+                &rows[0].get(0).and_then(Value::as_i64),
+                &Some(0),
+                "legacy rows remain actual memory references without synthetic native aliases",
+            )?;
+        }
+        for index in [
+            "idx_pack_omissions_memory",
+            "idx_pack_omissions_rule",
+            "idx_pack_omissions_evidence_span",
+            "idx_pack_candidate_impressions_memory",
+            "idx_pack_candidate_impressions_rule",
+            "idx_pack_candidate_impressions_evidence_span",
+            "idx_pack_candidate_impressions_workspace",
+            "idx_pack_candidate_impressions_query_lens",
+        ] {
+            let rows = connection.query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                &[Value::Text(index.to_owned())],
+            )?;
+            ensure_equal(&rows.len(), &1, &format!("V126 retains native index {index}"))?;
+        }
+        ensure(
+            connection.migrate()?.applied().is_empty(),
+            "V126 migration is idempotent",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V126 foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn v126_native_omissions_and_impressions_enforce_identity_and_selection_shape() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        v126_seed_native_pack_sources(&connection)?;
+        for table in ["pack_omissions", "pack_candidate_impressions"] {
+            for (entity_column, entity_id, missing_id) in [
+                ("memory_id", V126_MEMORY, "mem_12600000000000000000000099"),
+                ("rule_id", V126_RULE, "rule_12600000000000000000000099"),
+                (
+                    "evidence_span_id",
+                    V126_EVIDENCE,
+                    "ev_12600000000000000000000099",
+                ),
+            ] {
+                v126_insert_native_child(
+                    &connection,
+                    table,
+                    V126_PACK,
+                    V126_WORKSPACE,
+                    entity_column,
+                    entity_id,
+                )?;
+                ensure(
+                    v126_insert_native_child(
+                        &connection,
+                        table,
+                        V126_PACK,
+                        V126_WORKSPACE,
+                        entity_column,
+                        entity_id,
+                    )
+                    .is_err(),
+                    format!("{table} rejects duplicate {entity_column} identity"),
+                )?;
+                let before = v126_query_values(&connection, &format!("SELECT * FROM {table}"))?;
+                let second_column = if entity_column == "memory_id" {
+                    "rule_id"
+                } else {
+                    "memory_id"
+                };
+                let second_id = if entity_column == "memory_id" {
+                    V126_RULE
+                } else {
+                    V126_MEMORY
+                };
+                for assignment in [
+                    format!("{entity_column} = NULL"),
+                    format!("{second_column} = '{second_id}'"),
+                    format!("{entity_column} = '{missing_id}'"),
+                    format!("{entity_column} = 'untyped-source'"),
+                ] {
+                    ensure(
+                        connection
+                            .execute_raw(&format!("UPDATE {table} SET {assignment}"))
+                            .is_err(),
+                        format!("{table} rejects invalid native identity: {assignment}"),
+                    )?;
+                    ensure_equal(
+                        &v126_query_values(&connection, &format!("SELECT * FROM {table}"))?,
+                        &before,
+                        "rejected identity update preserves the historical row",
+                    )?;
+                }
+                if table == "pack_candidate_impressions" {
+                    ensure(
+                        connection
+                            .execute_raw("UPDATE pack_candidate_impressions SET rank = -1")
+                            .is_err(),
+                        "selected impression rejects a negative rank while rank zero is valid",
+                    )?;
+                    if entity_column != "memory_id" {
+                        ensure(
+                            connection
+                                .execute_raw("UPDATE pack_candidate_impressions SET section = 'decisions'")
+                                .is_err(),
+                            "selected native entities require the matching section",
+                        )?;
+                    }
+                    connection.execute_raw("UPDATE pack_candidate_impressions SET selected = 0, rank = NULL, section = NULL, omission_reason = 'token_budget_exceeded'")?;
+                    for assignment in [
+                        "rank = 0",
+                        "section = 'evidence'",
+                        "omission_reason = NULL",
+                    ] {
+                        ensure(
+                            connection
+                                .execute_raw(&format!("UPDATE pack_candidate_impressions SET {assignment}"))
+                                .is_err(),
+                            format!("omitted native impression rejects {assignment}"),
+                        )?;
+                    }
+                }
+                let source_table = match entity_column {
+                    "memory_id" => "memories",
+                    "rule_id" => "procedural_rules",
+                    _ => "evidence_spans",
+                };
+                ensure(
+                    connection
+                        .execute_raw(&format!("DELETE FROM {source_table} WHERE id = '{entity_id}'"))
+                        .is_err(),
+                    format!("{table} restricts source deletion instead of erasing pack history"),
+                )?;
+                ensure_equal(
+                    &table_row_count(&connection, table)?,
+                    &1,
+                    "failed source deletion preserves its pack child",
+                )?;
+                connection.execute_raw(&format!("DELETE FROM {table}"))?;
+            }
+            v126_insert_native_child(
+                &connection,
+                table,
+                V126_PACK,
+                V126_WORKSPACE,
+                "memory_id",
+                V126_OTHER_MEMORY,
+            )?;
+            connection.execute_raw(&format!("DELETE FROM {table}"))?;
+        }
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "native identity foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn v126_native_pack_references_guard_both_sides_of_workspace_ownership() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        v126_seed_native_pack_sources(&connection)?;
+        for table in [
+            "pack_items",
+            "pack_omissions",
+            "pack_candidate_impressions",
+            "pack_evidence_items",
+        ] {
+            for (entity_column, source_table, entity_id, foreign_id) in [
+                ("rule_id", "procedural_rules", V126_RULE, V126_OTHER_RULE),
+                (
+                    "evidence_span_id",
+                    "evidence_spans",
+                    V126_EVIDENCE,
+                    V126_OTHER_EVIDENCE,
+                ),
+            ] {
+                if table == "pack_evidence_items" && entity_column == "rule_id" {
+                    continue;
+                }
+                ensure(
+                    v126_insert_native_child(
+                        &connection,
+                        table,
+                        V126_PACK,
+                        V126_WORKSPACE,
+                        entity_column,
+                        foreign_id,
+                    )
+                    .is_err(),
+                    format!("{table} rejects foreign workspace {entity_column} on insert"),
+                )?;
+                v126_insert_native_child(
+                    &connection,
+                    table,
+                    V126_PACK,
+                    V126_WORKSPACE,
+                    entity_column,
+                    entity_id,
+                )?;
+                let stored_column = if table == "pack_evidence_items" {
+                    "evidence_id"
+                } else {
+                    entity_column
+                };
+                let mut rejected = vec![
+                    format!("UPDATE {table} SET {stored_column} = '{foreign_id}'"),
+                    format!("UPDATE {table} SET pack_id = '{V126_OTHER_PACK}'"),
+                    format!("UPDATE pack_records SET workspace_id = '{V126_OTHER_WORKSPACE}' WHERE id = '{V126_PACK}'"),
+                    format!("DELETE FROM {source_table} WHERE id = '{entity_id}'"),
+                ];
+                if entity_column == "evidence_span_id" {
+                    rejected.push(format!("UPDATE evidence_spans SET workspace_id = '{V126_OTHER_WORKSPACE}', session_id = '{V126_OTHER_SESSION}' WHERE id = '{V126_EVIDENCE}'"));
+                    rejected.push(format!("UPDATE evidence_spans SET session_id = '{V126_REPLACEMENT_SESSION}' WHERE id = '{V126_EVIDENCE}'"));
+                    rejected.push(format!("UPDATE sessions SET workspace_id = '{V126_OTHER_WORKSPACE}' WHERE id = '{V126_SESSION}'"));
+                } else {
+                    rejected.push(format!("UPDATE procedural_rules SET workspace_id = '{V126_OTHER_WORKSPACE}' WHERE id = '{V126_RULE}'"));
+                }
+                if table == "pack_candidate_impressions" {
+                    rejected.push(format!("UPDATE pack_candidate_impressions SET workspace_id = '{V126_OTHER_WORKSPACE}'"));
+                }
+                let before = v126_query_values(&connection, &format!("SELECT * FROM {table}"))?;
+                for sql in rejected {
+                    ensure(
+                        connection.execute_raw(&sql).is_err(),
+                        format!("native historical reference rejects: {sql}"),
+                    )?;
+                    ensure_equal(
+                        &v126_query_values(&connection, &format!("SELECT * FROM {table}"))?,
+                        &before,
+                        "failed cross-workspace mutation preserves native pack evidence",
+                    )?;
+                }
+                connection.execute_raw(&format!("DELETE FROM {table}"))?;
+            }
+        }
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "workspace guard foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn v126_refuses_invalid_historical_identity_without_rewriting_pack_history() -> TestResult {
+        for (label, sql, table) in [
+            (
+                "orphan impression",
+                "UPDATE pack_candidate_impressions SET memory_id = 'mem_12600000000000000000000099'",
+                "pack_candidate_impressions",
+            ),
+            (
+                "synthetic native alias",
+                "UPDATE pack_candidate_impressions SET memory_id = 'rule_12600000000000000000000001'",
+                "pack_candidate_impressions",
+            ),
+            (
+                "impression workspace",
+                "UPDATE pack_candidate_impressions SET workspace_id = 'wsp_11234567890123456789012345'",
+                "pack_candidate_impressions",
+            ),
+            (
+                "foreign rule",
+                "UPDATE pack_items SET rule_id = 'rule_12600000000000000000000002'",
+                "pack_items",
+            ),
+            (
+                "foreign direct evidence",
+                "UPDATE pack_evidence_items SET evidence_id = 'ev_12600000000000000000000002'",
+                "pack_evidence_items",
+            ),
+            (
+                "moved evidence session",
+                "UPDATE sessions SET workspace_id = 'wsp_11234567890123456789012345' WHERE id = 'sess_12600000000000000000000001'",
+                "pack_evidence_items",
+            ),
+        ] {
+            let connection = DbConnection::open_memory()?;
+            seed_migrations_through(&connection, 125)?;
+            v126_seed_native_pack_sources(&connection)?;
+            if table == "pack_candidate_impressions" {
+                v126_insert_native_child(
+                    &connection,
+                    table,
+                    V126_PACK,
+                    V126_WORKSPACE,
+                    "memory_id",
+                    V126_MEMORY,
+                )?;
+            } else if table == "pack_items" {
+                v126_insert_native_child(
+                    &connection,
+                    table,
+                    V126_PACK,
+                    V126_WORKSPACE,
+                    "rule_id",
+                    V126_RULE,
+                )?;
+            } else {
+                v126_insert_native_child(
+                    &connection,
+                    table,
+                    V126_PACK,
+                    V126_WORKSPACE,
+                    "evidence_span_id",
+                    V126_EVIDENCE,
+                )?;
+            }
+            connection.execute_raw(sql)?;
+            let parent_before =
+                v126_query_values(&connection, "SELECT * FROM pack_records ORDER BY rowid")?;
+            let child_before = v126_query_values(
+                &connection,
+                &format!("SELECT * FROM {table} ORDER BY rowid"),
+            )?;
+            let schema_before = v126_query_values(
+                &connection,
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+            )?;
+            let error = connection
+                .migrate()
+                .expect_err("invalid historical native reference must block V126");
+            ensure(
+                error.to_string().contains("V126"),
+                format!("{label} reports the migration requiring repair: {error}"),
+            )?;
+            ensure(
+                !connection.has_migration(126)?,
+                "failed V126 is not recorded as applied",
+            )?;
+            ensure_equal(
+                &v126_query_values(&connection, "SELECT * FROM pack_records ORDER BY rowid")?,
+                &parent_before,
+                "failed V126 preserves parent identity and ledger bytes",
+            )?;
+            ensure_equal(
+                &v126_query_values(&connection, &format!("SELECT * FROM {table} ORDER BY rowid"))?,
+                &child_before,
+                "failed V126 preserves invalid source evidence for explicit repair",
+            )?;
+            ensure_equal(
+                &v126_query_values(
+                    &connection,
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+                )?,
+                &schema_before,
+                "failed V126 rolls back all schema changes",
+            )?;
+            ensure_equal(
+                &connection.foreign_key_enforcement_state()?,
+                &1,
+                "failed V126 restores foreign-key enforcement",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
