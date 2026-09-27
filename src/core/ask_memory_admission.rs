@@ -95,6 +95,17 @@ fn load_selected_revisions(
         }
     }
 
+    // Pending review is current authority, not a historical trust score.
+    // Withhold these identities before loading bodies; linked CASS evidence
+    // later inherits this completed admission decision, never the other way.
+    let held = super::quarantine::held_ids(
+        connection,
+        workspace_id,
+        super::quarantine::Target::Memory,
+        &admitted,
+    )?;
+    admitted.retain(|id| !held.contains(*id));
+
     let mut memories = Vec::with_capacity(admitted.len());
     for page in admitted.chunks(ASK_MEMORY_REVISION_PAGE_SIZE) {
         before_hydration(page);

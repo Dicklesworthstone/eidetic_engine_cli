@@ -21,6 +21,13 @@ mod admission;
 #[path = "ask_memory_admission.rs"]
 mod memory_admission;
 
+#[path = "ask_quarantine.rs"]
+mod quarantine;
+
+#[cfg(test)]
+#[path = "ask_quarantine_tests.rs"]
+mod quarantine_tests;
+
 use memory_admission::load_memory_revisions;
 
 #[derive(Clone, Debug)]
@@ -378,9 +385,18 @@ fn load_rules(
     paths: &[String],
     candidates: &mut Vec<AskCandidate>,
 ) -> Result<BTreeMap<String, AskNativeSource>, DomainError> {
-    let rules = connection
+    let mut rules = connection
         .list_procedural_rules(workspace_id, None, None, false)
         .map_err(|_| corpus_storage_error())?;
+    // A rule's native review status is independent of its source memories.
+    // Resolve holds before lineage, target matching, scoring or hint selection.
+    let held = quarantine::held_ids(
+        connection,
+        workspace_id,
+        quarantine::Target::Rule,
+        &rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+    )?;
+    rules.retain(|rule| !held.contains(&rule.id));
     let mut native_sources = BTreeMap::new();
     if rules.is_empty() {
         return Ok(native_sources);
