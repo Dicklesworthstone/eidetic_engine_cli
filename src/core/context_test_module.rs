@@ -7438,9 +7438,9 @@ pub fn unrelated_context() -> u64 {{
             )
             .map_err(|error| error.to_string())?;
 
-        let response = super::run_context_pack(&super::ContextPackOptions {
+        let mut options = super::ContextPackOptions {
             task_paths: Vec::new(),
-            workspace_path: workspace,
+            workspace_path: workspace.clone(),
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
             query: "fmt before release".to_owned(),
@@ -7470,11 +7470,23 @@ pub fn unrelated_context() -> u64 {{
             task_lens: None,
             require_fresh_sentinels: false,
             output_options: Default::default(),
-            persist_pack: true,
+            persist_pack: false,
             baseline_write: None,
             no_lod: false,
-        })
-        .map_err(|error| error.to_string())?;
+        };
+        let read_only = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert!(
+            read_only
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory_id)
+        );
+        assert!(crate::core::index::read_index_rebuild_request(&workspace)?.is_none());
+
+        options.persist_pack = true;
+        let response = super::run_context_pack(&options).map_err(|error| error.to_string())?;
 
         let packed_ids: Vec<String> = response
             .data
@@ -7494,7 +7506,20 @@ pub fn unrelated_context() -> u64 {{
             .map(|entry| entry.code.as_str())
             .collect();
         assert!(degraded_codes.contains("index_missing"));
-        assert!(degraded_codes.contains("context_lexical_fallback"));
+        if cfg!(feature = "lexical-bm25") {
+            assert!(degraded_codes.contains("search_live_snapshot_lexical"));
+            assert!(!degraded_codes.contains("context_lexical_fallback"));
+        } else {
+            assert!(degraded_codes.contains("context_lexical_fallback"));
+        }
+        let rebuild = crate::core::index::read_index_rebuild_request(&workspace)?
+            .ok_or_else(|| "writable source retrieval lost its index repair request".to_owned())?;
+        assert_eq!(
+            rebuild.trigger,
+            crate::core::index::IndexRebuildTrigger::IndexMissing
+        );
+        assert_eq!(rebuild.request_count, 1);
+        assert!(rebuild.is_pending());
         Ok(())
     }
 

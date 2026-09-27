@@ -3169,6 +3169,33 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
 
     push_search_degradations(&mut degraded, &search_report.degraded);
+    let index_rebuild_request = match search_report.status {
+        SearchStatus::IndexNotFound => Some((
+            crate::core::index::IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+        )),
+        SearchStatus::IndexError => Some((
+            crate::core::index::IndexRebuildTrigger::IndexError,
+            "context_lexical_fallback",
+        )),
+        SearchStatus::Success | SearchStatus::NoResults
+            if search_report.source_mode_applied == SearchSourceMode::LexicalOnly
+                && search_report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "index_missing")
+                && search_report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_lexical") =>
+        {
+            Some((
+                crate::core::index::IndexRebuildTrigger::IndexMissing,
+                "search_live_snapshot_lexical",
+            ))
+        }
+        _ => None,
+    };
     if matches!(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
@@ -3194,46 +3221,6 @@ async fn run_context_pack_with_performance_inner(
             global_memories,
             &mut degraded,
         );
-        // bd-auto-index-rebuild-on-fallback-x35vi: record a durable rebuild
-        // request so a later pack or the steward can repair the index, instead of
-        // every subsequent pack paying this same degradation until an operator
-        // notices. This response keeps its existing read snapshot and latency
-        // budget, and it does not soften the degradation
-        // below: an agent reading `degraded[]` must still know retrieval was
-        // lexical-only for THIS response.
-        //
-        // The trigger is deliberately limited to the two causes a rebuild can
-        // actually fix. A workspace serving lexical-only results because it has
-        // no real embedder (deterministic hash fallback) never reaches this
-        // branch, and must not: rebuilding cannot conjure a model, so requesting
-        // one there would loop the steward over an index that is already fine.
-        // `bd-1iupc.2` settled that distinction; `search_lexical_only` is the
-        // separate status-side signal for the embedder condition.
-        //
-        // Gated on `persist_pack` so `--read-only` / `--no-persist` write
-        // nothing, and rate-limited inside `record_index_rebuild_request`, so a
-        // swarm packing in parallel cannot turn this into a write storm.
-        if options.persist_pack {
-            let trigger = match search_report.status {
-                SearchStatus::IndexNotFound => {
-                    crate::core::index::IndexRebuildTrigger::IndexMissing
-                }
-                _ => crate::core::index::IndexRebuildTrigger::IndexError,
-            };
-            let outcome = crate::core::index::record_index_rebuild_request(
-                &options.workspace_path,
-                trigger,
-                "context_lexical_fallback",
-                &chrono::Utc::now().to_rfc3339(),
-                crate::core::index::DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
-            );
-            tracing::debug!(
-                target: "ee::context::index_rebuild_request",
-                outcome = %outcome.data_json(),
-                "recorded index rebuild request for lexical fallback"
-            );
-        }
-
         let fallback_count = fallback_hits.len();
         push_degradation(
             &mut degraded,
@@ -3252,6 +3239,29 @@ async fn run_context_pack_with_performance_inner(
             SearchStatus::Success
         };
         control.check()?;
+    }
+
+    // A successful source-only response still leaves its persisted index
+    // missing. Preserve the repair request for both complete source retrieval
+    // and the older memory fallback, including reusable daemon handoffs.
+    // Missing embedding models do not qualify: rebuilding cannot supply one.
+    // Read-only packs write nothing; the existing cooldown bounds writes from
+    // concurrent packs without changing this response's pinned source snapshot.
+    if options.persist_pack
+        && let Some((trigger, degraded_code)) = index_rebuild_request
+    {
+        let outcome = crate::core::index::record_index_rebuild_request(
+            &options.workspace_path,
+            trigger,
+            degraded_code,
+            &chrono::Utc::now().to_rfc3339(),
+            crate::core::index::DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        tracing::debug!(
+            target: "ee::context::index_rebuild_request",
+            outcome = %outcome.data_json(),
+            "recorded index rebuild request for lexical source retrieval"
+        );
     }
 
     // Apply metadata query filters to search results. Tag filters are applied
