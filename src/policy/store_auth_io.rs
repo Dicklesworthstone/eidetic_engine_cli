@@ -274,7 +274,7 @@ fn write_and_sync(path: &Path, mut file: File, bytes: &[u8]) -> Result<(), Store
 }
 
 #[cfg(unix)]
-fn exclusive_at(directory: &File, path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
+fn create_exclusive_at(directory: &File, path: &Path) -> Result<File, StoreAuthError> {
     use rustix::fs::{Mode, OFlags};
     let descriptor = rustix::fs::openat(
         directory,
@@ -291,12 +291,85 @@ fn exclusive_at(directory: &File, path: &Path, bytes: &[u8]) -> Result<(), Store
             io_error(path, error)
         }
     })?;
-    write_and_sync(path, File::from(descriptor), bytes)
+    Ok(File::from(descriptor))
+}
+
+#[cfg(unix)]
+fn exclusive_at(directory: &File, path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
+    write_and_sync(path, create_exclusive_at(directory, path)?, bytes)
+}
+
+/// Initial creation must not reserve the live name with an empty/partial key.
+/// A reader either sees no root or a complete, file-synced root. NOREPLACE is
+/// essential: a racing creator's successful key must never be overwritten.
+/// Retain failed staging files for inspection; they never authorize a root.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn publish_new_key_with(
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&Path, File, &[u8]) -> Result<(), StoreAuthError>,
+    sync: impl FnOnce(&Path, &File) -> Result<(), StoreAuthError>,
+) -> Result<(), StoreAuthError> {
+    use rustix::fs::{AtFlags, RenameFlags};
+
+    let directory = private_parent(path)?;
+    // This avoids writing another secret on ordinary duplicate creation. It
+    // is only an optimization; the no-replace rename decides the actual race.
+    match rustix::fs::statat(&directory, name(path)?, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => {
+            return Err(StoreAuthError::AlreadyInitialized {
+                path: path.display().to_string(),
+            });
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => {}
+        Err(error) => return Err(io_error(path, error)),
+    }
+    let temporary = parent(path).join(format!(".ee-store-auth-init-{}", uuid::Uuid::now_v7()));
+    let file = create_exclusive_at(&directory, &temporary).map_err(|error| match error {
+        // Only an occupied LIVE name means another root can be adopted by
+        // open_or_create. A staging collision must remain an ordinary failure.
+        StoreAuthError::AlreadyInitialized { .. } => {
+            io_error(path, "key initialization staging name is occupied; retry")
+        }
+        error => error,
+    })?;
+    write(&temporary, file, bytes)?;
+    rustix::fs::renameat_with(
+        &directory,
+        name(&temporary)?,
+        &directory,
+        name(path)?,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            StoreAuthError::AlreadyInitialized {
+                path: path.display().to_string(),
+            }
+        } else {
+            io_error(path, error)
+        }
+    })?;
+    // Persist the entry in the parent inode used for publication, not a
+    // newly resolved pathname. A barrier error does not undo the installed key.
+    sync(parent(path), &directory)
 }
 
 pub(super) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
     reject_symlink_components(parent(path), path)?;
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        publish_new_key_with(path, bytes, write_and_sync, |parent, directory| {
+            directory.sync_all().map_err(|error| io_error(parent, error))
+        })
+    }
+    // Other platforms retain exclusive direct creation until they have a
+    // supported atomic no-replace publisher. Never emulate it with a racy
+    // exists check followed by an overwriting rename.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
+    ))]
     {
         exclusive_at(&private_parent(path)?, path, bytes)
     }
@@ -370,6 +443,200 @@ mod tests {
                 .expect("physical temporary root"),
         )
         .expect("temporary directory")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    mod initialization {
+        use super::*;
+        use crate::policy::store_auth::MacDomain;
+
+        fn sync(parent: &Path, directory: &File) -> Result<(), StoreAuthError> {
+            directory.sync_all().map_err(|error| io_error(parent, error))
+        }
+
+        #[test]
+        fn atomic_initialization_exposes_only_a_complete_authenticated_root() {
+            let source = fixture();
+            let original = StoreAuthRoot::create(source.path()).expect("source root");
+            let bytes = fs::read(source.path().join(KEY_FILE_NAME)).expect("source bytes");
+            let destination = fixture();
+            let path = destination.path().join(KEY_FILE_NAME);
+            publish_new_key_with(
+                &path,
+                &bytes,
+                |temporary, file, bytes| {
+                    assert_ne!(temporary, path.as_path());
+                    assert!(!path.exists(), "the live name is not a reservation");
+                    write_and_sync(temporary, file, bytes)?;
+                    assert!(matches!(
+                        StoreAuthRoot::open(destination.path()),
+                        Err(StoreAuthError::NotInitialized { .. })
+                    ));
+                    Ok(())
+                },
+                sync,
+            )
+            .expect("publish complete root");
+            let reopened = StoreAuthRoot::open(destination.path()).expect("authenticated root");
+            assert_eq!(reopened.current_key_id(), original.current_key_id());
+            assert_eq!(fs::read(&path).expect("published bytes"), bytes);
+            assert_eq!(fs::read_dir(destination.path()).expect("entries").count(), 1);
+        }
+
+        #[test]
+        fn atomic_initialization_failures_leave_the_live_name_free_for_retry() {
+            let source = fixture();
+            StoreAuthRoot::create(source.path()).expect("source root");
+            let bytes = fs::read(source.path().join(KEY_FILE_NAME)).expect("source bytes");
+            for length in [0, bytes.len() / 2, bytes.len()] {
+                let destination = fixture();
+                let path = destination.path().join(KEY_FILE_NAME);
+                let mut retained = None;
+                let error = publish_new_key_with(
+                    &path,
+                    &bytes,
+                    |temporary, mut file, bytes| {
+                        retained = Some(temporary.to_path_buf());
+                        file.write_all(&bytes[..length])
+                            .map_err(|error| io_error(temporary, error))?;
+                        file.sync_all().map_err(|error| io_error(temporary, error))?;
+                        Err(io_error(temporary, "injected interrupted initialization"))
+                    },
+                    |_, _| panic!("a failed write must not reach publication sync"),
+                )
+                .expect_err("interrupted write");
+                assert!(matches!(error, StoreAuthError::Io { .. }));
+                assert!(!path.exists(), "partial bytes must not occupy the root name");
+                let retained = retained.expect("staging retained");
+                assert_eq!(
+                    fs::read(&retained).expect("retained prefix"),
+                    &bytes[..length]
+                );
+                let root = StoreAuthRoot::open_or_create(destination.path()).expect("fresh retry");
+                let reopened = StoreAuthRoot::open(destination.path()).expect("valid retry");
+                assert_eq!(root.current_key_id(), reopened.current_key_id());
+                assert_eq!(
+                    fs::read(&retained).expect("preserved prefix"),
+                    &bytes[..length]
+                );
+            }
+        }
+
+        #[test]
+        fn atomic_initialization_adopts_one_complete_root_under_concurrent_creation() {
+            let destination = fixture();
+            let gate = std::sync::Barrier::new(8);
+            let results = std::thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for _ in 0..8 {
+                    let gate = &gate;
+                    let path = destination.path();
+                    workers.push(scope.spawn(move || {
+                        gate.wait();
+                        let root = StoreAuthRoot::open_or_create(path).expect("concurrent root");
+                        (
+                            root.current_key_id(),
+                            root.mac(MacDomain::NativeImportRecordsRoot, b"one store")
+                                .expect("MAC"),
+                        )
+                    }));
+                }
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("creator finished"))
+                    .collect::<Vec<_>>()
+            });
+            let reopened = StoreAuthRoot::open(destination.path()).expect("durable winner");
+            let expected = (
+                reopened.current_key_id(),
+                reopened
+                    .mac(MacDomain::NativeImportRecordsRoot, b"one store")
+                    .expect("durable MAC"),
+            );
+            assert_eq!(results.len(), 8);
+            assert!(results.iter().all(|result| *result == expected));
+        }
+
+        #[test]
+        fn atomic_initialization_never_overwrites_a_winner_published_during_staging() {
+            let source = fixture();
+            let losing = StoreAuthRoot::create(source.path()).expect("losing root");
+            let bytes = fs::read(source.path().join(KEY_FILE_NAME)).expect("losing bytes");
+            let destination = fixture();
+            let path = destination.path().join(KEY_FILE_NAME);
+            let mut winner = None;
+            let mut retained = None;
+            let error = publish_new_key_with(
+                &path,
+                &bytes,
+                |temporary, file, bytes| {
+                    write_and_sync(temporary, file, bytes)?;
+                    retained = Some(temporary.to_path_buf());
+                    winner = Some(StoreAuthRoot::create(destination.path())?.current_key_id());
+                    Ok(())
+                },
+                |_, _| panic!("the losing publisher must not report a successful rename"),
+            )
+            .expect_err("winner must not be replaced");
+            assert!(matches!(error, StoreAuthError::AlreadyInitialized { .. }));
+            let reopened = StoreAuthRoot::open(destination.path()).expect("winner remains valid");
+            assert_eq!(Some(reopened.current_key_id()), winner);
+            assert_ne!(reopened.current_key_id(), losing.current_key_id());
+            assert_eq!(
+                fs::read(retained.expect("losing stage")).expect("stage bytes"),
+                bytes
+            );
+        }
+
+        #[test]
+        fn atomic_initialization_refuses_occupied_names_without_writing_another_key() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            for entry in ["corrupt", "directory", "symlink", "hardlink"] {
+                let destination = fixture();
+                let path = destination.path().join(KEY_FILE_NAME);
+                let target = destination.path().join("preserved");
+                fs::write(&target, b"preserve existing material").expect("existing material");
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("mode");
+                match entry {
+                    "corrupt" => fs::write(&path, b"partial old key").expect("partial key"),
+                    "directory" => fs::create_dir(&path).expect("occupied directory"),
+                    "symlink" => symlink(&target, &path).expect("occupied symlink"),
+                    _ => fs::hard_link(&target, &path).expect("occupied hardlink"),
+                }
+                assert!(write_exclusive(&path, b"replacement is forbidden").is_err());
+                assert_eq!(
+                    fs::read(&target).expect("unchanged"),
+                    b"preserve existing material"
+                );
+                assert_eq!(
+                    fs::read_dir(destination.path()).expect("no stage").count(),
+                    2
+                );
+                if entry == "corrupt" {
+                    assert_eq!(fs::read(&path).expect("old key retained"), b"partial old key");
+                }
+            }
+        }
+
+        #[test]
+        fn atomic_initialization_reports_barrier_failure_without_replacing_the_installed_root() {
+            let source = fixture();
+            let original = StoreAuthRoot::create(source.path()).expect("source root");
+            let bytes = fs::read(source.path().join(KEY_FILE_NAME)).expect("source bytes");
+            let destination = fixture();
+            let path = destination.path().join(KEY_FILE_NAME);
+            let error = publish_new_key_with(&path, &bytes, write_and_sync, |parent, _| {
+                let installed = StoreAuthRoot::open(parent).expect("rename already happened");
+                assert_eq!(installed.current_key_id(), original.current_key_id());
+                Err(io_error(parent, "injected directory barrier failure"))
+            })
+            .expect_err("durability failure must be reported");
+            assert!(matches!(error, StoreAuthError::Io { .. }));
+            let retry = StoreAuthRoot::open_or_create(destination.path()).expect("adopt installed");
+            assert_eq!(retry.current_key_id(), original.current_key_id());
+            assert_eq!(fs::read(path).expect("installed key retained"), bytes);
+        }
     }
 
     #[test]
