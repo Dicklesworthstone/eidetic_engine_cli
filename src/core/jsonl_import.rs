@@ -5219,6 +5219,243 @@ mod tests {
         )
     }
 
+    // bd-cjt23 acceptance tests (IvoryFinch): the ruled behaviour of a
+    // verified-backup restore, stated independently of the implementation.
+
+    /// Workspace id the acceptance fixtures sign their records under; equal to
+    /// the sample header's workspace id, as it is for a real backup.
+    const CJT23_SOURCE_SCOPE: &str = "wsp_01234567890123456789012345";
+
+    /// A store with its own key root, standing in for a backup's source
+    /// workspace. Returns its canonical path.
+    fn cjt23_key_store(tempdir: &tempfile::TempDir, name: &str) -> Result<PathBuf, String> {
+        let store = tempdir.path().join(name);
+        fs::create_dir_all(store.join(crate::config::WORKSPACE_MARKER))
+            .map_err(|error| error.to_string())?;
+        let store = store.canonicalize().map_err(|error| error.to_string())?;
+        StoreAuthRoot::open_or_create(workspace_keys_dir(&store))
+            .map_err(|error| error.message())?;
+        Ok(store)
+    }
+
+    fn cjt23_key_root(store: &Path) -> Result<StoreAuthRoot, String> {
+        StoreAuthRoot::open(workspace_keys_dir(store)).map_err(|error| error.message())
+    }
+
+    /// A restore destination as `ee backup restore` builds it: no keys of its
+    /// own, and the backup's workspace row (`workspace_id`) already bound to
+    /// the destination path. Returns (workspace, database).
+    fn cjt23_restore_destination(
+        tempdir: &tempfile::TempDir,
+        workspace_id: &str,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let workspace = tempdir.path().join("restored");
+        fs::create_dir_all(workspace.join(crate::config::WORKSPACE_MARKER))
+            .map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            workspace_keys_dir(&workspace).exists(),
+            false,
+            "the destination must hold no keys, or it could authenticate on its own",
+        )?;
+        let database = workspace
+            .join(crate::config::WORKSPACE_MARKER)
+            .join(DEFAULT_DB_FILE);
+        let connection = DbConnection::open(DatabaseConfig::file(database.clone()))
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((workspace, database))
+    }
+
+    /// Verified-backup import of `artifact` into a restore destination whose
+    /// workspace row is `destination_workspace_id`. Returns the report, the
+    /// stored trust class of the sample memory, and the paths used.
+    fn cjt23_restore_import(
+        tempdir: &tempfile::TempDir,
+        artifact: &str,
+        destination_workspace_id: &str,
+        source_auth: Option<&StoreAuthRoot>,
+    ) -> Result<(JsonlImportReport, String, PathBuf, PathBuf, PathBuf), String> {
+        let (workspace, database) = cjt23_restore_destination(tempdir, destination_workspace_id)?;
+        let records = tempdir.path().join("verified-backup.jsonl");
+        fs::write(&records, artifact).map_err(|error| error.to_string())?;
+        let report = import_verified_backup_jsonl_records(
+            &JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                source_path: records.clone(),
+                dry_run: false,
+            },
+            source_auth,
+        )
+        .map_err(|error| error.to_string())?;
+        let stored = DbConnection::open(DatabaseConfig::file(database.clone()))
+            .map_err(|error| error.to_string())?
+            .get_memory("mem_01234567890123456789012345")
+            .map_err(|error| error.to_string())?
+            .ok_or("restored memory missing")?;
+        ensure(
+            stored.workspace_id.as_str(),
+            destination_workspace_id,
+            "rows bind to the destination's workspace row",
+        )?;
+        Ok((report, stored.trust_class, workspace, database, records))
+    }
+
+    fn cjt23_downgrade_warnings(report: &JsonlImportReport) -> usize {
+        report
+            .issues
+            .iter()
+            .filter(|issue| {
+                issue.code == VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE
+                    && issue.severity == JsonlImportIssueSeverity::Warning
+            })
+            .count()
+    }
+
+    #[test]
+    fn verified_backup_restore_keeps_human_explicit_under_source_keys() -> TestResult {
+        // Ruling 2(b): a same-lineage restore keeps human_explicit, keyed on
+        // the records MAC verifying under the SOURCE key root.
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_store = cjt23_key_store(&tempdir, "source-store")?;
+        let artifact =
+            authenticate_sample(&human_explicit_jsonl(), &source_store, CJT23_SOURCE_SCOPE)?;
+        let source_root = cjt23_key_root(&source_store)?;
+
+        let (report, trust, ..) =
+            cjt23_restore_import(&tempdir, &artifact, CJT23_SOURCE_SCOPE, Some(&source_root))?;
+
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(report.memories_imported, 1, "memories imported")?;
+        ensure(cjt23_downgrade_warnings(&report), 0, "no downgrade warning")?;
+        ensure(
+            trust.as_str(),
+            "human_explicit",
+            "a records MAC that verifies under the source keys keeps human trust",
+        )
+    }
+
+    #[test]
+    fn verified_backup_restore_without_source_keys_stays_capped() -> TestResult {
+        // Ruling 2(b) adversarial negatives: each case must NOT elevate. The
+        // artifact is the same authenticated one throughout; only the key
+        // root, the bound workspace or the bytes differ from the case above.
+        for case in [
+            "no_source",
+            "foreign_keys",
+            "wrong_scope",
+            "tampered_record",
+        ] {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let source_store = cjt23_key_store(&tempdir, "source-store")?;
+            let foreign_store = cjt23_key_store(&tempdir, "foreign-store")?;
+            let mut artifact =
+                authenticate_sample(&human_explicit_jsonl(), &source_store, CJT23_SOURCE_SCOPE)?;
+            if case == "tampered_record" {
+                let tampered = artifact.replace(
+                    "Run cargo fmt --check before release.",
+                    "Run cargo fmt --check before releases.",
+                );
+                ensure(tampered != artifact, true, "the tamper changed a record")?;
+                artifact = tampered;
+            }
+            let root = match case {
+                "foreign_keys" => Some(cjt23_key_root(&foreign_store)?),
+                "no_source" => None,
+                _ => Some(cjt23_key_root(&source_store)?),
+            };
+            let destination_workspace_id = if case == "wrong_scope" {
+                "wsp_01234567890123456789099999"
+            } else {
+                CJT23_SOURCE_SCOPE
+            };
+
+            let (report, trust, ..) =
+                cjt23_restore_import(&tempdir, &artifact, destination_workspace_id, root.as_ref())?;
+
+            ensure(
+                report.status.as_str(),
+                "completed",
+                &format!("{case}: status"),
+            )?;
+            ensure(
+                cjt23_downgrade_warnings(&report),
+                1,
+                &format!("{case}: downgrade warning"),
+            )?;
+            ensure(
+                trust.as_str(),
+                "agent_validated",
+                &format!("{case}: human trust must not cross without the source MAC"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verified_backup_fence_expects_the_trust_the_source_import_writes() -> TestResult {
+        // Restore freezes BackupRecordsExpectation before importing and checks
+        // the restored rows against it. Given the same source root it must
+        // accept the kept human_explicit rows; without it the fence expects the
+        // cap and must reject them on their fields.
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_store = cjt23_key_store(&tempdir, "source-store")?;
+        let artifact =
+            authenticate_sample(&human_explicit_jsonl(), &source_store, CJT23_SOURCE_SCOPE)?;
+        let source_root = cjt23_key_root(&source_store)?;
+        let (report, trust, workspace, database, records) =
+            cjt23_restore_import(&tempdir, &artifact, CJT23_SOURCE_SCOPE, Some(&source_root))?;
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(trust.as_str(), "human_explicit", "import kept human trust")?;
+
+        let with_source = recovery::BackupRecordsExpectation::capture(
+            &records,
+            &workspace,
+            CJT23_SOURCE_SCOPE,
+            Some(&source_root),
+        )
+        .map_err(|error| error.message())?
+        .verify_database(&database)
+        .err()
+        .map(|error| error.message());
+        ensure(
+            with_source,
+            None,
+            "the fence given the source root accepts the restored rows",
+        )?;
+        let without_source = recovery::BackupRecordsExpectation::capture(
+            &records,
+            &workspace,
+            CJT23_SOURCE_SCOPE,
+            None,
+        )
+        .map_err(|error| error.message())?
+        .verify_database(&database)
+        .err()
+        .map(|error| error.message());
+        ensure(
+            without_source
+                .as_deref()
+                .is_some_and(|message| message.contains("memory fields differ")),
+            true,
+            &format!(
+                "a fence without the source expects the cap and rejects the rows on their fields: {without_source:?}"
+            ),
+        )
+    }
+
     /// Emit a native artifact through the real exporter, authenticated by the
     /// store at `workspace` and bound to `workspace_scope`.
     fn authenticate_sample(
