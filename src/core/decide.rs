@@ -5,7 +5,7 @@
 //! typed fields, optional `supersedes` memory links, and audited lifecycle
 //! expiration for replaced heads.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
@@ -23,6 +23,8 @@ use crate::models::{DomainError, MemoryKind};
 mod atomic;
 #[path = "decide_read.rs"]
 mod read;
+#[path = "decide_lineage.rs"]
+mod lineage;
 
 pub const DECIDE_RECORD_SCHEMA_V1: &str = "ee.decide.record.v1";
 pub const DECIDE_LIST_SCHEMA_V1: &str = "ee.decide.list.v1";
@@ -488,9 +490,9 @@ fn memory_to_decide_item(
     conn: &DbConnection,
     memory: &StoredMemory,
     now: DateTime<Utc>,
+    chain_depth: u32,
 ) -> Result<DecideItem, DomainError> {
     let fields = decision_fields_from_memory(conn, memory)?;
-    let chain_depth = supersede_chain_depth(conn, &memory.id)?;
     Ok(DecideItem {
         memory_id: memory.id.clone(),
         topic: fields.topic,
@@ -589,31 +591,6 @@ fn string_list_field(fields: &BTreeMap<String, JsonValue>, name: &str) -> Vec<St
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn supersede_chain_depth(conn: &DbConnection, memory_id: &str) -> Result<u32, DomainError> {
-    let mut current = memory_id.to_owned();
-    let mut seen = BTreeSet::new();
-    let mut depth = 0_u32;
-    loop {
-        if !seen.insert(current.clone()) || depth >= 64 {
-            return Ok(depth);
-        }
-        let links = conn
-            .list_memory_links_for_memory(&current, Some(MemoryLinkRelation::Supersedes))
-            .map_err(|error| {
-                decide_storage_error(format!("Failed to load supersede chain: {error}"))
-            })?;
-        let Some(next) = links
-            .into_iter()
-            .find(|link| link.src_memory_id == current && link.directed)
-            .map(|link| link.dst_memory_id)
-        else {
-            return Ok(depth);
-        };
-        depth += 1;
-        current = next;
-    }
 }
 
 fn revisit_status(

@@ -4,6 +4,7 @@
 //! Bodies, exact typed fields, revision markers and lineage share one snapshot.
 
 use super::*;
+use std::collections::BTreeSet;
 use sqlmodel_core::Value;
 
 const PAGE_SIZE: usize = 256;
@@ -107,6 +108,7 @@ fn read_current_snapshot(
 ) -> Result<Vec<DecideItem>, DomainError> {
     let mut after = String::new();
     let mut decisions = Vec::new();
+    let mut lineage = lineage::DecisionLineage::new(workspace_id);
     let mut closed = None;
     loop {
         // Identity heads are clock-free: author expiry is not supersession.
@@ -183,6 +185,7 @@ fn read_current_snapshot(
         }
         before_hydration(&ids)?;
         let mut memories = connection.get_memories_batch(&ids).map_err(|_| read_error())?;
+        let mut eligible = Vec::with_capacity(ids.len());
         for id in ids {
             let memory = memories.remove(id).ok_or_else(read_error)?;
             if memory.id != id
@@ -212,7 +215,13 @@ fn read_current_snapshot(
                     return Err(record_authority_error());
                 }
             }
-            let item = memory_to_decide_item(connection, &memory, now).map_err(|_| read_error())?;
+            eligible.push(memory);
+        }
+        let roots: Vec<_> = eligible.iter().map(|memory| memory.id.as_str()).collect();
+        lineage.load(connection, &roots)?;
+        for memory in eligible {
+            let item = memory_to_decide_item(connection, &memory, now, lineage.depth(&memory.id)?)
+                .map_err(|_| read_error())?;
             if !include_superseded && item.superseded {
                 return Err(read_error());
             }

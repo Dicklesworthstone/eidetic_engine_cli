@@ -62,6 +62,28 @@ These checks use the same snapshot as the decision read or the complete writer
 transaction. Missing or malformed authority returns a sanitized error with no
 partial report; no source, feedback, audit, or indexing row is changed by a read.
 
+## Complete Decision Lineage
+
+`chainDepth` counts the complete retained chain of directed `supersedes` links,
+not a 64-link prefix. List, revisit, record preview, and the final pre-commit
+record acknowledgment use the same workspace-owned ancestry checks. A cycle,
+multiple outgoing predecessors, missing ancestor, foreign workspace, or
+non-decision ancestor is a storage error rather than an arbitrary chosen path
+or a successful truncated depth. An unrelated malformed chain is not traversed
+unless it belongs to the selected decision history.
+
+Only ancestor identities and outgoing predecessor links are read for depth.
+Retired, tombstoned, held, and sealed ancestors may remain valid lineage
+identities without making their bodies or structured fields visible. Incoming
+links, undirected links, and other relation types do not add predecessors.
+Standalone typed-field claims do not manufacture absent stored links.
+
+The reader batches frontier identities in groups of 256 and reuses completed
+ancestry within one source snapshot. An excessive outgoing fan-out is detected
+with a bounded extra row, not loaded in full. No ancestry cache crosses a request
+or transaction boundary. There is no recursive stack or silent depth cutoff;
+unrepresentable depths fail rather than saturating the reported number.
+
 ## Revisit Hygiene
 
 Use `--revisit-by +90d` for relative day intervals or an explicit RFC3339

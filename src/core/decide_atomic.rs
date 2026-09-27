@@ -90,6 +90,10 @@ fn record_with_boundary(
         let preview = remember_memory(&remember_options)?;
         let existing = read::load_record_heads(&mut scope, &fields, now)?;
         let predecessor = validate_head(&existing, &fields)?;
+        let chain_depth = predecessor
+            .map(|item| lineage::successor_depth(item.chain_depth))
+            .transpose()?
+            .unwrap_or(0);
         return Ok(DecideRecordReport {
             schema: DECIDE_RECORD_SCHEMA_V1,
             version: env!("CARGO_PKG_VERSION"),
@@ -107,7 +111,7 @@ fn record_with_boundary(
                 options: fields.options.clone(),
                 rationale: fields.rationale.clone(),
                 supersedes: fields.supersedes.clone(),
-                chain_depth: predecessor.map_or(0, |item| item.chain_depth.saturating_add(1)),
+                chain_depth,
                 revisit_by: fields.revisit_by.clone(),
                 revisit_status: revisit_status(fields.revisit_by.as_deref(), now, None),
                 superseded: false,
@@ -175,7 +179,8 @@ fn record_with_boundary(
                 persisted: true,
                 workspace_id: write.workspace_id().to_owned(),
                 database_path: scope.database_path.display().to_string(),
-                decision: memory_to_decide_item(&connection, &stored, now)?,
+                // The new row has no predecessor edge until replacement below.
+                decision: memory_to_decide_item(&connection, &stored, now, 0)?,
                 superseded: None,
                 memory_audit_id: Some(memory_audit_id(&connection, &write)?),
                 memory_index_job_id: Some(write.index_job_id().to_owned()),
@@ -196,7 +201,11 @@ fn record_with_boundary(
                 )?;
             }
             // All fallible source-dependent report construction is pre-COMMIT.
-            report.decision.chain_depth = supersede_chain_depth(&connection, write.memory_id())?;
+            report.decision.chain_depth = lineage::chain_depth(
+                &connection,
+                write.workspace_id(),
+                write.memory_id(),
+            )?;
             boundary(Stage::Report, &connection)?;
             Ok::<_, RecordError>(report)
         })
