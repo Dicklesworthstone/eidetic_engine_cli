@@ -61,7 +61,48 @@
           },
           "source": {
             "type": "object",
-            "description": "Where this advisory rule came from (built-in registry vs. user/workspace rules)."
+            "description": "Where this advisory rule came from. kind names the origin; each kind carries exactly one identifying field.",
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["builtin", "workspace_file", "procedural_rule", "tripwire"]
+              }
+            },
+            "oneOf": [
+              {
+                "description": "Compiled-in default rule.",
+                "required": ["kind", "name"],
+                "properties": {
+                  "kind": { "const": "builtin" },
+                  "name": { "type": "string" }
+                }
+              },
+              {
+                "description": "Rule loaded from the workspace TOML file.",
+                "required": ["kind", "path"],
+                "properties": {
+                  "kind": { "const": "workspace_file" },
+                  "path": { "type": "string" }
+                }
+              },
+              {
+                "description": "Live native procedural rule; rule_id is its procedural_rules id, the same value as ruleId.",
+                "required": ["kind", "rule_id"],
+                "properties": {
+                  "kind": { "const": "procedural_rule" },
+                  "rule_id": { "type": "string" }
+                }
+              },
+              {
+                "description": "Linked tripwire from the tripwires table.",
+                "required": ["kind", "tripwire_id"],
+                "properties": {
+                  "kind": { "const": "tripwire" },
+                  "tripwire_id": { "type": "string" }
+                }
+              }
+            ]
           },
           "resolution": {
             "type": "string",
