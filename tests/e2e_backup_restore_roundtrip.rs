@@ -1675,11 +1675,11 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
     // created in THIS test. There they could only ever report `[]`, which is
     // what they did, in a target two verify.sh stages execute.
     //
-    // Keyed to `restored_memory_id`, NOT the source `memory_id`: this test
-    // exercises Standard redaction, which remaps identifiers across the
-    // archive boundary, which is why the `why` call above resolves the id from
-    // a restored-side search rather than reusing the source one. These
-    // assertions therefore have to follow that search.
+    // Keyed to `restored_memory_id`, NOT the source `memory_id`: the `why`
+    // call above resolves the id from a restored-side search rather than
+    // reusing the source one, so the test holds whether or not the backup's
+    // redaction level remaps identifiers (the default `minimal` keeps them;
+    // bd-cjt23). These assertions therefore have to follow that search.
     let restored_db = side_path.join(".ee").join("ee.db");
     let restored_conn = DbConnection::open_file(&restored_db)
         .map_err(|error| format!("open restored db: {error}"))?;
@@ -2831,10 +2831,10 @@ fn typed_fields_value(
 /// bd-1n0np.23.2: typed memory fields survive backup -> restore.
 ///
 /// This is the suite's one per-kind round trip at the DEFAULT redaction level
-/// (no `--redaction` flag); the other per-kind tests use `--redaction minimal`,
-/// so without this one the suite would only ever test a non-default mode. The
-/// default re-mints memory IDs (bd-cjt23), so the restored memory is found by
-/// its content, not by its ID.
+/// (no `--redaction` flag). The default is `minimal` since bd-cjt23, as are
+/// the other per-kind tests, but this one keeps no flag so it follows the
+/// default wherever it goes. The restored memory is found by its content, not
+/// by its ID, so the test holds whether or not the default re-mints IDs.
 #[test]
 fn backup_restore_at_default_redaction_preserves_typed_memory_fields() -> TestResult {
     const CONTENT: &str = "Decision: keep the build cache on the remote workers.";

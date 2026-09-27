@@ -76,6 +76,7 @@ Notes on the matrix:
 | Surface           | Default level | Rationale                                                       | Override status                 |
 |-------------------|---------------|-----------------------------------------------------------------|---------------------------------|
 | `ee export`       | `standard`    | Round-trip safe; preserves shape for re-import.                  | current `--redaction <level>`   |
+| `ee backup create`| `minimal`     | Recovery point; preserves identifiers (bd-cjt23). `standard` makes a shareable backup whose ids are re-minted on restore. | current `--redaction <level>`   |
 | `ee handoff create`| `standard`   | Handoff capsules are redaction-safe artifacts.                 | current `--redaction <level>`   |
 | `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | current `--redaction <level>`   |
 | `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | current `--redaction <level>`   |
@@ -101,6 +102,10 @@ handoff_create = "standard"
 context_json   = "minimal"
 support_bundle = "paranoid"
 ```
+
+The `export` key also sets the default for `ee backup create`, so the example
+above makes backups re-mint ids on restore; omit it to keep the `minimal`
+backup default.
 
 The override precedence is:
 CLI flag → workspace config → built-in default. No `EE_REDACTION_*`
