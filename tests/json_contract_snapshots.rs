@@ -231,9 +231,14 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 trust_class: "human_explicit".to_string(),
                 trust_subclass: Some("project-rule".to_string()),
                 tags: vec!["cargo".to_string(), "formatting".to_string()],
-                valid_from: None,
+                valid_from: Some("2026-04-29T12:00:00+00:00".to_string()),
                 valid_to: None,
             },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_raw(
+            "UPDATE memories SET created_at = '2026-04-29T12:00:00+00:00', updated_at = '2026-04-29T12:00:00+00:00' WHERE id = 'mem_00000000000000000000000001'",
         )
         .map_err(|error| error.to_string())?;
     connection
@@ -1031,6 +1036,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             workspace.clone(),
             "search".to_string(),
             QUERY.to_string(),
+            "--as-of".to_string(),
+            "2026-04-29T12:00:00Z".to_string(),
             "--database".to_string(),
             database.clone(),
             "--index-dir".to_string(),
@@ -1061,6 +1068,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             workspace,
             "pack".to_string(),
             QUERY.to_string(),
+            "--as-of".to_string(),
+            "2026-04-29T12:00:00Z".to_string(),
             "--database".to_string(),
             database,
             "--index-dir".to_string(),

@@ -1,5 +1,37 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
+## Production quality ranking and pack identity v4
+
+Search now applies EE's observed recency, confidence, utility, harmful-feedback,
+native-rule maturity and scope signals after Frankensearch retrieval. Candidate
+collection is bounded and occurs before the final limit, so a stronger candidate
+can enter even when the requested limit is one. Original engine scores and
+relevance-floor semantics remain available unchanged.
+
+The existing metadata extension map now carries `qualityScoring`, including
+the policy digest, measured inputs, explicit observation availability and the
+component breakdown. `--explain` adds named quality factors through its existing
+factor list. Consumers should use this weighted result order while retaining
+`relevanceScore` for its documented engine-domain meaning. An unavailable
+signal has a neutral effect and is reported as unobserved.
+
+Configure the eight active `scoring.*` controls through TOML or
+`ee config set/get/show`. The parser and mutation path share finite/range
+validation. Memory feedback is read from the owning database at the request's
+reference time; a future event cannot penalize a historical request.
+
+New pack responses retain `ee.pack.v2` and identify their hash input as
+`ee.pack.hash_input.v4`, with `snapshotIdentity.version=4`. The added
+`qualityScoring` component binds the policy actually used by retrieval; a
+direct pack builder without search binds an explicit absence marker. Thus a
+policy change can change identity even when selected items remain equal.
+Historical pack records, ledger bytes and hashes are not rewritten.
+
+The L2 cache key is now `ee.pack.l2_cache_key.v9`. Retrieval and source
+admission run before cache lookup; reuse covers assembly/rendering and binds
+the actual quality policy and scored candidate pool. Daemon pack handoffs
+with observed feedback trigger fresh retrieval, avoiding stale top-K reuse.
+
 > **Audience.** Agent-harness authors and integration code consuming
 > `ee`'s `--json` output. Human users of the `ee` CLI surface should
 > read [`docs/migration-guide.md`](./migration-guide.md) for the

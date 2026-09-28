@@ -21066,6 +21066,83 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Count accepted harmful feedback for source-owned memories at an instant.
+    ///
+    /// This borrows the caller's database view without opening or ending a
+    /// transaction. Every requested ID must exist in the addressed workspace;
+    /// otherwise no count is returned. Successful zeroes therefore mean an
+    /// observed absence of harmful events, never an unavailable source. Pending
+    /// quarantine rows are not feedback events and cannot influence this read.
+    ///
+    /// Bounded batches aggregate events by timestamp in SQL. Comparing parsed
+    /// RFC 3339 instants in Rust preserves offsets and sub-millisecond precision
+    /// instead of relying on textual ordering or rounded SQL date functions.
+    pub fn memory_harmful_feedback_counts_at(
+        &self,
+        workspace_id: &str,
+        memory_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>> {
+        const BATCH_SIZE: usize = 800;
+        let memory_ids = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut counts = BTreeMap::new();
+        for chunk in memory_ids.chunks(BATCH_SIZE) {
+            let placeholders = (2..=chunk.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT m.id, f.created_at, COUNT(f.id) \
+                 FROM memories m LEFT JOIN feedback_events f \
+                   ON f.target_type = 'memory' AND f.target_id = m.id \
+                  AND f.workspace_id = m.workspace_id \
+                  AND f.signal IN ('negative', 'harmful', 'contradiction', 'inaccurate') \
+                 WHERE m.workspace_id = ?1 AND m.id IN ({placeholders}) \
+                 GROUP BY m.id, f.created_at ORDER BY m.id, f.created_at"
+            );
+            let params = std::iter::once(Value::Text(workspace_id.to_owned()))
+                .chain(chunk.iter().map(|id| Value::Text((*id).to_owned())))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            for row in rows {
+                let id = required_text(&row, 0, DbOperation::Query, "memory_id")?;
+                let count = required_u32(&row, 2, DbOperation::Query, "harmful_count")?;
+                let total = counts.entry(id.to_owned()).or_insert(0_u32);
+                if count == 0 {
+                    continue;
+                }
+                let created_at = required_text(&row, 1, DbOperation::Query, "created_at")?;
+                let created_at = DateTime::parse_from_rfc3339(created_at).map_err(|_| {
+                    DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "harmful feedback has an invalid event timestamp".to_owned(),
+                    }
+                })?;
+                if created_at.with_timezone(&Utc) <= reference_time {
+                    *total = total
+                        .checked_add(count)
+                        .ok_or_else(|| DbError::MalformedRow {
+                            operation: DbOperation::Query,
+                            message: "harmful feedback count exceeds the supported range".to_owned(),
+                        })?;
+                }
+            }
+        }
+        if counts.len() != memory_ids.len() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "harmful feedback requires memories owned by the addressed workspace"
+                    .to_owned(),
+            });
+        }
+        Ok(counts)
+    }
+
     /// Count feedback events by signal for a target (for scoring).
     pub fn count_feedback_by_signal(
         &self,
@@ -52775,6 +52852,253 @@ UPDATE memories
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    fn harmful_feedback_test_event(
+        number: u32,
+        workspace_id: &str,
+        target_type: &str,
+        target_id: &str,
+        signal: &str,
+        created_at: &str,
+    ) -> super::StoredFeedbackEvent {
+        super::StoredFeedbackEvent {
+            id: format!("fb_{number:026}"),
+            workspace_id: workspace_id.to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target_id.to_owned(),
+            signal: signal.to_owned(),
+            weight: 0.5,
+            source_type: "human_explicit".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+            applied_at: None,
+            created_at: created_at.to_owned(),
+        }
+    }
+
+    #[test]
+    fn memory_harmful_feedback_counts_preserve_scope_time_and_observed_zero() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OTHER: &str = "wsp_11234567890123456789012345";
+        const MEMORY: &str = "mem_01234567890123456789012345";
+        const ZERO: &str = "mem_11234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            OTHER,
+            &CreateWorkspaceInput {
+                path: "/tmp/harmful-feedback-other".to_owned(),
+                name: None,
+            },
+        )?;
+        for id in [MEMORY, ZERO] {
+            connection.insert_memory(
+                id,
+                &simhash_test_memory_input(WORKSPACE, "Release guidance"),
+            )?;
+        }
+        for (number, signal, timestamp) in [
+            (0, "negative", "2026-09-28T00:00:00Z"),
+            (1, "harmful", "2026-09-28T02:00:00+02:00"),
+            (2, "contradiction", "2026-09-28T12:00:00.123456789Z"),
+            (3, "inaccurate", "2026-09-28T12:00:00.123456789Z"),
+            (4, "negative", "2026-09-28T12:00:00.123456789Z"),
+            (5, "harmful", "2026-09-28T12:00:00.123456790Z"),
+            (6, "inaccurate", "2026-09-28T11:00:00-02:00"),
+            (7, "negative", "2026-09-28T13:00:00+02:00"),
+            (8, "positive", "unrelated positive timestamp"),
+            (9, "stale", "2026-09-28T00:00:00Z"),
+        ] {
+            connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+                number, WORKSPACE, "memory", MEMORY, signal, timestamp,
+            ))?;
+        }
+        for (number, workspace, target_type) in [(10, OTHER, "memory"), (11, WORKSPACE, "rule")] {
+            connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+                number,
+                workspace,
+                target_type,
+                MEMORY,
+                "negative",
+                "2026-09-28T00:00:00Z",
+            ))?;
+        }
+        connection.insert_feedback_quarantine(
+            "fq_01234567890123456789012345",
+            &super::CreateFeedbackQuarantineInput {
+                workspace_id: WORKSPACE.to_owned(),
+                source_id: "test:unaccepted".to_owned(),
+                target_type: "memory".to_owned(),
+                target_id: ZERO.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "human_explicit".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-09-28T00:00:00Z".to_owned(),
+                reason: "pending review".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+            },
+        )?;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .with_timezone(&chrono::Utc);
+        let before = connection.list_feedback_events(WORKSPACE)?;
+        let generation = connection.get_workspace_generation(WORKSPACE)?;
+        let counts = connection.memory_harmful_feedback_counts_at(
+            WORKSPACE,
+            &[ZERO, MEMORY, MEMORY],
+            reference,
+        )?;
+        ensure_equal(&counts.len(), &2, "duplicate requests collapse by memory ID")?;
+        ensure_equal(
+            &counts.get(MEMORY),
+            &Some(&6),
+            "all accepted harmful signals at the cutoff",
+        )?;
+        ensure_equal(
+            &counts.get(ZERO),
+            &Some(&0),
+            "quarantine is not observed harmful feedback",
+        )?;
+        ensure_equal(
+            &connection.list_feedback_events(WORKSPACE)?,
+            &before,
+            "counting is read-only",
+        )?;
+        ensure_equal(
+            &connection.get_workspace_generation(WORKSPACE)?,
+            &generation,
+            "counting does not advance source generation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_harmful_feedback_counts_reject_unknown_sources_and_invalid_events() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OTHER: &str = "wsp_11234567890123456789012345";
+        const MEMORY: &str = "mem_01234567890123456789012345";
+        const FOREIGN: &str = "mem_11234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            OTHER,
+            &CreateWorkspaceInput {
+                path: "/tmp/harmful-feedback-foreign".to_owned(),
+                name: None,
+            },
+        )?;
+        connection.insert_memory(MEMORY, &simhash_test_memory_input(WORKSPACE, "Owned source"))?;
+        connection.insert_memory(FOREIGN, &simhash_test_memory_input(OTHER, "Foreign source"))?;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .with_timezone(&chrono::Utc);
+        ensure(
+            connection
+                .memory_harmful_feedback_counts_at(WORKSPACE, &[], reference)?
+                .is_empty(),
+            "an empty candidate pool has no observed signal entries",
+        )?;
+        for ids in [vec![MEMORY, FOREIGN], vec![MEMORY, "mem_missing"]] {
+            ensure(
+                connection
+                    .memory_harmful_feedback_counts_at(WORKSPACE, &ids, reference)
+                    .is_err(),
+                "foreign or missing source must not become an observed zero",
+            )?;
+        }
+        connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+            0, WORKSPACE, "memory", MEMORY, "harmful", "invalid-timestamp",
+        ))?;
+        ensure(
+            connection
+                .memory_harmful_feedback_counts_at(WORKSPACE, &[MEMORY], reference)
+                .is_err(),
+            "malformed harmful event time must not disappear from the score",
+        )?;
+        connection.execute_raw(
+            "ALTER TABLE feedback_events RENAME TO temporarily_unavailable_feedback",
+        )?;
+        ensure(
+            connection
+                .memory_harmful_feedback_counts_at(WORKSPACE, &[MEMORY], reference)
+                .is_err(),
+            "failed authority read must not become an observed zero",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_harmful_feedback_counts_batch_and_borrow_read_snapshots() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let root = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database = root.path().join("feedback.db");
+        let writer = DbConnection::open_file(&database)?;
+        writer.migrate()?;
+        setup_workspace(&writer)?;
+        let ids = (0..801)
+            .map(|number| {
+                crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string()
+            })
+            .collect::<Vec<_>>();
+        writer.with_transaction(|| {
+            for id in &ids {
+                writer.insert_memory(id, &simhash_test_memory_input(WORKSPACE, "Source"))?;
+            }
+            Ok(())
+        })?;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .with_timezone(&chrono::Utc);
+        let borrowed = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let reader = DbConnection::open_file_read_only(&database)?;
+        reader.begin_read_snapshot()?;
+        let before = reader.memory_harmful_feedback_counts_at(WORKSPACE, &borrowed, reference)?;
+        ensure_equal(&before.len(), &801, "all batches return observed source entries")?;
+        ensure(
+            before.values().all(|count| *count == 0),
+            "empty feedback source yields zeroes",
+        )?;
+        writer.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+            0,
+            WORKSPACE,
+            "memory",
+            &ids[800],
+            "negative",
+            "2026-09-28T00:00:00Z",
+        ))?;
+        ensure_equal(
+            &reader.memory_harmful_feedback_counts_at(WORKSPACE, &borrowed, reference)?,
+            &before,
+            "later feedback is excluded from the caller's pinned source snapshot",
+        )?;
+        ensure(
+            reader.begin_read_snapshot().is_err(),
+            "the helper never ends a borrowed transaction",
+        )?;
+        reader.rollback_read_snapshot()?;
+        let after = reader.memory_harmful_feedback_counts_at(WORKSPACE, &borrowed, reference)?;
+        ensure_equal(
+            &after.get(&ids[800]),
+            &Some(&1),
+            "the next source view sees committed feedback",
+        )?;
+        ensure_equal(
+            &after.get(&ids[0]),
+            &Some(&0),
+            "unaffected memory still has observed zero",
+        )?;
+        reader.begin_read_snapshot()?;
+        reader.rollback_read_snapshot()?;
         Ok(())
     }
 

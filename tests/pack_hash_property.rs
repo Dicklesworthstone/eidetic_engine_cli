@@ -1,4 +1,4 @@
-//! ADR 0087 v3 pack-hash properties (bd-pack-identity-asof-35viu).
+//! ADR 0087 v4 pack-hash properties: reference time and quality policy.
 //!
 //! Every property here reads the product's own output as it is. There is no
 //! test-side normalizer: a comparison that scrubbed timing first could not
@@ -22,11 +22,11 @@ use uuid::Uuid;
 // Keep the original fixture bytes so the version bump changes only hashing.
 const QUERY: &str = "pack hash v2 property";
 
-/// The v3 `pack.hash` of [`pinned_fixture`], identical on every declared
+/// The v4 `pack.hash` of [`pinned_fixture`], identical on every declared
 /// target. A change here is a deliberate `snapshotIdentity.version` bump
 /// (ADR 0087 §8), never a re-pin to make a run green.
-const PINNED_V3_PACK_HASH: &str =
-    "blake3:37f24b6854a5f79c40be11fa0475f2677058fd91483275cfe6b5a6cb407f02d3";
+const PINNED_V4_PACK_HASH: &str =
+    "blake3:9cc5f083d5b2c90a2236814ea5fca573a9178374ee07182919fe1ea1f667e47f";
 
 fn fixture(relevance: f32) -> Result<(ContextRequest, PackDraft), String> {
     let request = ContextRequest::from_query(QUERY).map_err(|error| error.to_string())?;
@@ -121,16 +121,16 @@ fn resource_profiles() -> impl Strategy<Value = PackResourceProfile> {
     ]
 }
 
-/// The pinned digest vector: one fixed input, one fixed v3 hash. Run on two
+/// The pinned digest vector: one fixed input, one fixed v4 hash. Run on two
 /// RCH workers, this is the cross-host half of ADR 0087 §9.
 #[test]
-fn pinned_v3_pack_hash_digest_vector() -> Result<(), String> {
+fn pinned_v4_pack_hash_digest_vector() -> Result<(), String> {
     let (request, draft) = pinned_fixture()?;
     let hash = compute_pack_hash(&request, &draft, &canonical_degraded()?);
-    println!("pack_hash_property pinned_v3_pack_hash={hash}");
-    if hash != PINNED_V3_PACK_HASH {
+    println!("pack_hash_property pinned_v4_pack_hash={hash}");
+    if hash != PINNED_V4_PACK_HASH {
         return Err(format!(
-            "v3 pack hash of the pinned fixture is {hash}, pinned {PINNED_V3_PACK_HASH}"
+            "v4 pack hash of the pinned fixture is {hash}, pinned {PINNED_V4_PACK_HASH}"
         ));
     }
     Ok(())
@@ -278,6 +278,24 @@ fn shipped_text_and_banner_disagree_by_exactly_the_volatile_entries() -> Result<
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Equal items do not erase the quality policy that admitted and ranked
+    /// them; an unobserved policy is also distinct from an observed one.
+    #[test]
+    fn quality_policy_binds_identity_without_changing_selected_content(
+        policy in 0_u64..u64::MAX,
+    ) {
+        let (mut request, draft) = fixture(0.9).map_err(TestCaseError::fail)?;
+        let canonical = canonical_degraded().map_err(TestCaseError::fail)?;
+        let unobserved = compute_pack_hash(&request, &draft, &canonical);
+        request.quality_scoring_policy = Some(format!("blake3:{policy:064x}"));
+        let first = compute_pack_hash(&request, &draft, &canonical);
+        request.quality_scoring_policy = Some(format!("blake3:{:064x}", policy + 1));
+        let second = compute_pack_hash(&request, &draft, &canonical);
+        prop_assert_ne!(&unobserved, &first);
+        prop_assert_ne!(&unobserved, &second);
+        prop_assert_ne!(&first, &second);
+    }
 
     /// S7: even unchanged selected content has a distinct identity at a
     /// different explicit lifecycle clock, or in wall-clock mode.

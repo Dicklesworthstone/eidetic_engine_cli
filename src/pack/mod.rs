@@ -1639,6 +1639,9 @@ pub struct ContextRequest {
     /// Effective explicit lifecycle clock, at UTC millisecond precision.
     /// `None` binds the wall-clock mode rather than a per-run clock reading.
     pub reference_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Digest of the effective quality policy captured by search execution.
+    /// Direct pack builders leave this absent instead of inventing a retrieval policy.
+    pub quality_scoring_policy: Option<String>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1679,6 +1682,7 @@ impl ContextRequest {
         Ok(Self {
             task_paths: Vec::new(),
             reference_time: None,
+            quality_scoring_policy: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -3651,16 +3655,17 @@ pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
 
 /// The pack-hash input schema (ADR 0087 §8). Every component and the composite
 /// bind this tag, and the snapshot identity reports its version.
-pub const PACK_HASH_INPUT_SCHEMA_V3: &str = "ee.pack.hash_input.v3";
-pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 3;
+pub const PACK_HASH_INPUT_SCHEMA_V4: &str = "ee.pack.hash_input.v4";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 4;
 
-/// The component digests behind a v3 `pack.hash` (ADR 0087 §7). Each is a
+/// The component digests behind a v4 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
 /// carries a raw input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackHashComponentDigests {
     pub request: String,
     pub reference_time: String,
+    pub quality_scoring: String,
     pub items: String,
     pub omitted: String,
     pub degraded: String,
@@ -3675,6 +3680,7 @@ impl PackHashComponentDigests {
         [
             ("request", self.request == other.request),
             ("referenceTime", self.reference_time == other.reference_time),
+            ("qualityScoring", self.quality_scoring == other.quality_scoring),
             ("items", self.items == other.items),
             ("omitted", self.omitted == other.omitted),
             ("degraded", self.degraded == other.degraded),

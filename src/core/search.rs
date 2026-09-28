@@ -65,6 +65,10 @@ use crate::search::plan_cache::{
     CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, PlanCacheKey, compute_eql_hash,
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
+use crate::search::scoring::{
+    RetrievalMaturity, SEARCH_SCORING_POLICY_V1, SearchScoreComponents, SearchScoringConfig,
+    SearchScoringSignals,
+};
 use crate::search::{
     NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
@@ -79,6 +83,10 @@ use frankensearch::LexicalRead;
 mod prefetch;
 #[cfg(unix)]
 pub(crate) use prefetch::warm_prefetch_lexical;
+
+#[cfg(all(test, unix, feature = "lexical-bm25"))]
+#[path = "search_quality_tests.rs"]
+mod quality_tests;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
@@ -211,6 +219,7 @@ const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
 const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
 const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
+const SEARCH_QUALITY_SCORING_KEY: &str = "_ee_quality_scoring";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.";
@@ -1665,6 +1674,7 @@ impl SearchAdvisorySession {
 #[derive(Clone, Debug)]
 pub struct SearchPerformanceRun {
     pub report: SearchReport,
+    pub quality_scoring_policy: String,
     pub performance: SearchPerformanceTrace,
     pub(crate) audit_facts: Option<SearchAuditFacts>,
     pack_snapshot: Option<PackSearchSnapshot>,
@@ -1676,6 +1686,8 @@ pub struct SearchPerformanceRun {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PackSearchHandoff {
     pub report: SearchReport,
+    pub(crate) quality_scoring_policy: String,
+    quality_reference_time: Option<DateTime<Utc>>,
     pub audit_facts: Option<SearchAuditFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cached_local_embedder: Option<crate::core::index::CachedLocalEmbedderAttestation>,
@@ -1686,6 +1698,9 @@ pub(crate) struct PackSearchHandoff {
 struct PackSearchSnapshot {
     workspace_id: String,
     generation: u64,
+    // Feedback is not part of workspace generations. Without a versioned
+    // mutable ledger, handoffs are reusable only for a proven empty ledger.
+    quality_feedback_absent: bool,
 }
 
 impl PackSearchHandoff {
@@ -1711,6 +1726,10 @@ impl PackSearchHandoff {
             && connection
                 .get_workspace_generation(&self.snapshot.workspace_id)
                 .is_ok_and(|generation| generation == Some(self.snapshot.generation))
+            && self.snapshot.quality_feedback_absent
+            && connection
+                .feedback_events_fingerprint(&self.snapshot.workspace_id)
+                .is_ok_and(|fingerprint| fingerprint.count == 0)
     }
 
     pub(crate) fn revalidate(
@@ -1727,12 +1746,41 @@ impl PackSearchHandoff {
             connection,
             Some(&mut memories),
         );
-        self.report.results = apply_live_evidence_visibility(
+        let hits = apply_live_evidence_visibility(
             options,
             hits,
             &mut self.report.degraded,
             Some(connection),
         );
+        self.report.results = rule_admission::admit_hits(
+            options,
+            hits,
+            &mut self.report.degraded,
+            Some(connection),
+        );
+        match resolved_search_scoring_config(&options.workspace_path) {
+            Ok(config) if config.policy_hash() == self.quality_scoring_policy => {
+                apply_quality_scoring(
+                    options,
+                    &mut self.report.results,
+                    config,
+                    options.as_of.unwrap_or_else(Utc::now),
+                    Some(connection),
+                    Some(&memories),
+                    None,
+                    &mut self.report.degraded,
+                );
+            }
+            _ => {
+                self.report.results.clear();
+                self.report.degraded.push(SearchDegradation {
+                    code: "search_quality_policy_changed".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: "The cached search quality policy no longer matches this request; cached candidates were withheld.".to_owned(),
+                    repair: None,
+                });
+            }
+        }
         if self.report.results.is_empty() && self.report.status == SearchStatus::Success {
             self.report.status = SearchStatus::NoResults;
         }
@@ -1767,6 +1815,9 @@ impl PackSearchHandoff {
     pub(crate) fn matches_request(&self, options: &SearchOptions) -> bool {
         let report = &self.report;
         report.query == options.query
+            && self.quality_reference_time == options.as_of
+            && resolved_search_scoring_config(&options.workspace_path)
+                .is_ok_and(|config| config.policy_hash() == self.quality_scoring_policy)
             && report.requested_limit == options.limit
             && report.source_mode_requested == options.source_mode
             && report.strict_source_mode == options.strict_source_mode
@@ -2000,6 +2051,7 @@ impl SearchPerformanceTrace {
 #[derive(Clone, Debug)]
 pub struct ContextSearchReport {
     pub report: SearchReport,
+    pub quality_scoring_policy: String,
     pub preloaded_memories: BTreeMap<String, StoredMemory>,
     pub performance: SearchPerformanceTrace,
 }
@@ -2263,6 +2315,44 @@ pub struct SearchHit {
 }
 
 impl SearchHit {
+    /// EE quality score used for ordering and pack selection. Engine relevance
+    /// remains separate so feedback never rewrites calibrated evidence.
+    #[must_use]
+    pub fn ranking_score(&self) -> f32 {
+        self.ranking_components_json()
+            .and_then(|value| value.get("components"))
+            .and_then(|value| value.get("finalScore"))
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or_else(|| self.relevance_score())
+    }
+
+    /// Common policy-bound projection for UnitScore pack consumers. All lanes
+    /// share the same denominator, preserving order when quality bonuses exceed 1.
+    #[must_use]
+    pub fn ranking_relevance_score(&self) -> f32 {
+        let Some(bound) = self
+            .ranking_components_json()
+            .and_then(|value| value.get("rankingBound"))
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite() && *value >= 1.0)
+        else {
+            return self.relevance_score();
+        };
+        (self.ranking_score() / bound).clamp(0.0, 1.0)
+    }
+
+    /// Source-derived quality components and explicit observation availability.
+    #[must_use]
+    pub fn ranking_components_json(&self) -> Option<&serde_json::Value> {
+        let value = self.metadata.as_ref()?.get(SEARCH_QUALITY_SCORING_KEY)?;
+        (value.get("schema").and_then(serde_json::Value::as_str)
+            == Some(SEARCH_SCORING_POLICY_V1))
+        .then_some(value)
+    }
+
     /// Deterministic normalized relevance score in `0.0..=1.0` (bd-1et0v.11).
     ///
     /// See [`normalized_relevance_score`]. Surfaced as `relevanceScore` so an
@@ -3689,8 +3779,14 @@ impl SearchReport {
                         obj_map.insert(Field::RerankScore, serde_json::json!(rerank));
                     }
                     if let Some(ref meta) = hit.metadata {
-                        let (metadata, mut redacted_patterns) =
+                        let (mut metadata, mut redacted_patterns) =
                             public_search_metadata(meta, output_redaction_enabled);
+                        if let Some(object) = metadata.as_object_mut() {
+                            object.remove("qualityScoring");
+                            if let Some(quality) = hit.ranking_components_json() {
+                                object.insert("qualityScoring".to_owned(), quality.clone());
+                            }
+                        }
                         redacted_patterns.extend(provenance_redacted_patterns.clone());
                         // Promote a short, redaction-safe body preview to the top
                         // level so agents don't have to reach into `metadata.content`
@@ -7032,7 +7128,56 @@ impl ScoreExplanation {
             )
         };
 
-        Self { summary, factors }
+        let mut explanation = Self { summary, factors };
+        if let Some(scoring) = hit.ranking_components_json() {
+            let observed = scoring.get("observedSignals");
+            if let Some(components) = scoring.get("components") {
+                for (key, formula) in [
+                    ("base", "ranking_base = relevanceScore"),
+                    ("recency", "exp(-age_days / recency_tau_days)"),
+                    ("confidence", "max(confidence_floor, confidence)"),
+                    ("utility", "utility_floor + (1 - utility_floor) * utility"),
+                    ("maturity", "configured multiplier for the observed native maturity"),
+                    ("harmfulPenalty", "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)"),
+                    ("scopeMatch", "scope_match_bonus for an authoritative exact workspace/scope match"),
+                    ("graphCentrality", "1 when graph centrality is not observed"),
+                    ("redundancy", "1 when redundancy is not observed"),
+                    ("freshnessDrift", "1 when anchor freshness is not observed"),
+                ] {
+                    let Some(value) = components.get(key).and_then(serde_json::Value::as_f64) else {
+                        continue;
+                    };
+                    let measured = key == "base"
+                        || observed
+                            .and_then(|fields| fields.get(key))
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true);
+                    explanation.factors.push(ScoreFactor::new(
+                        key,
+                        value as f32,
+                        if measured {
+                            "source-derived quality ranking component"
+                        } else {
+                            "neutral: signal unavailable or not observed"
+                        },
+                        &format!("metadata.qualityScoring.components.{key}"),
+                        formula,
+                    ));
+                }
+            }
+            explanation.factors.push(ScoreFactor::new(
+                "qualityRanking",
+                hit.ranking_score(),
+                "final EE quality ranking; engine relevance is unchanged",
+                "metadata.qualityScoring.components.finalScore",
+                "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral",
+            ));
+            explanation.summary.push_str(&format!(
+                " EE quality ranking {:.6}; original relevance and calibration are unchanged.",
+                hit.ranking_score()
+            ));
+        }
+        explanation
     }
 }
 
@@ -7729,6 +7874,8 @@ pub(crate) fn run_pack_search_with_cached_local_embedder(
     })?;
     Ok(PackSearchHandoff {
         report,
+        quality_scoring_policy: run.quality_scoring_policy,
+        quality_reference_time: options.as_of,
         audit_facts: run.audit_facts,
         cached_local_embedder: attestation,
         snapshot,
@@ -7907,6 +8054,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                             SearchError::Index("Workspace generation unavailable".to_owned())
                         })?;
                     run.pack_snapshot = Some(PackSearchSnapshot {
+                        quality_feedback_absent: connection
+                            .feedback_events_fingerprint(&workspace_id)
+                            .is_ok_and(|fingerprint| fingerprint.count == 0),
                         workspace_id,
                         generation,
                     });
@@ -8316,6 +8466,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
     .await?;
     Ok(ContextSearchReport {
         report: run.report,
+        quality_scoring_policy: run.quality_scoring_policy,
         preloaded_memories,
         performance: run.performance,
     })
@@ -9271,7 +9422,10 @@ async fn run_search_inner_with_performance(
     search_checkpoint(cx)?;
     // Invalid configured ranking must not become default ranking, including
     // when a missing index would otherwise send callers into lexical fallback.
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
+    let (fusion_weights, scoring_config) =
+        resolved_search_configuration(&options.workspace_path)?;
+    let quality_scoring_policy = scoring_config.policy_hash();
+    let scoring_reference_time = options.as_of.unwrap_or_else(Utc::now);
     // Seeded/library callers may supply only paths. Use the same authoritative
     // file connection for binding and visibility instead of leaving this entry
     // point able to retrieve a copied index without checking its store.
@@ -9335,6 +9489,7 @@ async fn run_search_inner_with_performance(
         .unwrap_or_else(|| runtime_profile_for_workspace(&options.workspace_path));
     trace.record_elapsed("search::runtimeProfile", runtime_profile_start);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
+    let scoring_candidate_limit = quality_scoring_candidate_limit(effective_limit, options.speed);
 
     let global_memory_policy = if global_store_participates_in_scope(options.memory_scope) {
         crate::config::workspace_memory_policy(&options.workspace_path)
@@ -9497,6 +9652,7 @@ async fn run_search_inner_with_performance(
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         trace.record_elapsed("search::total", start);
         return Ok(SearchPerformanceRun {
+            quality_scoring_policy,
             audit_facts: None,
             pack_snapshot: None,
             report: SearchReport {
@@ -9540,8 +9696,8 @@ async fn run_search_inner_with_performance(
             cx,
             &index_dir,
             &options.query,
-            effective_limit as usize,
-            options.two_tier_config_for_limit(effective_limit),
+            scoring_candidate_limit as usize,
+            options.two_tier_config_for_limit(scoring_candidate_limit),
             options.explain,
             source_mode.applied,
             rerank_seed,
@@ -9595,7 +9751,7 @@ async fn run_search_inner_with_performance(
                 cx,
                 options,
                 &global_memory_policy,
-                effective_limit,
+                scoring_candidate_limit,
                 &mut degraded,
                 Some(&mut global_source_memories),
                 &mut trace,
@@ -9692,6 +9848,18 @@ async fn run_search_inner_with_performance(
             let mesh_start = Instant::now();
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             trace.record_elapsed("search::meshVisibility", mesh_start);
+            let quality_start = Instant::now();
+            apply_quality_scoring(
+                options,
+                &mut above_floor,
+                scoring_config,
+                scoring_reference_time,
+                read_connection,
+                preloaded_memories.as_deref(),
+                Some(&admitted_global_ids),
+                &mut degraded,
+            );
+            trace.record_elapsed("search::qualityScoring", quality_start);
             let truncate_start = Instant::now();
             truncate_hits_to_limit(&mut above_floor, effective_limit);
             trace.record_elapsed("search::truncate", truncate_start);
@@ -9847,6 +10015,7 @@ async fn run_search_inner_with_performance(
             search_checkpoint(cx)?;
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
+                quality_scoring_policy,
                 audit_facts,
                 pack_snapshot: None,
                 report: SearchReport {
@@ -9899,6 +10068,7 @@ async fn run_search_inner_with_performance(
 
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
+                quality_scoring_policy,
                 audit_facts: None,
                 pack_snapshot: None,
                 report: SearchReport {
@@ -10067,11 +10237,14 @@ async fn run_diag_search_in_snapshot(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
-    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path)?;
+    let (fusion_weights, scoring_config) =
+        resolved_search_configuration(&options.workspace_path)?;
+    let scoring_reference_time = options.as_of.unwrap_or_else(Utc::now);
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
+    let scoring_candidate_limit = quality_scoring_candidate_limit(effective_limit, options.speed);
 
     let source_generation = if let Some(connection) = read_connection {
         let workspace = crate::core::workspace::addressed_workspace_row(
@@ -10194,12 +10367,12 @@ async fn run_diag_search_in_snapshot(
         ));
     }
 
-    let config = options.two_tier_config_for_limit(effective_limit);
+    let config = options.two_tier_config_for_limit(scoring_candidate_limit);
     let mut diag_result = diag_search_sync(
         cx,
         &index_dir,
         &options.query,
-        effective_limit as usize,
+        scoring_candidate_limit as usize,
         config,
         options.explain,
         source_mode.applied,
@@ -10224,6 +10397,7 @@ async fn run_diag_search_in_snapshot(
     )?;
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
+    let raw_hits = rule_admission::admit_hits(options, raw_hits, &mut degraded, read_connection);
     let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
         if options.dedup_mode == SearchDedupMode::MutualInformation {
             dedupe_hits_on_mutual_information(raw_hits, options, read_connection)
@@ -10257,6 +10431,16 @@ async fn run_diag_search_in_snapshot(
     let (above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, read_connection);
     let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
+    apply_quality_scoring(
+        options,
+        &mut above_floor,
+        scoring_config,
+        scoring_reference_time,
+        read_connection,
+        None,
+        None,
+        &mut degraded,
+    );
     truncate_hits_to_limit(&mut above_floor, effective_limit);
     let kept = above_floor.len();
     let dropped = below_floor.len();
@@ -11769,6 +11953,262 @@ pub(crate) fn resolved_search_fusion_weights(
         })
 }
 
+fn resolved_search_configuration(
+    workspace_path: &Path,
+) -> Result<(SearchFusionWeights, SearchScoringConfig), SearchError> {
+    let config = crate::core::config_surface::merged_workspace_config(workspace_path)
+        .map_err(|error| {
+            SearchError::Configuration(format!("Failed to load search configuration: {error}"))
+        })?;
+    let scoring = SearchScoringConfig::from_config(&config.values.scoring)
+        .map_err(SearchError::Configuration)?;
+    Ok((SearchFusionWeights::from_config(&config.values.search), scoring))
+}
+
+pub(crate) fn resolved_search_scoring_config(
+    workspace_path: &Path,
+) -> Result<SearchScoringConfig, SearchError> {
+    resolved_search_configuration(workspace_path).map(|(_, scoring)| scoring)
+}
+
+pub(crate) fn quality_scoring_candidate_limit(limit: u32, speed: SpeedMode) -> u32 {
+    limit
+        .saturating_mul(4)
+        .max(u32::try_from(speed.candidate_limit()).unwrap_or(u32::MAX))
+        .min(4096)
+        .max(limit)
+}
+
+/// Apply domain policy only after live source, seal, scope and mesh admission.
+/// A missing observation is null plus a neutral term, never an observed zero
+/// harmful count or perfect confidence. Optional graph/affinity terms are not
+/// inferred from index metadata.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_quality_scoring(
+    options: &SearchOptions,
+    hits: &mut [SearchHit],
+    config: SearchScoringConfig,
+    reference_time: DateTime<Utc>,
+    read_connection: Option<&DbConnection>,
+    preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+    admitted_global_ids: Option<&BTreeSet<String>>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    let workspace_id = bound_search_workspace_id(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        read_connection,
+    );
+    // Own these IDs: borrowing from hits would overlap the later mutable pass.
+    let memory_ids: Vec<String> = hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("mem_"))
+        .map(|hit| hit.doc_id.clone())
+        .collect();
+    let memory_refs: Vec<&str> = memory_ids.iter().map(String::as_str).collect();
+    let mut unavailable = false;
+    // Local source identity wins collisions with separately admitted globals.
+    let local_memories = if memory_refs.is_empty() {
+        BTreeMap::new()
+    } else if let Some(connection) = read_connection {
+        match connection.get_memories_batch(&memory_refs) {
+            Ok(rows) => rows,
+            Err(_) => {
+                unavailable = true;
+                BTreeMap::new()
+            }
+        }
+    } else {
+        unavailable = true;
+        BTreeMap::new()
+    };
+    let local_ids: Vec<&str> = memory_refs
+        .iter()
+        .copied()
+        .filter(|id| {
+            local_memories
+                .get(*id)
+                .is_some_and(|memory| memory.workspace_id == workspace_id)
+        })
+        .collect();
+    let harmful_counts = if local_ids.is_empty() {
+        Some(BTreeMap::new())
+    } else if let Some(connection) = read_connection {
+        match connection.memory_harmful_feedback_counts_at(
+            &workspace_id,
+            &local_ids,
+            reference_time,
+        ) {
+            Ok(counts) => Some(counts),
+            Err(_) => {
+                unavailable = true;
+                None
+            }
+        }
+    } else {
+        unavailable = true;
+        None
+    };
+    let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
+    let policy = config.policy_hash();
+    for hit in hits.iter_mut() {
+        if let Some(object) = hit.metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+            object.remove(SEARCH_QUALITY_SCORING_KEY);
+            object.remove("qualityScoring");
+        }
+        let mut signals =
+            SearchScoringSignals::new(hit.relevance_score(), RetrievalMaturity::Semantic);
+        let mut created_at = None;
+        let mut confidence = None;
+        let mut utility = None;
+        let mut maturity = None;
+        let mut harmful_count = None;
+        let mut scope_match = None;
+        let entity_type;
+        if let Some(memory) = local_memories.get(&hit.doc_id).or_else(|| {
+            preloaded_memories.and_then(|memories| memories.get(&hit.doc_id))
+        }) {
+            entity_type = "memory";
+            created_at = parse_validity_timestamp(&memory.created_at);
+            confidence = memory.confidence.is_finite().then_some(memory.confidence);
+            utility = memory.utility.is_finite().then_some(memory.utility);
+            let parsed_maturity = match memory.level.as_str() {
+                "working" => Some(RetrievalMaturity::Working),
+                "episodic" => Some(RetrievalMaturity::Episodic),
+                "semantic" => Some(RetrievalMaturity::Semantic),
+                // A procedural memory's level does not prove a rule lifecycle.
+                _ => None,
+            };
+            if let Some(parsed) = parsed_maturity {
+                signals.maturity = parsed;
+                maturity = Some(memory.level.clone());
+            }
+            if local_ids.contains(hit.doc_id.as_str()) {
+                harmful_count = harmful_counts
+                    .as_ref()
+                    .and_then(|counts| counts.get(&hit.doc_id).copied());
+                scope_match = Some(true);
+            } else if admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)) {
+                // A workspace DB cannot observe a separate store's feedback.
+                scope_match = Some(options.memory_scope == MemoryScope::Global);
+            }
+        } else if rule_admission::is_rule_hit(hit) {
+            // admit_hits replaced this metadata from the native source row.
+            entity_type = "rule";
+            if let Some(metadata) = hit.metadata.as_ref() {
+                created_at =
+                    metadata_string(metadata, "created_at").and_then(parse_validity_timestamp);
+                confidence = quality_metadata_number(metadata, "confidence");
+                utility = quality_metadata_number(metadata, "utility");
+                let native_maturity = metadata_string(metadata, "maturity");
+                let parsed_maturity = native_maturity.and_then(|value| match value {
+                    "draft" | "candidate" => Some(RetrievalMaturity::ProceduralCandidate),
+                    "validated" => Some(RetrievalMaturity::ProceduralEstablished),
+                    "deprecated" => Some(RetrievalMaturity::ProceduralDeprecated),
+                    "superseded" => Some(RetrievalMaturity::ProceduralRetired),
+                    _ => None,
+                });
+                if let Some(parsed) = parsed_maturity {
+                    signals.maturity = parsed;
+                    maturity = native_maturity.map(str::to_owned);
+                }
+                // A present-day cumulative counter cannot establish past harm.
+                let counter_observed = options.as_of.is_none()
+                    || metadata_string(metadata, "updated_at")
+                        .and_then(parse_validity_timestamp)
+                        .is_some_and(|updated| updated <= reference_time);
+                if counter_observed {
+                    harmful_count = metadata_string(metadata, "negative_feedback_count")
+                        .and_then(|value| value.parse::<u32>().ok());
+                }
+                scope_match = metadata_string(metadata, "scope").map(|scope| {
+                    (scope == "global" && options.memory_scope == MemoryScope::Global)
+                        || (scope == "workspace"
+                            && metadata_string(metadata, "workspace_id")
+                                == Some(workspace_id.as_str()))
+                });
+            }
+        } else {
+            entity_type = "other";
+        }
+        let age_days = created_at.map(|created| {
+            (reference_time
+                .signed_duration_since(created)
+                .num_milliseconds()
+                .max(0) as f64
+                / 86_400_000.0) as f32
+        });
+        signals.age_days = age_days;
+        signals.confidence = confidence.unwrap_or(1.0);
+        signals.utility_score = utility.unwrap_or(1.0);
+        signals.harmful_count = harmful_count.unwrap_or(0);
+        signals.scope_match = scope_match.unwrap_or(false);
+        let components = SearchScoreComponents::from_signals(signals, config);
+        let scoring = serde_json::json!({
+            "schema": SEARCH_SCORING_POLICY_V1,
+            "policyHash": policy,
+            "entityType": entity_type,
+            "rankingBound": config.ranking_bound(),
+            "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "components": components,
+            "observedSignals": {
+                "recency": age_days.is_some(), "confidence": confidence.is_some(),
+                "utility": utility.is_some(), "maturity": maturity.is_some(),
+                "harmfulPenalty": harmful_count.is_some(), "scopeMatch": scope_match.is_some(),
+                "graphCentrality": false, "redundancy": false, "freshnessDrift": false,
+                "anchorMatch": false, "beadAffinity": false
+            },
+            "inputs": {
+                "ageDays": age_days, "confidence": confidence, "utility": utility,
+                "maturity": maturity, "harmfulCount": harmful_count, "scopeMatch": scope_match,
+                "graphCentrality": null, "redundancy": null, "freshnessDrift": null,
+                "anchorMatch": null, "beadAffinity": null
+            }
+        });
+        let metadata = hit.metadata.get_or_insert_with(|| serde_json::json!({}));
+        if !metadata.is_object() {
+            *metadata = serde_json::json!({});
+        }
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(SEARCH_QUALITY_SCORING_KEY.to_owned(), scoring);
+        }
+        if options.explain {
+            let mut explanation = ScoreExplanation::generate(hit);
+            if let Some(existing) = hit.explanation.as_ref() {
+                explanation.factors.extend(
+                    existing
+                        .factors
+                        .iter()
+                        .filter(|factor| factor.name == "mesh_trust_adjustment")
+                        .cloned(),
+                );
+            }
+            hit.explanation = Some(explanation);
+        }
+    }
+    if unavailable
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == "search_quality_signals_unavailable")
+    {
+        degraded.push(SearchDegradation {
+            code: "search_quality_signals_unavailable".to_owned(),
+            severity: "warning".to_owned(),
+            message: "Some authoritative quality signals could not be read; their ranking multipliers are neutral and marked unobserved.".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        });
+    }
+    sort_search_hits_by_score_order(hits);
+}
+
+fn quality_metadata_number(metadata: &serde_json::Value, key: &str) -> Option<f32> {
+    let value = metadata.get(key)?;
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())? as f32;
+    (number.is_finite() && (0.0..=1.0).contains(&number)).then_some(number)
+}
+
 /// Which scale the Frankensearch adapter's final score arrives on.
 ///
 /// Public only because it appears in [`search_hits_from_scored_results`]'s
@@ -11854,6 +12294,11 @@ fn search_hit_from_scored_result(
         metadata: result.metadata.map(|m| (*m).clone()),
         explanation: None,
     };
+    // Derived metadata cannot assert source-owned quality authority.
+    if let Some(object) = hit.metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+        object.remove(SEARCH_QUALITY_SCORING_KEY);
+        object.remove("qualityScoring");
+    }
     if explain {
         hit.explanation = Some(ScoreExplanation::generate(&hit));
     }
@@ -12373,6 +12818,14 @@ fn preload_returned_search_memories(
 /// native score breaks relevance ties within a score kind, preserving engine
 /// ordering where the projection clamps multiple values to the same endpoint.
 fn rerank_aware_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
+    if left.ranking_components_json().is_some() || right.ranking_components_json().is_some() {
+        return right
+            .ranking_score()
+            .total_cmp(&left.ranking_score())
+            .then_with(|| right.relevance_score().total_cmp(&left.relevance_score()))
+            .then_with(|| left.score_kind().cmp(right.score_kind()))
+            .then_with(|| right.score.total_cmp(&left.score));
+    }
     match (left.rerank_score, right.rerank_score) {
         (Some(left_rerank), Some(right_rerank)) => right_rerank.total_cmp(&left_rerank),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -18347,11 +18800,14 @@ mod tests {
                 Vec::new(),
                 false,
             ),
+            quality_scoring_policy: SearchScoringConfig::default().policy_hash(),
+            quality_reference_time: options.as_of,
             audit_facts: None,
             cached_local_embedder: None,
             snapshot: PackSearchSnapshot {
                 workspace_id: WORKSPACE.to_owned(),
                 generation: 0,
+                quality_feedback_absent: true,
             },
         };
         assert!(handoff.revalidate(&options, &connection).is_empty());

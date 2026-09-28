@@ -1,15 +1,21 @@
-//! Reference model for deterministic ee-owned retrieval multipliers.
+//! Deterministic ee-owned retrieval quality multipliers.
 //!
 //! Frankensearch owns candidate retrieval and fused base scores. This module
-//! defines the historical multiplier contract used by monotonicity tests, but
-//! its composite scorer has no production consumer. Live search passes fusion
-//! weights to Frankensearch; EE-specific trust policy and pack-selection hints
-//! are applied at their owning boundaries. Do not present this reference model
-//! as evidence that live ranking consumes these fields.
+//! applies quality policy to positively admitted source rows after retrieval.
+//! Raw engine relevance and calibration remain unchanged; the composite score
+//! drives final search ordering and context candidate selection.
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::models::MemoryAnchorFreshnessState;
+
+/// Active formula and candidate-pool policy. V1 requests four times the final
+/// limit, at least the speed-mode candidate budget, capped at 4096 additional
+/// candidates. Pack scores divide by the common maximum active multiplier.
+/// Unobserved optional signals remain neutral.
+pub const SEARCH_SCORING_POLICY_V1: &str = "ee.search.quality_scoring.v1";
 
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
@@ -56,6 +62,8 @@ pub struct SearchScoringConfig {
     pub harmful_penalty_per_hit: f32,
     pub harmful_penalty_floor: f32,
     pub scope_match_bonus: f32,
+    pub candidate_maturity_multiplier: f32,
+    pub established_maturity_multiplier: f32,
     pub graph_centrality_weight: f32,
     pub redundancy_lambda: f32,
     pub anchor_match_bias_cap: f32,
@@ -77,12 +85,82 @@ impl Default for SearchScoringConfig {
             harmful_penalty_per_hit: DEFAULT_HARMFUL_PENALTY_PER_HIT,
             harmful_penalty_floor: DEFAULT_HARMFUL_PENALTY_FLOOR,
             scope_match_bonus: DEFAULT_SCOPE_MATCH_BONUS,
+            candidate_maturity_multiplier: 0.5,
+            established_maturity_multiplier: 1.0,
             graph_centrality_weight: DEFAULT_GRAPH_CENTRALITY_WEIGHT,
             redundancy_lambda: DEFAULT_REDUNDANCY_LAMBDA,
             anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
             bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
             stale_anchor_penalty: DEFAULT_STALE_ANCHOR_PENALTY,
         }
+    }
+}
+
+impl SearchScoringConfig {
+    /// Resolve validated values from the actual merged request configuration.
+    pub fn from_config(config: &crate::config::ScoringConfig) -> Result<Self, String> {
+        config.validate().map_err(|error| error.to_string())?;
+        let defaults = Self::default();
+        fn resolved(value: Option<f64>, default: f32) -> f32 {
+            let value = value.map_or(default, |value| value as f32);
+            if value == 0.0 { 0.0 } else { value }
+        }
+        Ok(Self {
+            recency_tau_days: resolved(config.recency_tau_days, defaults.recency_tau_days),
+            confidence_floor: resolved(config.confidence_floor, defaults.confidence_floor),
+            utility_floor: resolved(config.utility_floor, defaults.utility_floor),
+            harmful_penalty_per_hit: resolved(
+                config.harmful_penalty_per_hit,
+                defaults.harmful_penalty_per_hit,
+            ),
+            harmful_penalty_floor: resolved(
+                config.harmful_penalty_floor,
+                defaults.harmful_penalty_floor,
+            ),
+            scope_match_bonus: resolved(config.scope_match_bonus, defaults.scope_match_bonus),
+            candidate_maturity_multiplier: resolved(
+                config.candidate_multiplier,
+                defaults.candidate_maturity_multiplier,
+            ),
+            established_maturity_multiplier: resolved(
+                config.established_multiplier,
+                defaults.established_maturity_multiplier,
+            ),
+            ..defaults
+        })
+    }
+
+    /// Common bound for every lane, including candidates with neutral signals.
+    #[must_use]
+    pub fn ranking_bound(self) -> f32 {
+        self.scope_match_bonus.max(1.0)
+            * self
+                .candidate_maturity_multiplier
+                .max(self.established_maturity_multiplier)
+                .max(1.0)
+    }
+
+    /// Identity of the active policy, binding exact resolved floating-point bits.
+    /// Inactive graph, redundancy and affinity knobs are deliberately excluded.
+    #[must_use]
+    pub fn policy_hash(self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SEARCH_SCORING_POLICY_V1.as_bytes());
+        for (name, value) in [
+            ("recency_tau_days", self.recency_tau_days),
+            ("confidence_floor", self.confidence_floor),
+            ("utility_floor", self.utility_floor),
+            ("harmful_penalty_per_hit", self.harmful_penalty_per_hit),
+            ("harmful_penalty_floor", self.harmful_penalty_floor),
+            ("scope_match_bonus", self.scope_match_bonus),
+            ("candidate_multiplier", self.candidate_maturity_multiplier),
+            ("established_multiplier", self.established_maturity_multiplier),
+        ] {
+            hasher.update(&(name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        format!("blake3:{}", hasher.finalize().to_hex())
     }
 }
 
@@ -416,7 +494,8 @@ impl SearchScoringSignals {
 }
 
 /// Component expansion for one final retrieval score.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchScoreComponents {
     pub base: f32,
     pub recency: f32,
@@ -447,7 +526,15 @@ impl SearchScoreComponents {
             1.0,
             finite_unit(signals.utility_score),
         );
-        let maturity = signals.maturity.multiplier();
+        let maturity = match signals.maturity {
+            RetrievalMaturity::ProceduralCandidate => {
+                finite_nonnegative(config.candidate_maturity_multiplier)
+            }
+            RetrievalMaturity::ProceduralEstablished => {
+                finite_nonnegative(config.established_maturity_multiplier)
+            }
+            maturity => maturity.multiplier(),
+        };
         let harmful_penalty = harmful_penalty(
             signals.harmful_count,
             config.harmful_penalty_per_hit,
@@ -596,8 +683,8 @@ pub fn final_score(signals: SearchScoringSignals, config: SearchScoringConfig) -
 /// The result is clamped to `[floor, 1.0]` (with `floor` itself clamped to the
 /// unit interval), so a drifted memory ranks down but never vanishes. Mirrors
 /// the standalone, deterministic shape of [`anchor_match_score`] /
-/// [`bead_affinity_score`]; the live ranking path multiplies it in once the
-/// scoring pipeline is wired into retrieval.
+/// [`bead_affinity_score`]. The current production policy leaves drift neutral
+/// until an authoritative anchor observation is supplied.
 /// Convert a configurable `stale_anchor_penalty` (the opt-in rank reduction for
 /// a drifted code anchor; clamped to `0.0..=1.0`) into the `floor` consumed by
 /// [`freshness_drift_multiplier`].
@@ -899,6 +986,8 @@ mod tests {
             harmful_penalty_per_hit: f32::NAN,
             harmful_penalty_floor: 0.2,
             scope_match_bonus: -3.0,
+            candidate_maturity_multiplier: 0.5,
+            established_maturity_multiplier: 1.0,
             graph_centrality_weight: f32::NAN,
             redundancy_lambda: 2.0,
             anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
@@ -964,6 +1053,8 @@ mod tests {
             harmful_penalty_per_hit: f32::NEG_INFINITY,
             harmful_penalty_floor: f32::INFINITY,
             scope_match_bonus: f32::INFINITY,
+            candidate_maturity_multiplier: 0.5,
+            established_maturity_multiplier: 1.0,
             graph_centrality_weight: f32::INFINITY,
             redundancy_lambda: f32::NEG_INFINITY,
             anchor_match_bias_cap: f32::NAN,

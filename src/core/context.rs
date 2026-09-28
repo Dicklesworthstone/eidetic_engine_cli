@@ -130,9 +130,9 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v8: bind the effective reference-time domain and miss cached responses
-/// written before pack-hash input v3 (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V8: &str = "ee.pack.l2_cache_key.v8";
+/// v9: bind the executed quality policy and scored candidates after retrieval,
+/// and miss responses written before pack-hash input v4 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V9: &str = "ee.pack.l2_cache_key.v9";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -2594,6 +2594,7 @@ pub fn explain_why_not(
         fast_embedder_override,
     ) {
         Ok(context_search) => {
+            request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
             search_preloaded_memories = context_search.preloaded_memories;
             context_search.report
         }
@@ -2621,19 +2622,13 @@ pub fn explain_why_not(
             &mut search_preloaded_memories,
         )?;
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let fallback_hits = lexical_memory_fallback_hits(
+        let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
-            &options.workspace_path,
-            &request.query,
-            request.candidate_pool,
-            options.include_tombstoned,
-            context_validity_reference_time(options, &effective_filters),
-            context_include_expired(options, &effective_filters),
-            context_include_future(options, &effective_filters),
-            context_include_stale(options, &effective_filters),
+            &search_options,
             global_memories,
             &mut degraded,
-        );
+        )?;
+        request.quality_scoring_policy = Some(quality_policy);
         search_report.results = fallback_hits;
         search_report.status = if search_report.results.is_empty() {
             SearchStatus::NoResults
@@ -3078,41 +3073,9 @@ async fn run_context_pack_with_performance_inner(
     // a profile lowers the configured ceiling — falsely flags healthy packs that used a
     // tiny fraction of the budget as degraded. See the post-assembly emission below.
 
-    let l2_cache_context = if options.output_options.cache_json_response
+    let l2_cache_eligible = options.output_options.cache_json_response
         && fast_embedder_override.is_none()
-        && search_provider.is_none()
-    {
-        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let l2_context = context_pack_l2_prepare(
-            options,
-            read_connection,
-            &request,
-            &effective_filters,
-            &runtime_profile,
-            output_redaction_enabled,
-            prepared_embed_backend,
-            &mut degraded,
-        );
-        if let Some(context) = &l2_context
-            && let Some(cached_run) = context_pack_l2_try_hit(
-                context,
-                command,
-                options,
-                &search_options,
-                read_connection,
-                &request,
-                total_start,
-                &mut trace,
-                &mut degraded,
-            )
-        {
-            control.check()?;
-            return Ok(cached_run);
-        }
-        l2_context
-    } else {
-        None
-    };
+        && search_provider.is_none();
 
     control.check()?;
     let search_start = Instant::now();
@@ -3125,6 +3088,7 @@ async fn run_context_pack_with_performance_inner(
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
         search_preloaded_memories = handoff.revalidate(&search_options, read_connection);
+        request.quality_scoring_policy = Some(handoff.quality_scoring_policy.clone());
         if let Some(connection) = &context_write_connection {
             handoff.record_audit(&search_options, connection);
         }
@@ -3149,6 +3113,7 @@ async fn run_context_pack_with_performance_inner(
         .await
         {
             Ok(context_search) => {
+                request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
                 search_preloaded_memories = context_search.preloaded_memories;
                 trace.record_search_subspans(context_search.performance);
                 context_search.report
@@ -3208,19 +3173,13 @@ async fn run_context_pack_with_performance_inner(
             &mut search_preloaded_memories,
         )?;
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let fallback_hits = lexical_memory_fallback_hits(
+        let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
-            &options.workspace_path,
-            &request.query,
-            request.candidate_pool,
-            options.include_tombstoned,
-            context_validity_reference_time(options, &effective_filters),
-            context_include_expired(options, &effective_filters),
-            context_include_future(options, &effective_filters),
-            context_include_stale(options, &effective_filters),
+            &search_options,
             global_memories,
             &mut degraded,
-        );
+        )?;
+        request.quality_scoring_policy = Some(quality_policy);
         let fallback_count = fallback_hits.len();
         push_degradation(
             &mut degraded,
@@ -3326,6 +3285,42 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
 
     request.task_paths = task_paths::normalize(&options.workspace_path, &options.task_paths)?;
+    // Quality policy is captured by actual retrieval, including empty results
+    // and daemon handoffs. Only now can a cache key bind the executed config.
+    // L2 reuses assembly/rendering; retrieval and source admission still run.
+    let l2_cache_context = if l2_cache_eligible {
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        let l2_context = context_pack_l2_prepare(
+            options,
+            read_connection,
+            &request,
+            &effective_filters,
+            &runtime_profile,
+            output_redaction_enabled,
+            prepared_embed_backend,
+            &search_report,
+            &mut degraded,
+        );
+        if let Some(context) = &l2_context
+            && let Some(cached_run) = context_pack_l2_try_hit(
+                context,
+                command,
+                options,
+                &search_options,
+                read_connection,
+                &request,
+                total_start,
+                &mut trace,
+                &mut degraded,
+            )
+        {
+            control.check()?;
+            return Ok(cached_run);
+        }
+        l2_context
+    } else {
+        None
+    };
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -4910,6 +4905,55 @@ fn context_severity_for_memory_drift_hint(
     hint: &MemoryDriftSelectionHint,
 ) -> ContextResponseSeverity {
     ContextResponseSeverity::parse_lossy(hint.severity.as_str())
+}
+
+/// Keep the degraded lexical path on the same quality policy as indexed and
+/// unpublished-source search. Score a bounded pool before the final limit so
+/// a healthier candidate can displace the first lexical match.
+fn quality_scored_lexical_memory_fallback_hits(
+    connection: &DbConnection,
+    options: &SearchOptions,
+    global_memories: Vec<StoredMemory>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<(Vec<SearchHit>, String), ContextPackError> {
+    let config = crate::core::search::resolved_search_scoring_config(&options.workspace_path)
+        .map_err(ContextPackError::Search)?;
+    let reference_time = options.as_of.unwrap_or_else(Utc::now);
+    let global_ids = global_memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect();
+    let preloaded = global_memories
+        .iter()
+        .map(|memory| (memory.id.clone(), memory.clone()))
+        .collect();
+    let mut hits = lexical_memory_fallback_hits(
+        connection,
+        &options.workspace_path,
+        &options.query,
+        crate::core::search::quality_scoring_candidate_limit(options.limit, options.speed),
+        options.include_tombstoned,
+        Some(reference_time),
+        options.include_expired,
+        options.include_future,
+        options.include_stale,
+        global_memories,
+        degraded,
+    );
+    let mut search_degraded = Vec::new();
+    crate::core::search::apply_quality_scoring(
+        options,
+        &mut hits,
+        config,
+        reference_time,
+        Some(connection),
+        Some(&preloaded),
+        Some(&global_ids),
+        &mut search_degraded,
+    );
+    push_search_degradations(degraded, &search_degraded);
+    hits.truncate(usize::try_from(options.limit).unwrap_or(usize::MAX));
+    Ok((hits, config.policy_hash()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7234,6 +7278,7 @@ fn context_pack_l2_prepare(
     runtime_profile: &RuntimeProfileReport,
     output_redaction_enabled: bool,
     embed_backend: EmbedBackend,
+    search_report: &SearchReport,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackL2Context> {
     if let Some(reason) = context_pack_l2_bypass_reason(options, filters) {
@@ -7352,6 +7397,7 @@ fn context_pack_l2_prepare(
             filters,
             runtime_profile,
             output_redaction_enabled,
+            search_report,
         ),
         personalization_generation,
     };
@@ -7971,8 +8017,12 @@ fn context_pack_l2_feature_flags_hash(
     filters: &crate::models::QueryFilters,
     runtime_profile: &RuntimeProfileReport,
     output_redaction_enabled: bool,
+    search_report: &SearchReport,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
+    // Feedback can change ranking without changing the memory row. Bind the
+    // actually scored candidate pool before reusing assembly.
+    hash_pack_quality_candidates(&mut hasher, &search_report.results);
     // Packs produced before the authority guard must never bypass it via L2.
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
     // Cached source-memory hydration predating native rule filters and
@@ -8079,6 +8129,28 @@ fn context_pack_l2_feature_flags_hash(
         options.coordination_stale_after_ms,
     );
     finalize_blake3(hasher)
+}
+
+fn hash_pack_quality_candidates(hasher: &mut blake3::Hasher, hits: &[SearchHit]) {
+    hash_labeled_count(hasher, "quality_candidate.count", hits.len());
+    for hit in hits {
+        hash_labeled_bytes(hasher, "quality_candidate.id", hit.doc_id.as_bytes());
+        hash_labeled_bytes(
+            hasher,
+            "quality_candidate.source",
+            hit.source.as_str().as_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            "quality_candidate.ranking_score",
+            &hit.ranking_score().to_bits().to_le_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            "quality_candidate.pack_relevance",
+            &hit.ranking_relevance_score().to_bits().to_le_bytes(),
+        );
+    }
 }
 
 fn context_pack_l2_cached_response_json(
@@ -8407,7 +8479,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V8.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V9.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -8430,6 +8502,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     );
     hash_labeled_bytes(&mut hasher, "query", input.request.query.as_bytes());
     hash_pack_reference_time(&mut hasher, input.request.reference_time);
+    hash_labeled_optional_bytes(
+        &mut hasher,
+        "quality_scoring_policy",
+        input.request.quality_scoring_policy.as_deref().map(str::as_bytes),
+    );
     hash_labeled_bytes(
         &mut hasher,
         "context_profile",
@@ -8693,7 +8770,7 @@ struct PackHashComponents {
     composite_hash: String,
 }
 
-/// The v3 pack hash (ADR 0087 §4, §7, §8).
+/// The v4 pack hash (ADR 0087 §4, §7, §8).
 ///
 /// Each component is its own blake3 hasher, opened with the input schema tag
 /// and the component name, over labeled, length-prefixed fields only
@@ -8763,6 +8840,13 @@ fn compute_pack_hash_components(
 
     let mut reference_time_hasher = pack_hash_component_hasher("reference_time");
     hash_pack_reference_time(&mut reference_time_hasher, request.reference_time);
+
+    let mut quality_scoring_hasher = pack_hash_component_hasher("quality_scoring");
+    hash_labeled_optional_bytes(
+        &mut quality_scoring_hasher,
+        "policy",
+        request.quality_scoring_policy.as_deref().map(str::as_bytes),
+    );
 
     let mut items_hasher = pack_hash_component_hasher("items");
     hash_labeled_u64(
@@ -8858,6 +8942,7 @@ fn compute_pack_hash_components(
     let digests = crate::pack::PackHashComponentDigests {
         request: finalize_blake3(request_hasher),
         reference_time: finalize_blake3(reference_time_hasher),
+        quality_scoring: finalize_blake3(quality_scoring_hasher),
         items: finalize_blake3(items_hasher),
         omitted: finalize_blake3(omitted_hasher),
         degraded: finalize_blake3(degraded_hasher),
@@ -8869,13 +8954,18 @@ fn compute_pack_hash_components(
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V3.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
     hash_labeled_bytes(
         &mut composite_hasher,
         "reference_time",
         digests.reference_time.as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "quality_scoring",
+        digests.quality_scoring.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "items", digests.items.as_bytes());
     if output_options.include_skipped {
@@ -8905,7 +8995,7 @@ fn compute_pack_hash_components(
     }
 }
 
-/// The degraded set the v3 pack hash binds (ADR 0087 §4): non-canonical
+/// The degraded set the v4 pack hash binds (ADR 0087 §4): non-canonical
 /// telemetry codes are dropped, the rest sorted by (code, severity, message,
 /// repair) with exact duplicates removed. Emission order and repetition are
 /// presentation, and timing is telemetry, so neither can fork `pack.hash`,
@@ -8934,7 +9024,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V3.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
@@ -11321,7 +11411,7 @@ fn personalized_pagerank_seed_map(
         if !candidate_ids.contains(&memory_id) {
             continue;
         }
-        let Some(weight) = positive_f32_score(hit.relevance_score()) else {
+        let Some(weight) = positive_f32_score(hit.ranking_score()) else {
             continue;
         };
         seed_map
@@ -13590,7 +13680,7 @@ fn collect_direct_evidence_pack_candidates(
         // already applies to an unconstructable provenance directly above, so
         // an unscorable hit is counted as a rejected admission rather than
         // admitted with an invented score.
-        let Ok(relevance) = UnitScore::parse(hit.relevance_score()) else {
+        let Ok(relevance) = UnitScore::parse(hit.ranking_relevance_score()) else {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
@@ -13600,7 +13690,7 @@ fn collect_direct_evidence_pack_candidates(
             "matched '{}' via {} (relevance {:.4}, utility 0.5000); selected live-admitted imported evidence {}",
             request.query,
             hit.source.as_str(),
-            hit.relevance_score(),
+            hit.ranking_relevance_score(),
             span.id
         );
         candidates.push(DirectEvidencePackCandidate {
@@ -14190,7 +14280,7 @@ fn diversity_key_for_memory(memory: &StoredMemory, tags: &[String]) -> String {
 }
 
 fn pack_candidate_relevance_from_search_hit(hit: &SearchHit) -> Option<UnitScore> {
-    unit_score(hit.relevance_score())
+    unit_score(hit.ranking_relevance_score())
 }
 
 fn unit_score(value: f32) -> Option<UnitScore> {

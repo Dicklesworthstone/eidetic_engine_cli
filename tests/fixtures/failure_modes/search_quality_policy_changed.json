@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_quality_policy_changed",
+  "introduced_by": {
+    "bead": "bd-6oqlx",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "The effective scoring configuration changes or becomes unreadable between validating a daemon handoff and revalidating its source rows. Cached candidates must not survive with a mismatched quality policy.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Change scoring.confidence_floor between handoff request matching and source revalidation."
+    ],
+    "invocation": "ee context qualityquasar --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_quality_policy_changed",
+    "severity": "warning",
+    "message_contains": [
+      "quality policy no longer matches",
+      "cached candidates were withheld"
+    ]
+  }
+}

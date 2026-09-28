@@ -10560,6 +10560,170 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn pack_quality_policy_changes_identity_without_changing_selected_items() -> TestResult {
+        use super::{ContextPackOutputOptions, compute_pack_hash_components};
+
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let options = ContextPackOutputOptions::default();
+        let hash = |request: &ContextRequest| {
+            compute_pack_hash_components(request, &draft, &[], options, None, None, None)
+        };
+        let direct = hash(&request);
+        let default_config = crate::search::SearchScoringConfig::default();
+        request.quality_scoring_policy = Some(default_config.policy_hash());
+        let scored = hash(&request);
+        let mut changed_config = default_config;
+        changed_config.harmful_penalty_per_hit = 0.2;
+        request.quality_scoring_policy = Some(changed_config.policy_hash());
+        let changed = hash(&request);
+        for other in [&direct, &changed] {
+            assert_eq!(
+                scored.digests.differing_components(&other.digests),
+                ["qualityScoring"]
+            );
+            assert_ne!(scored.composite_hash, other.composite_hash);
+        }
+        assert_eq!(scored.digests.items, direct.digests.items);
+        assert_eq!(scored.digests.rendered_text, direct.digests.rendered_text);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_quality_fallback_ranks_before_limit_and_tracks_feedback_snapshot() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            "[scoring]\nrecency_tau_days = 30.0\nconfidence_floor = 0.1\nutility_floor = 0.5\nharmful_penalty_per_hit = 0.1\nharmful_penalty_floor = 0.2\nscope_match_bonus = 1.2\ncandidate_multiplier = 0.5\nestablished_multiplier = 1.0\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("quality fallback".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let weaker = MemoryId::from_uuid(uuid::Uuid::from_u128(9601)).to_string();
+        let stronger = MemoryId::from_uuid(uuid::Uuid::from_u128(9602)).to_string();
+        for (id, confidence) in [(&weaker, 0.9), (&stronger, 1.0)] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "note".to_owned(),
+                        content: "Identical quality selection marker.".to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility: 1.0,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .execute_raw(
+                "UPDATE memories SET created_at = '2026-05-01T12:00:00Z', updated_at = '2026-05-01T12:00:00Z'",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "identical quality selection marker".to_owned(),
+            limit: 2,
+            speed: crate::search::SpeedMode::Default,
+            explain: true,
+            as_of: Some(query_time("2026-05-01T12:00:00Z")),
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+        let run = |options: &SearchOptions| {
+            super::quality_scored_lexical_memory_fallback_hits(
+                &connection, options, Vec::new(), &mut Vec::new(),
+            )
+            .map_err(|error| error.to_string())
+        };
+        let digest = |hits: &[SearchHit]| {
+            let mut hasher = blake3::Hasher::new();
+            super::hash_pack_quality_candidates(&mut hasher, hits);
+            hasher.finalize().to_hex().to_string()
+        };
+        let (before, policy) = run(&options)?;
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].doc_id, stronger);
+        assert_eq!(before[0].relevance_score(), before[1].relevance_score());
+        assert!(before[0].ranking_score() > before[1].ranking_score());
+        assert!(before[1].ranking_score() > 1.0);
+        let top = super::pack_candidate_relevance_from_search_hit(&before[0])
+            .ok_or_else(|| "strong candidate needs pack relevance".to_owned())?;
+        let second = super::pack_candidate_relevance_from_search_hit(&before[1])
+            .ok_or_else(|| "weaker candidate needs pack relevance".to_owned())?;
+        assert!(top.into_inner() > second.into_inner());
+        assert!(top.into_inner() <= 1.0);
+        options.limit = 1;
+        assert_eq!(run(&options)?.0[0].doc_id, stronger);
+
+        let feedback = |id: &str, created_at: &str| {
+            connection
+                .insert_feedback_event_for_recovery(&crate::db::StoredFeedbackEvent {
+                    id: id.to_owned(),
+                    workspace_id: workspace_id.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: stronger.clone(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "human_explicit".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    applied_at: None,
+                    created_at: created_at.to_owned(),
+                })
+                .map_err(|error| error.to_string())
+        };
+        feedback("fb_00000000000000000000000001", "2026-05-02T12:00:00Z")?;
+        options.limit = 2;
+        assert_eq!(digest(&before), digest(&run(&options)?.0));
+
+        feedback("fb_00000000000000000000000002", "2026-05-01T11:00:00Z")?;
+        feedback("fb_00000000000000000000000003", "2026-05-01T11:30:00Z")?;
+        let (after, after_policy) = run(&options)?;
+        assert_eq!(policy, after_policy);
+        assert_eq!(after[0].doc_id, weaker);
+        assert_ne!(digest(&before), digest(&after));
+        options.limit = 1;
+        assert_eq!(run(&options)?.0[0].doc_id, weaker);
+        Ok(())
+    }
+
+    #[test]
     fn pack_hash_v3_names_reference_time_without_changing_other_components() -> Result<(), String> {
         use super::{ContextPackOutputOptions, compute_pack_hash_components};
 
@@ -10594,8 +10758,8 @@ pub fn unrelated_context() -> u64 {{
             serde_json::from_str(&crate::output::render_context_response_json(&response))
                 .map_err(|error| error.to_string())?;
         let identity = &json["data"]["pack"]["snapshotIdentity"];
-        assert_eq!(identity["version"], 3);
-        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v3");
+        assert_eq!(identity["version"], 4);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v4");
         assert_eq!(
             identity["components"]["referenceTime"],
             first.digests.reference_time
@@ -10625,6 +10789,7 @@ pub fn unrelated_context() -> u64 {{
             [
                 ("request", l.request == r.request),
                 ("referenceTime", l.reference_time == r.reference_time),
+                ("qualityScoring", l.quality_scoring == r.quality_scoring),
                 ("items", l.items == r.items),
                 ("omitted", l.omitted == r.omitted),
                 ("degraded", l.degraded == r.degraded),
@@ -11016,6 +11181,11 @@ pub fn unrelated_context() -> u64 {{
             compute_pack_l2_cache_key(&base),
             "same canonical inputs must reproduce the same key"
         );
+
+        let mut scoring = base.clone();
+        scoring.request.quality_scoring_policy =
+            Some(crate::search::SearchScoringConfig::default().policy_hash());
+        assert_ne!(key, compute_pack_l2_cache_key(&scoring));
 
         let mut timed = base.clone();
         timed.request.reference_time = Some(query_time("2026-05-01T12:00:00.123456Z"));

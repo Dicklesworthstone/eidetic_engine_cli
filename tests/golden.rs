@@ -3066,6 +3066,8 @@ mod tests {
             .arg(&workspace)
             .arg("search")
             .arg("format before release")
+            .arg("--as-of")
+            .arg("2026-04-29T12:00:00Z")
             .arg("--database")
             .arg(&database)
             .arg("--index-dir")
@@ -3131,6 +3133,23 @@ mod tests {
             &value["data"]["results"][0]["memoryId"],
             &serde_json::json!("mem_00000000000000000000000001"),
             "search result canonical memory id",
+        )?;
+        let scoring = &value["data"]["results"][0]["metadata"]["qualityScoring"];
+        ensure_equal(
+            &scoring["schema"],
+            &serde_json::json!("ee.search.quality_scoring.v1"),
+            "search quality scoring is exposed in extensible metadata",
+        )?;
+        ensure_equal(
+            &scoring["referenceTime"],
+            &serde_json::json!("2026-04-29T12:00:00.000Z"),
+            "search quality scoring uses the fixed fixture clock",
+        )?;
+        ensure_json_number_close(
+            &scoring["components"]["finalScore"],
+            &serde_json::json!(0.9936),
+            0.000_001,
+            "observed confidence, utility and scope affect production ranking",
         )?;
         ensure_equal(
             &value["data"]["metrics"]["requestedLimit"],
@@ -3215,6 +3234,8 @@ mod tests {
             .arg("4000")
             .arg("--candidate-pool")
             .arg("10")
+            .arg("--as-of")
+            .arg("2026-04-29T12:00:00Z")
             .output()
             .map_err(|error| format!("failed to run ee context --json: {error}"))?;
 
@@ -3548,6 +3569,7 @@ mod tests {
             r#"{
               "version": "ee.query.v1",
               "query": {"text": "graph anchor release", "mode": "hybrid"},
+              "asOf": "2026-05-08T12:00:00Z",
               "graph": {
                 "seedMemories": ["mem_00000000000000000000000101"],
                 "traversal": "outbound",
@@ -3659,6 +3681,8 @@ mod tests {
             .arg("compact")
             .arg("--max-tokens")
             .arg("4000")
+            .arg("--as-of")
+            .arg("2026-04-29T12:00:00Z")
             .output()
             .map_err(|error| format!("failed to run ee context --format markdown: {error}"))?;
 

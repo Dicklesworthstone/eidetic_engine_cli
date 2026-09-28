@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_quality_signals_unavailable",
+  "introduced_by": {
+    "bead": "bd-6oqlx",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A positively admitted search candidate has a source memory row, but its owning feedback table cannot be queried. Quality ranking must keep the harmful multiplier neutral and report the count as unobserved.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Use the real DB fixture with feedback_events renamed after source admission."
+    ],
+    "invocation": "ee search qualityquasar --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_quality_signals_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "authoritative quality signals could not be read",
+      "neutral",
+      "unobserved"
+    ],
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

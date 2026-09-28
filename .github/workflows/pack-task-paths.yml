@@ -4,6 +4,10 @@ on:
     branches: [main]
     paths:
       - 'src/core/context*.rs'
+      - 'src/core/search*.rs'
+      - 'src/search/scoring.rs'
+      - 'src/config/*.rs'
+      - 'src/db/mod.rs'
       - 'src/cli/mod.rs'
       - 'src/cli/pack_stream_tests.rs'
       - 'src/cli/pack_diff_native_tests.rs'
@@ -74,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for group in cli::pack_stream_tests cli::pack_diff_native_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
+          for group in cli::pack_stream_tests cli::pack_diff_native_tests core::context::task_paths::tests core::context::rule_admission_tests core::context::tests::pack_quality core::search::quality_tests memory_harmful_feedback_counts scoring_config_ scoring_defaults_ scoring_fields_ scoring_set_ output::streaming::tests; do
             log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
             if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1

@@ -37,7 +37,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70).",
+        "why": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70). EE quality ranking 1.079996; original relevance and calibration are unchanged.",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -62,6 +62,54 @@
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
           "provenanceVerificationStatus": "unverified",
+          "qualityScoring": {
+            "schema": "ee.search.quality_scoring.v1",
+            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "entityType": "memory",
+            "rankingBound": 1.2,
+            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "components": {
+              "base": 1.0,
+              "recency": 0.99722606,
+              "confidence": 0.95,
+              "utility": 0.95,
+              "maturity": 1.0,
+              "harmfulPenalty": 1.0,
+              "scopeMatch": 1.2,
+              "graphCentrality": 1.0,
+              "redundancy": 1.0,
+              "anchorMatch": 0.0,
+              "beadAffinity": 0.0,
+              "freshnessDrift": 1.0,
+              "finalScore": 1.0799959
+            },
+            "observedSignals": {
+              "recency": true,
+              "confidence": true,
+              "utility": true,
+              "maturity": false,
+              "harmfulPenalty": true,
+              "scopeMatch": true,
+              "graphCentrality": false,
+              "redundancy": false,
+              "freshnessDrift": false,
+              "anchorMatch": false,
+              "beadAffinity": false
+            },
+            "inputs": {
+              "ageDays": 0.083333336,
+              "confidence": 0.95,
+              "utility": 0.9,
+              "maturity": null,
+              "harmfulCount": 0,
+              "scopeMatch": true,
+              "graphCentrality": null,
+              "redundancy": null,
+              "freshnessDrift": null,
+              "anchorMatch": null,
+              "beadAffinity": null
+            }
+          },
           "schema": "ee.search.document.v1",
           "scoreCalibration": {
             "schema": "ee.search.score_calibration.v1",
@@ -105,7 +153,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70).",
+          "summary": "Relevance 1.0000 from score 1.0000 (query_relative_pool_minmax) via lexical match (1.70). EE quality ranking 1.079996; original relevance and calibration are unchanged.",
           "factors": [
             {
               "name": "lexical",
@@ -113,6 +161,83 @@
               "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
               "formula": "score = minmax(lexical_score, returned_pool)"
+            },
+            {
+              "name": "base",
+              "value": 1.0,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.base",
+              "formula": "ranking_base = relevanceScore"
+            },
+            {
+              "name": "recency",
+              "value": 0.99722606,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.recency",
+              "formula": "exp(-age_days / recency_tau_days)"
+            },
+            {
+              "name": "confidence",
+              "value": 0.95,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.confidence",
+              "formula": "max(confidence_floor, confidence)"
+            },
+            {
+              "name": "utility",
+              "value": 0.95,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.utility",
+              "formula": "utility_floor + (1 - utility_floor) * utility"
+            },
+            {
+              "name": "maturity",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.maturity",
+              "formula": "configured multiplier for the observed native maturity"
+            },
+            {
+              "name": "harmfulPenalty",
+              "value": 1.0,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.harmfulPenalty",
+              "formula": "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)"
+            },
+            {
+              "name": "scopeMatch",
+              "value": 1.2,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.scopeMatch",
+              "formula": "scope_match_bonus for an authoritative exact workspace/scope match"
+            },
+            {
+              "name": "graphCentrality",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.graphCentrality",
+              "formula": "1 when graph centrality is not observed"
+            },
+            {
+              "name": "redundancy",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.redundancy",
+              "formula": "1 when redundancy is not observed"
+            },
+            {
+              "name": "freshnessDrift",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.freshnessDrift",
+              "formula": "1 when anchor freshness is not observed"
+            },
+            {
+              "name": "qualityRanking",
+              "value": 1.0799959,
+              "contribution": "final EE quality ranking; engine relevance is unchanged",
+              "sourceField": "metadata.qualityScoring.components.finalScore",
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
             }
           ]
         }
@@ -130,7 +255,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06).",
+        "why": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06). EE quality ranking 0.597392; original relevance and calibration are unchanged.",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -155,6 +280,54 @@
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
           "provenanceVerificationStatus": "unverified",
+          "qualityScoring": {
+            "schema": "ee.search.quality_scoring.v1",
+            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "entityType": "memory",
+            "rankingBound": 1.2,
+            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "components": {
+              "base": 0.6233764,
+              "recency": 0.9972492,
+              "confidence": 0.88,
+              "utility": 0.90999997,
+              "maturity": 1.0,
+              "harmfulPenalty": 1.0,
+              "scopeMatch": 1.2,
+              "graphCentrality": 1.0,
+              "redundancy": 1.0,
+              "anchorMatch": 0.0,
+              "beadAffinity": 0.0,
+              "freshnessDrift": 1.0,
+              "finalScore": 0.597392
+            },
+            "observedSignals": {
+              "recency": true,
+              "confidence": true,
+              "utility": true,
+              "maturity": false,
+              "harmfulPenalty": true,
+              "scopeMatch": true,
+              "graphCentrality": false,
+              "redundancy": false,
+              "freshnessDrift": false,
+              "anchorMatch": false,
+              "beadAffinity": false
+            },
+            "inputs": {
+              "ageDays": 0.08263889,
+              "confidence": 0.88,
+              "utility": 0.82,
+              "maturity": null,
+              "harmfulCount": 0,
+              "scopeMatch": true,
+              "graphCentrality": null,
+              "redundancy": null,
+              "freshnessDrift": null,
+              "anchorMatch": null,
+              "beadAffinity": null
+            }
+          },
           "schema": "ee.search.document.v1",
           "scoreCalibration": {
             "schema": "ee.search.score_calibration.v1",
@@ -198,7 +371,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06).",
+          "summary": "Relevance 0.6234 from score 0.6234 (query_relative_pool_minmax) via lexical match (1.06). EE quality ranking 0.597392; original relevance and calibration are unchanged.",
           "factors": [
             {
               "name": "lexical",
@@ -206,6 +379,83 @@
               "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
               "formula": "score = minmax(lexical_score, returned_pool)"
+            },
+            {
+              "name": "base",
+              "value": 0.6233764,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.base",
+              "formula": "ranking_base = relevanceScore"
+            },
+            {
+              "name": "recency",
+              "value": 0.9972492,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.recency",
+              "formula": "exp(-age_days / recency_tau_days)"
+            },
+            {
+              "name": "confidence",
+              "value": 0.88,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.confidence",
+              "formula": "max(confidence_floor, confidence)"
+            },
+            {
+              "name": "utility",
+              "value": 0.90999997,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.utility",
+              "formula": "utility_floor + (1 - utility_floor) * utility"
+            },
+            {
+              "name": "maturity",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.maturity",
+              "formula": "configured multiplier for the observed native maturity"
+            },
+            {
+              "name": "harmfulPenalty",
+              "value": 1.0,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.harmfulPenalty",
+              "formula": "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)"
+            },
+            {
+              "name": "scopeMatch",
+              "value": 1.2,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.scopeMatch",
+              "formula": "scope_match_bonus for an authoritative exact workspace/scope match"
+            },
+            {
+              "name": "graphCentrality",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.graphCentrality",
+              "formula": "1 when graph centrality is not observed"
+            },
+            {
+              "name": "redundancy",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.redundancy",
+              "formula": "1 when redundancy is not observed"
+            },
+            {
+              "name": "freshnessDrift",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.freshnessDrift",
+              "formula": "1 when anchor freshness is not observed"
+            },
+            {
+              "name": "qualityRanking",
+              "value": 0.597392,
+              "contribution": "final EE quality ranking; engine relevance is unchanged",
+              "sourceField": "metadata.qualityScoring.components.finalScore",
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
             }
           ]
         }
@@ -223,7 +473,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62).",
+        "why": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62). EE quality ranking 0.246339; original relevance and calibration are unchanged.",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -248,6 +498,54 @@
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
           "provenanceVerificationStatus": "unverified",
+          "qualityScoring": {
+            "schema": "ee.search.quality_scoring.v1",
+            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "entityType": "memory",
+            "rankingBound": 1.2,
+            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "components": {
+              "base": 0.36304024,
+              "recency": 0.99727225,
+              "confidence": 0.7,
+              "utility": 0.81,
+              "maturity": 1.0,
+              "harmfulPenalty": 1.0,
+              "scopeMatch": 1.2,
+              "graphCentrality": 1.0,
+              "redundancy": 1.0,
+              "anchorMatch": 0.0,
+              "beadAffinity": 0.0,
+              "freshnessDrift": 1.0,
+              "finalScore": 0.24633883
+            },
+            "observedSignals": {
+              "recency": true,
+              "confidence": true,
+              "utility": true,
+              "maturity": true,
+              "harmfulPenalty": true,
+              "scopeMatch": true,
+              "graphCentrality": false,
+              "redundancy": false,
+              "freshnessDrift": false,
+              "anchorMatch": false,
+              "beadAffinity": false
+            },
+            "inputs": {
+              "ageDays": 0.08194444,
+              "confidence": 0.7,
+              "utility": 0.62,
+              "maturity": "episodic",
+              "harmfulCount": 0,
+              "scopeMatch": true,
+              "graphCentrality": null,
+              "redundancy": null,
+              "freshnessDrift": null,
+              "anchorMatch": null,
+              "beadAffinity": null
+            }
+          },
           "schema": "ee.search.document.v1",
           "scoreCalibration": {
             "schema": "ee.search.score_calibration.v1",
@@ -291,7 +589,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62).",
+          "summary": "Relevance 0.3630 from score 0.3630 (query_relative_pool_minmax) via lexical match (0.62). EE quality ranking 0.246339; original relevance and calibration are unchanged.",
           "factors": [
             {
               "name": "lexical",
@@ -299,6 +597,83 @@
               "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
               "formula": "score = minmax(lexical_score, returned_pool)"
+            },
+            {
+              "name": "base",
+              "value": 0.36304024,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.base",
+              "formula": "ranking_base = relevanceScore"
+            },
+            {
+              "name": "recency",
+              "value": 0.99727225,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.recency",
+              "formula": "exp(-age_days / recency_tau_days)"
+            },
+            {
+              "name": "confidence",
+              "value": 0.7,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.confidence",
+              "formula": "max(confidence_floor, confidence)"
+            },
+            {
+              "name": "utility",
+              "value": 0.81,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.utility",
+              "formula": "utility_floor + (1 - utility_floor) * utility"
+            },
+            {
+              "name": "maturity",
+              "value": 1.0,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.maturity",
+              "formula": "configured multiplier for the observed native maturity"
+            },
+            {
+              "name": "harmfulPenalty",
+              "value": 1.0,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.harmfulPenalty",
+              "formula": "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)"
+            },
+            {
+              "name": "scopeMatch",
+              "value": 1.2,
+              "contribution": "source-derived quality ranking component",
+              "sourceField": "metadata.qualityScoring.components.scopeMatch",
+              "formula": "scope_match_bonus for an authoritative exact workspace/scope match"
+            },
+            {
+              "name": "graphCentrality",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.graphCentrality",
+              "formula": "1 when graph centrality is not observed"
+            },
+            {
+              "name": "redundancy",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.redundancy",
+              "formula": "1 when redundancy is not observed"
+            },
+            {
+              "name": "freshnessDrift",
+              "value": 1.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.freshnessDrift",
+              "formula": "1 when anchor freshness is not observed"
+            },
+            {
+              "name": "qualityRanking",
+              "value": 0.24633883,
+              "contribution": "final EE quality ranking; engine relevance is unchanged",
+              "sourceField": "metadata.qualityScoring.components.finalScore",
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
             }
           ]
         }

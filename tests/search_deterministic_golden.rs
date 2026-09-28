@@ -346,7 +346,8 @@ fn seed_tie_workspace(workspace: &Path, database: &Path) -> TestResult {
         .execute_raw(
             "UPDATE memories \
              SET created_at = '2026-04-30T12:00:00+00:00', \
-                 updated_at = '2026-04-30T12:00:00+00:00' \
+                 updated_at = '2026-04-30T12:00:00+00:00', \
+                 valid_from = '2026-04-30T12:00:00+00:00' \
              WHERE workspace_id = 'wsp_searchtie00000000000000001'",
         )
         .map_err(|error| error.to_string())?;
@@ -418,6 +419,8 @@ fn run_search_json_for_query(
         .arg(workspace)
         .arg("search")
         .arg(query)
+        .arg("--as-of")
+        .arg("2026-04-30T12:00:00Z")
         .arg("--database")
         .arg(database)
         .arg("--index-dir")
@@ -479,10 +482,10 @@ fn assert_result_scores_non_increasing(value: &JsonValue) -> TestResult {
         .ok_or_else(|| "search results must be an array".to_owned())?;
 
     for pair in results.windows(2) {
-        let left_score = pair[0]["score"]
+        let left_score = pair[0]["metadata"]["qualityScoring"]["components"]["finalScore"]
             .as_f64()
             .ok_or_else(|| "left tie-fixture search score must be numeric".to_owned())?;
-        let right_score = pair[1]["score"]
+        let right_score = pair[1]["metadata"]["qualityScoring"]["components"]["finalScore"]
             .as_f64()
             .ok_or_else(|| "right tie-fixture search score must be numeric".to_owned())?;
         ensure(
@@ -621,6 +624,40 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
     )?;
 
     for result in results {
+        let scoring = &result["metadata"]["qualityScoring"];
+        ensure_equal(
+            &scoring["schema"],
+            &serde_json::json!("ee.search.quality_scoring.v1"),
+            "search quality policy schema",
+        )?;
+        ensure_equal(
+            &scoring["referenceTime"],
+            &serde_json::json!("2026-04-30T12:00:00.000Z"),
+            "search quality reference clock",
+        )?;
+        ensure_equal(
+            &scoring["observedSignals"]["harmfulPenalty"],
+            &serde_json::json!(true),
+            "the empty authoritative feedback ledger is an observed zero",
+        )?;
+        ensure_json_number_close(
+            &scoring["components"]["base"],
+            &result["relevanceScore"],
+            0.000_001,
+            "quality ranking preserves original engine relevance",
+        )?;
+        ensure(
+            result["explanation"]["factors"]
+                .as_array()
+                .is_some_and(|factors| {
+                    factors.iter().any(|factor| {
+                        factor["name"] == "qualityRanking"
+                            && factor["sourceField"]
+                                == "metadata.qualityScoring.components.finalScore"
+                    })
+                }),
+            "quality ranking remains visible through the existing explanation contract",
+        )?;
         ensure(
             result["score"].is_number(),
             format!("search result score must be numeric: {result:?}"),
@@ -681,10 +718,10 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
     }
 
     for pair in results.windows(2) {
-        let left_score = pair[0]["score"]
+        let left_score = pair[0]["metadata"]["qualityScoring"]["components"]["finalScore"]
             .as_f64()
             .ok_or_else(|| "left search score must be numeric".to_owned())?;
-        let right_score = pair[1]["score"]
+        let right_score = pair[1]["metadata"]["qualityScoring"]["components"]["finalScore"]
             .as_f64()
             .ok_or_else(|| "right search score must be numeric".to_owned())?;
         ensure(
