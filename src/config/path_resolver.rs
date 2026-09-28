@@ -66,17 +66,24 @@ pub fn resolve_dir_windows_localappdata(
 
 /// Resolve the Unix XDG data directory for `app_name`.
 ///
-/// If `XDG_DATA_HOME` is present, this returns `$XDG_DATA_HOME/<app_name>`.
-/// Otherwise it falls back to `$HOME/.local/share/<app_name>`.
+/// If `XDG_DATA_HOME` is an absolute Unix path, this returns
+/// `$XDG_DATA_HOME/<app_name>`. Missing, empty, or relative values are ignored
+/// in favor of `$HOME/.local/share/<app_name>`, as required by XDG.
 ///
 /// # Errors
 ///
-/// Returns a typed error when neither `XDG_DATA_HOME` nor `HOME` is available.
+/// Returns a typed error when no absolute `XDG_DATA_HOME` and no non-empty
+/// `HOME` are available.
 pub fn resolve_dir_unix_xdg(
     env: &BTreeMap<String, OsString>,
     app_name: &str,
 ) -> Result<PathBuf, PlatformDataDirError> {
-    if let Some(root) = non_empty_env_path(env, "XDG_DATA_HOME") {
+    // Check Unix syntax, not host-native Path::is_absolute: this pure resolver
+    // is also tested from Windows. Inspect the ASCII separator without losing
+    // non-UTF-8 path bytes. A relative XDG root would depend on the launch CWD.
+    if let Some(root) = non_empty_env_path(env, "XDG_DATA_HOME")
+        .filter(|path| path.as_os_str().as_encoded_bytes().starts_with(b"/"))
+    {
         return Ok(root.join(app_name));
     }
     let home = required_env_path_with_repair(
@@ -203,6 +210,74 @@ mod tests {
         let home = resolve_dir_unix_xdg(&env(&[("HOME", "/home/agent")]), "ee")
             .map_err(|error| error.to_string())?;
         assert_eq!(home, PathBuf::from("/home/agent/.local/share/ee"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_dir_unix_xdg_ignores_relative_and_empty_roots() -> TestResult {
+        for root in [
+            "",
+            ".",
+            "cache",
+            "../cache",
+            "~/cache",
+            "$HOME/cache",
+            r"C:\cache",
+            r"\cache",
+        ] {
+            let resolved = resolve_dir_unix_xdg(
+                &env(&[("XDG_DATA_HOME", root), ("HOME", "/home/agent")]),
+                "ee",
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                resolved,
+                PathBuf::from("/home/agent/.local/share/ee"),
+                "invalid Unix XDG root must not be relative to the launch directory: {root:?}",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_dir_unix_xdg_relative_root_without_home_is_an_error() {
+        for root in ["", ".", "cache", "../cache", "~/cache", r"C:\cache"] {
+            let err = resolve_dir_unix_xdg(&env(&[("XDG_DATA_HOME", root)]), "ee")
+                .expect_err("an invalid XDG root must not bypass the missing-HOME error");
+            assert_eq!(err.code, UNIX_XDG_DATA_UNAVAILABLE_CODE);
+            assert_eq!(err.variable, "HOME");
+            assert!(err.repair.contains("XDG_DATA_HOME"));
+        }
+    }
+
+    #[test]
+    fn resolve_dir_unix_xdg_accepts_absolute_roots_without_home() -> TestResult {
+        for root in ["/", "/var/tmp/xdg", "/tmp/ee data", "/tmp/../xdg"] {
+            let resolved = resolve_dir_unix_xdg(&env(&[("XDG_DATA_HOME", root)]), "ee")
+                .map_err(|error| error.to_string())?;
+            assert_eq!(resolved, PathBuf::from(root).join("ee"));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_dir_unix_xdg_preserves_non_utf8_absolute_paths() -> TestResult {
+        use std::os::unix::ffi::OsStringExt;
+
+        let absolute = OsString::from_vec(b"/tmp/xdg-\xff".to_vec());
+        let mut vars = BTreeMap::new();
+        vars.insert("XDG_DATA_HOME".to_owned(), absolute.clone());
+        let resolved = resolve_dir_unix_xdg(&vars, "ee").map_err(|error| error.to_string())?;
+        assert_eq!(resolved, PathBuf::from(absolute).join("ee"));
+
+        vars.insert(
+            "XDG_DATA_HOME".to_owned(),
+            OsString::from_vec(b"xdg-\xff".to_vec()),
+        );
+        vars.insert("HOME".to_owned(), OsString::from("/home/agent"));
+        let resolved = resolve_dir_unix_xdg(&vars, "ee").map_err(|error| error.to_string())?;
+        assert_eq!(resolved, PathBuf::from("/home/agent/.local/share/ee"));
         Ok(())
     }
 
