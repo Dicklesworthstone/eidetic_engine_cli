@@ -57,6 +57,20 @@ pub(super) fn legacy_supersession_ids(memories: &[ValidatedMemory<'_>]) -> BTree
 pub(super) fn supersession_timestamps(
     memories: &[ValidatedMemory<'_>],
 ) -> Result<BTreeMap<String, String>, JsonlImportIssue> {
+    // Source aliases can be distinct yet resolve to the same durable ID: a
+    // native ID may equal a redacted record's deterministic remapping. Reject
+    // before building lineage/legacy sets or preparing any writes; otherwise
+    // one row's history markers and upsert identity can absorb another row.
+    let mut imported_ids = BTreeSet::new();
+    for memory in memories {
+        if !imported_ids.insert(memory.id.as_str()) {
+            return Err(JsonlImportIssue::error(
+                None,
+                "duplicate_imported_memory_id",
+                "distinct source records resolve to the same imported memory identity",
+            ));
+        }
+    }
     let by_id: BTreeMap<_, _> = memories
         .iter()
         .map(|memory| (memory.record.memory_id.as_str(), memory.record))
@@ -174,3 +188,178 @@ pub(super) fn supersession_timestamps(
 #[cfg(test)]
 #[path = "jsonl_revision_heads_tests.rs"]
 mod head_tests;
+
+#[cfg(test)]
+mod identity_tests {
+    use super::super::{
+        EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, JsonValue,
+        JsonlImportOptions, MemoryId, RedactionLevel, Uuid, import_jsonl_records,
+        import_memory_id, import_verified_backup_jsonl_records, json, parse_jsonl_source,
+        validate_memories,
+    };
+    use crate::models::WorkspaceId;
+
+    type TestResult = Result<(), String>;
+
+    fn text(rows: &[JsonValue]) -> String {
+        rows.iter()
+            .map(JsonValue::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn mixed_identity_rows(collide: bool) -> Result<Vec<JsonValue>, String> {
+        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(71)).to_string();
+        let mut rows = vec![
+            json!({
+                "schema": EXPORT_HEADER_SCHEMA_V1, "format_version": 1,
+                "created_at": "2026-05-05T00:00:00Z", "workspace_id": workspace,
+                "workspace_path": "/source", "export_scope": "memories",
+                "redaction_level": "paranoid", "record_count": 3,
+                "ee_version": "0.15.2", "export_id": "identity-collision-test",
+                "import_source": "native", "trust_level": "validated"
+            }),
+            json!({
+                "schema": EXPORT_MEMORY_SCHEMA_V1,
+                "memory_id": "redacted-source-alias", "logical_id": "redacted-source-alias",
+                "workspace_id": workspace, "level": "semantic", "kind": "note",
+                "content": "Historical deployment guidance retained for recovery.",
+                "created_at": "2026-05-01T00:00:00Z",
+                "valid_to": "2026-05-02T00:00:00Z",
+                "confidence": 0.8, "utility": 0.5, "importance": 0.6,
+                "trust_class": "agent_assertion", "redacted": true
+            }),
+            json!({
+                "schema": EXPORT_FOOTER_SCHEMA_V1, "export_id": "identity-collision-test",
+                "completed_at": "2026-05-05T00:00:00Z", "total_records": 4,
+                "memory_count": 2, "link_count": 0, "tag_count": 0,
+                "audit_count": 0, "artifact_count": 0, "success": true
+            }),
+        ];
+        // Use the real remapper, not a mock or a guessed ID encoding. A valid
+        // native ID can be chosen to equal an unrelated redacted row's output.
+        let parsed = parse_jsonl_source(&text(&rows));
+        let alias = parsed.memories.first().ok_or("missing alias record")?;
+        let recovered = import_memory_id(alias, RedactionLevel::Paranoid)
+            .map_err(|issue| issue.message)?;
+        let native_id = if collide {
+            recovered
+        } else {
+            MemoryId::from_uuid(Uuid::from_u128(72)).to_string()
+        };
+        rows.insert(
+            2,
+            json!({
+                "schema": EXPORT_MEMORY_SCHEMA_V1,
+                "memory_id": native_id, "logical_id": native_id,
+                "workspace_id": workspace, "level": "semantic", "kind": "note",
+                "content": "The current deployment guidance must remain a distinct row.",
+                "created_at": "2026-05-03T00:00:00Z", "superseded_at": null,
+                "confidence": 0.9, "utility": 0.7, "importance": 0.6,
+                "trust_class": "agent_assertion", "redacted": false
+            }),
+        );
+        Ok(rows)
+    }
+
+    #[test]
+    fn rejects_destination_collisions_before_legacy_headship_inference() -> TestResult {
+        for reverse in [false, true] {
+            let mut rows = mixed_identity_rows(true)?;
+            if reverse {
+                rows.swap(1, 2);
+            }
+            let parsed = parse_jsonl_source(&text(&rows));
+            assert!(!parsed.has_errors(), "distinct archive IDs pass parsing");
+            assert_ne!(parsed.memories[0].memory_id, parsed.memories[1].memory_id);
+            let mapped = parsed
+                .memories
+                .iter()
+                .map(|row| import_memory_id(row, RedactionLevel::Paranoid))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|issue| issue.message)?;
+            assert_eq!(mapped[0], mapped[1], "the actual destination collision");
+            let issues = validate_memories(&parsed)
+                .err()
+                .ok_or("colliding destination IDs were accepted")?;
+            let issue = issues
+                .iter()
+                .find(|issue| issue.code == "duplicate_imported_memory_id")
+                .ok_or("missing destination identity rejection")?;
+            for record in &parsed.memories {
+                assert!(!issue.message.contains(&record.memory_id));
+                assert!(!issue.message.contains(&record.content));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn collision_rejection_has_no_destination_effects_in_either_import_mode() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = directory.path().canonicalize().map_err(|error| error.to_string())?;
+        for reverse in [false, true] {
+            let mut rows = mixed_identity_rows(true)?;
+            if reverse {
+                rows.swap(1, 2);
+            }
+            let source = text(&rows);
+            for dry_run in [false, true] {
+                for backup in [false, true] {
+                    let case = format!("{reverse}-{dry_run}-{backup}");
+                    let options = JsonlImportOptions {
+                        workspace_path: root.join(format!("workspace-{case}")),
+                        database_path: Some(root.join(format!("database-{case}/ee.db"))),
+                        source_path: root.join(format!("source-{case}.jsonl")),
+                        dry_run,
+                    };
+                    std::fs::write(&options.source_path, &source)
+                        .map_err(|error| error.to_string())?;
+                    let report = if backup {
+                        import_verified_backup_jsonl_records(&options, None)
+                    } else {
+                        import_jsonl_records(&options)
+                    }
+                    .map_err(|error| error.to_string())?;
+                    assert_eq!(report.status, "rejected", "{case}: {:?}", report.issues);
+                    assert!(report.issues.iter().any(|issue| {
+                        issue.code == "duplicate_imported_memory_id"
+                    }));
+                    assert!(!options.workspace_path.exists(), "{case}");
+                    let database = options.database_path.as_ref().ok_or("database")?;
+                    assert!(!database.exists(), "{case}");
+                    assert!(!database.parent().ok_or("database parent")?.exists(), "{case}");
+                    assert_eq!(
+                        std::fs::read_to_string(&options.source_path)
+                            .map_err(|error| error.to_string())?,
+                        source
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_native_and_redacted_identities_preserve_explicit_headship() -> TestResult {
+        for reverse in [false, true] {
+            let mut rows = mixed_identity_rows(false)?;
+            if reverse {
+                rows.swap(1, 2);
+            }
+            let parsed = parse_jsonl_source(&text(&rows));
+            assert!(!parsed.has_errors());
+            let memories = validate_memories(&parsed).map_err(|issues| format!("{issues:?}"))?;
+            assert_eq!(memories.len(), 2);
+            assert_ne!(memories[0].id, memories[1].id);
+            let current = memories
+                .iter()
+                .find(|memory| memory.record.superseded_at == Some(None))
+                .ok_or("missing explicitly current revision")?;
+            assert!(current.supersession_known);
+            assert!(current.superseded_at.is_none());
+            assert!(!super::legacy_supersession_ids(&memories).contains(&current.id));
+        }
+        Ok(())
+    }
+}
