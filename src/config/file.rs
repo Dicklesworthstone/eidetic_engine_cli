@@ -56,6 +56,7 @@ pub struct ConfigFile {
     pub write: WriteConfig,
     pub cass: CassConfig,
     pub search: SearchConfig,
+    pub scoring: ScoringConfig,
     pub pack: PackConfig,
     pub task_lens: TaskLensConfig,
     pub handoff: HandoffConfig,
@@ -117,6 +118,7 @@ impl ConfigFile {
             write: WriteConfig::parse(&document)?,
             cass: CassConfig::parse(&document)?,
             search: SearchConfig::parse(&document)?,
+            scoring: ScoringConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
             task_lens: TaskLensConfig::parse(&document)?,
             handoff: HandoffConfig::parse(&document)?,
@@ -278,6 +280,92 @@ impl SearchConfig {
             )?,
             lexical_ram_tier: SearchLexicalRamTierConfig::parse(document)?,
         })
+    }
+}
+
+/// Operator controls for the retrieval signals observed by live search.
+/// Unobserved graph, redundancy, anchor, and bead signals have no config keys.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScoringConfig {
+    pub recency_tau_days: Option<f64>,
+    pub confidence_floor: Option<f64>,
+    pub utility_floor: Option<f64>,
+    pub harmful_penalty_per_hit: Option<f64>,
+    pub harmful_penalty_floor: Option<f64>,
+    pub scope_match_bonus: Option<f64>,
+    pub candidate_multiplier: Option<f64>,
+    pub established_multiplier: Option<f64>,
+}
+
+impl ScoringConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        let config = Self {
+            recency_tau_days: optional_float(document, "scoring", "recency_tau_days")?,
+            confidence_floor: optional_float(document, "scoring", "confidence_floor")?,
+            utility_floor: optional_float(document, "scoring", "utility_floor")?,
+            harmful_penalty_per_hit: optional_float(
+                document,
+                "scoring",
+                "harmful_penalty_per_hit",
+            )?,
+            harmful_penalty_floor: optional_float(document, "scoring", "harmful_penalty_floor")?,
+            scope_match_bonus: optional_float(document, "scoring", "scope_match_bonus")?,
+            candidate_multiplier: optional_float(document, "scoring", "candidate_multiplier")?,
+            established_multiplier: optional_float(document, "scoring", "established_multiplier")?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate both parsed files and programmatically supplied config layers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming any non-finite, out-of-range, or nonrepresentable
+    /// value before it can affect live ranking.
+    pub fn validate(&self) -> Result<(), ConfigParseError> {
+        for (key, value, minimum, maximum) in [
+            (
+                "recency_tau_days",
+                self.recency_tau_days,
+                0.0,
+                f64::from(f32::MAX),
+            ),
+            ("confidence_floor", self.confidence_floor, 0.0, 1.0),
+            ("utility_floor", self.utility_floor, 0.0, 1.0),
+            (
+                "harmful_penalty_per_hit",
+                self.harmful_penalty_per_hit,
+                0.0,
+                1.0,
+            ),
+            ("harmful_penalty_floor", self.harmful_penalty_floor, 0.0, 1.0),
+            ("scope_match_bonus", self.scope_match_bonus, 1.0, 2.0),
+            ("candidate_multiplier", self.candidate_multiplier, 0.0, 1.0),
+            (
+                "established_multiplier",
+                self.established_multiplier,
+                0.0,
+                2.0,
+            ),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            let invalid_recency = key == "recency_tau_days" && (value as f32) <= 0.0;
+            if !value.is_finite() || !(minimum..=maximum).contains(&value) || invalid_recency {
+                return Err(ConfigParseError::InvalidValue {
+                    key: key_name("scoring", key),
+                    value: value.to_string(),
+                    message: if key == "recency_tau_days" {
+                        "expected a positive finite number representable as f32".to_string()
+                    } else {
+                        format!("expected a finite number in {minimum}..={maximum}")
+                    },
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1541,6 +1629,7 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
             "write",
             "cass",
             "search",
+            "scoring",
             "pack",
             "task_lens",
             "handoff",
@@ -1594,6 +1683,16 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
         "search.lexical_ram_tier" => {
             ConfigKeyPolicy::Closed(&["enabled", "request_hugepages", "populate_on_open"])
         }
+        "scoring" => ConfigKeyPolicy::Closed(&[
+            "recency_tau_days",
+            "confidence_floor",
+            "utility_floor",
+            "harmful_penalty_per_hit",
+            "harmful_penalty_floor",
+            "scope_match_bonus",
+            "candidate_multiplier",
+            "established_multiplier",
+        ]),
         "pack" => ConfigKeyPolicy::Closed(&[
             "default_profile",
             "default_format",
@@ -4141,6 +4240,84 @@ source_mode = "random"
             &config.search.query_miss_retention_days,
             &Some(30),
             "query miss retention days",
+        )
+    }
+
+    #[test]
+    fn scoring_config_preserves_omissions_and_accepts_active_boundaries() -> TestResult {
+        let empty = ConfigFile::parse("").map_err(|error| error.to_string())?;
+        ensure_equal(
+            &empty.scoring,
+            &super::ScoringConfig::default(),
+            "unset scoring",
+        )?;
+        let parsed = ConfigFile::parse(
+            "[scoring]\nrecency_tau_days = 0.25\nconfidence_floor = 0\nutility_floor = 1\n\
+             harmful_penalty_per_hit = 0\nharmful_penalty_floor = 1\nscope_match_bonus = 2\n\
+             candidate_multiplier = 0\nestablished_multiplier = 2\n",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &parsed.scoring,
+            &super::ScoringConfig {
+                recency_tau_days: Some(0.25),
+                confidence_floor: Some(0.0),
+                utility_floor: Some(1.0),
+                harmful_penalty_per_hit: Some(0.0),
+                harmful_penalty_floor: Some(1.0),
+                scope_match_bonus: Some(2.0),
+                candidate_multiplier: Some(0.0),
+                established_multiplier: Some(2.0),
+            },
+            "active scoring boundaries",
+        )
+    }
+
+    #[test]
+    fn scoring_config_rejects_invalid_numbers_and_inactive_knobs() -> TestResult {
+        for key in [
+            "recency_tau_days",
+            "confidence_floor",
+            "utility_floor",
+            "harmful_penalty_per_hit",
+            "harmful_penalty_floor",
+            "scope_match_bonus",
+            "candidate_multiplier",
+            "established_multiplier",
+        ] {
+            for value in ["nan", "inf", "-inf", "-1", "\"0.5\"", "true"] {
+                let error = expect_config_error(&format!("[scoring]\n{key} = {value}\n"))?;
+                ensure(
+                    error.to_string().contains(&format!("scoring.{key}")),
+                    format!("validation must identify scoring.{key}: {error}"),
+                )?;
+            }
+        }
+        for (key, value) in [
+            ("recency_tau_days", "0"),
+            ("recency_tau_days", "1e-100"),
+            ("recency_tau_days", "1e100"),
+            ("confidence_floor", "1.01"),
+            ("utility_floor", "1.01"),
+            ("harmful_penalty_per_hit", "1.01"),
+            ("harmful_penalty_floor", "1.01"),
+            ("scope_match_bonus", "0.99"),
+            ("scope_match_bonus", "2.01"),
+            ("candidate_multiplier", "1.01"),
+            ("established_multiplier", "2.01"),
+            ("graph_centrality_weight", "0.1"),
+            ("redundancy_lambda", "0.7"),
+            ("proven_multiplier", "1.5"),
+        ] {
+            expect_config_error(&format!("[scoring]\n{key} = {value}\n"))?;
+        }
+        let invalid = super::ScoringConfig {
+            confidence_floor: Some(f64::NAN),
+            ..super::ScoringConfig::default()
+        };
+        ensure(
+            invalid.validate().is_err(),
+            "programmatic NaN must be rejected",
         )
     }
 

@@ -24,8 +24,8 @@ use super::file::{
     JournalConfig, LearnConfig, LearnDecayConfig, MemoryConfig, MeshCommandMode, MeshConfig,
     OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig,
     PrimerKeywordGate, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
-    RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
+    RuntimeConfig, ScoringConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode,
+    SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
     TrustConfig, WriteConfig,
 };
 use super::parse_env_bool_flag;
@@ -58,6 +58,14 @@ pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
 pub const SEARCH_GRAPH_WEIGHT_KEY: &str = "search.graph_weight";
+pub const SCORING_RECENCY_TAU_DAYS_KEY: &str = "scoring.recency_tau_days";
+pub const SCORING_CONFIDENCE_FLOOR_KEY: &str = "scoring.confidence_floor";
+pub const SCORING_UTILITY_FLOOR_KEY: &str = "scoring.utility_floor";
+pub const SCORING_HARMFUL_PENALTY_PER_HIT_KEY: &str = "scoring.harmful_penalty_per_hit";
+pub const SCORING_HARMFUL_PENALTY_FLOOR_KEY: &str = "scoring.harmful_penalty_floor";
+pub const SCORING_SCOPE_MATCH_BONUS_KEY: &str = "scoring.scope_match_bonus";
+pub const SCORING_CANDIDATE_MULTIPLIER_KEY: &str = "scoring.candidate_multiplier";
+pub const SCORING_ESTABLISHED_MULTIPLIER_KEY: &str = "scoring.established_multiplier";
 pub const SEARCH_RERANK_KEY: &str = "search.rerank";
 pub const SEARCH_RERANK_TOP_K_KEY: &str = "search.rerank_top_k";
 pub const SEARCH_QUERY_MISS_RETENTION_DAYS_KEY: &str = "search.query_miss_retention_days";
@@ -445,6 +453,42 @@ impl MergedConfig {
                 populate_on_open.to_string(),
                 self.source(SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY),
             ));
+        }
+
+        for (key, value) in [
+            (
+                SCORING_RECENCY_TAU_DAYS_KEY,
+                self.values.scoring.recency_tau_days,
+            ),
+            (
+                SCORING_CONFIDENCE_FLOOR_KEY,
+                self.values.scoring.confidence_floor,
+            ),
+            (SCORING_UTILITY_FLOOR_KEY, self.values.scoring.utility_floor),
+            (
+                SCORING_HARMFUL_PENALTY_PER_HIT_KEY,
+                self.values.scoring.harmful_penalty_per_hit,
+            ),
+            (
+                SCORING_HARMFUL_PENALTY_FLOOR_KEY,
+                self.values.scoring.harmful_penalty_floor,
+            ),
+            (
+                SCORING_SCOPE_MATCH_BONUS_KEY,
+                self.values.scoring.scope_match_bonus,
+            ),
+            (
+                SCORING_CANDIDATE_MULTIPLIER_KEY,
+                self.values.scoring.candidate_multiplier,
+            ),
+            (
+                SCORING_ESTABLISHED_MULTIPLIER_KEY,
+                self.values.scoring.established_multiplier,
+            ),
+        ] {
+            if let Some(value) = value {
+                entries.push(ConfigShowEntry::new(key, value.to_string(), self.source(key)));
+            }
         }
 
         // Pack section
@@ -1164,6 +1208,16 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 populate_on_open: Some(true),
             },
         },
+        scoring: ScoringConfig {
+            recency_tau_days: Some(30.0),
+            confidence_floor: Some(0.1),
+            utility_floor: Some(0.5),
+            harmful_penalty_per_hit: Some(0.1),
+            harmful_penalty_floor: Some(0.2),
+            scope_match_bonus: Some(1.2),
+            candidate_multiplier: Some(0.5),
+            established_multiplier: Some(1.0),
+        },
         pack: PackConfig {
             default_profile: Some("balanced".to_string()),
             default_format: Some("markdown".to_string()),
@@ -1472,6 +1526,7 @@ pub fn config_from_env(
             baseline_ledger_max_rows: None,
         },
         task_lens: TaskLensConfig::default(),
+        scoring: ScoringConfig::default(),
         curation: CurationConfig::default(),
         journal: JournalConfig {
             enabled: optional_env_bool_flag(env, EnvVar::JournalEnabled.name())?,
@@ -1843,6 +1898,80 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.defaults.search.lexical_ram_tier.populate_on_open,
                 ),
             },
+        },
+        scoring: ScoringConfig {
+            recency_tau_days: pick_field(
+                &mut sources,
+                SCORING_RECENCY_TAU_DAYS_KEY,
+                &layers.cli.scoring.recency_tau_days,
+                &layers.environment.scoring.recency_tau_days,
+                &layers.project.scoring.recency_tau_days,
+                &layers.user.scoring.recency_tau_days,
+                &layers.defaults.scoring.recency_tau_days,
+            ),
+            confidence_floor: pick_field(
+                &mut sources,
+                SCORING_CONFIDENCE_FLOOR_KEY,
+                &layers.cli.scoring.confidence_floor,
+                &layers.environment.scoring.confidence_floor,
+                &layers.project.scoring.confidence_floor,
+                &layers.user.scoring.confidence_floor,
+                &layers.defaults.scoring.confidence_floor,
+            ),
+            utility_floor: pick_field(
+                &mut sources,
+                SCORING_UTILITY_FLOOR_KEY,
+                &layers.cli.scoring.utility_floor,
+                &layers.environment.scoring.utility_floor,
+                &layers.project.scoring.utility_floor,
+                &layers.user.scoring.utility_floor,
+                &layers.defaults.scoring.utility_floor,
+            ),
+            harmful_penalty_per_hit: pick_field(
+                &mut sources,
+                SCORING_HARMFUL_PENALTY_PER_HIT_KEY,
+                &layers.cli.scoring.harmful_penalty_per_hit,
+                &layers.environment.scoring.harmful_penalty_per_hit,
+                &layers.project.scoring.harmful_penalty_per_hit,
+                &layers.user.scoring.harmful_penalty_per_hit,
+                &layers.defaults.scoring.harmful_penalty_per_hit,
+            ),
+            harmful_penalty_floor: pick_field(
+                &mut sources,
+                SCORING_HARMFUL_PENALTY_FLOOR_KEY,
+                &layers.cli.scoring.harmful_penalty_floor,
+                &layers.environment.scoring.harmful_penalty_floor,
+                &layers.project.scoring.harmful_penalty_floor,
+                &layers.user.scoring.harmful_penalty_floor,
+                &layers.defaults.scoring.harmful_penalty_floor,
+            ),
+            scope_match_bonus: pick_field(
+                &mut sources,
+                SCORING_SCOPE_MATCH_BONUS_KEY,
+                &layers.cli.scoring.scope_match_bonus,
+                &layers.environment.scoring.scope_match_bonus,
+                &layers.project.scoring.scope_match_bonus,
+                &layers.user.scoring.scope_match_bonus,
+                &layers.defaults.scoring.scope_match_bonus,
+            ),
+            candidate_multiplier: pick_field(
+                &mut sources,
+                SCORING_CANDIDATE_MULTIPLIER_KEY,
+                &layers.cli.scoring.candidate_multiplier,
+                &layers.environment.scoring.candidate_multiplier,
+                &layers.project.scoring.candidate_multiplier,
+                &layers.user.scoring.candidate_multiplier,
+                &layers.defaults.scoring.candidate_multiplier,
+            ),
+            established_multiplier: pick_field(
+                &mut sources,
+                SCORING_ESTABLISHED_MULTIPLIER_KEY,
+                &layers.cli.scoring.established_multiplier,
+                &layers.environment.scoring.established_multiplier,
+                &layers.project.scoring.established_multiplier,
+                &layers.user.scoring.established_multiplier,
+                &layers.defaults.scoring.established_multiplier,
+            ),
         },
         pack: PackConfig {
             default_profile: pick_field(
@@ -4398,5 +4527,90 @@ mod tests {
             }
         }
         ensure_equal(&report.entry_count, &report.entries.len(), "entry count")
+    }
+
+    #[test]
+    fn scoring_defaults_match_the_live_contract_and_are_visible() -> TestResult {
+        let defaults = built_in_config(&expander()).map_err(|error| error.to_string())?;
+        let expected = ConfigFile::parse(
+            "[scoring]\nrecency_tau_days = 30\nconfidence_floor = 0.1\nutility_floor = 0.5\n\
+             harmful_penalty_per_hit = 0.1\nharmful_penalty_floor = 0.2\nscope_match_bonus = 1.2\n\
+             candidate_multiplier = 0.5\nestablished_multiplier = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(&defaults.scoring, &expected.scoring, "scoring defaults")?;
+        let merged = merge_config(&ConfigLayers::with_defaults(defaults));
+        let report = merged.to_show_report();
+        let entries = report
+            .entries
+            .iter()
+            .filter(|entry| entry.key.starts_with("scoring."))
+            .collect::<Vec<_>>();
+        ensure_equal(&entries.len(), &8, "all active scoring knobs must be shown")?;
+        for entry in entries {
+            ensure_equal(
+                &merged.source(entry.key),
+                &Some(ConfigValueSource::Default),
+                entry.key,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoring_fields_merge_independently_through_all_five_layers() -> TestResult {
+        for key in [
+            "recency_tau_days",
+            "confidence_floor",
+            "utility_floor",
+            "harmful_penalty_per_hit",
+            "harmful_penalty_floor",
+            "scope_match_bonus",
+            "candidate_multiplier",
+            "established_multiplier",
+        ] {
+            let values = if key == "scope_match_bonus" {
+                ["1.1", "1.2", "1.3", "1.4", "1.5"]
+            } else {
+                ["0.1", "0.2", "0.3", "0.4", "0.5"]
+            };
+            let layer = |value: &str| {
+                ConfigFile::parse(&format!("[scoring]\n{key} = {value}\n"))
+                    .map_err(|error| error.to_string())
+            };
+            let mut layers = ConfigLayers {
+                defaults: layer(values[0])?,
+                user: layer(values[1])?,
+                project: layer(values[2])?,
+                environment: layer(values[3])?,
+                cli: layer(values[4])?,
+            };
+            for (index, source) in [
+                (4, ConfigValueSource::Cli),
+                (3, ConfigValueSource::Environment),
+                (2, ConfigValueSource::Project),
+                (1, ConfigValueSource::User),
+                (0, ConfigValueSource::Default),
+            ] {
+                let merged = merge_config(&layers);
+                let report = merged.to_show_report();
+                let full_key = format!("scoring.{key}");
+                let entry = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.key == full_key)
+                    .ok_or_else(|| format!("missing {full_key}"))?;
+                ensure_equal(&entry.value.as_str(), &values[index], &full_key)?;
+                ensure_equal(&merged.source(&full_key), &Some(source), &full_key)?;
+                match source {
+                    ConfigValueSource::Cli => layers.cli = ConfigFile::default(),
+                    ConfigValueSource::Environment => layers.environment = ConfigFile::default(),
+                    ConfigValueSource::Project => layers.project = ConfigFile::default(),
+                    ConfigValueSource::User => layers.user = ConfigFile::default(),
+                    ConfigValueSource::Default => {}
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -30,6 +30,10 @@ use crate::config::{
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
     GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,
     PACK_CANDIDATE_POOL_KEY, PathExpander, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY,
+    SCORING_CANDIDATE_MULTIPLIER_KEY, SCORING_CONFIDENCE_FLOOR_KEY,
+    SCORING_ESTABLISHED_MULTIPLIER_KEY, SCORING_HARMFUL_PENALTY_FLOOR_KEY,
+    SCORING_HARMFUL_PENALTY_PER_HIT_KEY, SCORING_RECENCY_TAU_DAYS_KEY,
+    SCORING_SCOPE_MATCH_BONUS_KEY, SCORING_UTILITY_FLOOR_KEY,
     SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
     SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
 };
@@ -806,6 +810,7 @@ fn ensure_no_config_symlink_components(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphValueKind {
     Bool,
+    ScoringFloat,
     UnitFloat,
     PositiveFloat,
     NonNegativeFloat,
@@ -827,6 +832,46 @@ struct GraphKeySpec {
 
 fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
     match key {
+        SCORING_RECENCY_TAU_DAYS_KEY => Some(GraphKeySpec {
+            key: SCORING_RECENCY_TAU_DAYS_KEY,
+            path: &["scoring", "recency_tau_days"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_CONFIDENCE_FLOOR_KEY => Some(GraphKeySpec {
+            key: SCORING_CONFIDENCE_FLOOR_KEY,
+            path: &["scoring", "confidence_floor"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_UTILITY_FLOOR_KEY => Some(GraphKeySpec {
+            key: SCORING_UTILITY_FLOOR_KEY,
+            path: &["scoring", "utility_floor"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_HARMFUL_PENALTY_PER_HIT_KEY => Some(GraphKeySpec {
+            key: SCORING_HARMFUL_PENALTY_PER_HIT_KEY,
+            path: &["scoring", "harmful_penalty_per_hit"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_HARMFUL_PENALTY_FLOOR_KEY => Some(GraphKeySpec {
+            key: SCORING_HARMFUL_PENALTY_FLOOR_KEY,
+            path: &["scoring", "harmful_penalty_floor"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_SCOPE_MATCH_BONUS_KEY => Some(GraphKeySpec {
+            key: SCORING_SCOPE_MATCH_BONUS_KEY,
+            path: &["scoring", "scope_match_bonus"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_CANDIDATE_MULTIPLIER_KEY => Some(GraphKeySpec {
+            key: SCORING_CANDIDATE_MULTIPLIER_KEY,
+            path: &["scoring", "candidate_multiplier"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
+        SCORING_ESTABLISHED_MULTIPLIER_KEY => Some(GraphKeySpec {
+            key: SCORING_ESTABLISHED_MULTIPLIER_KEY,
+            path: &["scoring", "established_multiplier"],
+            kind: GraphValueKind::ScoringFloat,
+        }),
         PACK_CANDIDATE_POOL_KEY => Some(GraphKeySpec {
             key: PACK_CANDIDATE_POOL_KEY,
             path: &["pack", "candidate_pool"],
@@ -1033,6 +1078,20 @@ impl TomlScalar {
 
 fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, ConfigSurfaceError> {
     match spec.kind {
+        GraphValueKind::ScoringFloat => {
+            let expected = match spec.key {
+                SCORING_RECENCY_TAU_DAYS_KEY => "a positive finite number representable as f32",
+                SCORING_SCOPE_MATCH_BONUS_KEY => "a finite number in the range 1.0..=2.0",
+                SCORING_ESTABLISHED_MULTIPLIER_KEY => "a finite number in the range 0.0..=2.0",
+                _ => "a finite number in the range 0.0..=1.0",
+            };
+            let value = parse_finite_float(spec, raw, expected)?;
+            // Reuse the file parser's authoritative bounds. Only the parsed
+            // numeric value enters TOML; raw input cannot inject another key.
+            ConfigFile::parse(&format!("{} = {}\n", spec.key, toml_edit::value(value)))
+                .map_err(|_| invalid_value(spec, raw, expected))?;
+            Ok(TomlScalar::Float(value))
+        }
         GraphValueKind::Bool => match raw {
             "true" => Ok(TomlScalar::Bool(true)),
             "false" => Ok(TomlScalar::Bool(false)),
@@ -1598,6 +1657,89 @@ cache_results = 120
                 return Err(format!("{key}: unexpected source {}", observed.source));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn scoring_set_get_show_preserves_dry_run_idempotence_and_unrelated_config() -> TestResult {
+        let temp = workspace()?;
+        let options = options(temp.path());
+        let path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(&path, "# Keep this comment\n[search]\nrerank = \"off\"\n")
+            .map_err(|error| error.to_string())?;
+        for (key, value) in [
+            ("scoring.recency_tau_days", "90"),
+            ("scoring.confidence_floor", "0.25"),
+            ("scoring.utility_floor", "0.75"),
+            ("scoring.harmful_penalty_per_hit", "0.3"),
+            ("scoring.harmful_penalty_floor", "0.4"),
+            ("scoring.scope_match_bonus", "1.5"),
+            ("scoring.candidate_multiplier", "0.75"),
+            ("scoring.established_multiplier", "1.25"),
+        ] {
+            let before = fs::read(&path).map_err(|error| error.to_string())?;
+            let dry = set_config(&options, key, value, true)
+                .map_err(|error| format!("dry-run {key}: {error}"))?;
+            if !dry.would_write || dry.applied || fs::read(&path).ok().as_ref() != Some(&before) {
+                return Err(format!("dry-run changed config or lost its plan for {key}"));
+            }
+            let applied = set_config(&options, key, value, false)
+                .map_err(|error| format!("set {key}: {error}"))?;
+            let repeated = set_config(&options, key, value, false)
+                .map_err(|error| format!("repeat {key}: {error}"))?;
+            if !applied.applied || repeated.applied || repeated.would_write {
+                return Err(format!("set must apply once and then be idempotent for {key}"));
+            }
+            let observed = get_config(&options, key).map_err(|error| error.to_string())?;
+            if observed.value != value || observed.source != "project" {
+                return Err(format!("set/get mismatch for {key}: {observed:?}"));
+            }
+        }
+        let shown = show_config(&options, Some("scoring.*"))
+            .map_err(|error| error.to_string())?;
+        if shown.entries.len() != 8 || shown.entries.iter().any(|entry| entry.source != "project") {
+            return Err(format!("scoring show must expose all eight project settings: {shown:?}"));
+        }
+        let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        if !contents.contains("# Keep this comment") || !contents.contains("rerank = \"off\"") {
+            return Err("scoring set changed unrelated configuration".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoring_set_reuses_parser_bounds_and_rejects_before_any_write() -> TestResult {
+        let temp = workspace()?;
+        let options = options(temp.path());
+        for (key, value) in [
+            ("scoring.recency_tau_days", "0"),
+            ("scoring.recency_tau_days", "1e-100"),
+            ("scoring.recency_tau_days", "1e100"),
+            ("scoring.confidence_floor", "NaN"),
+            ("scoring.utility_floor", "inf"),
+            ("scoring.harmful_penalty_per_hit", "-0.1"),
+            ("scoring.harmful_penalty_floor", "1.1"),
+            ("scoring.scope_match_bonus", "0.9"),
+            ("scoring.scope_match_bonus", "2.1"),
+            ("scoring.candidate_multiplier", "1.1"),
+            ("scoring.established_multiplier", "2.1"),
+            ("scoring.confidence_floor", "0.5\n[search]\nrerank = \"off\""),
+        ] {
+            if !matches!(
+                set_config(&options, key, value, false),
+                Err(super::ConfigSurfaceError::InvalidValue { .. })
+            ) {
+                return Err(format!("{key}={value} must fail numeric validation"));
+            }
+            if temp.path().join(".ee").exists() {
+                return Err(format!("invalid scoring value created config state for {key}"));
+            }
+        }
+        // This is a valid f32 time constant but exceeds TOML's integer range.
+        // Validation must serialize it as a float, without accidentally rejecting it.
+        set_config(&options, "scoring.recency_tau_days", "1e30", true)
+            .map_err(|error| format!("large finite tau must remain valid: {error}"))?;
         Ok(())
     }
 

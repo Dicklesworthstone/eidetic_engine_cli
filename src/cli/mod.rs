@@ -28593,15 +28593,15 @@ fn append_list(out: &mut String, indent: &str, label: &str, values: &[String], e
 fn config_surface_error_to_domain(error: ConfigSurfaceError) -> DomainError {
     match error {
         // bd-p7wjm: `set` genuinely supports a narrow typed surface, so
-        // "unknown" is honest here. The old repair hint was not wrong about
-        // `graph.*` being settable -- it is, 26 of the 34 writable keys --
-        // but it answered a question nobody asked: a user who mistyped
+        // "unknown" is honest here. The old repair hint answered a question
+        // nobody asked: a user who mistyped
         // `cache.pack_l2.enabled` was told to go list graph keys.
         ConfigSurfaceError::UnknownKey { key } => DomainError::Configuration {
             message: format!("`{key}` is not a config key that `ee config set` can write."),
             repair: Some(
-                "`ee config set` writes the 34 keys it can type-check (`graph.*`, `search.*`, \
-                 `memory.*`); run `ee config show --json` to see every key with a value, and \
+                "`ee config set` writes supported typed keys in `graph.*`, `search.*`, \
+                 `scoring.*`, `memory.*`, and `pack.candidate_pool`; run `ee config show --json` \
+                 to see every key with a value, and \
                  set anything else directly in `.ee/config.toml`."
                     .into(),
             ),

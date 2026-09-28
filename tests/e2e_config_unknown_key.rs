@@ -347,6 +347,78 @@ fn config_set_unknown_key_returns_configuration_error_before_write() -> TestResu
 }
 
 #[test]
+fn scoring_config_cli_dry_run_set_get_show_and_invalid_value() -> TestResult {
+    let workspace = unique_workspace("scoring-round-trip")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
+    init_workspace(workspace_arg)?;
+    let config_path = workspace.join(".ee").join("config.toml");
+    let original = fs::read(&config_path).ok();
+    for (label, command) in [
+        (
+            "dry-run",
+            vec!["set", "scoring.confidence_floor", "0.35", "--dry-run"],
+        ),
+        ("set", vec!["set", "scoring.confidence_floor", "0.35"]),
+        ("get", vec!["get", "scoring.confidence_floor"]),
+        ("show", vec!["show", "scoring.*"]),
+    ] {
+        let mut arguments = vec!["--workspace", workspace_arg, "--json", "config"];
+        arguments.extend(command);
+        let output = run_ee(&arguments)?;
+        ensure(
+            output.status.success(),
+            format!(
+                "scoring config {label} failed; exit: {:?}; stdout: {}; stderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("scoring {label} stdout must contain only JSON: {error}"))?;
+        let data = &parsed["data"];
+        if label == "show" {
+            let entries = data["entries"].as_array().ok_or("config show entries missing")?;
+            ensure(entries.len() == 8, "config show must list the eight active scoring knobs")?;
+            ensure(
+                entries.iter().any(|entry| {
+                    entry["key"] == "scoring.confidence_floor"
+                        && entry["value"] == "0.35"
+                        && entry["source"] == "project"
+                }),
+                format!("config show lost the effective scoring override: {parsed}"),
+            )?;
+        } else {
+            ensure(
+                data["key"] == "scoring.confidence_floor" && data["value"] == "0.35",
+                format!("scoring {label} lost the requested setting: {parsed}"),
+            )?;
+        }
+        if label == "dry-run" {
+            ensure(
+                fs::read(&config_path).ok() == original && data["applied"] == false,
+                "scoring dry-run must preserve configuration bytes",
+            )?;
+        }
+    }
+    let before_invalid = fs::read(&config_path).map_err(|error| error.to_string())?;
+    let rejected = run_ee(&[
+        "--workspace", workspace_arg, "--json", "config", "set",
+        "scoring.confidence_floor", "1.1",
+    ])?;
+    ensure(!rejected.status.success(), "out-of-range scoring value must fail")?;
+    let error: Value = serde_json::from_slice(&rejected.stdout)
+        .map_err(|error| format!("rejected scoring value must emit only JSON: {error}"))?;
+    ensure(
+        error["error"]["code"] == "configuration"
+            && fs::read(&config_path).ok().as_ref() == Some(&before_invalid),
+        "rejected scoring value must preserve configuration bytes and report configuration error",
+    )
+}
+
+#[test]
 fn config_show_rejects_unknown_task_lens_override_key() -> TestResult {
     let workspace_arg = workspace_with_task_lens_key_typo("show-file-typo")?;
     let output = run_ee(&[
