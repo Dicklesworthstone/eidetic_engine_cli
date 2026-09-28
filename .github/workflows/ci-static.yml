@@ -420,3 +420,83 @@ jobs:
 
       - name: Clippy (all targets, warnings are errors)
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  # bd-n1nyu. Until this job existed, NOTHING in this repository compiled for
+  # Windows: CI Static is otherwise cargo-free, ci.yml is disabled_manually,
+  # every RCH worker is Linux, and scripts/verify.sh compiles for the host triple
+  # only. The single x86_64-pc-windows-msvc compile in the project was one a human
+  # ran by hand, once, at release time.
+  #
+  # That gap is not hypothetical. bd-ajl2b sat on main for three days: an insert
+  # in edeef7838 landed between a `#[cfg(unix)]` and the function it gated, which
+  # made the whole flock write-lock path unconditional and broke the Windows build
+  # with nine name-resolution errors. It was found only because a release build
+  # happened to run.
+  #
+  # POSITIVE CONTROL, run before this job was written, so it is not decoration:
+  # replanting that exact defect in the published v0.16.0 source makes this same
+  # command exit 101 with the bd-ajl2b error family (FlockGateWaitState,
+  # FlockOperation, flock, advance_flock_gate_epoch, observe_flock_gate_epoch,
+  # FlockGateWaitDecision), while the unmodified tree exits 0. Even a PARTIAL
+  # replant -- only the function half of the cfg, not the constant half -- is
+  # caught.
+  #
+  # `check`, not `build`: this gate answers "does the Windows target still
+  # compile", which is the failure class that actually reaches main. Linking and
+  # running Windows binaries is out of scope and would need a Windows runner.
+  windows-cross-check:
+    name: cargo xwin check (x86_64-pc-windows-msvc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: ci-static-windows-cross-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+
+      - name: Install nightly Rust with the Windows MSVC target
+        # Same dated pin as the other jobs and rust-toolchain.toml (bd-niay4):
+        # the action ref alone would float the toolchain.
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+          targets: x86_64-pc-windows-msvc
+
+      # Cached separately from the host-triple jobs: a Windows-target target/ dir
+      # shares nothing useful with them, and the xwin SDK download is the slow
+      # part of a cold run, so it gets its own cache entry.
+      - name: Cache cargo registry, Windows target dir, and the xwin SDK
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
+            target
+          key: ci-static-winxcheck-${{ runner.os }}-nightly-2026-08-31-xwin0.22.0-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ci-static-winxcheck-${{ runner.os }}-nightly-2026-08-31-xwin0.22.0-${{ hashFiles('Cargo.lock') }}-
+            ci-static-winxcheck-${{ runner.os }}-nightly-2026-08-31-xwin0.22.0-
+
+      # Version-pinned deliberately: an unpinned cargo-xwin would make this gate's
+      # verdict depend on whatever version published most recently, which is the
+      # same floating-toolchain mistake bd-niay4 records for action refs. 0.22.0
+      # is the version the positive control above was run with.
+      - name: Install cargo-xwin 0.22.0
+        run: |
+          if [ "$(cargo-xwin xwin --version 2>/dev/null || true)" != "cargo-xwin-xwin 0.22.0" ]; then
+            cargo install cargo-xwin --version 0.22.0 --locked
+          else
+            echo "cargo-xwin 0.22.0 already present from cache"
+          fi
+
+      - name: Windows cross-compile check
+        run: cargo xwin check --locked --lib --target x86_64-pc-windows-msvc
