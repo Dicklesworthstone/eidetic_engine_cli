@@ -6692,6 +6692,28 @@ pub(crate) fn local_model_verified_and_unresolved() -> bool {
         && verified_default_model_dir(&default_embedder_settings()).is_some()
 }
 
+/// Whether a verified machine-level default model would serve retrieval,
+/// regardless of whether this process has resolved the embedder yet and
+/// regardless of the workspace model registry.
+///
+/// The bundled registry row is deliberately registered `Unavailable`, because it
+/// "must not shadow a verified machine-level model cache"
+/// (`is_bundled_embedding_declaration`), and the embedder resolver honours that
+/// by falling through to the cache in `default_search_embedder_for_settings`.
+/// Posture surfaces read the registry only, so without this predicate they
+/// report "no available semantic embedding model" for a workspace whose searches
+/// are in fact neural — three surfaces contradicting retrieval about the same
+/// fact (bd-xivcz).
+///
+/// This is the registry-independent half of `local_model_verified_and_unresolved`
+/// and shares its cost profile: it reads the verification receipt and stats the
+/// files, and never constructs a model, so it is safe on a posture path that
+/// must verify without loading (bd-qf3l4).
+pub(crate) fn verified_default_local_model_available() -> bool {
+    configured_embed_backend() != EmbedBackendSelection::Remote
+        && verified_default_model_dir(&default_embedder_settings()).is_some()
+}
+
 /// Test-only since 5434b5b4e (bd-kvltg). Production now resolves through
 /// `default_search_embedder_stack_with_provenance`, which carries the origin
 /// fact the posture needs; this bare wrapper survives only because the

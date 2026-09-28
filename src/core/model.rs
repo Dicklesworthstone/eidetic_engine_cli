@@ -1134,8 +1134,17 @@ fn build_model_lifecycle_report(
         selected_embedding_entry,
         index_degraded,
     );
-    let semantic_readiness =
-        semantic_readiness_from_lifecycle(selected_embedding_entry, &models, &index_row);
+    // Resolved here, not inside the readiness function, so the readiness logic
+    // stays a pure function of its inputs and can be unit-tested for both states
+    // without a real model cache on the host (bd-xivcz).
+    let cached_default_model_available =
+        crate::core::index::verified_default_local_model_available();
+    let semantic_readiness = semantic_readiness_from_lifecycle(
+        selected_embedding_entry,
+        &models,
+        &index_row,
+        cached_default_model_available,
+    );
 
     let mut degraded = semantic_readiness.degraded.clone();
     for model in &models {
@@ -1902,12 +1911,57 @@ fn index_dimension_compatibility(
     }
 }
 
+/// Whether a verified machine-level model cache can actually serve semantic
+/// retrieval for this index, i.e. the index is not missing, corrupt, stale for
+/// its model, or of a proven-incompatible dimension.
+///
+/// Deliberately narrow. When this is false the caller falls through to the
+/// ESTABLISHED lexical answer rather than composing a new one: a broken index
+/// with an available model is a pre-existing reporting question of its own, and
+/// changing its degradation code here would silently rewrite a contract that
+/// `lifecycle_surface_degradation_reports_lexical_only_readiness` pins. This
+/// bead is only about the case where retrieval really is serving semantically
+/// (bd-xivcz).
+fn cached_default_model_can_serve(index_row: &ModelLifecycleIndexRow) -> bool {
+    !matches!(index_row.state, "missing" | "corrupt" | "stale_index_model")
+        && index_row.dimension_compatibility.compatible != Some(false)
+}
+
+/// Readiness for the state the embedder resolver actually serves: no AVAILABLE
+/// registry row, but a verified machine-level model cache and a usable index.
+fn cached_default_model_readiness(
+    index_row: &ModelLifecycleIndexRow,
+) -> ModelLifecycleSemanticReadiness {
+    ModelLifecycleSemanticReadiness {
+        state: "available",
+        mode: "semantic",
+        selected_model_id: Some(BUNDLED_EMBEDDING_MODEL_ID.to_owned()),
+        selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+        dimension_compatibility: index_row.dimension_compatibility.clone(),
+        degraded: Vec::new(),
+    }
+}
+
 fn semantic_readiness_from_lifecycle(
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
     models: &[ModelLifecycleModelRow],
     index_row: &ModelLifecycleIndexRow,
+    cached_default_model_available: bool,
 ) -> ModelLifecycleSemanticReadiness {
     let Some(selected) = selected_embedding_entry else {
+        // No AVAILABLE registry row is not the same as no semantic model. The
+        // bundled row is registered `Unavailable` on purpose so it cannot shadow
+        // a verified machine-level cache, and the embedder resolver falls through
+        // to that cache and serves real neural vectors from it. Reading the
+        // registry alone made this surface report "no available semantic
+        // embedding model" for workspaces whose searches were demonstrably
+        // hybrid, and that answer then propagated into `ee search`'s
+        // `embed_model_unavailable`, the `ee.embedding_posture.v1` fields and
+        // `ee doctor` — handing users a repair for a model that was working
+        // (bd-xivcz).
+        if cached_default_model_available && cached_default_model_can_serve(index_row) {
+            return cached_default_model_readiness(index_row);
+        }
         let degraded = vec![ModelLifecycleDegradation::new(
             "lexical_fallback",
             "warning",
@@ -3838,6 +3892,143 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    /// An index row in the requested state, with everything else neutral, for the
+    /// bd-xivcz readiness cases.
+    fn lifecycle_index_row_for_test(
+        state: &'static str,
+        compatible: Option<bool>,
+    ) -> ModelLifecycleIndexRow {
+        ModelLifecycleIndexRow {
+            index_id: MODEL_LIFECYCLE_INDEX_ID.to_string(),
+            kind: "semantic",
+            state,
+            stored_model_id: None,
+            stored_model_revision: None,
+            stored_model_hash: None,
+            stored_dimension: None,
+            stored_distance_metric: None,
+            stored_vector_dtype: None,
+            last_rebuild_at: None,
+            derived_from: Vec::new(),
+            dimension_compatibility: ModelLifecycleDimensionCompatibility {
+                expected_dimension: None,
+                actual_dimension: None,
+                index_dimension: None,
+                distance_metric: None,
+                vector_dtype: None,
+                compatible,
+                rule: "test_fixture",
+                mismatch_reason: None,
+                repair: None,
+            },
+            degraded: Vec::new(),
+        }
+    }
+
+    /// bd-xivcz. A workspace can have NO available embedding registry row while a
+    /// verified machine-level model cache serves retrieval, because the bundled
+    /// row is registered `Unavailable` on purpose so it cannot shadow that cache.
+    /// Reading the registry alone made this surface answer "no available semantic
+    /// embedding model", and that answer propagated into `ee search`'s
+    /// `embed_model_unavailable`, the `ee.embedding_posture.v1` fields and
+    /// `ee doctor` — three surfaces contradicting retrieval about one fact.
+    ///
+    /// Observed on the shipped 0.16.0 binary: one workspace reporting
+    /// `degradations: [model_registry_no_available_entry]` and readiness
+    /// `lexical_fallback` while `ee search` returned `source=hybrid`,
+    /// `scoreKind=rrf_fused` with a live semantic score. Moving the model
+    /// directory aside flipped `embed_backend` to `hash_fallback` and removed the
+    /// semantic arm entirely, which is what proved the neural tier was serving.
+    #[test]
+    fn cached_default_model_makes_readiness_semantic_without_a_registry_row() -> TestResult {
+        let index_row = lifecycle_index_row_for_test("available", Some(true));
+
+        let with_cache = semantic_readiness_from_lifecycle(None, &[], &index_row, true);
+        ensure(
+            with_cache.state == "available" && with_cache.mode == "semantic",
+            format!(
+                "a verified cache must read as semantic, got state={} mode={}",
+                with_cache.state, with_cache.mode
+            ),
+        )?;
+        // The whole point of the bead: this is the field `ee search`,
+        // `ee index status` and `ee doctor` all derive their answer from, so it
+        // must not produce a degradation when the model is serving.
+        ensure(
+            with_cache.semantic_surface_degradation("search").is_none(),
+            "a serving semantic tier must raise no surface degradation",
+        )?;
+        ensure(
+            with_cache.selected_model_id.as_deref() == Some(BUNDLED_EMBEDDING_MODEL_ID),
+            "readiness should name the model that is actually serving",
+        )?;
+
+        // PLANTED NEGATIVE: the same inputs with no cache must still be lexical,
+        // and must still say so on the surface. If this arm ever passes as
+        // semantic, the fix has stopped discriminating and is reporting
+        // availability unconditionally.
+        let without_cache = semantic_readiness_from_lifecycle(None, &[], &index_row, false);
+        ensure(
+            without_cache.state == "lexical_fallback" && without_cache.mode == "lexical_fallback",
+            format!(
+                "no registry row and no cache must read as lexical, got state={}",
+                without_cache.state
+            ),
+        )?;
+        ensure(
+            without_cache
+                .semantic_surface_degradation("search")
+                .is_some(),
+            "a genuinely absent model must still degrade the surface",
+        )
+    }
+
+    /// bd-xivcz. The cache does not override the index: a model that loads cannot
+    /// rescue an index that is missing, corrupt, stale for that model, or of a
+    /// proven-incompatible dimension. Those must keep reporting lexical fallback,
+    /// otherwise the fix would trade one false "available" for another.
+    #[test]
+    fn cached_default_model_still_defers_to_a_broken_index() -> TestResult {
+        for state in ["missing", "corrupt", "stale_index_model"] {
+            let row = lifecycle_index_row_for_test(state, Some(true));
+            let readiness = semantic_readiness_from_lifecycle(None, &[], &row, true);
+            ensure(
+                readiness.state == "lexical_fallback",
+                format!(
+                    "index state {state} must stay lexical, got {}",
+                    readiness.state
+                ),
+            )?;
+            // And through the ESTABLISHED path, with the same code as before.
+            // An earlier revision of this fix composed its own lexical answer
+            // here and carried the index row's degraded entries, which changed
+            // the surface code from embed_model_unavailable to an index code and
+            // reddened lifecycle_surface_degradation_reports_lexical_only_readiness.
+            // Caught on a worker that turned out to have a model cache, so the
+            // new branch was live there. Asserting the code, not just the state,
+            // is what stops that recurring.
+            let degradation = readiness
+                .semantic_surface_degradation("search")
+                .ok_or_else(|| format!("index state {state} must still degrade the surface"))?;
+            ensure(
+                degradation.code == "embed_model_unavailable",
+                format!(
+                    "index state {state} must keep the established code, got {}",
+                    degradation.code
+                ),
+            )?;
+        }
+        let mismatched = lifecycle_index_row_for_test("available", Some(false));
+        let readiness = semantic_readiness_from_lifecycle(None, &[], &mismatched, true);
+        ensure(
+            readiness.state == "lexical_fallback",
+            format!(
+                "a proven dimension mismatch must stay lexical, got {}",
+                readiness.state
+            ),
+        )
     }
 
     #[test]
