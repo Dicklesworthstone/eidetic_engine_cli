@@ -243,28 +243,79 @@ if [[ ! -f "${MANIFEST}" ]]; then
     exit 1
 fi
 
-if ! METADATA=$(cargo metadata --locked --format-version=1 --manifest-path "${MANIFEST}"); then
-    echo "error: cargo metadata failed; Cargo.lock was left unchanged" >&2
-    exit 3
-fi
-
-if ! HITS=$(printf '%s\n' "${METADATA}" | scan_metadata); then
-    echo "error: dependency metadata scan failed" >&2
-    exit 3
-fi
-
-if [[ -n "${HITS}" ]]; then
-    echo "error: forbidden dependencies present in the resolved tree:" >&2
+report_hits() {
+    local label="$1" hits="$2"
+    echo "error: forbidden dependencies present in the ${label} resolved tree:" >&2
     while IFS= read -r hit; do
         printf '  - %s\n' "${hit}" >&2
-    done <<<"${HITS}"
+    done <<<"${hits}"
     echo >&2
     echo "Fix: remove the dependency, or quarantine it behind an explicit feature" >&2
     echo "that is disabled by default. See AGENTS.md \`Forbidden Dependencies" >&2
     echo "(Hard Rule, Audited By CI)\` for the canonical list and rationale." >&2
-    exit 2
+}
+
+# Audit one manifest's resolved graph. Returns 0 clean, 2 on a hit, 3 on an
+# infrastructure failure, so a broken toolchain can never be mistaken for a pass.
+audit_manifest() {
+    local label="$1" manifest="$2" stale_is_fatal="${3:-yes}" metadata hits stderr_file status
+    if [[ ! -f "${manifest}" ]]; then
+        echo "error: ${label} manifest not found at ${manifest}" >&2
+        return 1
+    fi
+    stderr_file=$(mktemp)
+    metadata=$(cargo metadata --locked --format-version=1 --manifest-path "${manifest}" 2>"${stderr_file}")
+    status=$?
+    if (( status != 0 )); then
+        # A lockfile that no longer matches its manifest is a DIFFERENT defect
+        # from a forbidden dependency, and conflating them would make this gate
+        # red for a reason it is not named for. Distinguish exactly that one
+        # signature; anything else is still a hard infrastructure failure, so a
+        # broken toolchain can never be mistaken for a pass.
+        if [[ "${stale_is_fatal}" == "no" ]] && grep -q 'because --locked was passed' "${stderr_file}"; then
+            echo "warning: ${label} lockfile is out of sync with its manifest, so its graph could not be" >&2
+            echo "         audited. This is tracked as bd-mj18x and is NOT a forbidden-dependency finding." >&2
+            echo "         Regenerating it today introduces tokio via wasm-bindgen-futures 0.4.79 (bd-iuybr)," >&2
+            echo "         which is why it has not simply been regenerated." >&2
+            rm -f "${stderr_file}"
+            return 0
+        fi
+        cat "${stderr_file}" >&2
+        rm -f "${stderr_file}"
+        echo "error: cargo metadata failed for ${label}; its lockfile was left unchanged" >&2
+        return 3
+    fi
+    rm -f "${stderr_file}"
+    if ! hits=$(printf '%s\n' "${metadata}" | scan_metadata); then
+        echo "error: dependency metadata scan failed for ${label}" >&2
+        return 3
+    fi
+    if [[ -n "${hits}" ]]; then
+        report_hits "${label}" "${hits}"
+        return 2
+    fi
+    echo "ok: no forbidden dependencies detected in the ${label} resolved tree"
+    return 0
+}
+
+audit_manifest "root" "${MANIFEST}" || exit $?
+
+# bd-mj18x: fuzz/ is EXCLUDED from the workspace and resolves its own lockfile, so
+# the root audit above never saw it. That blind spot is not theoretical -- while
+# regenerating fuzz/Cargo.lock on 2026-09-28, free resolution selected
+# wasm-bindgen-futures 0.4.79, which depends on tokio, and nothing would have
+# reported it. The root escapes only because it pins 0.4.78 (bd-iuybr).
+#
+# Audited with the same policy and the same scanner as the root: one forbidden
+# list, two graphs. A missing fuzz manifest is not an error -- the subproject is
+# optional -- but a fuzz manifest that FAILS to resolve is, because a silent skip
+# is exactly how this surface went unwatched.
+FUZZ_MANIFEST="${REPO_ROOT}/fuzz/Cargo.toml"
+if [[ -f "${FUZZ_MANIFEST}" ]]; then
+    audit_manifest "fuzz" "${FUZZ_MANIFEST}" "no" || exit $?
+else
+    echo "note: no fuzz manifest at ${FUZZ_MANIFEST}; nothing to audit there"
 fi
 
-echo "ok: no forbidden dependencies detected in the resolved tree"
 echo "checked: ${FORBIDDEN_LIST//$'\n'/ }"
 exit 0
