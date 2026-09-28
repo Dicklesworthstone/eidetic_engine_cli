@@ -71679,6 +71679,7 @@ mod tests {
             episodic_total: 0,
             sessions: Vec::new(),
             transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
+            task_frames: crate::core::resume::ResumeTaskFrames::default(),
             open_loops: crate::core::resume::OpenLoops::default(),
             stale_count: 0,
             nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
@@ -71725,6 +71726,7 @@ mod tests {
             episodic_total: 0,
             sessions: Vec::new(),
             transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
+            task_frames: crate::core::resume::ResumeTaskFrames::default(),
             open_loops: crate::core::resume::OpenLoops::default(),
             stale_count: 0,
             nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
@@ -71757,6 +71759,7 @@ mod tests {
             episodic_total: 0,
             sessions: Vec::new(),
             transcript_history: crate::core::resume::ResumeTranscriptHistory::default(),
+            task_frames: crate::core::resume::ResumeTaskFrames::default(),
             open_loops: crate::core::resume::OpenLoops {
                 revisit_decisions_total: 40,
                 revisit_decisions_truncated: true,

@@ -9425,13 +9425,12 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
     let live_snapshot_start = Instant::now();
-    let live_snapshot_retrieval = if unpublished_source
-        || index_freshness.as_ref().is_some_and(|status| status.stale)
-    {
-        stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
-    } else {
-        None
-    };
+    let live_snapshot_retrieval =
+        if unpublished_source || index_freshness.as_ref().is_some_and(|status| status.stale) {
+            stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
+        } else {
+            None
+        };
     // Never run the indexed engines on absent bytes or present a partial
     // source corpus as complete. Unsupported modes and oversized corpora keep
     // the existing NoIndex contract (and pack's explicitly degraded fallback).
@@ -18294,7 +18293,11 @@ mod tests {
             &mut healthy_degraded,
             Some(&connection),
         );
-        assert_eq!(healthy.len(), 1, "positive source authority permits the hit");
+        assert_eq!(
+            healthy.len(),
+            1,
+            "positive source authority permits the hit"
+        );
         assert!(healthy_degraded.is_empty());
 
         connection
@@ -18317,7 +18320,11 @@ mod tests {
         assert_eq!(visible[0].doc_id, NATIVE);
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "tombstone_visibility_unavailable");
-        assert!(!degraded[0].message.contains("temporarily_unavailable_memories"));
+        assert!(
+            !degraded[0]
+                .message
+                .contains("temporarily_unavailable_memories")
+        );
         assert!(
             !serde_json::json!({ "hits": visible, "degraded": degraded })
                 .to_string()
@@ -18416,12 +18423,8 @@ mod tests {
             memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
         ];
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(
-            &options,
-            hits.clone(),
-            &mut degraded,
-            Some(&connection),
-        );
+        let visible =
+            apply_tombstone_visibility(&options, hits.clone(), &mut degraded, Some(&connection));
         assert_eq!(visible.len(), 1);
         assert_eq!(
             visible[0].doc_id, PLACEHOLDER,
@@ -18434,13 +18437,8 @@ mod tests {
                 .map_err(|error| error.to_string())?
         );
         assert_eq!(
-            apply_tombstone_visibility(
-                &options,
-                hits.clone(),
-                &mut Vec::new(),
-                Some(&connection),
-            )
-            .len(),
+            apply_tombstone_visibility(&options, hits.clone(), &mut Vec::new(), Some(&connection),)
+                .len(),
             2
         );
 
@@ -18456,7 +18454,8 @@ mod tests {
             "unreadable seal authority cannot reveal either body"
         );
         assert_eq!(
-            unavailable.len(), 1,
+            unavailable.len(),
+            1,
             "source diagnostics are bounded per visibility pass"
         );
         assert_eq!(unavailable[0].code, "tombstone_visibility_unavailable");
