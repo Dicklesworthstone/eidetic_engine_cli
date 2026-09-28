@@ -490,6 +490,31 @@ jobs:
       # verdict depend on whatever version published most recently, which is the
       # same floating-toolchain mistake bd-niay4 records for action refs. 0.22.0
       # is the version the positive control above was run with.
+      # cc-rs builds the C dependencies (ring, zstd-sys) for the MSVC target and
+      # archives them with `llvm-lib`, looked up by bare name. The first run of
+      # this job failed on exactly that:
+      #   error occurred in cc-rs: failed to find tool "llvm-lib":
+      #   No such file or directory (os error 2)
+      # It is not on a GitHub Ubuntu runner by default, and Ubuntu ships it inside
+      # a VERSIONED LLVM bindir (/usr/lib/llvm-NN/bin) that is not on PATH, so
+      # installing the package alone is not enough. Resolve the bindir rather than
+      # hardcoding a version, and fail loudly if the tool still is not found --
+      # otherwise the next cc-rs change turns this gate into a silent pass.
+      - name: Install the LLVM tooling cargo-xwin needs
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          bindir="$(llvm-config --bindir)"
+          echo "$bindir" >> "$GITHUB_PATH"
+          if [ ! -x "$bindir/llvm-lib" ]; then
+            echo "llvm-lib not found in $bindir after installing llvm." >&2
+            echo "Contents:" >&2
+            ls -1 "$bindir" | grep -i '^llvm-' >&2 || true
+            exit 1
+          fi
+          echo "llvm-lib found at $bindir/llvm-lib"
+
       - name: Install cargo-xwin 0.22.0
         run: |
           if [ "$(cargo-xwin xwin --version 2>/dev/null || true)" != "cargo-xwin-xwin 0.22.0" ]; then
