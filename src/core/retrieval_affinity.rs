@@ -100,9 +100,14 @@ fn accumulate_pairs(deltas: &mut BTreeMap<(String, String), f64>, ranked: &[(Str
 }
 
 /// Consume new pack-ledger and search-audit rows from the stored cursor and
-/// fold them into the accumulation table. Idempotent: re-running from the
-/// same cursor never double-counts because the cursor and the deltas commit
-/// through the same connection before the report returns.
+/// fold them into the accumulation table. Cursor reads, source reads, all
+/// edge increments and both cursor writes share one write transaction. A
+/// failed attempt therefore cannot leave counted evidence behind a stale
+/// cursor, or acknowledge evidence whose increments were not committed.
+///
+/// Call through the existing write owner. A competing writer may fail with
+/// contention; it must retry the entire operation, including the cursor read.
+/// This does not repair overcounting left by older non-atomic accumulators.
 ///
 /// # Errors
 ///
@@ -112,9 +117,23 @@ pub fn accumulate_retrieval_affinity(
     workspace_id: &str,
     now_rfc3339: &str,
 ) -> Result<AffinityAccumulationReport, String> {
-    let (pack_cursor, search_cursor) = connection
-        .retrieval_affinity_cursor(workspace_id)
-        .map_err(|error| format!("read affinity cursor: {error}"))?;
+    connection
+        .with_transaction(|| accumulate_in_transaction(connection, workspace_id, now_rfc3339))
+        .map_err(|_| {
+            "Retrieval-affinity accumulation did not complete; retry the whole refresh through the write owner."
+                .to_owned()
+        })
+}
+
+/// The transaction owner is the public accumulator above. Never expose a
+/// successful report before that owner commits. In particular, a failure
+/// writing the cursor must roll back every previously applied edge increment.
+fn accumulate_in_transaction(
+    connection: &DbConnection,
+    workspace_id: &str,
+    now_rfc3339: &str,
+) -> crate::db::Result<AffinityAccumulationReport> {
+    let (pack_cursor, search_cursor) = connection.retrieval_affinity_cursor(workspace_id)?;
 
     let mut deltas: BTreeMap<(String, String), f64> = BTreeMap::new();
     let mut latest_event_at = String::new();
@@ -125,18 +144,14 @@ pub fn accumulate_retrieval_affinity(
     };
 
     // ── pack ledger: each pack's items are one ranked result set ──────────
-    let packs = connection
-        .list_pack_records_after(pack_cursor, ACCUMULATION_BATCH_LIMIT)
-        .map_err(|error| format!("list pack records: {error}"))?;
+    let packs = connection.list_pack_records_after(pack_cursor, ACCUMULATION_BATCH_LIMIT)?;
     let packs_len = packs.len();
     for (rowid, pack_id, pack_workspace, created_at) in packs {
         report.pack_cursor = rowid;
         if pack_workspace != workspace_id {
             continue;
         }
-        let items = connection
-            .get_pack_items(&pack_id)
-            .map_err(|error| format!("get pack items: {error}"))?;
+        let items = connection.get_pack_items(&pack_id)?;
         let mut ranked: Vec<(String, u32)> = items
             .iter()
             .map(|item| (item.memory_id.clone(), item.rank))
@@ -150,9 +165,8 @@ pub fn accumulate_retrieval_affinity(
     }
 
     // ── search audits: contiguous rows sharing a queryHash are one set ────
-    let search_rows = connection
-        .list_search_returned_mem_after(search_cursor, ACCUMULATION_BATCH_LIMIT)
-        .map_err(|error| format!("list search audit rows: {error}"))?;
+    let search_rows =
+        connection.list_search_returned_mem_after(search_cursor, ACCUMULATION_BATCH_LIMIT)?;
     let search_len = search_rows.len();
     let mut current_key: Option<String> = None;
     let mut current_set: Vec<(String, u32)> = Vec::new();
@@ -204,18 +218,14 @@ pub fn accumulate_retrieval_affinity(
             .into_iter()
             .map(|((memory_a, memory_b), delta)| (memory_a, memory_b, delta))
             .collect();
-        connection
-            .apply_retrieval_affinity_deltas(workspace_id, &rows, &event_at)
-            .map_err(|error| format!("apply affinity deltas: {error}"))?;
+        connection.apply_retrieval_affinity_deltas(workspace_id, &rows, &event_at)?;
     }
-    connection
-        .write_retrieval_affinity_cursor(
-            workspace_id,
-            report.pack_cursor,
-            report.search_cursor,
-            now_rfc3339,
-        )
-        .map_err(|error| format!("write affinity cursor: {error}"))?;
+    connection.write_retrieval_affinity_cursor(
+        workspace_id,
+        report.pack_cursor,
+        report.search_cursor,
+        now_rfc3339,
+    )?;
 
     report.more_pending = packs_len == ACCUMULATION_BATCH_LIMIT as usize
         || search_len == ACCUMULATION_BATCH_LIMIT as usize;
@@ -335,6 +345,168 @@ pub fn materialize_retrieval_affinity_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ATOMIC_NOW: &str = "2026-08-03T00:00:00Z";
+    const ATOMIC_HITS: [(&str, u32); 3] = [
+        ("mem_atomic000000000000000001", 1),
+        ("mem_atomic000000000000000002", 2),
+        ("mem_atomic000000000000000003", 3),
+    ];
+
+    #[test]
+    fn failed_cursor_insert_rolls_back_edges_and_reopen_retries_once() {
+        let (temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_a", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        connection
+            .execute_raw(
+                "CREATE TRIGGER affinity_fail_cursor BEFORE INSERT ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'private-cursor-fixture'); END;",
+            )
+            .expect("inject cursor failure");
+        let error = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect_err("cursor failure must not acknowledge the batch");
+        assert!(!error.contains("private-cursor-fixture"));
+        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("edges").is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("cursor"), (0, 0));
+        connection.close().expect("close after failed transaction");
+
+        let connection = DbConnection::open_file(&temp.path().join("ee.db")).expect("reopen");
+        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("durable edges").is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("durable cursor"), (0, 0));
+        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
+        let first = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry");
+        assert_eq!((first.search_rows_consumed, first.pairs_updated), (2, 1));
+        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("committed edges");
+        assert_eq!(edges.len(), 1);
+        assert!((edges[0].2 - 0.5).abs() < 1e-9);
+        let second = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("repeat");
+        assert_eq!((second.search_rows_consumed, second.pairs_updated), (0, 0));
+        assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id).expect("unchanged edges"), edges);
+    }
+
+    #[test]
+    fn failed_cursor_update_preserves_the_entire_previously_committed_prefix() {
+        let (_temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_b", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("first prefix");
+        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("first edges");
+        let cursor = connection.retrieval_affinity_cursor(&workspace_id).expect("first cursor");
+        seed_search_set(&connection, &workspace_id, "atomic_c", &ATOMIC_HITS, "2026-08-04T00:00:00Z");
+        connection
+            .execute_raw(
+                "CREATE TRIGGER affinity_fail_cursor BEFORE UPDATE ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'private-update-fixture'); END;",
+            )
+            .expect("inject existing-cursor failure");
+        assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
+        assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id).expect("rolled back edges"), edges);
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("rolled back cursor"), cursor);
+        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry prefix");
+        assert_eq!(replay.search_rows_consumed, 3);
+        let after = connection.list_retrieval_affinity_edges(&workspace_id).expect("complete edges");
+        assert_eq!(after.len(), 3);
+        assert!((after[0].2 - 1.0).abs() < 1e-9, "the old edge receives one increment");
+        assert!(replay.search_cursor > cursor.1);
+    }
+
+    #[test]
+    fn failed_later_edge_rolls_back_the_successfully_written_first_edge() {
+        let (_temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_d", &ATOMIC_HITS, ATOMIC_NOW);
+        connection
+            .execute_raw(
+                "CREATE TRIGGER affinity_fail_edge BEFORE INSERT ON retrieval_affinity_accumulation WHEN (SELECT COUNT(*) FROM retrieval_affinity_accumulation) > 0 BEGIN SELECT RAISE(ABORT, 'private-edge-fixture'); END;",
+            )
+            .expect("inject second-edge failure");
+        assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
+        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("no partial edges").is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("no cursor advance"), (0, 0));
+        connection.execute_raw("DROP TRIGGER affinity_fail_edge").expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry all edges");
+        assert_eq!(replay.pairs_updated, 3);
+        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("all edges");
+        assert_eq!(edges.len(), 3);
+        assert!((edges[0].2 - 0.5).abs() < 1e-9);
+        assert!((edges[1].2 - 1.0 / 3.0).abs() < 1e-9);
+        assert!((edges[2].2 - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn other_connections_never_observe_uncommitted_affinity_or_cursor_state() {
+        let (temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_e", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        let observer =
+            DbConnection::open_file_read_only(&temp.path().join("ee.db")).expect("observer");
+        let report = connection.with_transaction(|| {
+            let report = accumulate_in_transaction(&connection, &workspace_id, ATOMIC_NOW)?;
+            assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id)?.len(), 1);
+            assert_eq!(connection.retrieval_affinity_cursor(&workspace_id)?.1, report.search_cursor);
+            assert!(observer.list_retrieval_affinity_edges(&workspace_id)?.is_empty());
+            assert_eq!(observer.retrieval_affinity_cursor(&workspace_id)?, (0, 0));
+            Ok(report)
+        }).expect("commit complete prefix");
+        assert_eq!(observer.list_retrieval_affinity_edges(&workspace_id).expect("visible edges").len(), 1);
+        assert_eq!(observer.retrieval_affinity_cursor(&workspace_id).expect("visible cursor").1, report.search_cursor);
+    }
+
+    #[test]
+    fn competing_accumulators_retry_from_committed_cursors_without_double_counting() {
+        let (temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_f", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        let database = temp.path().join("ee.db");
+        let gate = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handles = (0..2).map(|_| {
+                let database = &database;
+                let workspace_id = &workspace_id;
+                let gate = &gate;
+                scope.spawn(move || {
+                    let writer = DbConnection::open_file(database).expect("competing writer");
+                    gate.wait();
+                    // The write owner may reject contention. Never retry only
+                    // the writes with deltas computed from a stale cursor.
+                    accumulate_retrieval_affinity(&writer, workspace_id, ATOMIC_NOW)
+                })
+            }).collect::<Vec<_>>();
+            for handle in handles {
+                let _outcome = handle.join().expect("writer did not panic");
+            }
+        });
+        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("drain any contention retry");
+        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("once-counted edges");
+        assert_eq!(edges.len(), 1);
+        assert!((edges[0].2 - 0.5).abs() < 1e-9);
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("already consumed");
+        assert_eq!(replay.search_rows_consumed, 0);
+    }
+
+    #[test]
+    fn read_only_accumulation_cannot_publish_edges_or_a_cursor() {
+        let (temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_g", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        let reader =
+            DbConnection::open_file_read_only(&temp.path().join("ee.db")).expect("read only");
+        assert!(accumulate_retrieval_affinity(&reader, &workspace_id, ATOMIC_NOW).is_err());
+        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("no edges").is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("no cursor"), (0, 0));
+        assert_eq!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("writer retry").pairs_updated, 1);
+    }
+
+    #[test]
+    fn cursor_failure_with_no_pairs_does_not_acknowledge_a_singleton() {
+        let (_temp, connection, workspace_id) = seeded_connection();
+        seed_search_set(&connection, &workspace_id, "atomic_h", &ATOMIC_HITS[..1], ATOMIC_NOW);
+        connection
+            .execute_raw(
+                "CREATE TRIGGER affinity_fail_cursor BEFORE INSERT ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'cursor fixture'); END;",
+            )
+            .expect("inject cursor-only failure");
+        assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("cursor"), (0, 0));
+        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("replay singleton");
+        assert_eq!((replay.search_rows_consumed, replay.pairs_updated), (1, 0));
+        assert!(replay.search_cursor > 0);
+    }
 
     fn seeded_connection() -> (tempfile::TempDir, DbConnection, String) {
         let temp = tempfile::tempdir().expect("tempdir");
