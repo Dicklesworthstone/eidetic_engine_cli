@@ -6,8 +6,7 @@
 //! the storage layer and cannot overwrite an explicit recovered marker.
 
 use super::{
-    BTreeMap, BTreeSet, JsonlImportIssue, TimestampClass, ValidatedMemory,
-    normalize_imported_timestamp,
+    BTreeMap, BTreeSet, JsonlImportIssue, TimestampClass, ValidatedMemory, normalize_imported_timestamp,
 };
 
 fn invalid(reason: &'static str) -> JsonlImportIssue {
@@ -193,9 +192,8 @@ mod head_tests;
 mod identity_tests {
     use super::super::{
         EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, JsonValue,
-        JsonlImportOptions, MemoryId, RedactionLevel, Uuid, import_jsonl_records,
-        import_memory_id, import_verified_backup_jsonl_records, json, parse_jsonl_source,
-        validate_memories,
+        JsonlImportOptions, MemoryId, RedactionLevel, Uuid, import_jsonl_records, import_memory_id,
+        import_verified_backup_jsonl_records, json, parse_jsonl_source, validate_memories,
     };
     use crate::models::WorkspaceId;
 
@@ -215,7 +213,7 @@ mod identity_tests {
                 "schema": EXPORT_HEADER_SCHEMA_V1, "format_version": 1,
                 "created_at": "2026-05-05T00:00:00Z", "workspace_id": workspace,
                 "workspace_path": "/source", "export_scope": "memories",
-                "redaction_level": "paranoid", "record_count": 3,
+                "redaction_level": "paranoid", "record_count": 2,
                 "ee_version": "0.15.2", "export_id": "identity-collision-test",
                 "import_source": "native", "trust_level": "validated"
             }),
@@ -231,17 +229,18 @@ mod identity_tests {
             }),
             json!({
                 "schema": EXPORT_FOOTER_SCHEMA_V1, "export_id": "identity-collision-test",
-                "completed_at": "2026-05-05T00:00:00Z", "total_records": 4,
-                "memory_count": 2, "link_count": 0, "tag_count": 0,
+                "completed_at": "2026-05-05T00:00:00Z", "total_records": 3,
+                "memory_count": 1, "link_count": 0, "tag_count": 0,
                 "audit_count": 0, "artifact_count": 0, "success": true
             }),
         ];
         // Use the real remapper, not a mock or a guessed ID encoding. A valid
         // native ID can be chosen to equal an unrelated redacted row's output.
         let parsed = parse_jsonl_source(&text(&rows));
+        assert!(!parsed.has_errors(), "the remapping seed must be valid");
         let alias = parsed.memories.first().ok_or("missing alias record")?;
-        let recovered = import_memory_id(alias, RedactionLevel::Paranoid)
-            .map_err(|issue| issue.message)?;
+        let recovered =
+            import_memory_id(alias, RedactionLevel::Paranoid).map_err(|issue| issue.message)?;
         let native_id = if collide {
             recovered
         } else {
@@ -259,6 +258,9 @@ mod identity_tests {
                 "trust_class": "agent_assertion", "redacted": false
             }),
         );
+        rows[0]["record_count"] = json!(3);
+        rows[3]["total_records"] = json!(4);
+        rows[3]["memory_count"] = json!(2);
         Ok(rows)
     }
 
@@ -294,10 +296,55 @@ mod identity_tests {
         Ok(())
     }
 
+    fn reject_existing_destination(options: &JsonlImportOptions, backup: bool) -> TestResult {
+        let database = options.database_path.as_ref().ok_or("database")?;
+        let database_parent = database.parent().ok_or("database parent")?;
+        std::fs::create_dir_all(database_parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&options.workspace_path).map_err(|error| error.to_string())?;
+        let sentinel = b"existing destination must not be opened or repaired";
+        std::fs::write(database, sentinel).map_err(|error| error.to_string())?;
+        let config = options.workspace_path.join(".ee");
+        std::fs::create_dir_all(&config).map_err(|error| error.to_string())?;
+        let config_file = config.join("config.toml");
+        std::fs::write(&config_file, sentinel).map_err(|error| error.to_string())?;
+        let repeat = if backup {
+            import_verified_backup_jsonl_records(options, None)
+        } else {
+            import_jsonl_records(options)
+        }
+        .map_err(|error| error.to_string())?;
+        assert_eq!(repeat.status, "rejected");
+        assert!(
+            repeat
+                .issues
+                .iter()
+                .any(|issue| issue.code == "duplicate_imported_memory_id")
+        );
+        assert_eq!(
+            std::fs::read(database).map_err(|error| error.to_string())?,
+            sentinel.as_slice()
+        );
+        assert_eq!(
+            std::fs::read(&config_file).map_err(|error| error.to_string())?,
+            sentinel.as_slice()
+        );
+        assert_eq!(
+            std::fs::read_dir(database_parent)
+                .map_err(|error| error.to_string())?
+                .count(),
+            1,
+            "rejected import created database sidecars"
+        );
+        Ok(())
+    }
+
     #[test]
     fn collision_rejection_has_no_destination_effects_in_either_import_mode() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let root = directory.path().canonicalize().map_err(|error| error.to_string())?;
+        let root = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         for reverse in [false, true] {
             let mut rows = mixed_identity_rows(true)?;
             if reverse {
@@ -322,13 +369,18 @@ mod identity_tests {
                     }
                     .map_err(|error| error.to_string())?;
                     assert_eq!(report.status, "rejected", "{case}: {:?}", report.issues);
-                    assert!(report.issues.iter().any(|issue| {
-                        issue.code == "duplicate_imported_memory_id"
-                    }));
+                    assert!(
+                        report
+                            .issues
+                            .iter()
+                            .any(|issue| issue.code == "duplicate_imported_memory_id")
+                    );
                     assert!(!options.workspace_path.exists(), "{case}");
                     let database = options.database_path.as_ref().ok_or("database")?;
                     assert!(!database.exists(), "{case}");
-                    assert!(!database.parent().ok_or("database parent")?.exists(), "{case}");
+                    let database_parent = database.parent().ok_or("database parent")?;
+                    assert!(!database_parent.exists(), "{case}");
+                    reject_existing_destination(&options, backup)?;
                     assert_eq!(
                         std::fs::read_to_string(&options.source_path)
                             .map_err(|error| error.to_string())?,
