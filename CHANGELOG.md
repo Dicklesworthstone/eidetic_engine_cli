@@ -22,7 +22,7 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 | 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
-| 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh; in preparation, not published as a GitHub Release. |
+| 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh. |
 
 Release surface (as of 2026-09-12):
 
@@ -44,7 +44,7 @@ Release surface (as of 2026-09-12):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.16.0](#0160---2026-09-26) | 2026-09-26 | pending | In preparation; not published as a GitHub Release. `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission, backups that keep ids by default |
+| [0.16.0](#0160---2026-09-26) | 2026-09-26 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission, backups that keep ids by default |
 | [0.15.2](#0152---2026-09-12) | 2026-09-12 | yes | Registry-only Cargo installation, read-only WAL correction and rerank storage-failure handling |
 | 0.15.1 | 2026-09-12 | withheld | Crate published; superseded by 0.15.2 after runtime qualification exposed a storage regression |
 | [0.15.0](#0150---2026-09-12) | 2026-09-12 | yes | Daemon retrieval, hook context, native reranking, Windows doctor and dependency updates |
@@ -75,9 +75,6 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [0.16.0] - 2026-09-26
-
-In preparation. The date above is the draft cutoff, not a publication date.
-GitHub still lists v0.15.2 as the latest published release as of 2026-09-27.
 
 ### `ee ask` answers from rules and session evidence, not just memories
 
@@ -722,12 +719,20 @@ came from.
   concurrent writes. If the neural backend is not active the verdict is
   `incomplete`, never pass.
 - The probe is a release-time step, not an automated gate: CI Static runs only
-  its `--self-test`. Against the published v0.15.2 archive it fails
+  its `--self-test`. Against the published v0.15.2 archive it failed
   `rule_packs_beside_source`, `unrelated_query_abstains` and
-  `status_doctor_agree`. A source build of `main` from 2026-09-24 passed all 13
-  rows. The 0.16.0 `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
-  archives were probed before publication; their rows are attached to the
-  GitHub release.
+  `status_doctor_agree`. The published 0.16.0 `aarch64-apple-darwin` archive
+  passes all 13 rows, including those three; its report is attached to the
+  GitHub release as `release-probe-aarch64-apple-darwin.json`, keyed by the
+  archive's SHA-256 and by this release commit.
+- **The other five archives were not probed.** The probe must execute the
+  binary, and the operator cutting this release had no Linux or Windows host
+  available to run one on. For those five targets the evidence is this release
+  commit's own verification plus the fact that every target is built from the
+  same source tree — not an executed probe. Treat the `x86_64-apple-darwin`,
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `x86_64-unknown-linux-musl` and `x86_64-pc-windows-msvc` archives as
+  compiled and checksummed but not behaviourally exercised.
 
 ### Known limitations
 
@@ -736,13 +741,20 @@ came from.
   `--require-provenance`.
 - The library test suite (`cargo test --lib`) still has known failing tests:
   13 of 11,284 fail at the release candidate, each tracked by an open Beads
-  issue (the census is `bd-rm8wj`). The release commit differs from that
-  candidate only in version numbers, two version-pinned snapshots and this
-  changelog. This release does not claim to resolve them.
+  issue (the census is `bd-rm8wj`). This release does not claim to resolve them.
+- The release commit is not byte-identical to the candidate that run was
+  measured on. It differs by the version numbers, the three version-pinned
+  JSON-contract snapshots, this changelog, and **one product change**:
+  `src/db/mod.rs` regains a `#[cfg(unix)]` gate on the database write-lock
+  path that an earlier commit had displaced, without which the
+  `x86_64-pc-windows-msvc` target does not compile at all (`bd-ajl2b`). That
+  change was verified by a Windows cross-build and a macOS build of this exact
+  file, and by the `db::` library tests — but it was not part of the
+  candidate's full library run, and it is disclosed here rather than folded
+  silently into "version numbers only".
 - Several changes in this release were committed without running their Rust
   tests at their own commit. For those, the evidence is the release
-  candidate's full library run and the 13-row release probe, not a
-  per-commit result.
+  candidate's full library run and the release probe, not a per-commit result.
 - The parallel rows of the release probe can exceed the 60-second CLI deadline
   on heavily loaded hosts and exit with a `cancelled` deadline error. Each
   concurrent process loads the embedding model on its own. Tracked in

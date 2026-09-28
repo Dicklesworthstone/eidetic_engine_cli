@@ -477,27 +477,33 @@ readme_installation_status() {
         has_status=true
     fi
     # bd-he3xx: these used to grep 2026-05 "planned; no release assets" rows.
-    # Live channels on 2026-09-17 are v0.15.2 (GitHub release, Homebrew
+    # Live channels on 2026-09-28 are v0.16.0 (GitHub release, Homebrew
     # formula, crates.io eidetic-engine). Restoring the planned strings
     # would make planned_markers_present true by lying.
-    if grep -qF '| GitHub release installer | available; latest published tag is v0.15.2 |' "$readme" 2>/dev/null; then
+    if grep -qF '| GitHub release installer | available; latest published tag is v0.16.0 |' "$readme" 2>/dev/null; then
         release_planned=true
     fi
-    if grep -qF '| Homebrew tap | available; formula version 0.15.2 |' "$readme" 2>/dev/null; then
+    if grep -qF '| Homebrew tap | available; formula version 0.16.0 |' "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
-    if grep -qF '| crates.io | available; package `eidetic-engine` 0.15.2; binary remains `ee` |' "$readme" 2>/dev/null; then
+    if grep -qF '| crates.io | available; package `eidetic-engine` 0.16.0; binary remains `ee` |' "$readme" 2>/dev/null; then
         cargo_planned=true
     fi
     if grep -qF '| Source build | available now | local build only | this README |' "$readme" 2>/dev/null; then
         source_available=true
     fi
-    if grep -qF 'releases/download/v0.15.2/install.sh' "$readme" 2>/dev/null \
-        && grep -qF 'releases/download/v0.15.2/install.ps1' "$readme" 2>/dev/null; then
+    if grep -qF 'releases/download/v0.16.0/install.sh' "$readme" 2>/dev/null \
+        && grep -qF 'releases/download/v0.16.0/install.ps1' "$readme" 2>/dev/null; then
         release_assets=true
     fi
-    if grep -qF 'EE_VERSION=v0.15.2 bash' "$readme" 2>/dev/null \
-        && grep -qF -- '-Version "0.15.2"' "$readme" 2>/dev/null; then
+    # The sh form was 'curl ... | EE_VERSION=vX.Y.Z bash' when this check was
+    # written; the README now fetches to a temp file first and exports the
+    # variable on its own line, so the old one-liner spelling had stopped
+    # matching and release_version_pinned had been silently false ever since --
+    # a stale spelling reporting a false negative, not a real finding. Match the
+    # export form, which is what the README actually documents.
+    if grep -qF 'EE_VERSION=v0.16.0' "$readme" 2>/dev/null \
+        && grep -qF -- '-Version "0.16.0"' "$readme" 2>/dev/null; then
         release_version_pinned=true
     fi
     if grep -qF '| Path | Status | Provenance | Tracking |' "$readme" 2>/dev/null; then

@@ -17,8 +17,8 @@
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh -o "$f"
-export EE_VERSION=v0.15.2
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.sh -o "$f"
+export EE_VERSION=v0.16.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
@@ -337,9 +337,9 @@ Hard constraints. CI fails if any of them break.
 
 | Path | Status | Provenance | Tracking |
 |---|---|---|---|
-| GitHub release installer | available; latest published tag is v0.15.2 | SHA-256 required; SLSA provenance JSON and its Sigstore bundle optional via `--require-provenance` (v0.15.2 published unsigned) | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; formula version 0.15.2 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | available; package `eidetic-engine` 0.15.2; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
+| GitHub release installer | available; latest published tag is v0.16.0 | SHA-256 required; SLSA provenance JSON and its Sigstore bundle optional via `--require-provenance` (v0.16.0 published unsigned) | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | available; formula version 0.16.0 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | available; package `eidetic-engine` 0.16.0; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
 | Source build | available now | local build only | this README |
 
 When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
@@ -357,12 +357,12 @@ for systems without glibc.
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh -o "$f"
-export EE_VERSION=v0.15.2
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.sh -o "$f"
+export EE_VERSION=v0.16.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
-This fetches the installer and the matching `v0.15.2` release binary from GitHub
+This fetches the installer and the matching `v0.16.0` release binary from GitHub
 release assets, not from mutable `main`. To install a different published tag,
 change both the URL path and `EE_VERSION`.
 
@@ -415,11 +415,11 @@ compatible GNU build when that release does not include musl.
 
 ```powershell
 $f = Join-Path $env:TEMP 'install-ee.ps1'
-Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.ps1" -OutFile $f
-if (Test-Path $f) { & $f -Version "0.15.2" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
+Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.ps1" -OutFile $f
+if (Test-Path $f) { & $f -Version "0.16.0" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
 ```
 
-This pins both the installer script and the installed binary to the `v0.15.2`
+This pins both the installer script and the installed binary to the `v0.16.0`
 release assets. The mutable-`main` jsDelivr / `raw.githubusercontent.com`
 fallback remains for installer-script development only:
 
@@ -468,12 +468,16 @@ brew install Dicklesworthstone/tap/ee
 ### Cargo
 
 Use nightly Rust and the published lockfile. Version 0.15.1 has a read-only
-storage regression affecting native reranking and concurrent writes; use the
-corrected 0.15.2 package or a newer version from the registry:
+storage regression affecting native reranking and concurrent writes; install
+0.16.0, or any version after 0.15.1, from the registry:
 
 ```bash
-cargo +nightly install eidetic-engine --version 0.15.2 --locked
+cargo +nightly install eidetic-engine --version 0.16.0 --locked
 ```
+
+A `cargo install` build does not run `build.rs` (crates.io excludes it from the
+published package), so `ee version` reports a null `gitCommit` for this install
+path. The GitHub release binaries carry their commit.
 
 The links above identify published versions; `UPGRADE_LOG.md` records the
 dependency changes and qualification results.
