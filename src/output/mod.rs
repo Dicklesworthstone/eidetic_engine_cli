@@ -10537,9 +10537,9 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: pack_replay_schema_definition,
         },
         SchemaEntry {
-            id: "ee.pack.diff.v2",
-            version: "2",
-            description: "Authority-preserving comparison of two persisted pack ledgers",
+            id: "ee.pack.diff.v3",
+            version: "3",
+            description: "Typed-entity comparison of two integrity-verified persisted pack ledgers",
             category: "context",
             definition: pack_diff_schema_definition,
         },
@@ -12325,7 +12325,7 @@ fn pack_replay_schema_definition() -> String {
 }
 
 fn pack_diff_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.pack.diff.v2.json").to_string()
+    include_str!("../../docs/schemas/ee.pack.diff.v3.json").to_string()
 }
 
 fn context_delta_schema_definition() -> String {

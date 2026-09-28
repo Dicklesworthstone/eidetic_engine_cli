@@ -5314,7 +5314,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.diff.v2",
+            expected_schema: "ee.pack.diff.v3",
             expect_clean_stderr: true,
         },
     )?;
@@ -5350,7 +5350,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 pack_query_after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.diff.v2",
+            expected_schema: "ee.pack.diff.v3",
             expect_clean_stderr: true,
         },
     )?;

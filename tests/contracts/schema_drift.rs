@@ -189,7 +189,7 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Context,
     ),
     SchemaEntry::new("pack_replay", "ee.pack.replay.v2", SchemaCategory::Context),
-    SchemaEntry::new("pack_diff", "ee.pack.diff.v2", SchemaCategory::Context),
+    SchemaEntry::new("pack_diff", "ee.pack.diff.v3", SchemaCategory::Context),
     SchemaEntry::new(
         "context_delta",
         "ee.context.delta.v2",

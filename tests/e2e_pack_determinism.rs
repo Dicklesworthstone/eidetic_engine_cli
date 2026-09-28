@@ -768,7 +768,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     ensure_stderr_empty(&diff, "pack diff")?;
     let diff_json = stdout_json(&diff)?;
     ensure(
-        diff_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.diff.v2")),
+        diff_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.diff.v3")),
         "pack diff schema mismatch",
     )?;
     ensure(

@@ -576,7 +576,7 @@ fn bd_1wtsb_representative_artifacts_validate_against_declared_schemas() -> Test
 }
 
 #[test]
-fn replay_and_diff_goldens_structurally_validate_against_v2_schemas() -> TestResult {
+fn replay_and_diff_goldens_structurally_validate_against_current_schemas() -> TestResult {
     let cases = [
         (
             "ee.pack.replay.v2.json",
@@ -586,17 +586,17 @@ fn replay_and_diff_goldens_structurally_validate_against_v2_schemas() -> TestRes
             "ee.pack.replay.v2.json",
             "pack_replay_missing_ledger.json.golden",
         ),
-        ("ee.pack.diff.v2.json", "pack_diff_no_change.json.golden"),
+        ("ee.pack.diff.v3.json", "pack_diff_no_change.json.golden"),
         (
-            "ee.pack.diff.v2.json",
+            "ee.pack.diff.v3.json",
             "pack_diff_ranking_change.json.golden",
         ),
         (
-            "ee.pack.diff.v2.json",
+            "ee.pack.diff.v3.json",
             "pack_diff_redaction_change.json.golden",
         ),
         (
-            "ee.pack.diff.v2.json",
+            "ee.pack.diff.v3.json",
             "pack_diff_degraded_assets.json.golden",
         ),
     ];
@@ -613,6 +613,108 @@ fn replay_and_diff_goldens_structurally_validate_against_v2_schemas() -> TestRes
         )?;
         validate_json_schema(&golden, &schema, &schema, "$")
             .map_err(|error| format!("{golden_file} against {schema_file}: {error}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn pack_diff_v3_schema_enforces_typed_identity_and_revision_contract() -> TestResult {
+    let schema = schema_doc("ee.pack.diff.v3.json")?;
+    let mut evidence = read_json(
+        repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("golden")
+            .join("pack")
+            .join("pack_diff_ranking_change.json.golden"),
+    )?;
+    let entity_pointers = [
+        "/data/diff/changed/0/entity",
+        "/data/diff/changed/0/old/entity",
+        "/data/diff/changed/0/new/entity",
+    ];
+    for pointer in entity_pointers {
+        let slot = evidence
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing entity pointer {pointer}"))?;
+        *slot = json!({"kind": "evidence_span", "id": "ev_00000000000000000000000001"});
+    }
+    for (pointer, replacement) in [
+        (
+            "/data/diff/changed/0/old/entityRevision",
+            json!(format!("blake3:{}", "a".repeat(64))),
+        ),
+        (
+            "/data/diff/changed/0/new/entityRevision",
+            json!(format!("blake3:{}", "b".repeat(64))),
+        ),
+        ("/data/diff/changed/0/revisionChanged", json!(true)),
+    ] {
+        let slot = evidence
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing revision pointer {pointer}"))?;
+        *slot = replacement;
+    }
+    validate_json_schema(&evidence, &schema, &schema, "$")
+        .map_err(|error| format!("valid native evidence diff rejected: {error}"))?;
+
+    for pointer in entity_pointers {
+        let mut malformed = evidence.clone();
+        let slot = malformed
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing entity pointer {pointer}"))?;
+        *slot = json!({"kind": "evidence_span", "id": "mem_00000000000000000000000001"});
+        if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted mismatched kind and ID at {pointer}"));
+        }
+    }
+
+    for pointer in [
+        "/data/diff/changed/0",
+        "/data/diff/changed/0/old",
+        "/data/diff/changed/0/new",
+    ] {
+        let mut malformed = evidence.clone();
+        let object = malformed
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("missing item object {pointer}"))?;
+        object.insert("memoryId".to_owned(), json!("mem_00000000000000000000000001"));
+        if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted legacy memoryId at {pointer}"));
+        }
+    }
+
+    for (pointer, field) in [
+        ("/data/diff/changed/0", "revisionChanged"),
+        ("/data/diff/changed/0/old", "entityRevision"),
+        ("/data/diff/changed/0/new", "entityRevision"),
+    ] {
+        let mut malformed = evidence.clone();
+        let object = malformed
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("missing item object {pointer}"))?;
+        if object.remove(field).is_none() {
+            return Err(format!("missing required fixture field {pointer}/{field}"));
+        }
+        if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted missing {pointer}/{field}"));
+        }
+    }
+
+    for pointer in [
+        "/data/diff/changed/0/old/entityRevision",
+        "/data/diff/changed/0/new/entityRevision",
+    ] {
+        let mut malformed = evidence.clone();
+        let slot = malformed
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing revision pointer {pointer}"))?;
+        *slot = json!("blake3:not-a-revision");
+        if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted malformed revision at {pointer}"));
+        }
     }
     Ok(())
 }

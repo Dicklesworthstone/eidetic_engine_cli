@@ -78,19 +78,55 @@
       "forbiddenCurrentClaims": []
     },
     {
-      "schemaId": "ee.pack.diff.v2",
+      "schemaId": "ee.pack.diff.v3",
       "status": "current",
       "surface": "pack_diff_response",
       "owner": "src/cli/mod.rs::handle_pack_diff",
-      "schemaFile": "docs/schemas/ee.pack.diff.v2.json",
+      "schemaFile": "docs/schemas/ee.pack.diff.v3.json",
       "canonicalDocs": ["docs/pack-replay.md", "docs/migration_v0_1_to_v0_2.md"],
       "currentFacingContexts": [
         "docs/pack-replay.md",
-        "docs/schemas/ee.pack.diff.v2.json",
+        "docs/schemas/ee.pack.diff.v3.json",
         "docs/migration_v0_1_to_v0_2.md"
       ],
       "allowedHistoricalContexts": [],
       "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.pack.diff.v2",
+      "status": "legacy",
+      "surface": "pack_diff_response",
+      "owner": "docs/schemas/ee.pack.diff.v2.json",
+      "schemaFile": "docs/schemas/ee.pack.diff.v2.json",
+      "canonicalDocs": ["docs/pack-replay.md", "docs/migration_v0_1_to_v0_2.md"],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "docs/schemas/ee.pack.diff.v2.json",
+          "reason": "Historical memory-only diff response contract remains unchanged."
+        },
+        {
+          "pathPattern": "docs/pack-replay.md",
+          "reason": "Explicitly labels the v2 schema as historical alongside the current v3 contract."
+        },
+        {
+          "pathPattern": "docs/migration_v0_1_to_v0_2.md",
+          "reason": "Documents migration from memory-only diff responses to typed entity identity."
+        },
+        {
+          "pathPattern": "docs/adr/0025-replayable-context-pack-selection-ledgers.md",
+          "reason": "Historical decision records the original v2 integrity and authority contract."
+        },
+        {
+          "pathPattern": "docs/archive/**",
+          "reason": "Archived historical design material is not current-facing contract guidance."
+        },
+        {
+          "pathPattern": "tests/**",
+          "reason": "Regression tests may preserve old schema IDs to assert migration behavior."
+        }
+      ],
+      "forbiddenCurrentClaims": ["always emits", "current", "default"]
     },
     {
       "schemaId": "ee.support_bundle.pack_replay_summary.v2",

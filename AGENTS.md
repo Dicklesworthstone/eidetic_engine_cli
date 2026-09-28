@@ -642,7 +642,7 @@ When `ee` emits a new degraded code, the implementing PR must land both the sour
 | Response envelope (error) | `ee.error.v2` |
 | Context pack | `ee.pack.v2` |
 | Pack replay | `ee.pack.replay.v2` |
-| Pack diff | `ee.pack.diff.v2` |
+| Pack diff | `ee.pack.diff.v3` |
 | Context delta | `ee.context.delta.v2` |
 | Support-bundle pack replay summary | `ee.support_bundle.pack_replay_summary.v2` |
 | Search result | `ee.search.document.v1` |

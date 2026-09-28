@@ -28,7 +28,7 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 | Error envelope | `ee.error.v1` | `ee.error.v2` | **Breaking.** `error.details.recovery[]` added as structured array (F1); `error.nonRecoverable?: bool` added. See [A10](#a10--error-envelope-v1--v2). |
 | Pack object inside response | `ee.pack.v1` | `ee.pack.v2` | **Breaking.** See [A1 phase 2](#a1-phase-2--collapse-selectioncertificate--provenancefooter-into-items). |
 | Pack replay response | `ee.pack.replay.v1` | `ee.pack.replay.v2` | **Breaking for strict parsers.** Unverified record metadata and denormalized `storedItems` are no longer replay evidence; creator and command fields are hashed in a redaction-safe ledger projection. |
-| Pack diff response | `ee.pack.diff.v1` | `ee.pack.diff.v2` | **Breaking for strict parsers.** Comparisons require two integrity-verified ledgers and redact replay-visible strings under the current policy. |
+| Pack diff response | `ee.pack.diff.v1` | `ee.pack.diff.v3` | **Breaking for strict parsers.** Integrity-verified comparisons use typed entity identities and include native evidence and revision changes. See [Pack diff](#pack-diff). |
 | Support-bundle pack replay summary | `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | **Breaking for strict parsers.** Unverified metadata becomes `null`, truncation is explicit, and every pack carries an attestation manifest. |
 | Context delta response | `ee.context.delta.v1` | `ee.context.delta.v2` | **Breaking for authority-sensitive consumers.** The server-verification marker is now false for caller-created snapshots and true only after central persisted-ledger validation. |
 | Model status data object | `ee.model.status.v1` | `ee.model.status.v2` | **Breaking for strict parsers.** `data.reranker` was added and active embedder selection is now explicitly embedding-purpose only. See [N8](#n8--model-status-reranker-posture). |
@@ -66,9 +66,10 @@ can load dual-polarity rows.
 
 ### Replay, diff, support-summary, and context-delta authority hardening
 
-These four nested surfaces moved to v2 together because their v1 shapes could
-promote denormalized or caller-asserted metadata beyond its authority. They
-keep their existing envelope families: replay, diff, and context delta use a
+These four nested surfaces first moved to v2 together because their v1 shapes
+could promote denormalized or caller-asserted metadata beyond its authority.
+Pack diff subsequently advanced to v3 for typed entity comparison. They keep
+their existing envelope families: replay, diff, and context delta use a
 `{schema, success, data, ...}` command response, while the support summary is a
 standalone artifact. In every case the top-level `schema` is the
 surface-specific value listed below rather than `ee.response.v2`.
@@ -106,12 +107,29 @@ else:
 **Before.** `ee.pack.diff.v1` could compare raw record fields or replay-item
 strings even when one side lacked a trustworthy ledger.
 
-**After.** `ee.pack.diff.v2` produces item, degradation, and derived-asset
+**After.** `ee.pack.diff.v3` produces item, degradation, and derived-asset
 changes only when both ledgers are Available. Otherwise `replayable` is false,
 comparison scalars are `null`, collections are empty, and
 `likelyCauses` contains `ledger_unavailable_or_untrusted`. Treat
 `data.diff.summary.replayable` as the admission gate before consuming any
 comparison.
+
+The v3 response also replaces the memory-only identity used by v2. Consumers
+must read `entity.kind` and `entity.id` in `added`, `removed`, `changed`, and
+`redactionChanges` rather than `memoryId`. Kinds are `memory`, `rule`, and
+`evidence_span`; native evidence is compared under its own ID. Identity keys
+must include both fields. Collections sort by kind in that order, then by ID.
+Item snapshots include `entityRevision` as a BLAKE3 revision or `null` when the
+stored ledger has none. Changed rows require `revisionChanged`, including when
+the revision is the only difference.
+
+Current ledger admission supports memories and native evidence; the `rule`
+identity variant is reserved for the native rule pack migration.
+
+This is a read-side change over verified stored ledgers. It does not rewrite
+historical ledgers or pack hashes and does not use live source rows to invent
+missing revisions. The historical `ee.pack.diff.v2` schema remains available;
+the CLI emits v3.
 
 #### Support-bundle replay summary
 
@@ -698,7 +716,7 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 | `ee.error.v1` | `ee.error.v2` | A10 |
 | `ee.pack.v1` (inside data.pack) | `ee.pack.v2` | A1 phase 2, A4 |
 | `ee.pack.replay.v1` | `ee.pack.replay.v2` | replay authority and redaction projection |
-| `ee.pack.diff.v1` | `ee.pack.diff.v2` | integrity-gated comparison |
+| `ee.pack.diff.v1`, `ee.pack.diff.v2` | `ee.pack.diff.v3` | integrity-gated comparison with typed entity identity and revision changes |
 | `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | bounded verified summaries and attestation manifests |
 | `ee.context.delta.v1` | `ee.context.delta.v2` | truthful persisted-record authority marker |
 | `ee.memory_sentinel.check.v1` | `ee.memory_sentinel.check.v2` | polarity on result rows plus `byPolarity` aggregates |

@@ -3,6 +3,8 @@
 mod candidate_pool_tests;
 mod context_delta_evidence;
 #[cfg(test)]
+mod pack_diff_native_tests;
+#[cfg(test)]
 #[path = "pack_stream_tests.rs"]
 mod pack_stream_tests;
 
@@ -46579,7 +46581,7 @@ fn error_recall_query_seed(
 pub const PACK_REPLAY_SCHEMA_V2: &str = "ee.pack.replay.v2";
 
 /// Schema for pack diff response.
-pub const PACK_DIFF_SCHEMA_V2: &str = "ee.pack.diff.v2";
+pub const PACK_DIFF_SCHEMA_V3: &str = "ee.pack.diff.v3";
 
 const PACK_DIFF_SCORE_EPSILON: f64 = 0.000_001;
 
@@ -46588,7 +46590,8 @@ type ParsedPackLedger = crate::db::ParsedPackLedger;
 
 #[derive(Clone, Debug, PartialEq)]
 struct PackDiffItem {
-    memory_id: String,
+    entity: crate::pack::PackEntityRef,
+    entity_revision: Option<String>,
     rank: Option<u32>,
     section: Option<String>,
     relevance: Option<f64>,
@@ -46996,9 +46999,56 @@ fn optional_string(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 fn diff_item_from_ledger(value: &serde_json::Value) -> Option<PackDiffItem> {
-    let memory_id = value.get("memoryId")?.as_str()?.to_string();
+    // The central replay gate validates the native identity before this
+    // projection. Historical memory ledgers carry no entity revision; retain
+    // that absence instead of manufacturing a revision from today's row.
+    let (entity, entity_revision) = match value
+        .get("entityKind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("memory")
+    {
+        "" | "memory" => {
+            let memory_id = value.get("memoryId")?.as_str()?;
+            if value
+                .get("entityId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty() && id != memory_id)
+                || ["evidenceSpanId", "entityRevision"].iter().any(|field| {
+                    value
+                        .get(*field)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| !text.is_empty())
+                })
+            {
+                return None;
+            }
+            (
+                crate::pack::PackEntityRef::Memory(memory_id.parse().ok()?),
+                None,
+            )
+        }
+        "evidence_span" => {
+            let evidence_id = value.get("evidenceSpanId")?.as_str()?;
+            let revision = value.get("entityRevision")?.as_str()?;
+            if value.get("entityId")?.as_str()? != evidence_id
+                || value
+                    .get("memoryId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+                || !crate::db::is_canonical_blake3_hash(revision)
+            {
+                return None;
+            }
+            (
+                crate::pack::PackEntityRef::EvidenceSpan(evidence_id.parse().ok()?),
+                Some(revision.to_owned()),
+            )
+        }
+        _ => return None,
+    };
     Some(PackDiffItem {
-        memory_id,
+        entity,
+        entity_revision,
         rank: optional_u32(value.get("rank")),
         section: optional_string(value.get("section")),
         relevance: optional_f64(value.pointer("/scores/relevance")),
@@ -47014,14 +47064,16 @@ fn diff_item_from_ledger(value: &serde_json::Value) -> Option<PackDiffItem> {
     })
 }
 
-fn diff_items_for_pack(parsed: &ParsedPackLedger) -> BTreeMap<String, PackDiffItem> {
+fn diff_items_for_pack(
+    parsed: &ParsedPackLedger,
+) -> BTreeMap<crate::pack::PackEntityRef, PackDiffItem> {
     if let Some(ledger) = available_pack_ledger(parsed) {
         let public = public_pack_ledger_projection(ledger);
         if let Some(items) = ledger_core_array(&public, "selectedItems") {
             return items
                 .iter()
                 .filter_map(diff_item_from_ledger)
-                .map(|item| (item.memory_id.clone(), item))
+                .map(|item| (item.entity, item))
                 .collect();
         }
     }
@@ -47031,7 +47083,8 @@ fn diff_items_for_pack(parsed: &ParsedPackLedger) -> BTreeMap<String, PackDiffIt
 
 fn diff_item_json(item: &PackDiffItem) -> serde_json::Value {
     serde_json::json!({
-        "memoryId": item.memory_id,
+        "entity": diff_entity_json(item.entity),
+        "entityRevision": item.entity_revision,
         "rank": item.rank,
         "section": item.section,
         "scores": {
@@ -47042,6 +47095,13 @@ fn diff_item_json(item: &PackDiffItem) -> serde_json::Value {
         "trustClass": item.trust_class,
         "trustSubclass": item.trust_subclass,
         "whyHash": item.why_hash,
+    })
+}
+
+fn diff_entity_json(entity: crate::pack::PackEntityRef) -> serde_json::Value {
+    serde_json::json!({
+        "kind": entity.kind_str(),
+        "id": entity.id_string(),
     })
 }
 
@@ -47136,22 +47196,22 @@ fn collect_pack_diff(
 
     let added = ids_b
         .difference(&ids_a)
-        .filter_map(|memory_id| comparable_b.get(memory_id))
+        .filter_map(|entity| comparable_b.get(entity))
         .map(diff_item_json)
         .collect::<Vec<_>>();
     let removed = ids_a
         .difference(&ids_b)
-        .filter_map(|memory_id| comparable_a.get(memory_id))
+        .filter_map(|entity| comparable_a.get(entity))
         .map(diff_item_json)
         .collect::<Vec<_>>();
 
     let mut changed = Vec::new();
     let mut redaction_changes = Vec::new();
-    for memory_id in ids_a.intersection(&ids_b) {
-        let Some(old_item) = comparable_a.get(memory_id) else {
+    for entity in ids_a.intersection(&ids_b) {
+        let Some(old_item) = comparable_a.get(entity) else {
             continue;
         };
-        let Some(new_item) = comparable_b.get(memory_id) else {
+        let Some(new_item) = comparable_b.get(entity) else {
             continue;
         };
 
@@ -47164,11 +47224,12 @@ fn collect_pack_diff(
         let trust_changed = old_item.trust_class != new_item.trust_class
             || old_item.trust_subclass != new_item.trust_subclass;
         let why_changed = old_item.why_hash != new_item.why_hash;
+        let revision_changed = old_item.entity_revision != new_item.entity_revision;
         let redaction_changed = old_item.redaction_classes != new_item.redaction_classes;
 
         if redaction_changed {
             redaction_changes.push(serde_json::json!({
-                "memoryId": memory_id,
+                "entity": diff_entity_json(*entity),
                 "oldClasses": old_item.redaction_classes,
                 "newClasses": new_item.redaction_classes,
             }));
@@ -47180,10 +47241,11 @@ fn collect_pack_diff(
             || section_changed
             || trust_changed
             || why_changed
+            || revision_changed
             || redaction_changed
         {
             changed.push(serde_json::json!({
-                "memoryId": memory_id,
+                "entity": diff_entity_json(*entity),
                 "old": diff_item_json(old_item),
                 "new": diff_item_json(new_item),
                 "rankDelta": rank_delta,
@@ -47194,6 +47256,7 @@ fn collect_pack_diff(
                 "sectionChanged": section_changed,
                 "trustChanged": trust_changed,
                 "whyChanged": why_changed,
+                "revisionChanged": revision_changed,
                 "redactionChanged": redaction_changed,
             }));
         }
@@ -47454,7 +47517,7 @@ where
     degraded.extend(public_degradation_values(&ledger_b.degraded));
 
     let response = serde_json::json!({
-        "schema": PACK_DIFF_SCHEMA_V2,
+        "schema": PACK_DIFF_SCHEMA_V3,
         "success": true,
         "data": {
             "command": "pack diff",
@@ -99261,7 +99324,6 @@ demos:
         );
         let comparable = super::diff_items_for_pack(&parsed);
         assert!(comparable.is_empty());
-        assert!(!comparable.contains_key("forged-ledger-item"));
         assert!(super::available_pack_ledger(&parsed).is_none());
         assert!(super::pack_record_request_value(&parsed, "maxTokens").is_none());
         assert!(super::pack_record_derived_asset(&parsed, "searchIndex").is_none());

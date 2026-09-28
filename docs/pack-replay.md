@@ -175,7 +175,7 @@ into historical replay evidence.
 ee pack diff <old-pack-id> <new-pack-id> --json
 ```
 
-Compares two ledgers and reports:
+Compares two integrity-verified ledgers and emits `ee.pack.diff.v3` with:
 
 - Added, removed, and changed items
 - Score deltas
@@ -186,6 +186,23 @@ Compares two ledgers and reports:
   `derived_asset_changed`, `degradation_changed`, `redaction_changed`,
   `selection_changed`, `memory_or_index_state_changed`, `no_change`, or
   `ledger_unavailable_or_untrusted`)
+
+Items in `added`, `removed`, `changed`, and `redactionChanges` identify their
+source with `entity: {"kind": "memory" | "rule" | "evidence_span", "id": "..."}`.
+Comparisons use both kind and ID, so native evidence participates alongside
+memories without a synthetic memory identity. Collections sort by kind
+(`memory`, `rule`, `evidence_span`), then ID. Item snapshots carry
+`entityRevision`, a BLAKE3 revision when recorded by the ledger, or `null` when
+unavailable. Changed rows include `revisionChanged`, so a revision change is
+reported even if rank and scores stay the same.
+
+Current ledger admission supports memories and native evidence. The `rule`
+identity variant is reserved for the native rule pack migration.
+
+The diff reads the stored ledger snapshots; it does not reconstruct historical
+revisions from live source rows. Existing ledgers and pack hashes are unchanged.
+The historical v2 schema remains available for interpreting older responses;
+new responses use v3 and replace `memoryId` with the typed `entity` field.
 
 If either ledger is unavailable or untrusted, `replayable=false` and every
 ledger-derived added, removed, changed, degradation, redaction, and
@@ -377,7 +394,8 @@ rch exec -- cargo test --test freshness_contracts
 |--------|---------|
 | `ee.pack_replay_ledger.v1` | Full selection ledger stored with pack_records |
 | [`ee.pack.replay.v2`](schemas/ee.pack.replay.v2.json) | Replay command stdout contract |
-| [`ee.pack.diff.v2`](schemas/ee.pack.diff.v2.json) | Diff command stdout contract |
+| [`ee.pack.diff.v3`](schemas/ee.pack.diff.v3.json) | Diff command stdout contract with typed entity identity and revision changes |
+| [`ee.pack.diff.v2`](schemas/ee.pack.diff.v2.json) | Historical memory-only diff response contract |
 | [`ee.support_bundle.pack_replay_summary.v2`](schemas/ee.support_bundle.pack_replay_summary.v2.json) | Support bundle artifact |
 | `ee.regression_causality.v1` | Cross-artifact capsule for pack omission and stale-derived-asset triage |
 | `ee.pack.compression_manifest.v1` | Optional compressed pack or ledger sidecar manifest; preserves uncompressed pack and ledger hashes |

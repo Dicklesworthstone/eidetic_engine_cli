@@ -6,6 +6,7 @@ on:
       - 'src/core/context*.rs'
       - 'src/cli/mod.rs'
       - 'src/cli/pack_stream_tests.rs'
+      - 'src/cli/pack_diff_native_tests.rs'
       - 'src/pack/mod.rs'
       - 'src/output/streaming.rs'
       - 'tests/pack_task_paths_cli.py'
@@ -67,13 +68,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/task-pack-check.log"
-          rustfmt --check --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs src/output/streaming.rs src/pack/mod.rs benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs 2>&1 | tee "$RUNNER_TEMP/task-pack-format.log"
+          rustfmt --check --edition 2024 --config skip_children=true src/core/context.rs src/core/context_task_paths.rs src/cli/mod.rs src/cli/pack_stream_tests.rs src/cli/pack_diff_native_tests.rs src/output/streaming.rs src/pack/mod.rs benches/tiered_recall.rs benches/context.rs benches/pack_size.rs benches/graph_full_stack.rs benches/context_with_ppr.rs 2>&1 | tee "$RUNNER_TEMP/task-pack-format.log"
       - name: Exercise targets, native authorization, streaming and diff commitments
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           failed=0
-          for group in cli::pack_stream_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
+          for group in cli::pack_stream_tests cli::pack_diff_native_tests core::context::task_paths::tests core::context::rule_admission_tests output::streaming::tests; do
             log="$RUNNER_TEMP/task-pack-${group//::/-}.log"
             if ! cargo test --locked --lib "$group" -- --test-threads=2 2>&1 | tee "$log"; then
               failed=1
