@@ -10,6 +10,7 @@ on:
       - src/core/resume*.rs
       - src/core/recall*.rs
       - src/core/memory_lifecycle.rs
+      - src/core/retrieval_affinity.rs
       - src/core/jsonl*.rs
       - src/core/context*.rs
       - src/core/curate*.rs
@@ -105,6 +106,7 @@ jobs:
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
+          retrieval-affinity core::retrieval_affinity::tests::
           memory-review-authority core::memory_lifecycle::review_admission_tests::
           resume-source-authority core::resume::snapshot::seal_authority_tests::
           recall-review-authority core::recall::scan::review_tests::

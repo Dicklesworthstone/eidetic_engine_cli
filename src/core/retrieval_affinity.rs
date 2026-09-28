@@ -18,10 +18,14 @@
 //! and diagnostics only.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use sqlmodel_core::{Row, Value};
 
 use crate::db::{CreateGraphSnapshotInput, DbConnection, GraphSnapshotType};
+use crate::models::MemoryId;
 
 /// Degraded code when the affinity snapshot is absent (cold start).
 pub const RETRIEVAL_AFFINITY_COLD_CODE: &str = "retrieval_affinity_cold";
@@ -36,9 +40,14 @@ pub const AFFINITY_HALF_LIFE_DAYS_DEFAULT: f64 = 30.0;
 pub const ACCUMULATION_BATCH_LIMIT: u32 = 512;
 
 /// Result-set size cap when expanding co-occurrence pairs, bounding the
-/// per-set pair expansion at `k·(k−1)/2` for `k ≤ 32` (documented candidate
-/// bound: total cost is O(consumed rows · k), never O(n²) over the corpus).
+/// per-set pair expansion at `k·(k−1)/2` for `k ≤ 32`. Search observations
+/// use original one-based result ranks, including native non-memory slots;
+/// a later storage page cannot reset this cap. Total pair work is O(rows · k),
+/// never O(n²) over the corpus.
 pub const RESULT_SET_PAIR_CAP: usize = 32;
+
+/// Bound retained audit metadata before allocation or JSON decoding.
+const SEARCH_DETAILS_MAX_BYTES: i64 = 16 * 1024;
 
 /// Weights below this are dropped at materialization.
 const EDGE_EPSILON: f64 = 1e-6;
@@ -120,7 +129,7 @@ pub fn accumulate_retrieval_affinity(
     connection
         .with_transaction(|| accumulate_in_transaction(connection, workspace_id, now_rfc3339))
         .map_err(|_| {
-            "Retrieval-affinity accumulation did not complete; retry the whole refresh through the write owner."
+            "Retrieval-affinity accumulation did not complete; inspect the retained audit metadata and cursor, then retry the whole refresh through the write owner."
                 .to_owned()
         })
 }
@@ -164,49 +173,17 @@ fn accumulate_in_transaction(
         }
     }
 
-    // ── search audits: contiguous rows sharing a queryHash are one set ────
-    let search_rows =
-        connection.list_search_returned_mem_after(search_cursor, ACCUMULATION_BATCH_LIMIT)?;
-    let search_len = search_rows.len();
-    let mut current_key: Option<String> = None;
-    let mut current_set: Vec<(String, u32)> = Vec::new();
-    let flush =
-        |set: &mut Vec<(String, u32)>, deltas: &mut BTreeMap<(String, String), f64>| -> u64 {
-            let mut updated = 0;
-            if set.len() > 1 {
-                set.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-                updated = accumulate_pairs(deltas, set);
-            }
-            set.clear();
-            updated
-        };
-    for (rowid, row_workspace, memory_id, details, timestamp) in search_rows {
-        report.search_cursor = rowid;
-        if row_workspace.as_deref() != Some(workspace_id) {
-            continue;
-        }
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&details) else {
-            continue;
-        };
-        let Some(query_hash) = parsed.get("queryHash").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let rank = parsed
-            .get("rank")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(u32::MAX);
-        if current_key.as_deref() != Some(query_hash) {
-            report.pairs_updated += flush(&mut current_set, &mut deltas);
-            current_key = Some(query_hash.to_owned());
-        }
-        current_set.push((memory_id, rank));
-        report.search_rows_consumed += 1;
-        if timestamp > latest_event_at {
-            latest_event_at = timestamp;
-        }
-    }
-    report.pairs_updated += flush(&mut current_set, &mut deltas);
+    let search = accumulate_search_page(
+        connection,
+        workspace_id,
+        search_cursor,
+        ACCUMULATION_BATCH_LIMIT,
+        &mut deltas,
+    )?;
+    report.search_cursor = search.cursor;
+    report.search_rows_consumed = search.consumed;
+    report.pairs_updated += search.pairs;
+    latest_event_at = latest_event_at.max(search.latest_event_at);
 
     if !deltas.is_empty() {
         let event_at = if latest_event_at.is_empty() {
@@ -228,8 +205,230 @@ fn accumulate_in_transaction(
     )?;
 
     report.more_pending = packs_len == ACCUMULATION_BATCH_LIMIT as usize
-        || search_len == ACCUMULATION_BATCH_LIMIT as usize;
+        || search.raw_rows == ACCUMULATION_BATCH_LIMIT as usize;
     Ok(report)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchObservation {
+    query_hash: String,
+    rank: u32,
+}
+
+#[derive(Default)]
+struct SearchRun {
+    query_hash: Option<String>,
+    last_rank: u32,
+    members: Vec<(String, u32)>,
+}
+
+struct SearchPage {
+    cursor: i64,
+    raw_rows: usize,
+    consumed: u64,
+    pairs: u64,
+    latest_event_at: String,
+}
+
+fn search_observation_error() -> crate::db::DbError {
+    crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not validate retained retrieval-affinity observations or cursor".to_owned(),
+    }
+}
+
+fn search_row_cursor(row: &Row) -> crate::db::Result<i64> {
+    row.get(0)
+        .and_then(Value::as_i64)
+        .filter(|cursor| *cursor > 0)
+        .ok_or_else(search_observation_error)
+}
+
+/// Read actual audit positions, including non-memory targets. Filtering those
+/// out in SQL would lose rank boundaries between mixed native result sets.
+/// Neither query loads actors, bodies, nor unbounded details. Only the fixed
+/// traversal direction is interpolated; all values are bound parameters.
+fn search_observation_rows(
+    connection: &DbConnection,
+    cursor: i64,
+    limit: u32,
+    preceding: bool,
+) -> crate::db::Result<Vec<Row>> {
+    let (comparison, order) = if preceding { ("<=", "DESC") } else { (">", "ASC") };
+    let sql = format!(
+        "SELECT rowid, workspace_id, \
+            CASE WHEN length(target_type) <= 64 THEN target_type ELSE NULL END, \
+            CASE WHEN length(target_id) <= 128 THEN target_id ELSE NULL END, \
+            CASE WHEN length(CAST(details AS BLOB)) <= ?3 THEN details ELSE NULL END, \
+            CASE WHEN length(timestamp) <= 128 THEN timestamp ELSE NULL END \
+         FROM audit_log WHERE rowid {comparison} ?1 AND action = ?4 \
+         ORDER BY rowid {order} LIMIT ?2"
+    );
+    connection.query(
+        &sql,
+        &[
+            Value::BigInt(cursor),
+            Value::BigInt(i64::from(limit)),
+            Value::BigInt(SEARCH_DETAILS_MAX_BYTES),
+            Value::Text(crate::db::audit_actions::SEARCH_RETURNED_MEM.to_owned()),
+        ],
+    )
+}
+
+impl SearchRun {
+    /// Retained producers record ordered, one-based ranks, not a stable request
+    /// identity. A hash change or rank restart starts another recorded run.
+    /// Foreign or undecodable rows break continuity; they never join local runs.
+    /// This does not infer request identity for arbitrarily interleaved writers.
+    fn observe(
+        &mut self,
+        row: &Row,
+        workspace_id: &str,
+        deltas: Option<&mut BTreeMap<(String, String), f64>>,
+    ) -> crate::db::Result<(bool, u64)> {
+        if row.get(1).and_then(Value::as_str) != Some(workspace_id) {
+            *self = Self::default();
+            return Ok((false, 0));
+        }
+        let Some(target_type) = row.get(2).and_then(Value::as_str) else {
+            *self = Self::default();
+            return Ok((false, 0));
+        };
+        let memory = target_type == "memory";
+        let observation = row
+            .get(4)
+            .and_then(Value::as_str)
+            .and_then(|details| serde_json::from_str::<SearchObservation>(details).ok())
+            .filter(|value| {
+                value.rank > 0
+                    && !value.query_hash.trim().is_empty()
+                    && value.query_hash.len() <= 256
+            });
+        let Some(observation) = observation else {
+            if memory {
+                return Err(search_observation_error());
+            }
+            *self = Self::default();
+            return Ok((false, 0));
+        };
+        if self.query_hash.as_ref() != Some(&observation.query_hash)
+            || observation.rank <= self.last_rank
+        {
+            self.members.clear();
+            self.query_hash = Some(observation.query_hash);
+        }
+        self.last_rank = observation.rank;
+        // Rules and evidence keep their native identities. Their original
+        // ranks delimit the run, but they cannot become memory-only edges.
+        if !memory {
+            return Ok((false, 0));
+        }
+        let id = row
+            .get(3)
+            .and_then(Value::as_str)
+            .ok_or_else(search_observation_error)?;
+        MemoryId::from_str(id).map_err(|_| search_observation_error())?;
+        let timestamp = row
+            .get(5)
+            .and_then(Value::as_str)
+            .ok_or_else(search_observation_error)?;
+        if parse_rfc3339(timestamp).is_none() {
+            return Err(search_observation_error());
+        }
+        // Cap by ORIGINAL result rank, not by page position or by the count
+        // left after native targets were removed. A later page never reopens
+        // a saturated run. At most 31 earlier ranks can precede an eligible hit.
+        if observation.rank as usize > RESULT_SET_PAIR_CAP {
+            return Ok((true, 0));
+        }
+        if self.members.iter().any(|(earlier, _)| earlier == id) {
+            return Err(search_observation_error());
+        }
+        let mut pairs = 0;
+        if let Some(deltas) = deltas {
+            for (earlier, rank) in &self.members {
+                let pair = if earlier.as_str() < id {
+                    (earlier.clone(), id.to_owned())
+                } else {
+                    (id.to_owned(), earlier.clone())
+                };
+                *deltas.entry(pair).or_insert(0.0) +=
+                    1.0 / (1.0 + f64::from(observation.rank.abs_diff(*rank)));
+                pairs += 1;
+            }
+        }
+        self.members.push((id.to_owned(), observation.rank));
+        Ok((true, pairs))
+    }
+}
+
+/// Rehydrate only the bounded preceding rank context in the SAME transaction,
+/// then charge each pair exactly when its right-hand audit position is new.
+/// No durable carry table or unbounded scan is needed: ranks above 32 never
+/// contribute. Replaying context must never replay its already-counted pairs.
+fn accumulate_search_page(
+    connection: &DbConnection,
+    workspace_id: &str,
+    cursor: i64,
+    limit: u32,
+    deltas: &mut BTreeMap<(String, String), f64>,
+) -> crate::db::Result<SearchPage> {
+    if cursor < 0 {
+        return Err(search_observation_error());
+    }
+    let mut run = SearchRun::default();
+    if cursor > 0 {
+        let mut prefix =
+            search_observation_rows(connection, cursor, RESULT_SET_PAIR_CAP as u32, true)?;
+        if prefix.first().map(search_row_cursor).transpose()? != Some(cursor) {
+            // An absent/pruned cursor cannot silently authorize a new prefix.
+            return Err(search_observation_error());
+        }
+        prefix.reverse();
+        let mut previous = 0;
+        for row in prefix {
+            let position = search_row_cursor(&row)?;
+            if position <= previous || position > cursor {
+                return Err(search_observation_error());
+            }
+            run.observe(&row, workspace_id, None)?;
+            previous = position;
+        }
+    }
+    let rows = search_observation_rows(
+        connection,
+        cursor,
+        limit.clamp(1, ACCUMULATION_BATCH_LIMIT),
+        false,
+    )?;
+    let mut page = SearchPage {
+        cursor,
+        raw_rows: rows.len(),
+        consumed: 0,
+        pairs: 0,
+        latest_event_at: String::new(),
+    };
+    for row in rows {
+        let position = search_row_cursor(&row)?;
+        if position <= page.cursor {
+            return Err(search_observation_error());
+        }
+        let (memory, pairs) = run.observe(&row, workspace_id, Some(deltas))?;
+        page.cursor = position;
+        page.pairs += pairs;
+        if memory {
+            page.consumed += 1;
+            let timestamp = row
+                .get(5)
+                .and_then(Value::as_str)
+                .ok_or_else(search_observation_error)?;
+            if timestamp > page.latest_event_at.as_str() {
+                page.latest_event_at = timestamp.to_owned();
+            }
+        }
+    }
+    Ok(page)
 }
 
 /// Materialize the accumulated weights into a `retrieval_affinity` graph
@@ -344,13 +543,230 @@ pub fn materialize_retrieval_affinity_snapshot(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+
+    fn stream_id(number: u128) -> String {
+        MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string()
+    }
+
+    fn stream_record(
+        connection: &DbConnection,
+        workspace: &str,
+        target_type: &str,
+        id: &str,
+        details: String,
+    ) -> crate::db::Result<()> {
+        connection.insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace.to_owned()),
+                actor: None,
+                action: crate::db::audit_actions::SEARCH_RETURNED_MEM.to_owned(),
+                target_type: Some(target_type.to_owned()),
+                target_id: Some(id.to_owned()),
+                details: Some(details),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn stream_hit(
+        connection: &DbConnection,
+        workspace: &str,
+        target_type: &str,
+        id: &str,
+        hash: &str,
+        rank: u32,
+    ) -> crate::db::Result<()> {
+        stream_record(
+            connection,
+            workspace,
+            target_type,
+            id,
+            serde_json::json!({"queryHash": hash, "rank": rank}).to_string(),
+        )
+    }
+
+    #[test]
+    fn pair_crossing_the_production_page_boundary_is_counted_once() {
+        let (_temp, connection, workspace) = seeded_connection();
+        let first = stream_id(1);
+        let second = stream_id(2);
+        connection.with_transaction(|| {
+            for index in 0..ACCUMULATION_BATCH_LIMIT - 1 {
+                stream_hit(&connection, &workspace, "memory", &first, &format!("singleton-{index}"), 1)?;
+            }
+            stream_hit(&connection, &workspace, "memory", &first, "split", 1)?;
+            stream_hit(&connection, &workspace, "memory", &second, "split", 2)
+        }).expect("retained source rows");
+        let left = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("first page");
+        assert_eq!((left.search_rows_consumed, left.pairs_updated), (512, 0));
+        assert!(left.more_pending);
+        let right = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("continuation");
+        assert_eq!((right.search_rows_consumed, right.pairs_updated), (1, 1));
+        assert!(!right.more_pending);
+        let edges = connection.list_retrieval_affinity_edges(&workspace).expect("complete pair");
+        assert_eq!(edges.len(), 1);
+        assert_eq!((&edges[0].0, &edges[0].1, edges[0].2), (&first, &second, 0.5));
+        let replay = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("no duplicate replay");
+        assert_eq!((replay.search_rows_consumed, replay.pairs_updated), (0, 0));
+        assert_eq!(connection.list_retrieval_affinity_edges(&workspace).unwrap(), edges);
+    }
+
+    #[test]
+    fn native_targets_keep_their_ranks_without_becoming_memory_edges() {
+        let (_temp, connection, workspace) = seeded_connection();
+        let first = stream_id(1);
+        let second = stream_id(2);
+        connection.with_transaction(|| {
+            stream_hit(&connection, &workspace, "rule", "rule-native", "mixed", 1)?;
+            stream_hit(&connection, &workspace, "memory", &first, "mixed", 2)?;
+            stream_hit(&connection, &workspace, "evidence_span", "ev-native", "mixed", 3)?;
+            stream_hit(&connection, &workspace, "memory", &second, "mixed", 4)?;
+            // A misleading memory-shaped ID cannot override the native type.
+            stream_hit(&connection, &workspace, "rule", &stream_id(3), "mixed", 5)
+        }).expect("mixed native observations");
+        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("native-safe refresh");
+        assert_eq!((report.search_rows_consumed, report.pairs_updated), (2, 1));
+        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!((&edges[0].0, &edges[0].1), (&first, &second));
+        assert!((edges[0].2 - 1.0 / 3.0).abs() < 1e-9, "do not renumber admitted memories");
+        assert!(report.search_cursor > 0);
+        assert_eq!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap().search_rows_consumed, 0);
+    }
+
+    #[test]
+    fn repeated_query_hashes_restart_at_the_recorded_rank_boundary() {
+        let (_temp, connection, workspace) = seeded_connection();
+        let ids = (1..=4).map(stream_id).collect::<Vec<_>>();
+        connection.with_transaction(|| {
+            for (index, id) in ids.iter().enumerate() {
+                stream_hit(&connection, &workspace, "memory", id, "same-query", (index % 2 + 1) as u32)?;
+            }
+            Ok(())
+        }).unwrap();
+        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
+        assert_eq!((report.search_rows_consumed, report.pairs_updated), (4, 2));
+        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
+        assert_eq!(edges.len(), 2, "different executions must not invent cross-result edges");
+        assert_eq!((&edges[0].0, &edges[0].1, edges[0].2), (&ids[0], &ids[1], 0.5));
+        assert_eq!((&edges[1].0, &edges[1].1, edges[1].2), (&ids[2], &ids[3], 0.5));
+    }
+
+    #[test]
+    fn later_pages_do_not_reset_the_original_result_rank_cap() {
+        let (_temp, connection, workspace) = seeded_connection();
+        connection.with_transaction(|| {
+            for rank in 1..=ACCUMULATION_BATCH_LIMIT + 3 {
+                stream_hit(&connection, &workspace, "memory", &stream_id(u128::from(rank)), "large-run", rank)?;
+            }
+            Ok(())
+        }).unwrap();
+        let first = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
+        assert_eq!(first.pairs_updated, 32 * 31 / 2);
+        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
+        assert_eq!(edges.len(), 32 * 31 / 2);
+        let second = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
+        assert_eq!((second.search_rows_consumed, second.pairs_updated), (3, 0));
+        assert_eq!(connection.list_retrieval_affinity_edges(&workspace).unwrap(), edges);
+    }
+
+    #[test]
+    fn every_small_page_size_replays_the_same_retained_pair_weights() {
+        let (_temp, connection, workspace) = seeded_connection();
+        connection.with_transaction(|| {
+            for ordinal in 0..75 {
+                let rank = ordinal % 11 + 1;
+                let target = if rank == 3 { "evidence_span" } else { "memory" };
+                stream_hit(&connection, &workspace, target, &stream_id(100 + ordinal as u128), "repeated-query", rank)?;
+            }
+            Ok(())
+        }).unwrap();
+        let mut expected = BTreeMap::new();
+        let whole = accumulate_search_page(&connection, &workspace, 0, 512, &mut expected).unwrap();
+        assert!(!expected.is_empty());
+        for limit in [1, 2, 7, 31, 32, 33] {
+            let mut actual = BTreeMap::new();
+            let mut cursor = 0;
+            let mut consumed = 0;
+            let mut pairs = 0;
+            loop {
+                let page = accumulate_search_page(&connection, &workspace, cursor, limit, &mut actual).unwrap();
+                cursor = page.cursor;
+                consumed += page.consumed;
+                pairs += page.pairs;
+                if page.raw_rows < limit as usize {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected, "page size {limit} changed the pair weights");
+            assert_eq!((cursor, consumed, pairs), (whole.cursor, whole.consumed, whole.pairs));
+        }
+        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn foreign_observations_break_continuity_without_exposing_their_metadata() {
+        let (_temp, connection, workspace) = seeded_connection();
+        let foreign = "wsp_00000000000000000000000902";
+        connection.insert_workspace(foreign, &crate::db::CreateWorkspaceInput {
+            path: "/tmp/foreign-affinity".to_owned(), name: None,
+        }).unwrap();
+        stream_hit(&connection, &workspace, "memory", &stream_id(1), "same", 1).unwrap();
+        stream_record(&connection, foreign, "memory", &stream_id(3), r#"{"queryHash":"private-foreign-canary","rank":"invalid"}"#.to_owned()).unwrap();
+        stream_hit(&connection, &workspace, "memory", &stream_id(2), "same", 3).unwrap();
+        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
+        assert_eq!((report.search_rows_consumed, report.pairs_updated), (2, 0));
+        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_owned_rank_and_oversized_details_hold_the_entire_prefix() {
+        for details in [
+            r#"{"queryHash":"private-rank-canary","rank":0}"#.to_owned(),
+            serde_json::json!({"queryHash": "same", "rank": 3, "private": "x".repeat(SEARCH_DETAILS_MAX_BYTES as usize)}).to_string(),
+        ] {
+            let (_temp, connection, workspace) = seeded_connection();
+            stream_hit(&connection, &workspace, "memory", &stream_id(1), "same", 1).unwrap();
+            stream_hit(&connection, &workspace, "memory", &stream_id(2), "same", 2).unwrap();
+            stream_record(&connection, &workspace, "memory", &stream_id(3), details).unwrap();
+            let error = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect_err("do not acknowledge ambiguous source metadata");
+            assert!(!error.contains("private-rank-canary"));
+            assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+            assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn repeated_identity_in_one_increasing_rank_run_is_not_double_counted() {
+        let (_temp, connection, workspace) = seeded_connection();
+        for (number, rank) in [(1, 1), (2, 2), (1, 3)] {
+            stream_hit(&connection, &workspace, "memory", &stream_id(number), "same", rank).unwrap();
+        }
+        assert!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).is_err());
+        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn an_unverifiable_retained_cursor_is_not_silently_advanced() {
+        let (_temp, connection, workspace) = seeded_connection();
+        stream_hit(&connection, &workspace, "memory", &stream_id(1), "same", 1).unwrap();
+        connection.write_retrieval_affinity_cursor(&workspace, 0, 1234, ATOMIC_NOW).unwrap();
+        assert!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).is_err());
+        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 1234));
+        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+    }
 
     const ATOMIC_NOW: &str = "2026-08-03T00:00:00Z";
     const ATOMIC_HITS: [(&str, u32); 3] = [
-        ("mem_atomic000000000000000001", 1),
-        ("mem_atomic000000000000000002", 2),
-        ("mem_atomic000000000000000003", 3),
+        ("mem_00000000000000000000000001", 1),
+        ("mem_00000000000000000000000002", 2),
+        ("mem_00000000000000000000000003", 3),
     ];
 
     #[test]
@@ -563,8 +979,8 @@ mod tests {
             &workspace_id,
             "qh_alpha",
             &[
-                ("mem_a0000000000000000000000001", 1),
-                ("mem_a0000000000000000000000002", 2),
+                ("mem_00000000000000000000000001", 1),
+                ("mem_00000000000000000000000002", 2),
             ],
             "2026-08-02T00:00:00Z",
         );
@@ -599,8 +1015,8 @@ mod tests {
             &workspace_id,
             "qh_beta0",
             &[
-                ("mem_b0000000000000000000000001", 1),
-                ("mem_b0000000000000000000000002", 4),
+                ("mem_00000000000000000000000001", 1),
+                ("mem_00000000000000000000000002", 4),
             ],
             "2026-08-02T00:00:00Z",
         );
@@ -630,9 +1046,9 @@ mod tests {
             &workspace_id,
             "qh_gamma",
             &[
-                ("mem_c0000000000000000000000001", 1),
-                ("mem_c0000000000000000000000002", 2),
-                ("mem_c0000000000000000000000003", 3),
+                ("mem_00000000000000000000000001", 1),
+                ("mem_00000000000000000000000002", 2),
+                ("mem_00000000000000000000000003", 3),
             ],
             "2026-08-02T00:00:00Z",
         );
