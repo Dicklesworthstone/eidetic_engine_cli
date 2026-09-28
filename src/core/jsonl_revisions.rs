@@ -6,7 +6,8 @@
 //! the storage layer and cannot overwrite an explicit recovered marker.
 
 use super::{
-    BTreeMap, BTreeSet, JsonlImportIssue, TimestampClass, ValidatedMemory, normalize_imported_timestamp,
+    BTreeMap, BTreeSet, JsonlImportIssue, TimestampClass, ValidatedMemory,
+    normalize_imported_timestamp,
 };
 
 fn invalid(reason: &'static str) -> JsonlImportIssue {

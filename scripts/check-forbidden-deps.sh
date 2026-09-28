@@ -93,6 +93,159 @@ print("\n".join(names))
 PY
 }
 
+# bd-iuybr. A forbidden crate can be absent from the graph for two very
+# different reasons: nothing wants it, or something wants it and an upper bound
+# somewhere is the only thing holding it back. The scan below cannot tell those
+# apart -- it reports a clean tree either way -- so the second kind is invisible
+# until a routine `cargo update` trips the gate, with no indication of which pin
+# had been doing the work.
+#
+# Each entry here names a cap that is load-bearing: remove it and a forbidden
+# crate enters the resolved graph. The check asserts the cap is still declared
+# AND that the resolved version honours it, so the cap cannot be deleted, or
+# quietly rendered ineffective, without this gate saying which crate it was
+# keeping out and why.
+#
+# The cap is located by searching every dependency table in the manifest rather
+# than by a hardcoded table path, so moving it (host vs target-gated, normal vs
+# dev) does not silently disable this check -- only deleting it does.
+#
+# Format: crate | required bound | why it exists
+LOAD_BEARING_CAPS=(
+    'wasm-bindgen-futures|<0.4.79|0.4.79 adds a tokio dependency; ee reaches this crate through asupersync, which requires only "0.4" (bd-iuybr)'
+)
+
+# Assert every load-bearing cap is still declared in the manifest and still
+# honoured by the resolved graph. Exits non-zero via its caller on any failure:
+# a cap that has been removed is a policy regression, not a clean scan.
+check_load_bearing_caps() {
+    CAPS_SPEC="$(printf '%s\n' "${LOAD_BEARING_CAPS[@]}")" \
+    CAPS_MANIFEST="$1" \
+    CAPS_METADATA="$2" \
+    python3 -c '
+import json
+import os
+import sys
+
+try:
+    import tomllib
+except ImportError:
+    sys.exit("error: Python 3.11+ with tomllib is required to verify load-bearing caps")
+
+
+def parse_version(text):
+    parts = []
+    for chunk in text.split("."):
+        digits = ""
+        for char in chunk:
+            if not char.isdigit():
+                break
+            digits += char
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+try:
+    with open(os.environ["CAPS_MANIFEST"], "rb") as handle:
+        manifest = tomllib.load(handle)
+except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+    sys.exit(f"error: cannot read manifest for cap verification: {error}")
+
+try:
+    with open(os.environ["CAPS_METADATA"], "r", encoding="utf-8") as handle:
+        packages = json.load(handle).get("packages") or []
+except (OSError, ValueError, UnicodeDecodeError) as error:
+    sys.exit(f"error: cannot read metadata for cap verification: {error}")
+
+resolved = {}
+for package in packages:
+    name = package.get("name")
+    version = package.get("version")
+    if isinstance(name, str) and isinstance(version, str):
+        resolved[name] = version
+
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def requirements_for(crate):
+    """Every version requirement the manifest declares on crate, with where."""
+    found = []
+
+    def visit(table, where):
+        if not isinstance(table, dict) or crate not in table:
+            return
+        entry = table[crate]
+        if isinstance(entry, str):
+            found.append((where, entry))
+        elif isinstance(entry, dict) and isinstance(entry.get("version"), str):
+            found.append((where, entry["version"]))
+
+    for name in DEPENDENCY_TABLES:
+        visit(manifest.get(name), f"[{name}]")
+    targets = manifest.get("target")
+    if isinstance(targets, dict):
+        for cfg, tables in targets.items():
+            if not isinstance(tables, dict):
+                continue
+            for name in DEPENDENCY_TABLES:
+                visit(tables.get(name), f"[target.{cfg!r}.{name}]")
+    return found
+
+
+failures = []
+reported = []
+for line in os.environ["CAPS_SPEC"].splitlines():
+    if not line.strip():
+        continue
+    crate, bound, why = line.split("|", 2)
+
+    declarations = requirements_for(crate)
+    capped = [(where, req) for where, req in declarations if bound in req.replace(" ", "")]
+
+    if not declarations:
+        failures.append(
+            f"{crate}: the {bound} cap is GONE -- the manifest no longer declares this crate "
+            f"anywhere.\n"
+            f"    That cap was the only reason a forbidden crate stayed out of the graph: {why}\n"
+            f"    Re-declaring the cap, or confirming upstream dropped the dependency, is the fix."
+        )
+        continue
+    if not capped:
+        failures.append(
+            f"{crate}: declared as "
+            + ", ".join(f"{req!r} in {where}" for where, req in declarations)
+            + f", none of which carries the {bound} bound.\n    {why}"
+        )
+        continue
+    where, requirement = capped[0]
+
+    actual = resolved.get(crate)
+    if actual is None:
+        reported.append(f"  {crate} {requirement} in {where} (not in the resolved graph) -- {why}")
+        continue
+    limit = bound.lstrip("<=")
+    if parse_version(actual) >= parse_version(limit):
+        failures.append(
+            f"{crate}: cap says {bound} but the graph resolved {actual}, so the cap is declared "
+            f"but not effective.\n    {why}"
+        )
+        continue
+    reported.append(f"  {crate} {requirement} in {where} -> resolved {actual} -- {why}")
+
+if failures:
+    print("error: a load-bearing version cap is missing or ineffective:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    sys.exit(2)
+
+print("ok: load-bearing caps holding forbidden crates out of the graph:")
+for line in reported:
+    print(line)
+'
+}
+
 scan_metadata() {
     FORBIDDEN_LIST="${FORBIDDEN_LIST}" python3 -c '
 import json
@@ -212,6 +365,91 @@ if [[ "${1:-}" == "--self-test" ]]; then
     done
     echo "ok: malformed metadata rejected"
 
+    # bd-iuybr. Controls for the load-bearing cap check. A guard whose failing
+    # arm has never been observed is decoration, and this one guards a cap whose
+    # removal is silent by construction: the forbidden scan reports a clean tree
+    # either way. One passing arm and three distinct failing arms -- cap deleted,
+    # cap present but unbounded, cap declared but not honoured by the resolution.
+    caps_manifest="${fixture_dir}/caps-ok.toml"
+    cat > "${caps_manifest}" <<'CAPFIXTURE'
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
+CAPFIXTURE
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"}]}\n' \
+        > "${fixture_dir}/caps-ok.json"
+    if ! check_load_bearing_caps "${caps_manifest}" "${fixture_dir}/caps-ok.json" \
+        > "${fixture_dir}/caps-ok.out" 2>&1; then
+        cat "${fixture_dir}/caps-ok.out" >&2
+        echo "error: self-test rejected a manifest whose cap is present and honoured" >&2
+        exit 2
+    fi
+    if ! grep -Fq 'wasm-bindgen-futures' "${fixture_dir}/caps-ok.out"; then
+        echo "error: cap check passed without naming the capped crate" >&2
+        exit 2
+    fi
+    echo "ok: load-bearing cap accepted when present and honoured"
+
+    expect_cap_failure() {
+        local label="$1" expected="$2" manifest="$3" metadata="$4"
+        if check_load_bearing_caps "${manifest}" "${metadata}" \
+            > "${fixture_dir}/${label}.out" 2>&1; then
+            echo "error: self-test accepted a broken cap: ${label}" >&2
+            exit 2
+        fi
+        if ! grep -Fq -- "${expected}" "${fixture_dir}/${label}.out"; then
+            cat "${fixture_dir}/${label}.out" >&2
+            echo "error: cap self-test ${label} failed for an unexpected reason" >&2
+            exit 2
+        fi
+        echo "ok: rejected cap ${label}"
+    }
+
+    cat > "${fixture_dir}/caps-deleted.toml" <<'CAPFIXTURE'
+[package]
+name = "fixture"
+version = "0.0.0"
+CAPFIXTURE
+    expect_cap_failure cap_deleted 'cap is GONE' \
+        "${fixture_dir}/caps-deleted.toml" "${fixture_dir}/caps-ok.json"
+
+    cat > "${fixture_dir}/caps-unbounded.toml" <<'CAPFIXTURE'
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+CAPFIXTURE
+    expect_cap_failure cap_unbounded 'none of which carries' \
+        "${fixture_dir}/caps-unbounded.toml" "${fixture_dir}/caps-ok.json"
+
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.79"}]}\n' \
+        > "${fixture_dir}/caps-violated.json"
+    expect_cap_failure cap_not_effective 'not effective' \
+        "${caps_manifest}" "${fixture_dir}/caps-violated.json"
+
+    # The cap may legitimately move between dependency tables; only deleting it
+    # is a regression. If this arm ever fails, the search narrowed by accident.
+    cat > "${fixture_dir}/caps-moved.toml" <<'CAPFIXTURE'
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[dependencies]
+wasm-bindgen-futures = { version = ">=0.4, <0.4.79" }
+CAPFIXTURE
+    if ! check_load_bearing_caps "${fixture_dir}/caps-moved.toml" "${fixture_dir}/caps-ok.json" \
+        > "${fixture_dir}/caps-moved.out" 2>&1; then
+        cat "${fixture_dir}/caps-moved.out" >&2
+        echo "error: cap check did not find the cap after it moved tables" >&2
+        exit 2
+    fi
+    echo "ok: cap still found when declared in a different dependency table"
+
     echo "ok: forbidden dependency scanner self-test passed"
     exit 0
 elif [[ -n "${1:-}" ]]; then
@@ -274,9 +512,15 @@ audit_manifest() {
         # broken toolchain can never be mistaken for a pass.
         if [[ "${stale_is_fatal}" == "no" ]] && grep -q 'because --locked was passed' "${stderr_file}"; then
             echo "warning: ${label} lockfile is out of sync with its manifest, so its graph could not be" >&2
-            echo "         audited. This is tracked as bd-mj18x and is NOT a forbidden-dependency finding." >&2
-            echo "         Regenerating it today introduces tokio via wasm-bindgen-futures 0.4.79 (bd-iuybr)," >&2
-            echo "         which is why it has not simply been regenerated." >&2
+            echo "         audited. This is NOT a forbidden-dependency finding." >&2
+            echo "         Regenerate it with: (cd fuzz && cargo generate-lockfile)" >&2
+            echo "         Tolerated rather than fatal because fuzz depends on the root by path, so ANY" >&2
+            echo "         change to the root manifest staleness-marks this lock; making that fatal would" >&2
+            echo "         red the gate for dependency edits that have nothing to do with fuzz. The" >&2
+            echo "         earlier reason for tolerating it -- that regenerating pulled in tokio via" >&2
+            echo "         wasm-bindgen-futures 0.4.79 -- no longer applies: the root now caps that" >&2
+            echo "         crate below 0.4.79 (bd-iuybr) and fuzz inherits the cap through the path" >&2
+            echo "         dependency, so a regenerated lock resolves 0.4.78 and stays tokio-free." >&2
             rm -f "${stderr_file}"
             return 0
         fi
@@ -286,6 +530,10 @@ audit_manifest() {
         return 3
     fi
     rm -f "${stderr_file}"
+    # Keep the resolved graph for the load-bearing cap check, which has to compare
+    # the manifest's declared bound against what was actually resolved.
+    LAST_AUDIT_METADATA_FILE=$(mktemp)
+    printf '%s\n' "${metadata}" > "${LAST_AUDIT_METADATA_FILE}"
     if ! hits=$(printf '%s\n' "${metadata}" | scan_metadata); then
         echo "error: dependency metadata scan failed for ${label}" >&2
         return 3
@@ -298,7 +546,24 @@ audit_manifest() {
     return 0
 }
 
+LAST_AUDIT_METADATA_FILE=""
 audit_manifest "root" "${MANIFEST}" || exit $?
+
+# A clean scan above means "no forbidden crate is in the graph", which is exactly
+# as true when a cap is holding one out as when nothing wants it. Say which,
+# while the tree is still green, instead of leaving the next person to discover
+# it from a red gate after their `cargo update`.
+if [[ -n "${LAST_AUDIT_METADATA_FILE}" && -f "${LAST_AUDIT_METADATA_FILE}" ]]; then
+    caps_status=0
+    check_load_bearing_caps "${MANIFEST}" "${LAST_AUDIT_METADATA_FILE}" || caps_status=$?
+    rm -f "${LAST_AUDIT_METADATA_FILE}"
+    if (( caps_status != 0 )); then
+        exit "${caps_status}"
+    fi
+else
+    echo "error: root audit produced no metadata to verify caps against" >&2
+    exit 3
+fi
 
 # bd-mj18x: fuzz/ is EXCLUDED from the workspace and resolves its own lockfile, so
 # the root audit above never saw it. That blind spot is not theoretical -- while
