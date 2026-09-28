@@ -10591,7 +10591,10 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn pack_quality_fallback_ranks_before_limit_and_tracks_feedback_snapshot() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let ee_dir = workspace.join(".ee");
         std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
         std::fs::write(
@@ -10600,8 +10603,8 @@ pub fn unrelated_context() -> u64 {{
         )
         .map_err(|error| error.to_string())?;
         let database_path = ee_dir.join("ee.db");
-        let connection = DbConnection::open_file(&database_path)
-            .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = super::stable_context_workspace_id(&workspace);
         connection
@@ -10665,7 +10668,10 @@ pub fn unrelated_context() -> u64 {{
         };
         let run = |options: &SearchOptions| {
             super::quality_scored_lexical_memory_fallback_hits(
-                &connection, options, Vec::new(), &mut Vec::new(),
+                &connection,
+                options,
+                Vec::new(),
+                &mut Vec::new(),
             )
             .map_err(|error| error.to_string())
         };

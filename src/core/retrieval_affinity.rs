@@ -255,7 +255,11 @@ fn search_observation_rows(
     limit: u32,
     preceding: bool,
 ) -> crate::db::Result<Vec<Row>> {
-    let (comparison, order) = if preceding { ("<=", "DESC") } else { (">", "ASC") };
+    let (comparison, order) = if preceding {
+        ("<=", "DESC")
+    } else {
+        (">", "ASC")
+    };
     let sql = format!(
         "SELECT rowid, workspace_id, \
             CASE WHEN length(target_type) <= 64 THEN target_type ELSE NULL END, \
@@ -594,25 +598,47 @@ mod tests {
         let (_temp, connection, workspace) = seeded_connection();
         let first = stream_id(1);
         let second = stream_id(2);
-        connection.with_transaction(|| {
-            for index in 0..ACCUMULATION_BATCH_LIMIT - 1 {
-                stream_hit(&connection, &workspace, "memory", &first, &format!("singleton-{index}"), 1)?;
-            }
-            stream_hit(&connection, &workspace, "memory", &first, "split", 1)?;
-            stream_hit(&connection, &workspace, "memory", &second, "split", 2)
-        }).expect("retained source rows");
-        let left = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("first page");
+        connection
+            .with_transaction(|| {
+                for index in 0..ACCUMULATION_BATCH_LIMIT - 1 {
+                    stream_hit(
+                        &connection,
+                        &workspace,
+                        "memory",
+                        &first,
+                        &format!("singleton-{index}"),
+                        1,
+                    )?;
+                }
+                stream_hit(&connection, &workspace, "memory", &first, "split", 1)?;
+                stream_hit(&connection, &workspace, "memory", &second, "split", 2)
+            })
+            .expect("retained source rows");
+        let left =
+            accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("first page");
         assert_eq!((left.search_rows_consumed, left.pairs_updated), (512, 0));
         assert!(left.more_pending);
-        let right = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("continuation");
+        let right = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)
+            .expect("continuation");
         assert_eq!((right.search_rows_consumed, right.pairs_updated), (1, 1));
         assert!(!right.more_pending);
-        let edges = connection.list_retrieval_affinity_edges(&workspace).expect("complete pair");
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace)
+            .expect("complete pair");
         assert_eq!(edges.len(), 1);
-        assert_eq!((&edges[0].0, &edges[0].1, edges[0].2), (&first, &second, 0.5));
-        let replay = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("no duplicate replay");
+        assert_eq!(
+            (&edges[0].0, &edges[0].1, edges[0].2),
+            (&first, &second, 0.5)
+        );
+        let replay = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)
+            .expect("no duplicate replay");
         assert_eq!((replay.search_rows_consumed, replay.pairs_updated), (0, 0));
-        assert_eq!(connection.list_retrieval_affinity_edges(&workspace).unwrap(), edges);
+        assert_eq!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap(),
+            edges
+        );
     }
 
     #[test]
@@ -620,71 +646,137 @@ mod tests {
         let (_temp, connection, workspace) = seeded_connection();
         let first = stream_id(1);
         let second = stream_id(2);
-        connection.with_transaction(|| {
-            stream_hit(&connection, &workspace, "rule", "rule-native", "mixed", 1)?;
-            stream_hit(&connection, &workspace, "memory", &first, "mixed", 2)?;
-            stream_hit(&connection, &workspace, "evidence_span", "ev-native", "mixed", 3)?;
-            stream_hit(&connection, &workspace, "memory", &second, "mixed", 4)?;
-            // A misleading memory-shaped ID cannot override the native type.
-            stream_hit(&connection, &workspace, "rule", &stream_id(3), "mixed", 5)
-        }).expect("mixed native observations");
-        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).expect("native-safe refresh");
+        connection
+            .with_transaction(|| {
+                stream_hit(&connection, &workspace, "rule", "rule-native", "mixed", 1)?;
+                stream_hit(&connection, &workspace, "memory", &first, "mixed", 2)?;
+                stream_hit(
+                    &connection,
+                    &workspace,
+                    "evidence_span",
+                    "ev-native",
+                    "mixed",
+                    3,
+                )?;
+                stream_hit(&connection, &workspace, "memory", &second, "mixed", 4)?;
+                // A misleading memory-shaped ID cannot override the native type.
+                stream_hit(&connection, &workspace, "rule", &stream_id(3), "mixed", 5)
+            })
+            .expect("mixed native observations");
+        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)
+            .expect("native-safe refresh");
         assert_eq!((report.search_rows_consumed, report.pairs_updated), (2, 1));
-        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace)
+            .unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!((&edges[0].0, &edges[0].1), (&first, &second));
-        assert!((edges[0].2 - 1.0 / 3.0).abs() < 1e-9, "do not renumber admitted memories");
+        assert!(
+            (edges[0].2 - 1.0 / 3.0).abs() < 1e-9,
+            "do not renumber admitted memories"
+        );
         assert!(report.search_cursor > 0);
-        assert_eq!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap().search_rows_consumed, 0);
+        assert_eq!(
+            accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)
+                .unwrap()
+                .search_rows_consumed,
+            0
+        );
     }
 
     #[test]
     fn repeated_query_hashes_restart_at_the_recorded_rank_boundary() {
         let (_temp, connection, workspace) = seeded_connection();
         let ids = (1..=4).map(stream_id).collect::<Vec<_>>();
-        connection.with_transaction(|| {
-            for (index, id) in ids.iter().enumerate() {
-                stream_hit(&connection, &workspace, "memory", id, "same-query", (index % 2 + 1) as u32)?;
-            }
-            Ok(())
-        }).unwrap();
+        connection
+            .with_transaction(|| {
+                for (index, id) in ids.iter().enumerate() {
+                    stream_hit(
+                        &connection,
+                        &workspace,
+                        "memory",
+                        id,
+                        "same-query",
+                        (index % 2 + 1) as u32,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
         let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
         assert_eq!((report.search_rows_consumed, report.pairs_updated), (4, 2));
-        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
-        assert_eq!(edges.len(), 2, "different executions must not invent cross-result edges");
-        assert_eq!((&edges[0].0, &edges[0].1, edges[0].2), (&ids[0], &ids[1], 0.5));
-        assert_eq!((&edges[1].0, &edges[1].1, edges[1].2), (&ids[2], &ids[3], 0.5));
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace)
+            .unwrap();
+        assert_eq!(
+            edges.len(),
+            2,
+            "different executions must not invent cross-result edges"
+        );
+        assert_eq!(
+            (&edges[0].0, &edges[0].1, edges[0].2),
+            (&ids[0], &ids[1], 0.5)
+        );
+        assert_eq!(
+            (&edges[1].0, &edges[1].1, edges[1].2),
+            (&ids[2], &ids[3], 0.5)
+        );
     }
 
     #[test]
     fn later_pages_do_not_reset_the_original_result_rank_cap() {
         let (_temp, connection, workspace) = seeded_connection();
-        connection.with_transaction(|| {
-            for rank in 1..=ACCUMULATION_BATCH_LIMIT + 3 {
-                stream_hit(&connection, &workspace, "memory", &stream_id(u128::from(rank)), "large-run", rank)?;
-            }
-            Ok(())
-        }).unwrap();
+        connection
+            .with_transaction(|| {
+                for rank in 1..=ACCUMULATION_BATCH_LIMIT + 3 {
+                    stream_hit(
+                        &connection,
+                        &workspace,
+                        "memory",
+                        &stream_id(u128::from(rank)),
+                        "large-run",
+                        rank,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
         let first = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
         assert_eq!(first.pairs_updated, 32 * 31 / 2);
-        let edges = connection.list_retrieval_affinity_edges(&workspace).unwrap();
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace)
+            .unwrap();
         assert_eq!(edges.len(), 32 * 31 / 2);
         let second = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
         assert_eq!((second.search_rows_consumed, second.pairs_updated), (3, 0));
-        assert_eq!(connection.list_retrieval_affinity_edges(&workspace).unwrap(), edges);
+        assert_eq!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap(),
+            edges
+        );
     }
 
     #[test]
     fn every_small_page_size_replays_the_same_retained_pair_weights() {
         let (_temp, connection, workspace) = seeded_connection();
-        connection.with_transaction(|| {
-            for ordinal in 0..75 {
-                let rank = ordinal % 11 + 1;
-                let target = if rank == 3 { "evidence_span" } else { "memory" };
-                stream_hit(&connection, &workspace, target, &stream_id(100 + ordinal as u128), "repeated-query", rank)?;
-            }
-            Ok(())
-        }).unwrap();
+        connection
+            .with_transaction(|| {
+                for ordinal in 0..75 {
+                    let rank = ordinal % 11 + 1;
+                    let target = if rank == 3 { "evidence_span" } else { "memory" };
+                    stream_hit(
+                        &connection,
+                        &workspace,
+                        target,
+                        &stream_id(100 + ordinal as u128),
+                        "repeated-query",
+                        rank,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
         let mut expected = BTreeMap::new();
         let whole = accumulate_search_page(&connection, &workspace, 0, 512, &mut expected).unwrap();
         assert!(!expected.is_empty());
@@ -694,7 +786,9 @@ mod tests {
             let mut consumed = 0;
             let mut pairs = 0;
             loop {
-                let page = accumulate_search_page(&connection, &workspace, cursor, limit, &mut actual).unwrap();
+                let page =
+                    accumulate_search_page(&connection, &workspace, cursor, limit, &mut actual)
+                        .unwrap();
                 cursor = page.cursor;
                 consumed += page.consumed;
                 pairs += page.pairs;
@@ -702,26 +796,58 @@ mod tests {
                     break;
                 }
             }
-            assert_eq!(actual, expected, "page size {limit} changed the pair weights");
-            assert_eq!((cursor, consumed, pairs), (whole.cursor, whole.consumed, whole.pairs));
+            assert_eq!(
+                actual, expected,
+                "page size {limit} changed the pair weights"
+            );
+            assert_eq!(
+                (cursor, consumed, pairs),
+                (whole.cursor, whole.consumed, whole.pairs)
+            );
         }
-        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 0));
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            connection.retrieval_affinity_cursor(&workspace).unwrap(),
+            (0, 0)
+        );
     }
 
     #[test]
     fn foreign_observations_break_continuity_without_exposing_their_metadata() {
         let (_temp, connection, workspace) = seeded_connection();
         let foreign = "wsp_00000000000000000000000902";
-        connection.insert_workspace(foreign, &crate::db::CreateWorkspaceInput {
-            path: "/tmp/foreign-affinity".to_owned(), name: None,
-        }).unwrap();
+        connection
+            .insert_workspace(
+                foreign,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/foreign-affinity".to_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
         stream_hit(&connection, &workspace, "memory", &stream_id(1), "same", 1).unwrap();
-        stream_record(&connection, foreign, "memory", &stream_id(3), r#"{"queryHash":"private-foreign-canary","rank":"invalid"}"#.to_owned()).unwrap();
+        stream_record(
+            &connection,
+            foreign,
+            "memory",
+            &stream_id(3),
+            r#"{"queryHash":"private-foreign-canary","rank":"invalid"}"#.to_owned(),
+        )
+        .unwrap();
         stream_hit(&connection, &workspace, "memory", &stream_id(2), "same", 3).unwrap();
         let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).unwrap();
         assert_eq!((report.search_rows_consumed, report.pairs_updated), (2, 0));
-        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -745,21 +871,47 @@ mod tests {
     fn repeated_identity_in_one_increasing_rank_run_is_not_double_counted() {
         let (_temp, connection, workspace) = seeded_connection();
         for (number, rank) in [(1, 1), (2, 2), (1, 3)] {
-            stream_hit(&connection, &workspace, "memory", &stream_id(number), "same", rank).unwrap();
+            stream_hit(
+                &connection,
+                &workspace,
+                "memory",
+                &stream_id(number),
+                "same",
+                rank,
+            )
+            .unwrap();
         }
         assert!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).is_err());
-        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 0));
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            connection.retrieval_affinity_cursor(&workspace).unwrap(),
+            (0, 0)
+        );
     }
 
     #[test]
     fn an_unverifiable_retained_cursor_is_not_silently_advanced() {
         let (_temp, connection, workspace) = seeded_connection();
         stream_hit(&connection, &workspace, "memory", &stream_id(1), "same", 1).unwrap();
-        connection.write_retrieval_affinity_cursor(&workspace, 0, 1234, ATOMIC_NOW).unwrap();
+        connection
+            .write_retrieval_affinity_cursor(&workspace, 0, 1234, ATOMIC_NOW)
+            .unwrap();
         assert!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).is_err());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace).unwrap(), (0, 1234));
-        assert!(connection.list_retrieval_affinity_edges(&workspace).unwrap().is_empty());
+        assert_eq!(
+            connection.retrieval_affinity_cursor(&workspace).unwrap(),
+            (0, 1234)
+        );
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     const ATOMIC_NOW: &str = "2026-08-03T00:00:00Z";
@@ -772,7 +924,13 @@ mod tests {
     #[test]
     fn failed_cursor_insert_rolls_back_edges_and_reopen_retries_once() {
         let (temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_a", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_a",
+            &ATOMIC_HITS[..2],
+            ATOMIC_NOW,
+        );
         connection
             .execute_raw(
                 "CREATE TRIGGER affinity_fail_cursor BEFORE INSERT ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'private-cursor-fixture'); END;",
@@ -781,65 +939,152 @@ mod tests {
         let error = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
             .expect_err("cursor failure must not acknowledge the batch");
         assert!(!error.contains("private-cursor-fixture"));
-        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("edges").is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("cursor"), (0, 0));
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("edges")
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("cursor"),
+            (0, 0)
+        );
         connection.close().expect("close after failed transaction");
 
         let connection = DbConnection::open_file(&temp.path().join("ee.db")).expect("reopen");
-        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("durable edges").is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("durable cursor"), (0, 0));
-        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
-        let first = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry");
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("durable edges")
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("durable cursor"),
+            (0, 0)
+        );
+        connection
+            .execute_raw("DROP TRIGGER affinity_fail_cursor")
+            .expect("remove fixture fault");
+        let first =
+            accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry");
         assert_eq!((first.search_rows_consumed, first.pairs_updated), (2, 1));
-        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("committed edges");
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace_id)
+            .expect("committed edges");
         assert_eq!(edges.len(), 1);
         assert!((edges[0].2 - 0.5).abs() < 1e-9);
-        let second = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("repeat");
+        let second =
+            accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("repeat");
         assert_eq!((second.search_rows_consumed, second.pairs_updated), (0, 0));
-        assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id).expect("unchanged edges"), edges);
+        assert_eq!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("unchanged edges"),
+            edges
+        );
     }
 
     #[test]
     fn failed_cursor_update_preserves_the_entire_previously_committed_prefix() {
         let (_temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_b", &ATOMIC_HITS[..2], ATOMIC_NOW);
-        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("first prefix");
-        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("first edges");
-        let cursor = connection.retrieval_affinity_cursor(&workspace_id).expect("first cursor");
-        seed_search_set(&connection, &workspace_id, "atomic_c", &ATOMIC_HITS, "2026-08-04T00:00:00Z");
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_b",
+            &ATOMIC_HITS[..2],
+            ATOMIC_NOW,
+        );
+        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("first prefix");
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace_id)
+            .expect("first edges");
+        let cursor = connection
+            .retrieval_affinity_cursor(&workspace_id)
+            .expect("first cursor");
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_c",
+            &ATOMIC_HITS,
+            "2026-08-04T00:00:00Z",
+        );
         connection
             .execute_raw(
                 "CREATE TRIGGER affinity_fail_cursor BEFORE UPDATE ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'private-update-fixture'); END;",
             )
             .expect("inject existing-cursor failure");
         assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
-        assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id).expect("rolled back edges"), edges);
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("rolled back cursor"), cursor);
-        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
-        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry prefix");
+        assert_eq!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("rolled back edges"),
+            edges
+        );
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("rolled back cursor"),
+            cursor
+        );
+        connection
+            .execute_raw("DROP TRIGGER affinity_fail_cursor")
+            .expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("retry prefix");
         assert_eq!(replay.search_rows_consumed, 3);
-        let after = connection.list_retrieval_affinity_edges(&workspace_id).expect("complete edges");
+        let after = connection
+            .list_retrieval_affinity_edges(&workspace_id)
+            .expect("complete edges");
         assert_eq!(after.len(), 3);
-        assert!((after[0].2 - 1.0).abs() < 1e-9, "the old edge receives one increment");
+        assert!(
+            (after[0].2 - 1.0).abs() < 1e-9,
+            "the old edge receives one increment"
+        );
         assert!(replay.search_cursor > cursor.1);
     }
 
     #[test]
     fn failed_later_edge_rolls_back_the_successfully_written_first_edge() {
         let (_temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_d", &ATOMIC_HITS, ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_d",
+            &ATOMIC_HITS,
+            ATOMIC_NOW,
+        );
         connection
             .execute_raw(
                 "CREATE TRIGGER affinity_fail_edge BEFORE INSERT ON retrieval_affinity_accumulation WHEN (SELECT COUNT(*) FROM retrieval_affinity_accumulation) > 0 BEGIN SELECT RAISE(ABORT, 'private-edge-fixture'); END;",
             )
             .expect("inject second-edge failure");
         assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
-        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("no partial edges").is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("no cursor advance"), (0, 0));
-        connection.execute_raw("DROP TRIGGER affinity_fail_edge").expect("remove fixture fault");
-        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("retry all edges");
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("no partial edges")
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("no cursor advance"),
+            (0, 0)
+        );
+        connection
+            .execute_raw("DROP TRIGGER affinity_fail_edge")
+            .expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("retry all edges");
         assert_eq!(replay.pairs_updated, 3);
-        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("all edges");
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace_id)
+            .expect("all edges");
         assert_eq!(edges.len(), 3);
         assert!((edges[0].2 - 0.5).abs() < 1e-9);
         assert!((edges[1].2 - 1.0 / 3.0).abs() < 1e-9);
@@ -849,77 +1094,156 @@ mod tests {
     #[test]
     fn other_connections_never_observe_uncommitted_affinity_or_cursor_state() {
         let (temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_e", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_e",
+            &ATOMIC_HITS[..2],
+            ATOMIC_NOW,
+        );
         let observer =
             DbConnection::open_file_read_only(&temp.path().join("ee.db")).expect("observer");
-        let report = connection.with_transaction(|| {
-            let report = accumulate_in_transaction(&connection, &workspace_id, ATOMIC_NOW)?;
-            assert_eq!(connection.list_retrieval_affinity_edges(&workspace_id)?.len(), 1);
-            assert_eq!(connection.retrieval_affinity_cursor(&workspace_id)?.1, report.search_cursor);
-            assert!(observer.list_retrieval_affinity_edges(&workspace_id)?.is_empty());
-            assert_eq!(observer.retrieval_affinity_cursor(&workspace_id)?, (0, 0));
-            Ok(report)
-        }).expect("commit complete prefix");
-        assert_eq!(observer.list_retrieval_affinity_edges(&workspace_id).expect("visible edges").len(), 1);
-        assert_eq!(observer.retrieval_affinity_cursor(&workspace_id).expect("visible cursor").1, report.search_cursor);
+        let report = connection
+            .with_transaction(|| {
+                let report = accumulate_in_transaction(&connection, &workspace_id, ATOMIC_NOW)?;
+                assert_eq!(
+                    connection
+                        .list_retrieval_affinity_edges(&workspace_id)?
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    connection.retrieval_affinity_cursor(&workspace_id)?.1,
+                    report.search_cursor
+                );
+                assert!(
+                    observer
+                        .list_retrieval_affinity_edges(&workspace_id)?
+                        .is_empty()
+                );
+                assert_eq!(observer.retrieval_affinity_cursor(&workspace_id)?, (0, 0));
+                Ok(report)
+            })
+            .expect("commit complete prefix");
+        assert_eq!(
+            observer
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("visible edges")
+                .len(),
+            1
+        );
+        assert_eq!(
+            observer
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("visible cursor")
+                .1,
+            report.search_cursor
+        );
     }
 
     #[test]
     fn competing_accumulators_retry_from_committed_cursors_without_double_counting() {
         let (temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_f", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_f",
+            &ATOMIC_HITS[..2],
+            ATOMIC_NOW,
+        );
         let database = temp.path().join("ee.db");
         let gate = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
-            let handles = (0..2).map(|_| {
-                let database = &database;
-                let workspace_id = &workspace_id;
-                let gate = &gate;
-                scope.spawn(move || {
-                    let writer = DbConnection::open_file(database).expect("competing writer");
-                    gate.wait();
-                    // The write owner may reject contention. Never retry only
-                    // the writes with deltas computed from a stale cursor.
-                    accumulate_retrieval_affinity(&writer, workspace_id, ATOMIC_NOW)
+            let handles = (0..2)
+                .map(|_| {
+                    let database = &database;
+                    let workspace_id = &workspace_id;
+                    let gate = &gate;
+                    scope.spawn(move || {
+                        let writer = DbConnection::open_file(database).expect("competing writer");
+                        gate.wait();
+                        // The write owner may reject contention. Never retry only
+                        // the writes with deltas computed from a stale cursor.
+                        accumulate_retrieval_affinity(&writer, workspace_id, ATOMIC_NOW)
+                    })
                 })
-            }).collect::<Vec<_>>();
+                .collect::<Vec<_>>();
             for handle in handles {
                 let _outcome = handle.join().expect("writer did not panic");
             }
         });
-        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("drain any contention retry");
-        let edges = connection.list_retrieval_affinity_edges(&workspace_id).expect("once-counted edges");
+        accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("drain any contention retry");
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace_id)
+            .expect("once-counted edges");
         assert_eq!(edges.len(), 1);
         assert!((edges[0].2 - 0.5).abs() < 1e-9);
-        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("already consumed");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("already consumed");
         assert_eq!(replay.search_rows_consumed, 0);
     }
 
     #[test]
     fn read_only_accumulation_cannot_publish_edges_or_a_cursor() {
         let (temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_g", &ATOMIC_HITS[..2], ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_g",
+            &ATOMIC_HITS[..2],
+            ATOMIC_NOW,
+        );
         let reader =
             DbConnection::open_file_read_only(&temp.path().join("ee.db")).expect("read only");
         assert!(accumulate_retrieval_affinity(&reader, &workspace_id, ATOMIC_NOW).is_err());
-        assert!(connection.list_retrieval_affinity_edges(&workspace_id).expect("no edges").is_empty());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("no cursor"), (0, 0));
-        assert_eq!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("writer retry").pairs_updated, 1);
+        assert!(
+            connection
+                .list_retrieval_affinity_edges(&workspace_id)
+                .expect("no edges")
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("no cursor"),
+            (0, 0)
+        );
+        assert_eq!(
+            accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+                .expect("writer retry")
+                .pairs_updated,
+            1
+        );
     }
 
     #[test]
     fn cursor_failure_with_no_pairs_does_not_acknowledge_a_singleton() {
         let (_temp, connection, workspace_id) = seeded_connection();
-        seed_search_set(&connection, &workspace_id, "atomic_h", &ATOMIC_HITS[..1], ATOMIC_NOW);
+        seed_search_set(
+            &connection,
+            &workspace_id,
+            "atomic_h",
+            &ATOMIC_HITS[..1],
+            ATOMIC_NOW,
+        );
         connection
             .execute_raw(
                 "CREATE TRIGGER affinity_fail_cursor BEFORE INSERT ON retrieval_affinity_cursor BEGIN SELECT RAISE(ABORT, 'cursor fixture'); END;",
             )
             .expect("inject cursor-only failure");
         assert!(accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).is_err());
-        assert_eq!(connection.retrieval_affinity_cursor(&workspace_id).expect("cursor"), (0, 0));
-        connection.execute_raw("DROP TRIGGER affinity_fail_cursor").expect("remove fixture fault");
-        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW).expect("replay singleton");
+        assert_eq!(
+            connection
+                .retrieval_affinity_cursor(&workspace_id)
+                .expect("cursor"),
+            (0, 0)
+        );
+        connection
+            .execute_raw("DROP TRIGGER affinity_fail_cursor")
+            .expect("remove fixture fault");
+        let replay = accumulate_retrieval_affinity(&connection, &workspace_id, ATOMIC_NOW)
+            .expect("replay singleton");
         assert_eq!((replay.search_rows_consumed, replay.pairs_updated), (1, 0));
         assert!(replay.search_cursor > 0);
     }
