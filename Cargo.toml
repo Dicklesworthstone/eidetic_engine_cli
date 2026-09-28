@@ -170,6 +170,34 @@ tar = { version = "0.4", default-features = false }
 [target.'cfg(windows)'.dependencies]
 windows-permissions = { version = "0.2.4" }
 
+# bd-iuybr. THIS IS A CAP, NOT A DEPENDENCY. ee does not use
+# wasm-bindgen-futures and never links it: it is declared here only to put an
+# upper bound on a transitive version the resolver would otherwise be free to
+# move.
+#
+# wasm-bindgen-futures 0.4.79 added a `tokio` dependency (gated on
+# `cfg(all(target_os = "emscripten", wasm_bindgen_unstable_tokio))`, so it would
+# never COMPILE for anything ee ships -- but it lands in Cargo.lock and in
+# `cargo metadata`, which is what the forbidden-dependency rule and
+# scripts/check-forbidden-deps.sh are written against). tokio is the first
+# forbidden crate in AGENTS.md.
+#
+# ee reaches it through asupersync, which requires only `"0.4"`, so before this
+# cap the single thing keeping tokio out of the tree was an incidental patch
+# pin. Reproduced 2026-09-28 on a clean export of main: a plain `cargo update`
+# (no flags, cached crates only) resolved 0.4.79 and put tokio 1.53.1 in the
+# root lock, and check-forbidden-deps.sh then exited 2 naming tokio.
+#
+# Cargo resolves ONE version per crate across all targets, so a target-gated
+# requirement still constrains the choice globally; the `cfg` only keeps
+# js-sys/wasm-bindgen out of host builds.
+#
+# Lifting this cap requires checking whether that tokio dependency is still
+# present upstream. check-forbidden-deps.sh asserts this cap exists and will
+# fail naming bd-iuybr if it is removed, so it cannot be dropped silently.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
+
 [dev-dependencies]
 # asupersync's `Cx::for_testing()` (and the other `for_testing*`/`for_request*`
 # constructors) are gated behind `cfg(any(test, feature = "test-internals"))`
