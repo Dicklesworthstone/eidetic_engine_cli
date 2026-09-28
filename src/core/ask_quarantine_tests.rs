@@ -277,7 +277,7 @@ fn native_rule_holds_do_not_alias_lineage_or_respect_protection_as_an_override()
     assert_eq!(ids(&corpus), BTreeSet::from([rule.clone()]));
     assert_eq!(
         corpus.native_sources[&rule].source_memory_ids,
-        [memory.clone()]
+        std::slice::from_ref(&memory)
     );
     fixture.review(&source_hold, "rejected");
     fixture.hold(2, &fixture.workspace, "rule", &rule);

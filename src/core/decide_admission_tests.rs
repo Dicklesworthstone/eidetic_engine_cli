@@ -258,7 +258,7 @@ fn denied_bodies_and_malformed_sidecars_never_reach_the_public_hydrator() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(hydrated, [visible.clone()]);
+    assert_eq!(hydrated, std::slice::from_ref(&visible));
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].memory_id, visible);
 }
