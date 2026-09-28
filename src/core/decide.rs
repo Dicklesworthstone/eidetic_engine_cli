@@ -21,10 +21,10 @@ use crate::models::{DomainError, MemoryKind};
 
 #[path = "decide_atomic.rs"]
 mod atomic;
-#[path = "decide_read.rs"]
-mod read;
 #[path = "decide_lineage.rs"]
 mod lineage;
+#[path = "decide_read.rs"]
+mod read;
 
 pub const DECIDE_RECORD_SCHEMA_V1: &str = "ee.decide.record.v1";
 pub const DECIDE_LIST_SCHEMA_V1: &str = "ee.decide.list.v1";

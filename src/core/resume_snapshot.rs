@@ -540,7 +540,10 @@ mod seal_authority_tests {
                 .unwrap(),
             generation
         );
-        assert_eq!(fixture.writer.count_table_rows("audit_log").unwrap(), audits);
+        assert_eq!(
+            fixture.writer.count_table_rows("audit_log").unwrap(),
+            audits
+        );
         assert!(!fixture.workspace.join(".ee/index").exists());
     }
 
@@ -571,7 +574,11 @@ mod seal_authority_tests {
             .insert_workspace(
                 other,
                 &CreateWorkspaceInput {
-                    path: fixture.workspace.join("other").to_string_lossy().into_owned(),
+                    path: fixture
+                        .workspace
+                        .join("other")
+                        .to_string_lossy()
+                        .into_owned(),
                     name: None,
                 },
             )
@@ -667,15 +674,19 @@ mod seal_authority_tests {
                     ended_at: Some(TIME.to_owned()),
                     message_count: 2,
                     token_count: None,
-                    content_hash: format!("blake3:{}", blake3::hash(b"resume-review-session").to_hex()),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"resume-review-session").to_hex()
+                    ),
                     metadata_json: None,
                 },
             )
             .unwrap();
         let mut evidence = Vec::new();
         for (number, parent) in [(902_u32, Some(SEALED.to_owned())), (903, None)] {
-            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(number)))
-                .to_string();
+            let id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(number)))
+                    .to_string();
             let body = "Previous session completed release validation.";
             fixture
                 .writer

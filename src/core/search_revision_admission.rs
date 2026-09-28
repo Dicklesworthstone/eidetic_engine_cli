@@ -536,7 +536,12 @@ mod seal_tests {
         quarantine(&db, 3, WORKSPACE, "memory", HIDDEN, "rejected")
             .map_err(|error| error.to_string())?;
         let mut degraded = Vec::new();
-        let visible = admit_hits(&options, vec![hit(HIDDEN), hit(PUBLIC)], &mut degraded, None);
+        let visible = admit_hits(
+            &options,
+            vec![hit(HIDDEN), hit(PUBLIC)],
+            &mut degraded,
+            None,
+        );
         assert_eq!(ids(&visible), vec![HIDDEN, PUBLIC]);
         assert!(degraded.is_empty());
         quarantine(&db, 4, WORKSPACE, "memory", HIDDEN, "pending")
@@ -687,7 +692,11 @@ mod seal_tests {
         assert_eq!(ids(&visible), vec!["evd_other", "rule_other"]);
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, UNAVAILABLE);
-        assert!(!degraded[0].message.contains("private_unavailable_quarantine"));
+        assert!(
+            !degraded[0]
+                .message
+                .contains("private_unavailable_quarantine")
+        );
         assert!(seed_is_visible(&db, HIDDEN, instant(TIME)?).is_err());
         db.execute_raw("ALTER TABLE private_unavailable_quarantine RENAME TO feedback_quarantine")
             .map_err(|error| error.to_string())?;

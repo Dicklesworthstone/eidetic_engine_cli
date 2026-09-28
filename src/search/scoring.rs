@@ -154,7 +154,10 @@ impl SearchScoringConfig {
             ("harmful_penalty_floor", self.harmful_penalty_floor),
             ("scope_match_bonus", self.scope_match_bonus),
             ("candidate_multiplier", self.candidate_maturity_multiplier),
-            ("established_multiplier", self.established_maturity_multiplier),
+            (
+                "established_multiplier",
+                self.established_maturity_multiplier,
+            ),
         ] {
             hasher.update(&(name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());

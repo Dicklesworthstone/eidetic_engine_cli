@@ -25,8 +25,8 @@ use super::file::{
     OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig,
     PrimerKeywordGate, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
     RuntimeConfig, ScoringConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode,
-    SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
-    TrustConfig, WriteConfig,
+    SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig,
+    TaskLensConfig, TrustConfig, WriteConfig,
 };
 use super::parse_env_bool_flag;
 use super::path::{PathExpander, PathExpansionError};
@@ -487,7 +487,11 @@ impl MergedConfig {
             ),
         ] {
             if let Some(value) = value {
-                entries.push(ConfigShowEntry::new(key, value.to_string(), self.source(key)));
+                entries.push(ConfigShowEntry::new(
+                    key,
+                    value.to_string(),
+                    self.source(key),
+                ));
             }
         }
 

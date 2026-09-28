@@ -8505,7 +8505,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_optional_bytes(
         &mut hasher,
         "quality_scoring_policy",
-        input.request.quality_scoring_policy.as_deref().map(str::as_bytes),
+        input
+            .request
+            .quality_scoring_policy
+            .as_deref()
+            .map(str::as_bytes),
     );
     hash_labeled_bytes(
         &mut hasher,
@@ -11592,10 +11596,8 @@ fn apply_graph_hints(
             degraded,
         ) {
             metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
-            candidates.push(candidate.with_lifecycle(pack_lifecycle_for_memory(
-                memory,
-                reference_time,
-            )));
+            candidates
+                .push(candidate.with_lifecycle(pack_lifecycle_for_memory(memory, reference_time)));
         }
     }
 

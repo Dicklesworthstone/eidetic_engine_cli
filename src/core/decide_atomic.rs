@@ -201,11 +201,8 @@ fn record_with_boundary(
                 )?;
             }
             // All fallible source-dependent report construction is pre-COMMIT.
-            report.decision.chain_depth = lineage::chain_depth(
-                &connection,
-                write.workspace_id(),
-                write.memory_id(),
-            )?;
+            report.decision.chain_depth =
+                lineage::chain_depth(&connection, write.workspace_id(), write.memory_id())?;
             boundary(Stage::Report, &connection)?;
             Ok::<_, RecordError>(report)
         })

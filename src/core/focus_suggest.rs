@@ -113,11 +113,12 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         });
     }
 
-    let connection =
-        DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
+    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+        DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?;
+        }
+    })?;
 
     let workspace_id = resolve_workspace_id(&connection, &options.workspace_path)?;
 
@@ -327,7 +328,9 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     if scoped.is_empty()
         && recommendations.is_empty()
         && options.limit > 0
-        && !degraded.iter().any(|entry| entry.code == "cass_unavailable")
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == "cass_unavailable")
     {
         degraded.push(FocusSuggestDegradation {
             code: "no_recent_evidence".to_owned(),
@@ -555,7 +558,8 @@ fn score_and_emit_topics(
                     break;
                 }
             }
-        } else if options.from_cass && options.task_frame_id.is_none()
+        } else if options.from_cass
+            && options.task_frame_id.is_none()
             && let Some(topic) = cass_topics::topic(span)
         {
             let cluster = clusters.entry(topic.key).or_insert_with(|| TopicCluster {
@@ -567,9 +571,9 @@ fn score_and_emit_topics(
             });
             cluster.span_ids.push(span.id.clone());
             cluster.most_recent_at = Some(
-                cluster.most_recent_at.map_or(topic.created_at, |existing| {
-                    existing.max(topic.created_at)
-                }),
+                cluster
+                    .most_recent_at
+                    .map_or(topic.created_at, |existing| existing.max(topic.created_at)),
             );
         }
     }

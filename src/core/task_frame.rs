@@ -518,7 +518,11 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
         updated_at: now.clone(),
         closed_at: None,
     };
-    if frame.subgoals.iter().any(|existing| existing.id == subgoal.id) {
+    if frame
+        .subgoals
+        .iter()
+        .any(|existing| existing.id == subgoal.id)
+    {
         return Err(DomainError::Usage {
             message: format!("Task subgoal already exists: {}", subgoal.id),
             repair: Some(format!("ee task-frame show {} --json", frame.id)),
@@ -584,8 +588,9 @@ fn lock_store_with_timeout(store_path: &Path, timeout: Duration) -> Result<File,
     let parent = store_path
         .parent()
         .ok_or_else(|| task_lock_error("Task-frame store has no parent directory."))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| task_lock_error(format!("Cannot prepare task-frame directory: {error}")))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        task_lock_error(format!("Cannot prepare task-frame directory: {error}"))
+    })?;
     let lock_path = parent.join(TASK_FRAME_LOCK_FILE);
     ensure_no_symlink_components(&lock_path, "lock")?;
     let mut options = OpenOptions::new();
@@ -601,7 +606,9 @@ fn lock_store_with_timeout(store_path: &Path, timeout: Duration) -> Result<File,
         .map_err(|error| task_lock_error(format!("Cannot open task-frame writer lock: {error}")))?;
     if !file
         .metadata()
-        .map_err(|error| task_lock_error(format!("Cannot inspect task-frame writer lock: {error}")))?
+        .map_err(|error| {
+            task_lock_error(format!("Cannot inspect task-frame writer lock: {error}"))
+        })?
         .is_file()
     {
         return Err(task_lock_error(
@@ -635,8 +642,8 @@ fn lock_store_with_timeout(store_path: &Path, timeout: Duration) -> Result<File,
         let opened = file
             .metadata()
             .map_err(|error| task_lock_error(error.to_string()))?;
-        let named = fs::symlink_metadata(&lock_path)
-            .map_err(|error| task_lock_error(error.to_string()))?;
+        let named =
+            fs::symlink_metadata(&lock_path).map_err(|error| task_lock_error(error.to_string()))?;
         if opened.dev() != named.dev() || opened.ino() != named.ino() || opened.nlink() != 1 {
             return Err(task_lock_error(
                 "Task-frame writer lock identity changed; retry safely.",
@@ -775,7 +782,8 @@ fn open_store_file_for_read(store_path: &Path) -> std::io::Result<File> {
 fn configure_task_frame_open_no_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
+    options
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
@@ -802,8 +810,9 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
     // before staging, rather than publish a store every subsequent read rejects.
     if text.len() as u64 > TASK_FRAME_STORE_MAX_BYTES {
         return Err(DomainError::Storage {
-            message: "Task-frame update exceeds the store byte limit; existing history is unchanged."
-                .to_owned(),
+            message:
+                "Task-frame update exceeds the store byte limit; existing history is unchanged."
+                    .to_owned(),
             repair: Some("Reduce the size of this task-frame change and retry.".to_owned()),
         });
     }
@@ -2020,8 +2029,8 @@ mod tests {
                     .map(|worker| worker.join().map_err(|_| "creator panicked".to_owned())?)
                     .collect::<Result<BTreeSet<_>, String>>()
             })?;
-            let persisted = read_store(&task_frame_store_path(&workspace))
-                .map_err(|error| error.message())?;
+            let persisted =
+                read_store(&task_frame_store_path(&workspace)).map_err(|error| error.message())?;
             assert_eq!(ids.len(), 8);
             assert_eq!(persisted.frames.len(), 8);
             assert_eq!(
@@ -2044,7 +2053,9 @@ mod tests {
                 let mut workers = Vec::new();
                 for index in 0..8 {
                     let mut options = update_options(&workspace, &id);
-                    options.blockers.push(format!("waiting on component {index}"));
+                    options
+                        .blockers
+                        .push(format!("waiting on component {index}"));
                     options.evidence_links.push(TaskEvidenceLink {
                         kind: "bead".to_owned(),
                         id: format!("component-{index}"),
@@ -2060,13 +2071,17 @@ mod tests {
                 }
                 Ok::<(), String>(())
             })?;
-            let store = read_store(&task_frame_store_path(&workspace))
-                .map_err(|error| error.message())?;
+            let store =
+                read_store(&task_frame_store_path(&workspace)).map_err(|error| error.message())?;
             let frame = find_frame(&store.frames, &id).map_err(|error| error.message())?;
             assert_eq!(frame.blockers.len(), 9);
             assert_eq!(frame.evidence_links.len(), 9);
             for index in 0..8 {
-                assert!(frame.blockers.contains(&format!("waiting on component {index}")));
+                assert!(
+                    frame
+                        .blockers
+                        .contains(&format!("waiting on component {index}"))
+                );
                 assert!(
                     frame
                         .evidence_links
@@ -2102,12 +2117,14 @@ mod tests {
                     }));
                 }
                 for worker in workers {
-                    worker.join().map_err(|_| "subgoal writer panicked".to_owned())??;
+                    worker
+                        .join()
+                        .map_err(|_| "subgoal writer panicked".to_owned())??;
                 }
                 Ok::<(), String>(())
             })?;
-            let store = read_store(&task_frame_store_path(&workspace))
-                .map_err(|error| error.message())?;
+            let store =
+                read_store(&task_frame_store_path(&workspace)).map_err(|error| error.message())?;
             let frame = find_frame(&store.frames, &id).map_err(|error| error.message())?;
             assert_eq!(frame.subgoals.len(), 8);
             assert_eq!(
@@ -2151,8 +2168,8 @@ mod tests {
             let id = create(&workspace)?;
             let path = task_frame_store_path(&workspace);
             let before = fs::read(&path).map_err(|error| error.to_string())?;
-            let lock = lock_store_with_timeout(&path, Duration::ZERO)
-                .map_err(|error| error.message())?;
+            let lock =
+                lock_store_with_timeout(&path, Duration::ZERO).map_err(|error| error.message())?;
             let error = lock_store_with_timeout(&path, Duration::ZERO)
                 .expect_err("independent handles must contend");
             assert!(error.message().contains("Timed out"));
@@ -2187,8 +2204,8 @@ mod tests {
             let workspace = temp_workspace("transaction-terminal")?;
             let id = create(&workspace)?;
             let path = task_frame_store_path(&workspace);
-            let lock = lock_store_with_timeout(&path, Duration::ZERO)
-                .map_err(|error| error.message())?;
+            let lock =
+                lock_store_with_timeout(&path, Duration::ZERO).map_err(|error| error.message())?;
             let mut options = update_options(&workspace, &id);
             options.status = Some(TaskFrameStatus::Active);
             let (started_tx, started_rx) = mpsc::channel();
@@ -2212,7 +2229,9 @@ mod tests {
             write_store(&path, &store).map_err(|error| error.message())?;
             let closed = fs::read(&path).map_err(|error| error.to_string())?;
             drop(lock);
-            worker.join().map_err(|_| "waiting writer panicked".to_owned())??;
+            worker
+                .join()
+                .map_err(|_| "waiting writer panicked".to_owned())??;
             assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)));
             assert_eq!(
                 result_rx
@@ -2233,8 +2252,8 @@ mod tests {
             let path = task_frame_store_path(&workspace);
             assert!(create(&workspace).is_err(), "duplicate creation must fail");
             let outcome = std::panic::catch_unwind(|| {
-                let _lock = lock_store_with_timeout(&path, Duration::ZERO)
-                    .expect("released after error");
+                let _lock =
+                    lock_store_with_timeout(&path, Duration::ZERO).expect("released after error");
                 panic!("injected writer unwind");
             });
             assert!(outcome.is_err());
@@ -2304,7 +2323,11 @@ mod tests {
             ];
             for outcome in outcomes {
                 let error = outcome.expect_err("unknown store format must not be overwritten");
-                assert!(error.message().contains("Unsupported task-frame store schema"));
+                assert!(
+                    error
+                        .message()
+                        .contains("Unsupported task-frame store schema")
+                );
             }
             assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, bytes);
             Ok(())
@@ -2323,10 +2346,12 @@ mod tests {
             assert!(error.message().contains("store byte limit"));
             assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, before);
             let mut options = update_options(&workspace, &id);
-            options.blockers.push("retry with a bounded change".to_owned());
+            options
+                .blockers
+                .push("retry with a bounded change".to_owned());
             update_task_frame(&options).map_err(|error| error.message())?;
-            let recovered = read_task_frames_for_resume(&workspace)
-                .map_err(|error| error.message())?;
+            let recovered =
+                read_task_frames_for_resume(&workspace).map_err(|error| error.message())?;
             assert!(
                 recovered[0]
                     .blockers
@@ -2399,7 +2424,9 @@ mod tests {
             }
             let mut failures = Vec::new();
             for worker in workers {
-                let output = worker.wait_with_output().map_err(|error| error.to_string())?;
+                let output = worker
+                    .wait_with_output()
+                    .map_err(|error| error.to_string())?;
                 if !output.status.success()
                     || !String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed")
                 {
@@ -2410,9 +2437,12 @@ mod tests {
                     ));
                 }
             }
-            assert!(failures.is_empty(), "independent writers failed: {failures:?}");
-            let store = read_store(&task_frame_store_path(&workspace))
-                .map_err(|error| error.message())?;
+            assert!(
+                failures.is_empty(),
+                "independent writers failed: {failures:?}"
+            );
+            let store =
+                read_store(&task_frame_store_path(&workspace)).map_err(|error| error.message())?;
             assert_eq!(store.frames.len(), 8);
             for index in 0..8 {
                 assert!(

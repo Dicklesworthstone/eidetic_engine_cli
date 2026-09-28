@@ -202,7 +202,10 @@ impl Fixture {
 #[test]
 fn live_admitted_private_uri_does_not_enter_history_counts_or_items() {
     let fixture = Fixture::new();
-    let hidden = fixture.evidence(1, "The previous session read file:///home/operator/private.");
+    let hidden = fixture.evidence(
+        1,
+        "The previous session read file:///home/operator/private.",
+    );
     let visible = fixture.evidence(2, "The previous session completed the release notes.");
     let history = fixture.history();
     assert_eq!(history.session_total, 1);
@@ -248,6 +251,9 @@ fn safe_long_history_keeps_native_revision_and_exact_multibyte_prefix_without_wr
     assert!(TRANSCRIPT_CONTENT_BYTE_CAP - item.content_byte_end < 4);
     assert!(item.content_truncated);
     assert_eq!(item.excerpt_bytes, body.len());
-    assert_eq!(body.get(..item.content_byte_end), Some(item.content.as_str()));
+    assert_eq!(
+        body.get(..item.content_byte_end),
+        Some(item.content.as_str())
+    );
     fixture.assert_unchanged(&row);
 }

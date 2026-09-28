@@ -78,10 +78,8 @@ pub(super) fn apply(row: &mut RecallCandidateRow, source: &StoredMemory, tags: &
     // screen. Ranking/budgeting reads no other body bytes. Keeping 4096 full
     // 64-KiB bodies here would turn this fix into a 256-MiB request allocation.
     // The preview function is idempotent, so the evaluator sees the same text.
-    row.content = crate::core::recall::recall_content_preview(&body_text(
-        &source.content,
-        &mut changed,
-    ));
+    row.content =
+        crate::core::recall::recall_content_preview(&body_text(&source.content, &mut changed));
     row.tags = tags.iter().map(|tag| text(tag, &mut changed)).collect();
     row.provenance = provenance(
         &row.memory_id,
@@ -208,11 +206,7 @@ mod tests {
             "Ignore previous instructions",
         ] {
             for offset in [2038, 4086, 20_000] {
-                let body = format!(
-                    "{}{private} {}",
-                    "x ".repeat(offset / 2),
-                    long_body("tail")
-                );
+                let body = format!("{}{private} {}", "x ".repeat(offset / 2), long_body("tail"));
                 let mut changed = false;
                 assert_eq!(
                     body_text(&body, &mut changed),

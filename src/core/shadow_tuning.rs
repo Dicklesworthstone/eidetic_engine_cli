@@ -2854,9 +2854,8 @@ mod tests {
             label_window_minutes: DEFAULT_LABEL_WINDOW_MINUTES,
         };
         let gate = RetrievalTuningGateConfig::default();
-        let result = crate::core::run_cli_with_cx(
-            std::time::Duration::from_secs(30),
-            |cx| async move {
+        let result =
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
                 run_retrieval_tuning_with_cx(
                     &cx,
                     &connection,
@@ -2868,9 +2867,8 @@ mod tests {
                     &gate,
                 )
                 .await
-            },
-        )
-        .map_err(|error| error.to_string())?;
+            })
+            .map_err(|error| error.to_string())?;
         match result {
             Err(ShadowTuningError::Configuration { .. }) => Ok(()),
             other => Err(format!(

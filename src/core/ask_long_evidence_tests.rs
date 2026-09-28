@@ -3,7 +3,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::{public_evidence_body, public_label, public_provenance};
-use crate::core::ask::{AskCorpus, AskRequest, ask_data_json, evaluate_ask, load_current_ask_corpus};
+use crate::core::ask::{
+    AskCorpus, AskRequest, ask_data_json, evaluate_ask, load_current_ask_corpus,
+};
 use crate::db::{
     CreateEvidenceSpanInput, CreateMemoryInput, CreateProceduralRuleInput, CreateSessionInput,
     CreateWorkspaceInput, DbConnection, EvidenceProducerKind,
@@ -209,7 +211,10 @@ impl Fixture {
                     ended_at: Some("2026-01-01T01:00:00Z".to_owned()),
                     message_count: 1,
                     token_count: None,
-                    content_hash: format!("blake3:{}", blake3::hash(b"long-evidence-session").to_hex()),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"long-evidence-session").to_hex()
+                    ),
                     metadata_json: None,
                 },
             )

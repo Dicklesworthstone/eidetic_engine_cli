@@ -53,7 +53,10 @@ impl DecisionLineage {
     }
 
     pub(super) fn depth(&self, memory_id: &str) -> Result<u32, DomainError> {
-        self.depths.get(memory_id).copied().ok_or_else(lineage_error)
+        self.depths
+            .get(memory_id)
+            .copied()
+            .ok_or_else(lineage_error)
     }
 
     pub(super) fn load(
@@ -153,8 +156,13 @@ impl DecisionLineage {
         }
         let mut predecessors = BTreeMap::new();
         for row in rows {
-            let id = row.get(0).and_then(Value::as_str).ok_or_else(lineage_error)?;
-            if page.binary_search_by(|candidate| candidate.as_str().cmp(id)).is_err()
+            let id = row
+                .get(0)
+                .and_then(Value::as_str)
+                .ok_or_else(lineage_error)?;
+            if page
+                .binary_search_by(|candidate| candidate.as_str().cmp(id))
+                .is_err()
                 || row.get(1).and_then(Value::as_str) != Some(self.workspace_id.as_str())
                 || row.get(2).and_then(Value::as_str) != Some("decision")
                 || predecessors.insert(id.to_owned(), None).is_some()
@@ -171,13 +179,21 @@ impl DecisionLineage {
         );
         let mut params = params;
         params.push(Value::BigInt((page.len() + 1) as i64));
-        let links = connection.query(&sql, &params).map_err(|_| lineage_error())?;
+        let links = connection
+            .query(&sql, &params)
+            .map_err(|_| lineage_error())?;
         if links.len() > page.len() {
             return Err(lineage_error());
         }
         for row in links {
-            let source = row.get(0).and_then(Value::as_str).ok_or_else(lineage_error)?;
-            let parent = row.get(1).and_then(Value::as_str).ok_or_else(lineage_error)?;
+            let source = row
+                .get(0)
+                .and_then(Value::as_str)
+                .ok_or_else(lineage_error)?;
+            let parent = row
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or_else(lineage_error)?;
             if !canonical_id(parent) {
                 return Err(lineage_error());
             }

@@ -281,9 +281,8 @@ fn verify_audit_order(db: &DbConnection, expected: &[String]) -> Result<(), Doma
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "SELECT id, rowid FROM audit_log WHERE id IN ({slots}) ORDER BY rowid ASC"
-        );
+        let sql =
+            format!("SELECT id, rowid FROM audit_log WHERE id IN ({slots}) ORDER BY rowid ASC");
         let rows = db.query(&sql, &parameters).map_err(storage_error)?;
         if rows.len() != page.len() {
             return Err(invalid());
@@ -371,7 +370,9 @@ mod audit_order_tests {
             },
         )
         .expect("append audit");
-        db.get_audit(id).expect("read audit").expect("inserted audit")
+        db.get_audit(id)
+            .expect("read audit")
+            .expect("inserted audit")
     }
 
     fn seed(db: &DbConnection, count: usize) -> Vec<StoredAuditEntry> {
@@ -384,10 +385,7 @@ mod audit_order_tests {
         .expect("seed audit history")
     }
 
-    fn assets(
-        root: &Path,
-        rows: &[StoredAuditEntry],
-    ) -> Vec<BackupRestoredDerivedAssetReport> {
+    fn assets(root: &Path, rows: &[StoredAuditEntry]) -> Vec<BackupRestoredDerivedAssetReport> {
         let count = rows.len().div_ceil(WORK_HISTORY_CHUNK_ROWS).max(1);
         (0..count)
             .map(|index| {
@@ -429,8 +427,7 @@ mod audit_order_tests {
         let mut assets = assets(root, rows);
         // Enumeration order cannot replace the signed chunk index order.
         assets.reverse();
-        OperationalExpectation::from_assets(&assets, BACKUP, WORKSPACE)
-            .expect("freeze archive")
+        OperationalExpectation::from_assets(&assets, BACKUP, WORKSPACE).expect("freeze archive")
     }
 
     fn assert_unchanged(db: &DbConnection, rows: &[StoredAuditEntry]) {
@@ -453,8 +450,11 @@ mod audit_order_tests {
             rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>()
         );
         db.begin_read_snapshot().unwrap();
-        expected.verify_connection(&db).expect("complete ordered history");
-        db.commit_read_snapshot().expect("caller still owns snapshot");
+        expected
+            .verify_connection(&db)
+            .expect("complete ordered history");
+        db.commit_read_snapshot()
+            .expect("caller still owns snapshot");
         assert_unchanged(&db, &rows);
     }
 
@@ -509,7 +509,9 @@ mod audit_order_tests {
         .unwrap();
         append(&db, "audit_00000000000000000000000008");
         let before = db.count_table_rows("audit_log").unwrap();
-        expected.verify_connection(&db).expect("relative order preserved");
+        expected
+            .verify_connection(&db)
+            .expect("relative order preserved");
         assert_eq!(db.count_table_rows("audit_log").unwrap(), before);
         assert_unchanged(&db, &rows);
     }
@@ -543,11 +545,17 @@ mod audit_order_tests {
             "UPDATE audit_log SET rowid = 1000000 - rowid",
         )
         .unwrap();
-        expected.verify_connection(&reader).expect("pinned order retained");
-        reader.commit_read_snapshot().expect("helper did not release snapshot");
+        expected
+            .verify_connection(&reader)
+            .expect("pinned order retained");
+        reader
+            .commit_read_snapshot()
+            .expect("helper did not release snapshot");
         reader.begin_read_snapshot().unwrap();
         assert!(expected.verify_connection(&reader).is_err());
-        reader.commit_read_snapshot().expect("failure also preserves caller ownership");
+        reader
+            .commit_read_snapshot()
+            .expect("failure also preserves caller ownership");
     }
 
     #[test]
@@ -555,7 +563,9 @@ mod audit_order_tests {
         let (root, db) = fixture();
         let expected = expected(root.path(), &[]);
         assert!(expected.audit_ids.is_empty());
-        expected.verify_connection(&db).expect("zero captured audits");
+        expected
+            .verify_connection(&db)
+            .expect("zero captured audits");
     }
 
     #[test]
@@ -573,7 +583,11 @@ mod audit_order_tests {
             .insert_audit(
                 "audit_00000000000000000000000092",
                 &CreateAuditInput {
-                    workspace_id: source.list_workspaces().unwrap().first().map(|w| w.id.clone()),
+                    workspace_id: source
+                        .list_workspaces()
+                        .unwrap()
+                        .first()
+                        .map(|w| w.id.clone()),
                     actor: Some("audit-order-recovery".to_owned()),
                     action: "backup.order_fixture".to_owned(),
                     target_type: None,
@@ -621,7 +635,10 @@ mod audit_order_tests {
             },
         )
         .unwrap_err();
-        assert!(reached.get(), "post-rebuild fault did not execute: {error:?}");
+        assert!(
+            reached.get(),
+            "post-rebuild fault did not execute: {error:?}"
+        );
         assert!(error.message().contains("replay order"), "{error:?}");
         assert!(!options.side_path.join(WORKSPACE_MARKER).exists());
         assert_eq!(hash_bytes(&std::fs::read(records).unwrap()), original_hash);

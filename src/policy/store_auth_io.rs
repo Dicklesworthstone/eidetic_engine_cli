@@ -169,8 +169,7 @@ fn create_key_directory_with(
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let start = if keys_dir.is_absolute() { "/" } else { "." };
     let mut directory = File::from(
-        rustix::fs::open(start, flags, Mode::empty())
-            .map_err(|error| io_error(keys_dir, error))?,
+        rustix::fs::open(start, flags, Mode::empty()).map_err(|error| io_error(keys_dir, error))?,
     );
     let mut current = std::path::PathBuf::from(start);
     for component in keys_dir.components() {
@@ -411,7 +410,9 @@ pub(super) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), StoreAuth
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     {
         publish_new_key_with(path, bytes, write_and_sync, |parent, directory| {
-            directory.sync_all().map_err(|error| io_error(parent, error))
+            directory
+                .sync_all()
+                .map_err(|error| io_error(parent, error))
         })
     }
     // Other platforms retain exclusive direct creation until they have a
@@ -537,7 +538,9 @@ mod tests {
             let created = StoreAuthRoot::create(&keys).expect("initialize after bootstrap");
             assert_eq!(
                 created.current_key_id(),
-                StoreAuthRoot::open(&keys).expect("reopen root").current_key_id()
+                StoreAuthRoot::open(&keys)
+                    .expect("reopen root")
+                    .current_key_id()
             );
         }
 
@@ -613,13 +616,14 @@ mod tests {
                 })
                 .expect("retry persists already-existing directories too");
                 assert!(barriers.windows(2).any(|pair| {
-                    pair[0].as_path() == keys.as_path()
-                        && pair[1].as_path() == marker.as_path()
+                    pair[0].as_path() == keys.as_path() && pair[1].as_path() == marker.as_path()
                 }));
                 let created = StoreAuthRoot::open_or_create(&keys).expect("usable after retry");
                 assert_eq!(
                     created.current_key_id(),
-                    StoreAuthRoot::open(&keys).expect("reopen root").current_key_id()
+                    StoreAuthRoot::open(&keys)
+                        .expect("reopen root")
+                        .current_key_id()
                 );
             }
         }
@@ -659,7 +663,9 @@ mod tests {
         use crate::policy::store_auth::MacDomain;
 
         fn sync(parent: &Path, directory: &File) -> Result<(), StoreAuthError> {
-            directory.sync_all().map_err(|error| io_error(parent, error))
+            directory
+                .sync_all()
+                .map_err(|error| io_error(parent, error))
         }
 
         #[test]
@@ -688,7 +694,10 @@ mod tests {
             let reopened = StoreAuthRoot::open(destination.path()).expect("authenticated root");
             assert_eq!(reopened.current_key_id(), original.current_key_id());
             assert_eq!(fs::read(&path).expect("published bytes"), bytes);
-            assert_eq!(fs::read_dir(destination.path()).expect("entries").count(), 1);
+            assert_eq!(
+                fs::read_dir(destination.path()).expect("entries").count(),
+                1
+            );
         }
 
         #[test]
@@ -707,14 +716,18 @@ mod tests {
                         retained = Some(temporary.to_path_buf());
                         file.write_all(&bytes[..length])
                             .map_err(|error| io_error(temporary, error))?;
-                        file.sync_all().map_err(|error| io_error(temporary, error))?;
+                        file.sync_all()
+                            .map_err(|error| io_error(temporary, error))?;
                         Err(io_error(temporary, "injected interrupted initialization"))
                     },
                     |_, _| panic!("a failed write must not reach publication sync"),
                 )
                 .expect_err("interrupted write");
                 assert!(matches!(error, StoreAuthError::Io { .. }));
-                assert!(!path.exists(), "partial bytes must not occupy the root name");
+                assert!(
+                    !path.exists(),
+                    "partial bytes must not occupy the root name"
+                );
                 let retained = retained.expect("staging retained");
                 assert_eq!(
                     fs::read(&retained).expect("retained prefix"),
@@ -822,7 +835,10 @@ mod tests {
                     2
                 );
                 if entry == "corrupt" {
-                    assert_eq!(fs::read(&path).expect("old key retained"), b"partial old key");
+                    assert_eq!(
+                        fs::read(&path).expect("old key retained"),
+                        b"partial old key"
+                    );
                 }
             }
         }

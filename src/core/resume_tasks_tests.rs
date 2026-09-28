@@ -115,7 +115,10 @@ fn unfinished_goals_survive_public_resume_without_a_database() {
         assert_eq!(report.task_frames.status, ResumeTaskStatus::Available);
         assert_eq!(report.task_frames.active_total, Some(1));
         assert_eq!(report.task_frames.frames[0].id, id);
-        assert_eq!(report.task_frames.frames[0].status, TaskFrameStatus::Blocked);
+        assert_eq!(
+            report.task_frames.frames[0].status,
+            TaskFrameStatus::Blocked
+        );
         assert_eq!(report.task_frames.frames[0].subgoals[0].id, subgoal_id);
         assert_eq!(report.episodic_total, 0, "do not synthesize memories");
         assert!(
@@ -202,16 +205,16 @@ fn bounded_projection_keeps_exact_counts_and_redacts_before_truncation() {
         assert_eq!(row.active_subgoals_total, SUBGOAL_CAP + 2);
         assert!(row.subgoals_truncated);
         assert_eq!(row.subgoals.len(), SUBGOAL_CAP);
-        assert!(
-            row.subgoals
-                .iter()
-                .all(|s| s.text_truncated && s.redaction.applied
-                    && s.title.chars().count() == TEXT_CHAR_CAP)
-        );
+        assert!(row.subgoals.iter().all(|s| s.text_truncated
+            && s.redaction.applied
+            && s.title.chars().count() == TEXT_CHAR_CAP));
     }
     let wire = serde_json::to_string(&report).unwrap();
     assert!(!wire.contains(&secret));
-    assert!(!wire.contains("sk_liv"), "do not emit a truncated secret prefix");
+    assert!(
+        !wire.contains("sk_liv"),
+        "do not emit a truncated secret prefix"
+    );
 }
 
 #[test]
@@ -227,7 +230,14 @@ fn malformed_or_foreign_tasks_are_withheld_without_hiding_valid_goals() {
     invalid_time.updated_at = "PRIVATE_TIME".to_owned();
     let mut closed = frame(5, TaskFrameStatus::Open);
     closed.closed_at = Some(TIME.to_owned());
-    let report = projected(vec![good.clone(), foreign, command_id, future, invalid_time, closed]);
+    let report = projected(vec![
+        good.clone(),
+        foreign,
+        command_id,
+        future,
+        invalid_time,
+        closed,
+    ]);
     assert_eq!(report.status, ResumeTaskStatus::Partial);
     assert_eq!(report.active_total, Some(1));
     assert_eq!(report.excluded_total, Some(5));
@@ -250,7 +260,13 @@ fn duplicate_ids_or_cyclic_and_orphan_subgoals_cannot_choose_a_task() {
     orphan.subgoals.push(child);
     let mut duplicate_child = frame(4, TaskFrameStatus::Open);
     duplicate_child.subgoals = vec![subgoal(1), subgoal(1)];
-    let report = projected(vec![duplicate.clone(), duplicate, cycle, orphan, duplicate_child]);
+    let report = projected(vec![
+        duplicate.clone(),
+        duplicate,
+        cycle,
+        orphan,
+        duplicate_child,
+    ]);
     assert_eq!(report.status, ResumeTaskStatus::Partial);
     assert_eq!(report.active_total, Some(0));
     assert_eq!(report.excluded_total, Some(5));
@@ -291,8 +307,15 @@ fn unreadable_or_future_task_stores_report_unknown_not_zero_without_echoing_inpu
         assert_eq!(report.active_total, None);
         assert_eq!(report.excluded_total, None);
         assert_eq!(report.degraded_code, Some("resume_task_frames_unavailable"));
-        assert!(!serde_json::to_string(&report).unwrap().contains("PRIVATE_PARSE_INPUT"));
-        assert_eq!(std::fs::read(workspace.join(".ee/task_frames.json")).unwrap(), body);
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("PRIVATE_PARSE_INPUT")
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(".ee/task_frames.json")).unwrap(),
+            body
+        );
     }
 }
 
@@ -307,7 +330,10 @@ fn symlinked_task_stores_are_unavailable_and_not_rewritten() {
     std::os::unix::fs::symlink(&outside, workspace.join(".ee/task_frames.json")).unwrap();
     let report = load(&workspace);
     assert_eq!(report.status, ResumeTaskStatus::Unavailable);
-    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "PRIVATE_OUTSIDE_INPUT");
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "PRIVATE_OUTSIDE_INPUT"
+    );
 }
 
 #[test]
@@ -368,13 +394,21 @@ fn public_resume_preserves_memory_results_when_task_store_is_corrupt() {
         })
     };
     let original = fingerprint();
-    std::fs::write(workspace.join(".ee/task_frames.json"), "PRIVATE_BROKEN_TASK_STORE").unwrap();
+    std::fs::write(
+        workspace.join(".ee/task_frames.json"),
+        "PRIVATE_BROKEN_TASK_STORE",
+    )
+    .unwrap();
     let after = build_resume_report(&options).unwrap();
     assert_eq!(after.sessions, before.sessions);
     assert_eq!(after.task_frames.status, ResumeTaskStatus::Unavailable);
     assert_eq!(fingerprint(), original);
     assert!(after.next_commands[0].contains("inspect incomplete task recovery"));
-    assert!(!serde_json::to_string(&after).unwrap().contains("PRIVATE_BROKEN_TASK_STORE"));
+    assert!(
+        !serde_json::to_string(&after)
+            .unwrap()
+            .contains("PRIVATE_BROKEN_TASK_STORE")
+    );
 }
 
 #[test]
@@ -385,7 +419,11 @@ fn a_non_directory_workspace_marker_is_unavailable_not_empty() {
     let report = load(&workspace);
     assert_eq!(report.status, ResumeTaskStatus::Unavailable);
     assert_eq!(report.active_total, None);
-    assert!(!serde_json::to_string(&report).unwrap().contains("PRIVATE_BROKEN_NAMESPACE"));
+    assert!(
+        !serde_json::to_string(&report)
+            .unwrap()
+            .contains("PRIVATE_BROKEN_NAMESPACE")
+    );
     assert_eq!(
         std::fs::read_to_string(workspace.join(".ee")).unwrap(),
         "PRIVATE_BROKEN_NAMESPACE"

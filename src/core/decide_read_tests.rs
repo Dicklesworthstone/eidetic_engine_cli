@@ -2,9 +2,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::db::{
-    CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, MemoryLinkSource,
-};
+use crate::db::{CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, MemoryLinkSource};
 
 struct Fixture {
     db: DbConnection,
@@ -246,8 +244,8 @@ fn invalid_stored_typed_fields_are_sanitized_and_do_not_pin_a_read() {
         )
         .unwrap();
     let reader = fixture.reader();
-    let error = read_with_observer(&reader, &mut fixture.scope(), false, clock(), |_| Ok(()))
-        .unwrap_err();
+    let error =
+        read_with_observer(&reader, &mut fixture.scope(), false, clock(), |_| Ok(())).unwrap_err();
     assert!(matches!(error, DomainError::Storage { .. }));
     assert!(!format!("{error:?}").contains("PRIVATE-DECISION-CANARY"));
     released(&reader);
@@ -294,7 +292,11 @@ fn headship_remains_clock_free_while_history_and_tombstones_keep_their_distincti
     assert!(!heads[0].superseded && heads[0].valid_to.is_some());
     let history = fixture.read(true);
     assert_eq!(history.len(), 2);
-    assert!(history.iter().any(|item| item.memory_id == replaced && item.superseded));
+    assert!(
+        history
+            .iter()
+            .any(|item| item.memory_id == replaced && item.superseded)
+    );
     assert!(!history.iter().any(|item| item.memory_id == deleted));
     assert_eq!(std::fs::read(fixture.scope().database_path).unwrap(), bytes);
     assert!(!fixture.root.path().join(".ee/index").exists());

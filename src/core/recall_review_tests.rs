@@ -8,8 +8,7 @@ use crate::db::{CreateFeedbackQuarantineInput, CreateMemoryInput, CreateWorkspac
 const WORKSPACE: &str = "wsp_00000000000000000000000921";
 const OTHER: &str = "wsp_00000000000000000000000922";
 const BASE: &str = "2026-01-01T00:00:00Z";
-const BODY: &str =
-    "Reviewed guidance. anchor:path:src/release.rs anchor:symbol:Release::publish";
+const BODY: &str = "Reviewed guidance. anchor:path:src/release.rs anchor:symbol:Release::publish";
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
@@ -187,7 +186,12 @@ fn held_high_ranked_pages_cannot_starve_a_later_admitted_memory() {
     assert!(result.degraded.iter().any(|entry| {
         entry.code == "recall_source_filtered" && entry.message.contains("pending_review=513")
     }));
-    assert!(!result.degraded.iter().any(|entry| entry.code == "recall_scan_incomplete"));
+    assert!(
+        !result
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "recall_scan_incomplete")
+    );
     // Every held memory has both a path and symbol, but it is counted once.
     assert_eq!(db.count_table_rows("memory_anchor_index").unwrap(), 1028);
 }
@@ -201,19 +205,39 @@ fn exact_native_review_ownership_and_all_pending_events_control_readmission() {
     assert_eq!(run_recall(&db, WORKSPACE, &query()).unwrap().items.len(), 1);
     let first = hold(&db, 3, WORKSPACE, "memory", &memory);
     let second = hold(&db, 4, WORKSPACE, "memory", &memory);
-    assert!(run_recall(&db, WORKSPACE, &query()).unwrap().items.is_empty());
+    assert!(
+        run_recall(&db, WORKSPACE, &query())
+            .unwrap()
+            .items
+            .is_empty()
+    );
     review(&db, &first, "released");
-    assert!(run_recall(&db, WORKSPACE, &query()).unwrap().items.is_empty());
+    assert!(
+        run_recall(&db, WORKSPACE, &query())
+            .unwrap()
+            .items
+            .is_empty()
+    );
     db.insert_memory_seal(&memory, &format!("blake3:{}", "b".repeat(64)), BASE)
         .unwrap();
     review(&db, &second, "rejected");
     let sealed = run_recall(&db, WORKSPACE, &query()).unwrap();
     assert!(sealed.items.is_empty());
-    assert!(sealed.degraded.iter().any(|entry| entry.message.contains("sealed=1")));
+    assert!(
+        sealed
+            .degraded
+            .iter()
+            .any(|entry| entry.message.contains("sealed=1"))
+    );
     assert!(db.mark_memory_seal_revealed(&memory, BASE).unwrap());
     let restored = run_recall(&db, WORKSPACE, &query()).unwrap();
     assert_eq!(restored.items[0].memory_id, memory);
-    assert!(!restored.degraded.iter().any(|entry| entry.message.contains("pending_review")));
+    assert!(
+        !restored
+            .degraded
+            .iter()
+            .any(|entry| entry.message.contains("pending_review"))
+    );
 }
 
 #[test]
@@ -241,7 +265,10 @@ fn concurrent_hold_and_release_never_split_a_borrowed_recall_snapshot() {
         held
     );
     snapshot.finish_db().unwrap();
-    assert_eq!(run_recall(&reader, WORKSPACE, &query()).unwrap().items[0].memory_id, memory);
+    assert_eq!(
+        run_recall(&reader, WORKSPACE, &query()).unwrap().items[0].memory_id,
+        memory
+    );
     assert!(!root.path().join("index").exists());
 }
 
@@ -253,12 +280,20 @@ fn unreadable_review_authority_withholds_the_result_and_preserves_snapshot_owner
         .unwrap();
     let error = run_recall(&db, WORKSPACE, &query()).unwrap_err();
     let diagnostic = format!("{error:?}");
-    for private in ["private_unavailable_review", "feedback_quarantine", "SELECT", BODY] {
+    for private in [
+        "private_unavailable_review",
+        "feedback_quarantine",
+        "SELECT",
+        BODY,
+    ] {
         assert!(!diagnostic.contains(private));
     }
     db.begin_read_snapshot().unwrap();
     assert!(run_recall_in_snapshot(&db, WORKSPACE, &query(), at()).is_err());
-    assert!(db.begin_read_snapshot().is_err(), "borrowed snapshot must remain owned");
+    assert!(
+        db.begin_read_snapshot().is_err(),
+        "borrowed snapshot must remain owned"
+    );
     db.rollback_read_snapshot().unwrap();
     // A later repair is observed without rebuilding or touching source rows.
     db.execute_raw("ALTER TABLE private_unavailable_review RENAME TO feedback_quarantine")
@@ -282,7 +317,10 @@ fn a_source_scan_bound_stays_explicit_even_when_the_prefix_is_held() {
         entry.code == "recall_scan_incomplete"
             && entry.message.contains("source scan incomplete=true")
     }));
-    assert!(!result.degraded.iter().any(|entry| {
-        entry.code == crate::core::recall::RECALL_FILTERED_EMPTY_CODE
-    }));
+    assert!(
+        !result
+            .degraded
+            .iter()
+            .any(|entry| { entry.code == crate::core::recall::RECALL_FILTERED_EMPTY_CODE })
+    );
 }

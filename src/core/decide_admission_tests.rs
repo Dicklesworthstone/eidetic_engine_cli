@@ -27,8 +27,11 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
         std::fs::create_dir_all(path.join(".ee")).unwrap();
-        std::fs::write(path.join(".ee/config.toml"), "[memory]\ninclude_global = false\n")
-            .unwrap();
+        std::fs::write(
+            path.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .unwrap();
         let db = DbConnection::open_file(path.join(".ee/ee.db")).unwrap();
         db.migrate().unwrap();
         let workspace = stable_workspace_id(&path);
@@ -43,7 +46,12 @@ impl Fixture {
             )
             .unwrap();
         }
-        Self { db, root, workspace, other }
+        Self {
+            db,
+            root,
+            workspace,
+            other,
+        }
     }
 
     fn seed(&self, number: u128, topic: &str) -> String {
@@ -72,12 +80,15 @@ impl Fixture {
         self.db
             .set_memory_typed_fields_json(
                 &id,
-                Some(&json!({
-                    "chosen": PRIVATE_CHOICE,
-                    "options": [PRIVATE_CHOICE, "alternative"],
-                    "rationale": "A deliberate local decision.",
-                    "revisit_by": "2027-01-01T00:00:00Z"
-                }).to_string()),
+                Some(
+                    &json!({
+                        "chosen": PRIVATE_CHOICE,
+                        "options": [PRIVATE_CHOICE, "alternative"],
+                        "rationale": "A deliberate local decision.",
+                        "revisit_by": "2027-01-01T00:00:00Z"
+                    })
+                    .to_string(),
+                ),
             )
             .unwrap();
         id
@@ -116,7 +127,11 @@ impl Fixture {
     }
 
     fn review(&self, id: &str, status: &str) {
-        assert!(self.db.update_feedback_quarantine_status(id, status, Some("operator"), None).unwrap());
+        assert!(
+            self.db
+                .update_feedback_quarantine_status(id, status, Some("operator"), None)
+                .unwrap()
+        );
     }
 
     fn scope(&self) -> DecideScope {
@@ -131,7 +146,8 @@ impl Fixture {
             include_superseded: history,
             limit,
             now: Some(now()),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn request(&self) -> DecideRecordOptions<'_> {
@@ -152,14 +168,30 @@ impl Fixture {
 
     fn state(&self) -> Vec<Vec<Vec<(String, Value)>>> {
         [
-            "memories", "memory_tags", "memory_links", "search_index_jobs", "audit_log",
-            "memory_seals", "feedback_quarantine", "memory_anchors", "memory_anchor_index",
-        ].into_iter().map(|table| {
-            self.db.query(&format!("SELECT * FROM {table} ORDER BY 1, 2"), &[]).unwrap()
-                .into_iter().map(|row| {
-                    row.iter().map(|(name, value)| (name.to_owned(), value.clone())).collect()
-                }).collect()
-        }).collect()
+            "memories",
+            "memory_tags",
+            "memory_links",
+            "search_index_jobs",
+            "audit_log",
+            "memory_seals",
+            "feedback_quarantine",
+            "memory_anchors",
+            "memory_anchor_index",
+        ]
+        .into_iter()
+        .map(|table| {
+            self.db
+                .query(&format!("SELECT * FROM {table} ORDER BY 1, 2"), &[])
+                .unwrap()
+                .into_iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|(name, value)| (name.to_owned(), value.clone()))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
     }
 }
 
@@ -168,8 +200,11 @@ fn sealed_and_held_decisions_are_absent_from_public_history_and_revisit_counts()
     for sealed in [false, true] {
         let fixture = Fixture::new();
         let hidden = fixture.seed(980, PRIVATE_TOPIC);
-        if sealed { fixture.seal(&hidden); }
-        else { fixture.hold(1, &fixture.workspace, "memory", &hidden); }
+        if sealed {
+            fixture.seal(&hidden);
+        } else {
+            fixture.hold(1, &fixture.workspace, "memory", &hidden);
+        }
         let before = fixture.state();
         for history in [false, true] {
             let report = fixture.list(history, 1);
@@ -177,14 +212,23 @@ fn sealed_and_held_decisions_are_absent_from_public_history_and_revisit_counts()
             assert_eq!(report.returned_count, 0);
             assert!(!report.truncated);
             let text = report.data_json().to_string();
-            for private in [hidden.as_str(), PRIVATE_CHOICE, PRIVATE_TOPIC, "PRIVATE-REVIEW"] {
+            for private in [
+                hidden.as_str(),
+                PRIVATE_CHOICE,
+                PRIVATE_TOPIC,
+                "PRIVATE-REVIEW",
+            ] {
                 assert!(!text.contains(private));
             }
         }
         let revisit = decide_revisit(&DecideRevisitOptions {
-            workspace_path: fixture.root.path(), database_path: None,
-            warning_days: Some(14), limit: 1, now: Some(now()),
-        }).unwrap();
+            workspace_path: fixture.root.path(),
+            database_path: None,
+            warning_days: Some(14),
+            limit: 1,
+            now: Some(now()),
+        })
+        .unwrap();
         assert_eq!(revisit.due_count, 0);
         assert!(revisit.decisions.is_empty());
         assert_eq!(fixture.state(), before);
@@ -201,15 +245,19 @@ fn denied_bodies_and_malformed_sidecars_never_reach_the_public_hydrator() {
     fixture.seal(&sealed);
     fixture.hold(1, &fixture.workspace, "memory", &held);
     for id in [&sealed, &held] {
-        fixture.db.execute_raw(&format!(
-            "UPDATE memories SET typed_fields_json = '{{\"chosen\":7}}' WHERE id = '{id}'"
-        )).unwrap();
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE memories SET typed_fields_json = '{{\"chosen\":7}}' WHERE id = '{id}'"
+            ))
+            .unwrap();
     }
     let mut hydrated = Vec::new();
     let result = read_with_observer(&fixture.db, &mut fixture.scope(), true, now(), |ids| {
         hydrated.extend(ids.iter().map(|id| (*id).to_owned()));
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(hydrated, [visible.clone()]);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].memory_id, visible);
@@ -238,13 +286,16 @@ fn review_matches_native_ownership_and_all_holds_must_close_without_unsealing() 
 #[test]
 fn held_prefixes_cannot_consume_result_slots_or_stop_keyset_paging() {
     let fixture = Fixture::new();
-    fixture.db.with_transaction(|| {
-        for number in 1000..1513 {
-            let id = fixture.seed(number, PRIVATE_TOPIC);
-            fixture.hold(number as u32, &fixture.workspace, "memory", &id);
-        }
-        Ok(())
-    }).unwrap();
+    fixture
+        .db
+        .with_transaction(|| {
+            for number in 1000..1513 {
+                let id = fixture.seed(number, PRIVATE_TOPIC);
+                fixture.hold(number as u32, &fixture.workspace, "memory", &id);
+            }
+            Ok(())
+        })
+        .unwrap();
     let visible = fixture.seed(1513, "Last visible decision");
     let report = fixture.list(false, 1);
     assert_eq!(report.total_count, 1);
@@ -262,13 +313,15 @@ fn concurrent_hold_and_release_are_observed_only_by_the_next_read_snapshot() {
     let captured = read_with_observer(&reader, &mut fixture.scope(), false, now(), |_| {
         hold = Some(fixture.hold(1, &fixture.workspace, "memory", &target));
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(captured.len(), 2);
     assert_eq!(fixture.list(false, 0).total_count, 1);
     let captured = read_with_observer(&reader, &mut fixture.scope(), false, now(), |_| {
         fixture.review(hold.as_deref().unwrap(), "rejected");
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(fixture.list(false, 0).total_count, 2);
     reader.begin_read_snapshot().unwrap();
@@ -279,24 +332,46 @@ fn concurrent_hold_and_release_are_observed_only_by_the_next_read_snapshot() {
 fn authority_failure_cannot_return_a_partial_result_or_release_a_borrowed_transaction() {
     let fixture = Fixture::new();
     fixture.seed(987, PRIVATE_TOPIC);
-    fixture.db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO private_unavailable_review").unwrap();
+    fixture
+        .db
+        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO private_unavailable_review")
+        .unwrap();
     let error = load(&mut fixture.scope(), false, now()).unwrap_err();
     assert!(matches!(error, DomainError::Storage { .. }));
     assert!(!format!("{error:?}").contains("private_unavailable_review"));
     fixture.db.begin_read_snapshot().unwrap();
     let request = fixture.request();
-    let fields = prepare_decision_fields(request.topic, request.chosen, &request.alternatives,
-        request.rationale, None, None, now()).unwrap();
-    assert!(record_heads_in_current_snapshot(&fixture.db, &fixture.workspace, &fields, now()).is_err());
-    assert!(fixture.db.begin_read_snapshot().is_err(), "caller still owns the transaction");
+    let fields = prepare_decision_fields(
+        request.topic,
+        request.chosen,
+        &request.alternatives,
+        request.rationale,
+        None,
+        None,
+        now(),
+    )
+    .unwrap();
+    assert!(
+        record_heads_in_current_snapshot(&fixture.db, &fixture.workspace, &fields, now()).is_err()
+    );
+    assert!(
+        fixture.db.begin_read_snapshot().is_err(),
+        "caller still owns the transaction"
+    );
     fixture.db.rollback_read_snapshot().unwrap();
 }
 
 #[test]
 fn empty_decision_stores_do_not_require_seal_or_review_tables() {
     let fixture = Fixture::new();
-    fixture.db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO unavailable_review").unwrap();
-    fixture.db.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_seals").unwrap();
+    fixture
+        .db
+        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO unavailable_review")
+        .unwrap();
+    fixture
+        .db
+        .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_seals")
+        .unwrap();
     assert_eq!(fixture.list(false, 0).total_count, 0);
 }
 
@@ -305,8 +380,11 @@ fn preview_and_writer_refuse_hidden_predecessors_and_hidden_topic_collisions() {
     for sealed in [false, true] {
         let fixture = Fixture::new();
         let target = fixture.seed(988, PRIVATE_TOPIC);
-        if sealed { fixture.seal(&target); }
-        else { fixture.hold(1, &fixture.workspace, "memory", &target); }
+        if sealed {
+            fixture.seal(&target);
+        } else {
+            fixture.hold(1, &fixture.workspace, "memory", &target);
+        }
         let before = fixture.state();
         for dry_run in [false, true] {
             for supersedes in [None, Some(target.as_str())] {
@@ -314,8 +392,16 @@ fn preview_and_writer_refuse_hidden_predecessors_and_hidden_topic_collisions() {
                 request.dry_run = dry_run;
                 request.supersedes = supersedes;
                 let error = decide_record(&request).unwrap_err();
-                assert!(matches!(error, DomainError::PolicyDenied { .. }), "{error:?}");
-                for private in [target.as_str(), PRIVATE_TOPIC, PRIVATE_CHOICE, "PRIVATE-REVIEW"] {
+                assert!(
+                    matches!(error, DomainError::PolicyDenied { .. }),
+                    "{error:?}"
+                );
+                for private in [
+                    target.as_str(),
+                    PRIVATE_TOPIC,
+                    PRIVATE_CHOICE,
+                    "PRIVATE-REVIEW",
+                ] {
                     assert!(!format!("{error:?}").contains(private));
                 }
                 assert_eq!(fixture.state(), before);
@@ -329,9 +415,12 @@ fn unrelated_review_holds_do_not_block_recording_or_require_private_sidecars() {
     let fixture = Fixture::new();
     let target = fixture.seed(989, PRIVATE_TOPIC);
     fixture.hold(1, &fixture.workspace, "memory", &target);
-    fixture.db.execute_raw(&format!(
-        "UPDATE memories SET typed_fields_json = '{{\"chosen\":7}}' WHERE id = '{target}'"
-    )).unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET typed_fields_json = '{{\"chosen\":7}}' WHERE id = '{target}'"
+        ))
+        .unwrap();
     let original = fixture.db.get_memory(&target).unwrap();
     let mut request = fixture.request();
     request.topic = "Independent public deployment";
@@ -341,7 +430,10 @@ fn unrelated_review_holds_do_not_block_recording_or_require_private_sidecars() {
     let report = decide_record(&request).unwrap();
     assert!(report.persisted);
     assert_eq!(fixture.db.get_memory(&target).unwrap(), original);
-    assert_eq!(fixture.list(false, 0).decisions[0].memory_id, report.decision.memory_id);
+    assert_eq!(
+        fixture.list(false, 0).decisions[0].memory_id,
+        report.decision.memory_id
+    );
 }
 
 #[test]
@@ -349,17 +441,28 @@ fn a_sealed_current_topic_is_unknown_not_vacant_but_sealed_history_does_not_bloc
     let fixture = Fixture::new();
     let target = fixture.seed(990, PRIVATE_TOPIC);
     fixture.seal(&target);
-    fixture.db.execute_raw(&format!(
-        "UPDATE memories SET content = '{}' WHERE id = '{target}'",
-        crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-    )).unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET content = '{}' WHERE id = '{target}'",
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+        ))
+        .unwrap();
     let mut request = fixture.request();
     request.topic = "Independent public deployment";
     for dry in [true, false] {
         request.dry_run = dry;
-        assert!(matches!(decide_record(&request), Err(DomainError::PolicyDenied { .. })));
+        assert!(matches!(
+            decide_record(&request),
+            Err(DomainError::PolicyDenied { .. })
+        ));
     }
-    assert!(fixture.db.restore_imported_memory_supersession(&target, TIME).unwrap());
+    assert!(
+        fixture
+            .db
+            .restore_imported_memory_supersession(&target, TIME)
+            .unwrap()
+    );
     assert!(decide_record(&request).unwrap().persisted);
     assert_eq!(fixture.list(true, 0).total_count, 1);
 }
@@ -369,7 +472,10 @@ fn releasing_review_does_not_resurrect_a_superseded_decision_head() {
     let fixture = Fixture::new();
     let target = fixture.seed(991, PRIVATE_TOPIC);
     let hold = fixture.hold(1, &fixture.workspace, "memory", &target);
-    fixture.db.restore_imported_memory_supersession(&target, TIME).unwrap();
+    fixture
+        .db
+        .restore_imported_memory_supersession(&target, TIME)
+        .unwrap();
     fixture.review(&hold, "rejected");
     assert_eq!(fixture.list(false, 0).total_count, 0);
     assert_eq!(fixture.list(true, 0).total_count, 1);
@@ -377,6 +483,9 @@ fn releasing_review_does_not_resurrect_a_superseded_decision_head() {
     request.supersedes = Some(&target);
     for dry in [true, false] {
         request.dry_run = dry;
-        assert!(matches!(decide_record(&request), Err(DomainError::NotFound { .. })));
+        assert!(matches!(
+            decide_record(&request),
+            Err(DomainError::NotFound { .. })
+        ));
     }
 }

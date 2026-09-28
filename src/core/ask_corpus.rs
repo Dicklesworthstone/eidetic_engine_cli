@@ -394,7 +394,10 @@ fn load_rules(
         connection,
         workspace_id,
         quarantine::Target::Rule,
-        &rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        &rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
     )?;
     rules.retain(|rule| !held.contains(&rule.id));
     let mut native_sources = BTreeMap::new();

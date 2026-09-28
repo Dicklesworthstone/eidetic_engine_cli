@@ -214,7 +214,8 @@ fn native_rule_quarantine_neither_aliases_nor_inherits_source_memory_feedback() 
             workspace_id: WORKSPACE.to_owned(),
             level: "episodic".to_owned(),
             kind: "note".to_owned(),
-            content: "Private observation; independently reviewed rule has its own body.".to_owned(),
+            content: "Private observation; independently reviewed rule has its own body."
+                .to_owned(),
             workflow_id: None,
             confidence: 0.8,
             utility: 0.5,
@@ -369,7 +370,11 @@ fn unavailable_native_rule_quarantine_fails_closed_without_discarding_evidence()
     assert_eq!(admitted[0].doc_id, "evidence_unrelated");
     assert_eq!(degraded.len(), 1);
     assert_eq!(degraded[0].code, "rule_live_admission_filtered");
-    assert!(!degraded[0].message.contains("unavailable_feedback_quarantine"));
+    assert!(
+        !degraded[0]
+            .message
+            .contains("unavailable_feedback_quarantine")
+    );
     db.execute_raw("ALTER TABLE unavailable_feedback_quarantine RENAME TO feedback_quarantine")
         .map_err(|error| error.to_string())?;
     assert_eq!(
@@ -397,8 +402,8 @@ fn native_rule_quarantine_pages_are_candidate_bounded_and_deduplicate_holds() ->
         load_relations(&db, &requested, WORKSPACE).map_err(|error| error.to_string())?;
     let expected = ids.iter().step_by(2).cloned().collect::<BTreeSet<_>>();
     assert_eq!(relations.pending_quarantine, expected);
-    let subset = load_relations(&db, &[ids[1].as_str()], WORKSPACE)
-        .map_err(|error| error.to_string())?;
+    let subset =
+        load_relations(&db, &[ids[1].as_str()], WORKSPACE).map_err(|error| error.to_string())?;
     assert!(subset.pending_quarantine.is_empty());
     let empty = load_relations(&db, &[], WORKSPACE).map_err(|error| error.to_string())?;
     assert!(empty.pending_quarantine.is_empty());

@@ -3680,7 +3680,10 @@ impl PackHashComponentDigests {
         [
             ("request", self.request == other.request),
             ("referenceTime", self.reference_time == other.reference_time),
-            ("qualityScoring", self.quality_scoring == other.quality_scoring),
+            (
+                "qualityScoring",
+                self.quality_scoring == other.quality_scoring,
+            ),
             ("items", self.items == other.items),
             ("omitted", self.omitted == other.omitted),
             ("degraded", self.degraded == other.degraded),

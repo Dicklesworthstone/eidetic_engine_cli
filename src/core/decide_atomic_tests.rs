@@ -396,7 +396,11 @@ fn ancillary_audit_stream_failure_preserves_the_committed_acknowledgement() {
 #[test]
 fn failed_derived_publication_cannot_turn_the_decision_into_a_failed_source_write() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.root.path().join(".ee/index"), b"not an index directory").unwrap();
+    std::fs::write(
+        fixture.root.path().join(".ee/index"),
+        b"not an index directory",
+    )
+    .unwrap();
     let report = record(&fixture.options(None)).unwrap();
     assert!(report.persisted);
     assert_eq!(report.status, "recorded");
@@ -425,7 +429,10 @@ fn an_earlier_author_expiry_is_not_extended_or_used_as_the_supersession_clock() 
     let mut request = fixture.options(None);
     request.supersedes = Some(&first.decision.memory_id);
     let second = record(&request).unwrap();
-    assert_eq!(second.superseded.unwrap().valid_to.as_deref(), Some(earlier));
+    assert_eq!(
+        second.superseded.unwrap().valid_to.as_deref(),
+        Some(earlier)
+    );
     let cutoff = fixture
         .db
         .get_memory_superseded_at(&first.decision.memory_id)

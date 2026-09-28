@@ -1752,12 +1752,8 @@ impl PackSearchHandoff {
             &mut self.report.degraded,
             Some(connection),
         );
-        self.report.results = rule_admission::admit_hits(
-            options,
-            hits,
-            &mut self.report.degraded,
-            Some(connection),
-        );
+        self.report.results =
+            rule_admission::admit_hits(options, hits, &mut self.report.degraded, Some(connection));
         match resolved_search_scoring_config(&options.workspace_path) {
             Ok(config) if config.policy_hash() == self.quality_scoring_policy => {
                 apply_quality_scoring(
@@ -2348,9 +2344,8 @@ impl SearchHit {
     #[must_use]
     pub fn ranking_components_json(&self) -> Option<&serde_json::Value> {
         let value = self.metadata.as_ref()?.get(SEARCH_QUALITY_SCORING_KEY)?;
-        (value.get("schema").and_then(serde_json::Value::as_str)
-            == Some(SEARCH_SCORING_POLICY_V1))
-        .then_some(value)
+        (value.get("schema").and_then(serde_json::Value::as_str) == Some(SEARCH_SCORING_POLICY_V1))
+            .then_some(value)
     }
 
     /// Deterministic normalized relevance score in `0.0..=1.0` (bd-1et0v.11).
@@ -7137,14 +7132,24 @@ impl ScoreExplanation {
                     ("recency", "exp(-age_days / recency_tau_days)"),
                     ("confidence", "max(confidence_floor, confidence)"),
                     ("utility", "utility_floor + (1 - utility_floor) * utility"),
-                    ("maturity", "configured multiplier for the observed native maturity"),
-                    ("harmfulPenalty", "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)"),
-                    ("scopeMatch", "scope_match_bonus for an authoritative exact workspace/scope match"),
+                    (
+                        "maturity",
+                        "configured multiplier for the observed native maturity",
+                    ),
+                    (
+                        "harmfulPenalty",
+                        "max(harmful_penalty_floor, 1 - harmful_penalty_per_hit * harmful_count)",
+                    ),
+                    (
+                        "scopeMatch",
+                        "scope_match_bonus for an authoritative exact workspace/scope match",
+                    ),
                     ("graphCentrality", "1 when graph centrality is not observed"),
                     ("redundancy", "1 when redundancy is not observed"),
                     ("freshnessDrift", "1 when anchor freshness is not observed"),
                 ] {
-                    let Some(value) = components.get(key).and_then(serde_json::Value::as_f64) else {
+                    let Some(value) = components.get(key).and_then(serde_json::Value::as_f64)
+                    else {
                         continue;
                     };
                     let measured = key == "base"
@@ -9422,8 +9427,7 @@ async fn run_search_inner_with_performance(
     search_checkpoint(cx)?;
     // Invalid configured ranking must not become default ranking, including
     // when a missing index would otherwise send callers into lexical fallback.
-    let (fusion_weights, scoring_config) =
-        resolved_search_configuration(&options.workspace_path)?;
+    let (fusion_weights, scoring_config) = resolved_search_configuration(&options.workspace_path)?;
     let quality_scoring_policy = scoring_config.policy_hash();
     let scoring_reference_time = options.as_of.unwrap_or_else(Utc::now);
     // Seeded/library callers may supply only paths. Use the same authoritative
@@ -10237,8 +10241,7 @@ async fn run_diag_search_in_snapshot(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
-    let (fusion_weights, scoring_config) =
-        resolved_search_configuration(&options.workspace_path)?;
+    let (fusion_weights, scoring_config) = resolved_search_configuration(&options.workspace_path)?;
     let scoring_reference_time = options.as_of.unwrap_or_else(Utc::now);
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -11956,13 +11959,16 @@ pub(crate) fn resolved_search_fusion_weights(
 fn resolved_search_configuration(
     workspace_path: &Path,
 ) -> Result<(SearchFusionWeights, SearchScoringConfig), SearchError> {
-    let config = crate::core::config_surface::merged_workspace_config(workspace_path)
-        .map_err(|error| {
+    let config =
+        crate::core::config_surface::merged_workspace_config(workspace_path).map_err(|error| {
             SearchError::Configuration(format!("Failed to load search configuration: {error}"))
         })?;
     let scoring = SearchScoringConfig::from_config(&config.values.scoring)
         .map_err(SearchError::Configuration)?;
-    Ok((SearchFusionWeights::from_config(&config.values.search), scoring))
+    Ok((
+        SearchFusionWeights::from_config(&config.values.search),
+        scoring,
+    ))
 }
 
 pub(crate) fn resolved_search_scoring_config(
@@ -12052,7 +12058,11 @@ pub(crate) fn apply_quality_scoring(
     let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
     let policy = config.policy_hash();
     for hit in hits.iter_mut() {
-        if let Some(object) = hit.metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+        if let Some(object) = hit
+            .metadata
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
             object.remove(SEARCH_QUALITY_SCORING_KEY);
             object.remove("qualityScoring");
         }
@@ -12065,9 +12075,10 @@ pub(crate) fn apply_quality_scoring(
         let mut harmful_count = None;
         let mut scope_match = None;
         let entity_type;
-        if let Some(memory) = local_memories.get(&hit.doc_id).or_else(|| {
-            preloaded_memories.and_then(|memories| memories.get(&hit.doc_id))
-        }) {
+        if let Some(memory) = local_memories
+            .get(&hit.doc_id)
+            .or_else(|| preloaded_memories.and_then(|memories| memories.get(&hit.doc_id)))
+        {
             entity_type = "memory";
             created_at = parse_validity_timestamp(&memory.created_at);
             confidence = memory.confidence.is_finite().then_some(memory.confidence);
@@ -12295,7 +12306,11 @@ fn search_hit_from_scored_result(
         explanation: None,
     };
     // Derived metadata cannot assert source-owned quality authority.
-    if let Some(object) = hit.metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+    if let Some(object) = hit
+        .metadata
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
         object.remove(SEARCH_QUALITY_SCORING_KEY);
         object.remove("qualityScoring");
     }

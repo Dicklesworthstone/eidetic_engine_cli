@@ -37,7 +37,10 @@ impl Fixture {
         let database = workspace.join(".ee/ee.db");
         let writer = DbConnection::open_file(&database).expect("open real store");
         writer.migrate().expect("migrate real schema");
-        for (id, path) in [(LOCAL, workspace.clone()), (FOREIGN, workspace.join("other"))] {
+        for (id, path) in [
+            (LOCAL, workspace.clone()),
+            (FOREIGN, workspace.join("other")),
+        ] {
             writer
                 .insert_workspace(
                     id,
@@ -123,8 +126,18 @@ fn repeated_memory_events_keep_all_canonical_tags_and_distinct_cursors() {
             "INSERT INTO memory_tags (memory_id, tag) VALUES ('{FIRST}', 'alpha')"
         ))
         .expect("second tag");
-    f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
-    f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_UPDATE);
+    f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
     let report = poll_memory_deltas(&f.options(0, 100, Some("TAG=alpha+zulu"))).unwrap();
     assert_eq!(report.delta_count, 2);
     assert!(report.deltas.iter().all(|d| d.tags == ["alpha", "zulu"]));
@@ -138,7 +151,12 @@ fn hydration_crosses_the_bulk_parameter_batch_boundary_without_losing_a_memory()
     for index in 0..257 {
         let id = format!("mem_{:026}", 1_000 + index);
         f.memory(&id, LOCAL, "release");
-        f.audit(Some(LOCAL), &id, Some("memory"), audit_actions::MEMORY_CREATE);
+        f.audit(
+            Some(LOCAL),
+            &id,
+            Some("memory"),
+            audit_actions::MEMORY_CREATE,
+        );
     }
     let report = poll_memory_deltas(&f.options(0, 300, Some("TAG=release"))).unwrap();
     assert_eq!(report.delta_count, 257);
@@ -165,7 +183,12 @@ fn restore_tags(f: &Fixture) {
 fn metadata_excluded_pages_do_not_query_tags_and_still_acknowledge_scanned_rows() {
     let f = Fixture::new();
     f.memory(FIRST, LOCAL, "release");
-    let cursor = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
+    let cursor = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
     hide_tags(&f);
     let report = poll_memory_deltas(&f.options(0, 100, Some("LEVEL=episodic")))
         .expect("excluded metadata never requires tag storage");
@@ -178,7 +201,12 @@ fn metadata_excluded_pages_do_not_query_tags_and_still_acknowledge_scanned_rows(
 fn a_failed_bulk_read_withholds_the_page_and_allows_retry_from_the_previous_cursor() {
     let f = Fixture::new();
     f.memory(FIRST, LOCAL, "release");
-    let cursor = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
+    let cursor = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
     hide_tags(&f);
     let options = f.options(0, 100, Some("TAG=release"));
     let error = poll_memory_deltas(&options).expect_err("tag lookup must fail closed");
@@ -197,17 +225,29 @@ fn metadata_prefilter_preserves_empty_page_has_more_and_does_not_skip_the_next_m
     f.memory(FIRST, LOCAL, "release");
     f.memory(SECOND, LOCAL, "release");
     f.writer
-        .execute_raw(&format!("UPDATE memories SET level = 'semantic' WHERE id = '{FIRST}'"))
+        .execute_raw(&format!(
+            "UPDATE memories SET level = 'semantic' WHERE id = '{FIRST}'"
+        ))
         .expect("first memory outside the requested level");
-    let first = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
-    let second = f.audit(Some(LOCAL), SECOND, Some("memory"), audit_actions::MEMORY_CREATE);
-    let report = poll_memory_deltas(&f.options(0, 1, Some("LEVEL=procedural,TAG=release")))
-        .unwrap();
+    let first = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let second = f.audit(
+        Some(LOCAL),
+        SECOND,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let report =
+        poll_memory_deltas(&f.options(0, 1, Some("LEVEL=procedural,TAG=release"))).unwrap();
     assert!(report.deltas.is_empty());
     assert!(report.has_more);
     assert_eq!(report.next_cursor, first);
-    let report = poll_memory_deltas(&f.options(first, 1, Some("LEVEL=procedural,TAG=release")))
-        .unwrap();
+    let report =
+        poll_memory_deltas(&f.options(first, 1, Some("LEVEL=procedural,TAG=release"))).unwrap();
     assert_eq!(report.delta_count, 1);
     assert_eq!(report.deltas[0].memory_id, SECOND);
     assert_eq!(report.deltas[0].tags, ["release"]);
@@ -219,7 +259,12 @@ fn metadata_prefilter_preserves_empty_page_has_more_and_does_not_skip_the_next_m
 fn bulk_tags_observe_the_same_snapshot_as_audit_metadata_during_a_real_writer_commit() {
     let f = Fixture::new();
     f.memory(FIRST, LOCAL, "release");
-    let old = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
+    let old = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
     let reader = DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).unwrap();
     let snapshot = SubscriptionSnapshot::begin(&reader).unwrap();
     assert_eq!(snapshot.high_watermark(LOCAL).unwrap(), old);
@@ -228,7 +273,12 @@ fn bulk_tags_observe_the_same_snapshot_as_audit_metadata_during_a_real_writer_co
             "UPDATE memory_tags SET tag = 'changed' WHERE memory_id = '{FIRST}'"
         ))
         .expect("concurrent tag commit");
-    let new = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_TAG_SET);
+    let new = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_TAG_SET,
+    );
     let filter = super::super::parse_subscribe_filter(Some("TAG=release")).unwrap();
     let page = snapshot.page(LOCAL, 0, 100, &filter, None).unwrap();
     assert_eq!(page.deltas.len(), 1);
@@ -252,7 +302,12 @@ fn invalid_memory_id_and_lookahead_are_never_hydrated_or_acknowledged_as_a_match
         audit_actions::MEMORY_UPDATE,
     );
     f.memory(FIRST, LOCAL, "release");
-    f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_CREATE);
+    f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
     hide_tags(&f);
     let page = poll_memory_deltas(&f.options(0, 1, None))
         .expect("invalid identity and lookahead must not trigger a tag read");
@@ -270,7 +325,12 @@ fn invalid_memory_id_and_lookahead_are_never_hydrated_or_acknowledged_as_a_match
 fn metadata_exits_emit_identity_only_invalidations_without_tag_storage() {
     let f = Fixture::new();
     f.memory(FIRST, LOCAL, "private-tag");
-    let cursor = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_UPDATE);
+    let cursor = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
     hide_tags(&f);
     let page = poll_memory_deltas(&f.options(0, 100, Some("LEVEL=episodic,TAG=release")))
         .expect("metadata exit needs no tags");
@@ -281,7 +341,14 @@ fn metadata_exits_emit_identity_only_invalidations_without_tag_storage() {
     assert_eq!(page.invalidations[0].affected_filters, ["levels", "tags"]);
     assert_eq!(page.next_cursor, cursor);
     let public = serde_json::to_value(&page.invalidations[0]).expect("notice JSON");
-    for field in ["tags", "levels", "kinds", "trustClass", "agentName", "content"] {
+    for field in [
+        "tags",
+        "levels",
+        "kinds",
+        "trustClass",
+        "agentName",
+        "content",
+    ] {
         assert!(public.get(field).is_none(), "private field {field}");
     }
     assert!(!public.to_string().contains("private-tag"));
@@ -294,15 +361,38 @@ fn tag_and_metadata_exits_keep_audit_order_across_hydration_phases() {
     f.memory(FIRST, LOCAL, "not-release");
     f.memory(SECOND, LOCAL, "release");
     f.writer
-        .execute_raw(&format!("UPDATE memories SET level = 'semantic' WHERE id = '{SECOND}'"))
+        .execute_raw(&format!(
+            "UPDATE memories SET level = 'semantic' WHERE id = '{SECOND}'"
+        ))
         .expect("metadata exit");
-    let first = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_TAG_SET);
-    let second = f.audit(Some(LOCAL), SECOND, Some("memory"), audit_actions::MEMORY_UPDATE);
-    let third = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_UPDATE);
+    let first = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_TAG_SET,
+    );
+    let second = f.audit(
+        Some(LOCAL),
+        SECOND,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let third = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
     let filter = "LEVEL=procedural,TAG=release";
     let page = poll_memory_deltas(&f.options(0, 2, Some(filter))).expect("mixed exits");
     assert!(page.deltas.is_empty());
-    assert_eq!(page.invalidations.iter().map(|n| n.cursor).collect::<Vec<_>>(), [first, second]);
+    assert_eq!(
+        page.invalidations
+            .iter()
+            .map(|n| n.cursor)
+            .collect::<Vec<_>>(),
+        [first, second]
+    );
     assert_eq!(page.next_cursor, second);
     assert!(page.has_more);
     let next = poll_memory_deltas(&f.options(second, 2, Some(filter))).expect("next page");
@@ -319,13 +409,28 @@ fn metadata_invalidation_is_not_acknowledged_when_a_later_tag_batch_fails() {
     f.memory(FIRST, LOCAL, "release");
     f.memory(SECOND, LOCAL, "release");
     f.writer
-        .execute_raw(&format!("UPDATE memories SET level = 'semantic' WHERE id = '{FIRST}'"))
+        .execute_raw(&format!(
+            "UPDATE memories SET level = 'semantic' WHERE id = '{FIRST}'"
+        ))
         .expect("metadata exit");
-    let exit = f.audit(Some(LOCAL), FIRST, Some("memory"), audit_actions::MEMORY_UPDATE);
-    let matched = f.audit(Some(LOCAL), SECOND, Some("memory"), audit_actions::MEMORY_UPDATE);
+    let exit = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let matched = f.audit(
+        Some(LOCAL),
+        SECOND,
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
     hide_tags(&f);
     let options = f.options(0, 100, Some("LEVEL=procedural,TAG=release"));
-    assert!(poll_memory_deltas(&options).is_err(), "no partial page acknowledgement");
+    assert!(
+        poll_memory_deltas(&options).is_err(),
+        "no partial page acknowledgement"
+    );
     restore_tags(&f);
     let page = poll_memory_deltas(&options).expect("retry includes both events");
     assert_eq!(page.invalidations.len(), 1);

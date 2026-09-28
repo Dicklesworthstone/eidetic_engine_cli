@@ -4,8 +4,8 @@
 //! Bodies, exact typed fields, revision markers and lineage share one snapshot.
 
 use super::*;
-use std::collections::BTreeSet;
 use sqlmodel_core::Value;
+use std::collections::BTreeSet;
 
 const PAGE_SIZE: usize = 256;
 
@@ -184,7 +184,9 @@ fn read_current_snapshot(
             continue;
         }
         before_hydration(&ids)?;
-        let mut memories = connection.get_memories_batch(&ids).map_err(|_| read_error())?;
+        let mut memories = connection
+            .get_memories_batch(&ids)
+            .map_err(|_| read_error())?;
         let mut eligible = Vec::with_capacity(ids.len());
         for id in ids {
             let memory = memories.remove(id).ok_or_else(read_error)?;
@@ -204,8 +206,8 @@ fn read_current_snapshot(
             if let ReadIntent::Record(fields) = intent {
                 // Internal topic comparison does not publish held content.
                 // Do not decode unrelated sidecars or traverse their lineage.
-                let topic = topic_from_content(&memory.content)
-                    .unwrap_or_else(|| memory.content.clone());
+                let topic =
+                    topic_from_content(&memory.content).unwrap_or_else(|| memory.content.clone());
                 let related = fields.supersedes.as_deref() == Some(id)
                     || normalize_decision_topic(&topic) == fields.normalized_topic;
                 if !related {

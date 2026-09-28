@@ -339,7 +339,12 @@ impl ScoringConfig {
                 0.0,
                 1.0,
             ),
-            ("harmful_penalty_floor", self.harmful_penalty_floor, 0.0, 1.0),
+            (
+                "harmful_penalty_floor",
+                self.harmful_penalty_floor,
+                0.0,
+                1.0,
+            ),
             ("scope_match_bonus", self.scope_match_bonus, 1.0, 2.0),
             ("candidate_multiplier", self.candidate_multiplier, 0.0, 1.0),
             (

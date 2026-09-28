@@ -189,7 +189,9 @@ fn persist_pack(
         .expect("read persisted pack")
         .expect("pack exists");
     assert!(
-        super::parse_pack_ledger(&record).available_ledger().is_some(),
+        super::parse_pack_ledger(&record)
+            .available_ledger()
+            .is_some(),
         "test fixtures must pass the real ledger integrity and record-binding gate"
     );
     record
@@ -280,8 +282,14 @@ fn native_pack_diff_reports_mixed_add_remove_revision_and_redaction_changes() {
     assert_eq!(result["changed"][0]["revisionChanged"], json!(false));
     let evidence_change = &result["changed"][1];
     assert_entity(evidence_change, "evidence_span", EVIDENCE_A);
-    assert_eq!(evidence_change["old"]["entityRevision"], json!(old_revision));
-    assert_eq!(evidence_change["new"]["entityRevision"], json!(new_revision));
+    assert_eq!(
+        evidence_change["old"]["entityRevision"],
+        json!(old_revision)
+    );
+    assert_eq!(
+        evidence_change["new"]["entityRevision"],
+        json!(new_revision)
+    );
     assert_eq!(evidence_change["rankDelta"], json!(-1));
     assert_eq!(evidence_change["revisionChanged"], json!(true));
     assert_eq!(evidence_change["whyChanged"], json!(true));
@@ -295,7 +303,11 @@ fn native_pack_diff_reports_mixed_add_remove_revision_and_redaction_changes() {
         result["redactionChanges"][0]["entity"],
         evidence_change["entity"]
     );
-    assert_eq!(result, diff(&record_a, &record_b), "typed ordering is stable");
+    assert_eq!(
+        result,
+        diff(&record_a, &record_b),
+        "typed ordering is stable"
+    );
     let rendered = result.to_string();
     for private_value in [
         secret_probe.as_str(),

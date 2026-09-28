@@ -271,7 +271,9 @@ fn complete_lexical(report: &SearchReport) {
     );
     for hit in &report.results {
         assert!(hit.lexical_score.is_some());
-        assert!(hit.fast_score.is_none() && hit.quality_score.is_none() && hit.rerank_score.is_none());
+        assert!(
+            hit.fast_score.is_none() && hit.quality_score.is_none() && hit.rerank_score.is_none()
+        );
     }
 }
 
@@ -291,10 +293,15 @@ fn absent_and_empty_indexes_search_native_memory_rule_and_cass_sources_without_a
             std::fs::create_dir(fixture.root.join(".ee/index")).unwrap();
         }
         let before = fixture.state();
-        let report = run_search_with_read_connection(&fixture.options(), &fixture.reader()).unwrap();
+        let report =
+            run_search_with_read_connection(&fixture.options(), &fixture.reader()).unwrap();
         assert_eq!(report.status, SearchStatus::Success);
         complete_lexical(&report);
-        let ids: BTreeSet<_> = report.results.iter().map(|hit| hit.doc_id.clone()).collect();
+        let ids: BTreeSet<_> = report
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect();
         assert_eq!(ids, BTreeSet::from([memory, rule, evidence]));
         assert_eq!(fixture.db.count_table_rows("memories").unwrap(), 1);
         assert_eq!(fixture.state(), before);
@@ -338,7 +345,8 @@ fn assert_global_sources_without_publication() {
     )
     .unwrap();
     let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
-    let (global, workspace) = crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&paths).unwrap();
     let insert = |number, content: &str| {
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         global
@@ -401,16 +409,9 @@ fn assert_global_sources_without_publication() {
             .any(|item| item.memory_id.to_string() == visible),
         "an unpublished global memory must remain available to read-only packs"
     );
-    assert!(
-        response
-            .data
-            .pack
-            .items
-            .iter()
-            .all(|item| {
-                item.memory_id.to_string() != sealed && item.memory_id.to_string() != tombstoned
-            })
-    );
+    assert!(response.data.pack.items.iter().all(|item| {
+        item.memory_id.to_string() != sealed && item.memory_id.to_string() != tombstoned
+    }));
     assert_eq!(fixture.state(), before);
     assert_eq!(source_state(&global), global_before);
     assert!(!fixture.root.join(".ee/index").exists());

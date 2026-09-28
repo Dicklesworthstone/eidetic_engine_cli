@@ -308,7 +308,10 @@ impl<'a> SubscriptionSnapshot<'a> {
     /// Repeated events retain their own cursors and complete canonical tags;
     /// lookahead and metadata-only invalidations never enter a batch.
     fn hydrate_tags(&self, deltas: &mut [MemoryDelta]) -> Result<(), DomainError> {
-        let ids: BTreeSet<&str> = deltas.iter().map(|delta| delta.memory_id.as_str()).collect();
+        let ids: BTreeSet<&str> = deltas
+            .iter()
+            .map(|delta| delta.memory_id.as_str())
+            .collect();
         let ids: Vec<&str> = ids.into_iter().collect();
         let mut tags = BTreeMap::new();
         // At most 40 bulk-reader calls for the 10,000-event page limit.

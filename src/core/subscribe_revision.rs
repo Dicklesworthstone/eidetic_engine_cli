@@ -267,13 +267,25 @@ mod tests {
     fn revision_fields_come_from_the_recorded_transition_not_generic_update_defaults() {
         let mut event = event();
         let mut pending = Vec::new();
-        let value = details(&id(1), &id(2), &id(1), "2026-09-01T00:00:00Z", &[
-            "tags", "level", "typed_fields", "seal_state", "tags",
-        ]);
+        let value = details(
+            &id(1),
+            &id(2),
+            &id(1),
+            "2026-09-01T00:00:00Z",
+            &["tags", "level", "typed_fields", "seal_state", "tags"],
+        );
         collect(&mut event, Some(&value.to_string()), &mut pending).unwrap();
-        assert_eq!(event.changed_fields, ["level", "seal_state", "tags", "typed_fields"]);
+        assert_eq!(
+            event.changed_fields,
+            ["level", "seal_state", "tags", "typed_fields"]
+        );
         assert_eq!(pending.len(), 1);
-        assert!(!event.changed_fields.iter().any(|field| field == "content_hash"));
+        assert!(
+            !event
+                .changed_fields
+                .iter()
+                .any(|field| field == "content_hash")
+        );
         let value = details(&id(1), &id(2), &id(1), "2026-09-01T00:00:00Z", &["content"]);
         collect(&mut event, Some(&value.to_string()), &mut pending).unwrap();
         assert_eq!(event.changed_fields, ["content_hash"]);
@@ -334,48 +346,77 @@ mod tests {
             let db = DbConnection::open_file(&path).unwrap();
             db.migrate().unwrap();
             let own = stable_workspace_id(&workspace);
-            db.insert_workspace(&own, &CreateWorkspaceInput {
-                path: workspace.to_string_lossy().into_owned(), name: None,
-            }).unwrap();
-            Self { _root: root, workspace, path, own, db }
+            db.insert_workspace(
+                &own,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            Self {
+                _root: root,
+                workspace,
+                path,
+                own,
+                db,
+            }
         }
 
         fn input(&self, level: &str, tag: &str) -> CreateMemoryInput {
             CreateMemoryInput {
                 workspace_id: self.own.clone(),
-                level: level.to_owned(), kind: "rule".to_owned(),
+                level: level.to_owned(),
+                kind: "rule".to_owned(),
                 content: "Run the release checks before publishing.".to_owned(),
-                workflow_id: None, confidence: 0.8, utility: 0.5, importance: 0.5,
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
                 provenance_uri: Some("manual://subscribe-revision".to_owned()),
-                trust_class: "agent_validated".to_owned(), trust_subclass: None,
-                tags: vec![tag.to_owned()], valid_from: None, valid_to: None,
+                trust_class: "agent_validated".to_owned(),
+                trust_subclass: None,
+                tags: vec![tag.to_owned()],
+                valid_from: None,
+                valid_to: None,
             }
         }
 
         fn seed(&self, number: u128) -> String {
             let memory = id(number);
-            self.db.insert_memory_revision_at(
-                &memory,
-                &memory,
-                &self.input("procedural", "release"),
-                instant("2026-08-31T00:00:00Z").unwrap(),
-            ).unwrap();
+            self.db
+                .insert_memory_revision_at(
+                    &memory,
+                    &memory,
+                    &self.input("procedural", "release"),
+                    instant("2026-08-31T00:00:00Z").unwrap(),
+                )
+                .unwrap();
             memory
         }
 
         fn head(&self) -> u64 {
-            let rows = self.db.query("SELECT COALESCE(MAX(rowid), 0) FROM audit_log", &[]).unwrap();
+            let rows = self
+                .db
+                .query("SELECT COALESCE(MAX(rowid), 0) FROM audit_log", &[])
+                .unwrap();
             u64::try_from(rows[0].get(0).and_then(Value::as_i64).unwrap()).unwrap()
         }
 
         fn audit(&self, to: &str, value: &serde_json::Value) -> u64 {
-            self.db.insert_audit(&crate::db::generate_audit_id(), &CreateAuditInput {
-                workspace_id: Some(self.own.clone()),
-                actor: Some("PRIVATE_REVISION_ACTOR".to_owned()),
-                action: crate::db::audit_actions::MEMORY_REVISE.to_owned(),
-                target_type: Some("memory".to_owned()), target_id: Some(to.to_owned()),
-                details: Some(value.to_string()),
-            }).unwrap();
+            self.db
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &CreateAuditInput {
+                        workspace_id: Some(self.own.clone()),
+                        actor: Some("PRIVATE_REVISION_ACTOR".to_owned()),
+                        action: crate::db::audit_actions::MEMORY_REVISE.to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some(to.to_owned()),
+                        details: Some(value.to_string()),
+                    },
+                )
+                .unwrap();
             self.head()
         }
 
@@ -391,18 +432,28 @@ mod tests {
             }
             let mut input = self.input(level, "new-tag");
             input.valid_from = Some(at.to_rfc3339());
-            self.db.with_transaction(|| {
-                self.db.insert_memory_revision_at(&to, &group, &input, at)?;
-                assert!(self.db.mark_memory_superseded(from, &at.to_rfc3339())?);
-                Ok(())
-            }).unwrap();
+            self.db
+                .with_transaction(|| {
+                    self.db.insert_memory_revision_at(&to, &group, &input, at)?;
+                    assert!(self.db.mark_memory_superseded(from, &at.to_rfc3339())?);
+                    Ok(())
+                })
+                .unwrap();
             let cursor = self.audit(&to, &details(from, &to, &group, &at.to_rfc3339(), &fields));
             (to, cursor)
         }
 
-        fn poll(&self, cursor: u64, limit: u32, filter: Option<&str>) -> Result<SubscribePollReport, DomainError> {
+        fn poll(
+            &self,
+            cursor: u64,
+            limit: u32,
+            filter: Option<&str>,
+        ) -> Result<SubscribePollReport, DomainError> {
             poll_memory_deltas(&SubscribePollOptions {
-                workspace_path: &self.workspace, database_path: Some(&self.path), cursor, limit,
+                workspace_path: &self.workspace,
+                database_path: Some(&self.path),
+                cursor,
+                limit,
                 filter: parse_subscribe_filter(filter).unwrap(),
             })
         }
@@ -428,14 +479,33 @@ mod tests {
         assert!(!report.has_more);
         let output = serde_json::to_value(notice).unwrap();
         assert!(!output.to_string().contains("PRIVATE_"));
-        for field in ["tags", "levels", "kinds", "agentName", "trustClass", "content"] {
+        for field in [
+            "tags",
+            "levels",
+            "kinds",
+            "agentName",
+            "trustClass",
+            "content",
+        ] {
             assert!(output.get(field).is_none());
         }
-        let filtered = f.poll(0, 1, Some("TAG=release,CHANGED_FIELDS=tags")).unwrap();
+        let filtered = f
+            .poll(0, 1, Some("TAG=release,CHANGED_FIELDS=tags"))
+            .unwrap();
         assert!(filtered.deltas.is_empty());
         assert_eq!(filtered.invalidations.len(), 2);
-        assert!(filtered.invalidations.iter().any(|entry| entry.memory_id == from));
-        assert!(filtered.invalidations.iter().any(|entry| entry.memory_id == to));
+        assert!(
+            filtered
+                .invalidations
+                .iter()
+                .any(|entry| entry.memory_id == from)
+        );
+        assert!(
+            filtered
+                .invalidations
+                .iter()
+                .any(|entry| entry.memory_id == to)
+        );
         assert_eq!(filtered.next_cursor, cursor);
         assert!(f.poll(cursor, 1, None).unwrap().invalidations.is_empty());
     }
@@ -445,20 +515,38 @@ mod tests {
         let f = Fixture::new();
         let from = f.seed(1);
         f.transition(&from, 2, "semantic");
-        f.db.execute_raw("ALTER TABLE memory_tags RENAME TO temporarily_hidden_tags").unwrap();
-        let report = f.poll(0, 10, Some("LEVEL=procedural,TAG=release,CHANGED_FIELDS=tags")).unwrap();
+        f.db.execute_raw("ALTER TABLE memory_tags RENAME TO temporarily_hidden_tags")
+            .unwrap();
+        let report = f
+            .poll(
+                0,
+                10,
+                Some("LEVEL=procedural,TAG=release,CHANGED_FIELDS=tags"),
+            )
+            .unwrap();
         assert!(report.deltas.is_empty());
         assert_eq!(report.invalidations.len(), 2);
-        for filter in ["WORKSPACE_ID=not-this-workspace", "CHANGED_FIELDS=confidence"] {
+        for filter in [
+            "WORKSPACE_ID=not-this-workspace",
+            "CHANGED_FIELDS=confidence",
+        ] {
             let report = f.poll(0, 10, Some(filter)).unwrap();
             assert!(report.deltas.is_empty());
             assert!(report.invalidations.is_empty());
         }
-        f.db.execute_raw("ALTER TABLE temporarily_hidden_tags RENAME TO memory_tags").unwrap();
+        f.db.execute_raw("ALTER TABLE temporarily_hidden_tags RENAME TO memory_tags")
+            .unwrap();
         let reader = DbConnection::open(DatabaseConfig::read_only_file(f.path.clone())).unwrap();
         let snapshot = super::super::SubscriptionSnapshot::begin(&reader).unwrap();
-        let page = snapshot.page(&f.own, 0, 10, &SubscribeFilter::default(),
-            Some(instant("9999-01-01T00:00:00Z").unwrap())).unwrap();
+        let page = snapshot
+            .page(
+                &f.own,
+                0,
+                10,
+                &SubscribeFilter::default(),
+                Some(instant("9999-01-01T00:00:00Z").unwrap()),
+            )
+            .unwrap();
         assert!(page.deltas.is_empty());
         assert!(page.invalidations.is_empty());
         snapshot.finish().unwrap();
@@ -488,10 +576,12 @@ mod tests {
         let f = Fixture::new();
         let from = f.seed(1);
         let (to, cursor) = f.transition(&from, 2, "procedural");
-        f.db.execute_raw("ALTER TABLE memory_tags RENAME TO temporarily_hidden_tags").unwrap();
+        f.db.execute_raw("ALTER TABLE memory_tags RENAME TO temporarily_hidden_tags")
+            .unwrap();
         let error = f.poll(0, 10, None).unwrap_err();
         assert!(error.to_string().contains("no cursor was acknowledged"));
-        f.db.execute_raw("ALTER TABLE temporarily_hidden_tags RENAME TO memory_tags").unwrap();
+        f.db.execute_raw("ALTER TABLE temporarily_hidden_tags RENAME TO memory_tags")
+            .unwrap();
         let report = f.poll(0, 10, None).unwrap();
         assert_eq!(report.deltas[0].memory_id, to);
         assert_eq!(report.invalidations[0].memory_id, from);
@@ -508,14 +598,23 @@ mod tests {
             if foreign {
                 let elsewhere = f.workspace.join("elsewhere");
                 let owner = stable_workspace_id(&elsewhere);
-                f.db.insert_workspace(&owner, &CreateWorkspaceInput {
-                    path: elsewhere.to_string_lossy().into_owned(), name: None,
-                }).unwrap();
+                f.db.insert_workspace(
+                    &owner,
+                    &CreateWorkspaceInput {
+                        path: elsewhere.to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .unwrap();
                 f.db.execute_raw(&format!(
                     "UPDATE memories SET workspace_id = '{owner}' WHERE id = '{forged}'"
-                )).unwrap();
+                ))
+                .unwrap();
             }
-            f.audit(&to, &details(&forged, &to, &from, "2026-09-01T00:00:02Z", &["tags"]));
+            f.audit(
+                &to,
+                &details(&forged, &to, &from, "2026-09-01T00:00:02Z", &["tags"]),
+            );
             let error = f.poll(cursor, 1, None).unwrap_err();
             assert!(error.to_string().contains("no cursor was acknowledged"));
             assert!(!error.to_string().contains(&forged));
@@ -531,11 +630,19 @@ mod tests {
         let reader = DbConnection::open(DatabaseConfig::read_only_file(f.path.clone())).unwrap();
         let snapshot = super::super::SubscriptionSnapshot::begin(&reader).unwrap();
         assert_eq!(snapshot.high_watermark(&f.own).unwrap(), cursor);
-        f.db.execute_raw(&format!("UPDATE memories SET logical_id = id WHERE id = '{to}'")).unwrap();
-        let page = snapshot.page(&f.own, 0, 10, &SubscribeFilter::default(), None).unwrap();
+        f.db.execute_raw(&format!(
+            "UPDATE memories SET logical_id = id WHERE id = '{to}'"
+        ))
+        .unwrap();
+        let page = snapshot
+            .page(&f.own, 0, 10, &SubscribeFilter::default(), None)
+            .unwrap();
         assert_eq!(page.invalidations[0].memory_id, from);
         snapshot.finish().unwrap();
-        assert!(f.poll(0, 10, None).is_err(), "fresh reads must reject detached lineage");
+        assert!(
+            f.poll(0, 10, None).is_err(),
+            "fresh reads must reject detached lineage"
+        );
     }
 
     #[test]
@@ -544,20 +651,40 @@ mod tests {
         let from = f.seed(1);
         let cursor = f.head();
         let revision = revise_memory(&ReviseMemoryOptions {
-            database_path: &f.path, original_memory_id: &from,
-            content: None, level: None, kind: None, confidence: Some(0.6),
-            tags: Some(vec!["release-v2".to_owned()]), provenance_uri: None,
-            reason: ReviseReason::Correction, actor: Some("revision-test"), dry_run: false,
+            database_path: &f.path,
+            original_memory_id: &from,
+            content: None,
+            level: None,
+            kind: None,
+            confidence: Some(0.6),
+            tags: Some(vec!["release-v2".to_owned()]),
+            provenance_uri: None,
+            reason: ReviseReason::Correction,
+            actor: Some("revision-test"),
+            dry_run: false,
         });
         assert!(revision.success, "{:?}", revision.error);
         let to = revision.new_id.unwrap();
-        let page = f.poll(cursor, 100, Some("CHANGED_FIELDS=tags,TAG=release-v2")).unwrap();
-        let delta = page.deltas.iter().find(|delta| delta.memory_id == to).unwrap();
-        let notice = page.invalidations.iter().find(|notice| notice.memory_id == from).unwrap();
+        let page = f
+            .poll(cursor, 100, Some("CHANGED_FIELDS=tags,TAG=release-v2"))
+            .unwrap();
+        let delta = page
+            .deltas
+            .iter()
+            .find(|delta| delta.memory_id == to)
+            .unwrap();
+        let notice = page
+            .invalidations
+            .iter()
+            .find(|notice| notice.memory_id == from)
+            .unwrap();
         assert_eq!(delta.changed_fields, ["confidence", "tags"]);
         assert_eq!(notice.reason, "revision_superseded");
         assert_eq!(delta.cursor, notice.cursor);
-        assert!(f.db.get_memory(&from).unwrap().is_some(), "history is not deleted");
+        assert!(
+            f.db.get_memory(&from).unwrap().is_some(),
+            "history is not deleted"
+        );
     }
 
     #[test]

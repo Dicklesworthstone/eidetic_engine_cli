@@ -380,8 +380,13 @@ fn scoring_config_cli_dry_run_set_get_show_and_invalid_value() -> TestResult {
             .map_err(|error| format!("scoring {label} stdout must contain only JSON: {error}"))?;
         let data = &parsed["data"];
         if label == "show" {
-            let entries = data["entries"].as_array().ok_or("config show entries missing")?;
-            ensure(entries.len() == 8, "config show must list the eight active scoring knobs")?;
+            let entries = data["entries"]
+                .as_array()
+                .ok_or("config show entries missing")?;
+            ensure(
+                entries.len() == 8,
+                "config show must list the eight active scoring knobs",
+            )?;
             ensure(
                 entries.iter().any(|entry| {
                     entry["key"] == "scoring.confidence_floor"
@@ -405,10 +410,18 @@ fn scoring_config_cli_dry_run_set_get_show_and_invalid_value() -> TestResult {
     }
     let before_invalid = fs::read(&config_path).map_err(|error| error.to_string())?;
     let rejected = run_ee(&[
-        "--workspace", workspace_arg, "--json", "config", "set",
-        "scoring.confidence_floor", "1.1",
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "config",
+        "set",
+        "scoring.confidence_floor",
+        "1.1",
     ])?;
-    ensure(!rejected.status.success(), "out-of-range scoring value must fail")?;
+    ensure(
+        !rejected.status.success(),
+        "out-of-range scoring value must fail",
+    )?;
     let error: Value = serde_json::from_slice(&rejected.stdout)
         .map_err(|error| format!("rejected scoring value must emit only JSON: {error}"))?;
     ensure(

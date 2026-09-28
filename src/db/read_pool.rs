@@ -3231,11 +3231,13 @@ mod tests {
     fn snapshot_admission_works_with_an_empty_unmigrated_schema() {
         let pool = memory_pool(1, Duration::from_secs(30));
         let pin = must(pool.pin_snapshot(), "empty schema admits snapshot");
-        assert!(must(
-            pin.query("SELECT name FROM sqlite_master", &[]),
-            "empty schema reads"
-        )
-        .is_empty());
+        assert!(
+            must(
+                pin.query("SELECT name FROM sqlite_master", &[]),
+                "empty schema reads"
+            )
+            .is_empty()
+        );
         must(pin.rollback(), "empty snapshot releases");
         let connection = must(pool.acquire(), "unmigrated connection remains reusable");
         assert_eq!(connection.slot_id(), Some(1));

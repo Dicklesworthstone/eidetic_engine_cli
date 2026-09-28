@@ -665,7 +665,9 @@ fn pack_diff_v3_schema_enforces_typed_identity_and_revision_contract() -> TestRe
             .ok_or_else(|| format!("missing entity pointer {pointer}"))?;
         *slot = json!({"kind": "evidence_span", "id": "mem_00000000000000000000000001"});
         if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
-            return Err(format!("validator accepted mismatched kind and ID at {pointer}"));
+            return Err(format!(
+                "validator accepted mismatched kind and ID at {pointer}"
+            ));
         }
     }
 
@@ -679,7 +681,10 @@ fn pack_diff_v3_schema_enforces_typed_identity_and_revision_contract() -> TestRe
             .pointer_mut(pointer)
             .and_then(Value::as_object_mut)
             .ok_or_else(|| format!("missing item object {pointer}"))?;
-        object.insert("memoryId".to_owned(), json!("mem_00000000000000000000000001"));
+        object.insert(
+            "memoryId".to_owned(),
+            json!("mem_00000000000000000000000001"),
+        );
         if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
             return Err(format!("validator accepted legacy memoryId at {pointer}"));
         }
@@ -713,7 +718,9 @@ fn pack_diff_v3_schema_enforces_typed_identity_and_revision_contract() -> TestRe
             .ok_or_else(|| format!("missing revision pointer {pointer}"))?;
         *slot = json!("blake3:not-a-revision");
         if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
-            return Err(format!("validator accepted malformed revision at {pointer}"));
+            return Err(format!(
+                "validator accepted malformed revision at {pointer}"
+            ));
         }
     }
     Ok(())

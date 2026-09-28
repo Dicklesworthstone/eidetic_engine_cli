@@ -97,7 +97,8 @@ fn operational_fence_accepts_frozen_files_beside_durable_task_episodes() -> Test
     );
     let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
     assert_eq!(
-        db.get_task_episode(&episode.id).map_err(|e| e.to_string())?,
+        db.get_task_episode(&episode.id)
+            .map_err(|e| e.to_string())?,
         Some(episode),
         "recovery must preserve every durable episode field, including workspace and failure"
     );

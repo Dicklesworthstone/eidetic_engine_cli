@@ -21128,7 +21128,8 @@ impl DbConnection {
                         .checked_add(count)
                         .ok_or_else(|| DbError::MalformedRow {
                             operation: DbOperation::Query,
-                            message: "harmful feedback count exceeds the supported range".to_owned(),
+                            message: "harmful feedback count exceeds the supported range"
+                                .to_owned(),
                         })?;
                 }
             }
@@ -42151,7 +42152,11 @@ mod tests {
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
                 &[Value::Text(index.to_owned())],
             )?;
-            ensure_equal(&rows.len(), &1, &format!("V126 retains native index {index}"))?;
+            ensure_equal(
+                &rows.len(),
+                &1,
+                &format!("V126 retains native index {index}"),
+            )?;
         }
         ensure(
             connection.migrate()?.applied().is_empty(),
@@ -42237,20 +42242,21 @@ mod tests {
                     if entity_column != "memory_id" {
                         ensure(
                             connection
-                                .execute_raw("UPDATE pack_candidate_impressions SET section = 'decisions'")
+                                .execute_raw(
+                                    "UPDATE pack_candidate_impressions SET section = 'decisions'",
+                                )
                                 .is_err(),
                             "selected native entities require the matching section",
                         )?;
                     }
                     connection.execute_raw("UPDATE pack_candidate_impressions SET selected = 0, rank = NULL, section = NULL, omission_reason = 'token_budget_exceeded'")?;
-                    for assignment in [
-                        "rank = 0",
-                        "section = 'evidence'",
-                        "omission_reason = NULL",
-                    ] {
+                    for assignment in ["rank = 0", "section = 'evidence'", "omission_reason = NULL"]
+                    {
                         ensure(
                             connection
-                                .execute_raw(&format!("UPDATE pack_candidate_impressions SET {assignment}"))
+                                .execute_raw(&format!(
+                                    "UPDATE pack_candidate_impressions SET {assignment}"
+                                ))
                                 .is_err(),
                             format!("omitted native impression rejects {assignment}"),
                         )?;
@@ -42263,7 +42269,9 @@ mod tests {
                 };
                 ensure(
                     connection
-                        .execute_raw(&format!("DELETE FROM {source_table} WHERE id = '{entity_id}'"))
+                        .execute_raw(&format!(
+                            "DELETE FROM {source_table} WHERE id = '{entity_id}'"
+                        ))
                         .is_err(),
                     format!("{table} restricts source deletion instead of erasing pack history"),
                 )?;
@@ -42341,7 +42349,9 @@ mod tests {
                 let mut rejected = vec![
                     format!("UPDATE {table} SET {stored_column} = '{foreign_id}'"),
                     format!("UPDATE {table} SET pack_id = '{V126_OTHER_PACK}'"),
-                    format!("UPDATE pack_records SET workspace_id = '{V126_OTHER_WORKSPACE}' WHERE id = '{V126_PACK}'"),
+                    format!(
+                        "UPDATE pack_records SET workspace_id = '{V126_OTHER_WORKSPACE}' WHERE id = '{V126_PACK}'"
+                    ),
                     format!("DELETE FROM {source_table} WHERE id = '{entity_id}'"),
                 ];
                 if entity_column == "evidence_span_id" {
@@ -42468,7 +42478,10 @@ mod tests {
                 "failed V126 preserves parent identity and ledger bytes",
             )?;
             ensure_equal(
-                &v126_query_values(&connection, &format!("SELECT * FROM {table} ORDER BY rowid"))?,
+                &v126_query_values(
+                    &connection,
+                    &format!("SELECT * FROM {table} ORDER BY rowid"),
+                )?,
                 &child_before,
                 "failed V126 preserves invalid source evidence for explicit repair",
             )?;
@@ -52957,7 +52970,11 @@ UPDATE memories
             &[ZERO, MEMORY, MEMORY],
             reference,
         )?;
-        ensure_equal(&counts.len(), &2, "duplicate requests collapse by memory ID")?;
+        ensure_equal(
+            &counts.len(),
+            &2,
+            "duplicate requests collapse by memory ID",
+        )?;
         ensure_equal(
             &counts.get(MEMORY),
             &Some(&6),
@@ -52997,7 +53014,10 @@ UPDATE memories
                 name: None,
             },
         )?;
-        connection.insert_memory(MEMORY, &simhash_test_memory_input(WORKSPACE, "Owned source"))?;
+        connection.insert_memory(
+            MEMORY,
+            &simhash_test_memory_input(WORKSPACE, "Owned source"),
+        )?;
         connection.insert_memory(FOREIGN, &simhash_test_memory_input(OTHER, "Foreign source"))?;
         let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
             .map_err(|error| TestFailure::new(error.to_string()))?
@@ -53017,7 +53037,12 @@ UPDATE memories
             )?;
         }
         connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
-            0, WORKSPACE, "memory", MEMORY, "harmful", "invalid-timestamp",
+            0,
+            WORKSPACE,
+            "memory",
+            MEMORY,
+            "harmful",
+            "invalid-timestamp",
         ))?;
         ensure(
             connection
@@ -53063,7 +53088,11 @@ UPDATE memories
         let reader = DbConnection::open_file_read_only(&database)?;
         reader.begin_read_snapshot()?;
         let before = reader.memory_harmful_feedback_counts_at(WORKSPACE, &borrowed, reference)?;
-        ensure_equal(&before.len(), &801, "all batches return observed source entries")?;
+        ensure_equal(
+            &before.len(),
+            &801,
+            "all batches return observed source entries",
+        )?;
         ensure(
             before.values().all(|count| *count == 0),
             "empty feedback source yields zeroes",

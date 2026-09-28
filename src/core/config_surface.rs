@@ -29,13 +29,13 @@ use crate::config::{
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
     GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,
-    PACK_CANDIDATE_POOL_KEY, PathExpander, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY,
-    SCORING_CANDIDATE_MULTIPLIER_KEY, SCORING_CONFIDENCE_FLOOR_KEY,
-    SCORING_ESTABLISHED_MULTIPLIER_KEY, SCORING_HARMFUL_PENALTY_FLOOR_KEY,
-    SCORING_HARMFUL_PENALTY_PER_HIT_KEY, SCORING_RECENCY_TAU_DAYS_KEY,
-    SCORING_SCOPE_MATCH_BONUS_KEY, SCORING_UTILITY_FLOOR_KEY,
-    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
-    SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
+    PACK_CANDIDATE_POOL_KEY, PathExpander, SCORING_CANDIDATE_MULTIPLIER_KEY,
+    SCORING_CONFIDENCE_FLOOR_KEY, SCORING_ESTABLISHED_MULTIPLIER_KEY,
+    SCORING_HARMFUL_PENALTY_FLOOR_KEY, SCORING_HARMFUL_PENALTY_PER_HIT_KEY,
+    SCORING_RECENCY_TAU_DAYS_KEY, SCORING_SCOPE_MATCH_BONUS_KEY, SCORING_UTILITY_FLOOR_KEY,
+    SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY,
+    SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config,
+    config_from_env, merge_config,
 };
 
 pub const CONFIG_GET_SCHEMA_V1: &str = "ee.config.get.v1";
@@ -1689,17 +1689,20 @@ cache_results = 120
             let repeated = set_config(&options, key, value, false)
                 .map_err(|error| format!("repeat {key}: {error}"))?;
             if !applied.applied || repeated.applied || repeated.would_write {
-                return Err(format!("set must apply once and then be idempotent for {key}"));
+                return Err(format!(
+                    "set must apply once and then be idempotent for {key}"
+                ));
             }
             let observed = get_config(&options, key).map_err(|error| error.to_string())?;
             if observed.value != value || observed.source != "project" {
                 return Err(format!("set/get mismatch for {key}: {observed:?}"));
             }
         }
-        let shown = show_config(&options, Some("scoring.*"))
-            .map_err(|error| error.to_string())?;
+        let shown = show_config(&options, Some("scoring.*")).map_err(|error| error.to_string())?;
         if shown.entries.len() != 8 || shown.entries.iter().any(|entry| entry.source != "project") {
-            return Err(format!("scoring show must expose all eight project settings: {shown:?}"));
+            return Err(format!(
+                "scoring show must expose all eight project settings: {shown:?}"
+            ));
         }
         let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         if !contents.contains("# Keep this comment") || !contents.contains("rerank = \"off\"") {
@@ -1724,7 +1727,10 @@ cache_results = 120
             ("scoring.scope_match_bonus", "2.1"),
             ("scoring.candidate_multiplier", "1.1"),
             ("scoring.established_multiplier", "2.1"),
-            ("scoring.confidence_floor", "0.5\n[search]\nrerank = \"off\""),
+            (
+                "scoring.confidence_floor",
+                "0.5\n[search]\nrerank = \"off\"",
+            ),
         ] {
             if !matches!(
                 set_config(&options, key, value, false),
@@ -1733,7 +1739,9 @@ cache_results = 120
                 return Err(format!("{key}={value} must fail numeric validation"));
             }
             if temp.path().join(".ee").exists() {
-                return Err(format!("invalid scoring value created config state for {key}"));
+                return Err(format!(
+                    "invalid scoring value created config state for {key}"
+                ));
             }
         }
         // This is a valid f32 time constant but exceeds TOML's integer range.

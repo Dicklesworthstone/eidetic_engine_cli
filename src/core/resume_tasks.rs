@@ -118,7 +118,11 @@ impl ResumeTaskFrames {
                 "ee task-frame show --workspace {workspace} --json  # inspect incomplete task recovery"
             ));
         }
-        for frame in self.frames.iter().take(2usize.saturating_sub(commands.len())) {
+        for frame in self
+            .frames
+            .iter()
+            .take(2usize.saturating_sub(commands.len()))
+        {
             commands.push(format!(
                 "ee task-frame show {} --workspace {workspace} --json  # recorded unfinished work; not automatically adopted",
                 frame.id

@@ -245,7 +245,10 @@ fn held_memory_cannot_supply_an_answer_citation_or_nearest_evidence_hint() {
             .unwrap(),
         generation
     );
-    assert_eq!(fixture.db.count_table_rows("audit_log").unwrap(), audit_count);
+    assert_eq!(
+        fixture.db.count_table_rows("audit_log").unwrap(),
+        audit_count
+    );
 }
 
 #[test]

@@ -605,8 +605,7 @@ mod runtime_tests {
             .map(|index| {
                 let mut row = source[0].clone();
                 row.memory_id = format!("runtime-source-{index}");
-                row.content =
-                    format!("Run cargo fmt on source before release variant{index}.");
+                row.content = format!("Run cargo fmt on source before release variant{index}.");
                 row
             })
             .collect();

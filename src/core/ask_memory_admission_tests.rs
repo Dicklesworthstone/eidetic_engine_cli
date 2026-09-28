@@ -312,19 +312,29 @@ fn metadata_paging_exhausts_the_corpus_before_any_body_is_hydrated() {
         |page| {
             assert_eq!(
                 *pages.borrow(),
-                [ASK_MEMORY_REVISION_PAGE_SIZE, ASK_MEMORY_REVISION_PAGE_SIZE, 1]
+                [
+                    ASK_MEMORY_REVISION_PAGE_SIZE,
+                    ASK_MEMORY_REVISION_PAGE_SIZE,
+                    1
+                ]
             );
             hydrated.extend(page.iter().map(|value| (*value).to_owned()));
         },
         |count| pages.borrow_mut().push(count),
     )
     .unwrap();
-    assert!(db.begin_read_snapshot().is_err(), "the caller still owns its snapshot");
+    assert!(
+        db.begin_read_snapshot().is_err(),
+        "the caller still owns its snapshot"
+    );
     snapshot.finish().unwrap();
     let expected: Vec<_> = (1..=count).map(id).collect();
     assert_eq!(hydrated, expected);
     assert_eq!(
-        memories.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+        memories
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect::<Vec<_>>(),
         expected
     );
 }
@@ -410,7 +420,8 @@ fn metadata_paging_rejects_a_corrupt_hidden_tail_before_reading_a_valid_prefix()
     assert!(db.begin_read_snapshot().is_err());
     snapshot.finish().unwrap();
     assert!(load_current_ask_corpus(&db, WORKSPACE, at(CUTOFF)).is_err());
-    db.begin_read_snapshot().expect("failed public read released its snapshot");
+    db.begin_read_snapshot()
+        .expect("failed public read released its snapshot");
     db.commit_read_snapshot().unwrap();
 }
 
@@ -418,13 +429,14 @@ fn metadata_paging_rejects_a_corrupt_hidden_tail_before_reading_a_valid_prefix()
 fn metadata_pages_and_body_hydration_share_the_callers_snapshot() {
     let (root, reader) = fixture();
     let last = ASK_MEMORY_REVISION_PAGE_SIZE * 2 + 1;
-    reader.with_transaction(|| {
-        for index in 1..=last {
-            seed(&reader, index, None, None);
-        }
-        Ok(())
-    })
-    .unwrap();
+    reader
+        .with_transaction(|| {
+            for index in 1..=last {
+                seed(&reader, index, None, None);
+            }
+            Ok(())
+        })
+        .unwrap();
     let writer = DbConnection::open_file(&root.path().join("ask.db")).unwrap();
     let snapshot = AskReadSnapshot::begin(&reader).unwrap();
     let mut changed = false;
@@ -437,15 +449,16 @@ fn metadata_pages_and_body_hydration_share_the_callers_snapshot() {
         |count| {
             if !changed {
                 assert_eq!(count, ASK_MEMORY_REVISION_PAGE_SIZE);
-                writer.with_transaction(|| {
-                    writer.execute_raw(&format!(
-                        "UPDATE memories SET valid_to = '2020-01-01T00:00:00Z' WHERE id = '{}'",
-                        id(last)
-                    ))?;
-                    seed(&writer, last + 1, None, None);
-                    Ok(())
-                })
-                .expect("commit after the first metadata page");
+                writer
+                    .with_transaction(|| {
+                        writer.execute_raw(&format!(
+                            "UPDATE memories SET valid_to = '2020-01-01T00:00:00Z' WHERE id = '{}'",
+                            id(last)
+                        ))?;
+                        seed(&writer, last + 1, None, None);
+                        Ok(())
+                    })
+                    .expect("commit after the first metadata page");
                 changed = true;
             }
         },
@@ -493,10 +506,18 @@ fn command_advice_pages_apply_kind_selection_before_the_page_limit() {
     assert_eq!(pages, [256, 256, 1]);
     let expected: Vec<_> = (1..=count).map(|index| id(index * 2 - 1)).collect();
     assert_eq!(
-        memories.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+        memories
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect::<Vec<_>>(),
         expected
     );
-    assert_eq!(load_command_advice_revisions(&db, WORKSPACE, at(CUTOFF)).unwrap().len(), count);
+    assert_eq!(
+        load_command_advice_revisions(&db, WORKSPACE, at(CUTOFF))
+            .unwrap()
+            .len(),
+        count
+    );
     snapshot.finish().unwrap();
     // The unrestricted path still validates those facts; the kind predicate
     // does not weaken lifecycle validation for rows selected by an operation.
