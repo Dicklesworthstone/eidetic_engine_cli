@@ -131,16 +131,21 @@ impl SearchScoringConfig {
     }
 
     /// Common bound for every lane, including candidates with neutral signals.
+    /// Include the fixed proven-rule boost as well as configurable maturities;
+    /// otherwise unit-interval pack projection clips distinct proven-rule scores.
     #[must_use]
     pub fn ranking_bound(self) -> f32 {
         self.scope_match_bonus.max(1.0)
             * self
                 .candidate_maturity_multiplier
                 .max(self.established_maturity_multiplier)
+                .max(RetrievalMaturity::ProceduralProven.multiplier())
                 .max(1.0)
     }
 
     /// Identity of the active policy, binding exact resolved floating-point bits.
+    /// Bind the projection bound too, so corrections to fixed maturity bonuses
+    /// cannot reuse cached packs produced with an obsolete normalization bound.
     /// Inactive graph, redundancy and affinity knobs are deliberately excluded.
     #[must_use]
     pub fn policy_hash(self) -> String {
@@ -158,6 +163,7 @@ impl SearchScoringConfig {
                 "established_multiplier",
                 self.established_maturity_multiplier,
             ),
+            ("ranking_bound", self.ranking_bound()),
         ] {
             hasher.update(&(name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());
@@ -696,7 +702,7 @@ pub fn final_score(signals: SearchScoringSignals, config: SearchScoringConfig) -
 /// the default penalty of `0.0` maps to a floor of `1.0`, so a `Stale` anchor
 /// keeps a neutral `1.0` multiplier (no suppression). A penalty `p` lets a
 /// `Stale` anchor fall at most to
-/// `max(1.0 - p, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR)` (a small tie-breaker),
+/// `max(1.0 - p, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR)`, never vanishing.
 /// and the multiplier never reaches zero, so a drifted memory never vanishes.
 #[must_use]
 pub fn stale_anchor_floor(stale_anchor_penalty: f32) -> f32 {
@@ -1512,5 +1518,111 @@ mod tests {
             stale.final_score > 0.0,
             "even the maximum opt-in penalty cannot suppress a drifted memory to zero"
         );
+    }
+
+    #[test]
+    fn ranking_bound_covers_every_active_maturity_and_scope() {
+        let defaults = SearchScoringConfig::default();
+        let configs = [
+            defaults,
+            SearchScoringConfig {
+                scope_match_bonus: 0.5,
+                candidate_maturity_multiplier: 0.1,
+                established_maturity_multiplier: 0.4,
+                ..defaults
+            },
+            SearchScoringConfig {
+                candidate_maturity_multiplier: 3.0,
+                ..defaults
+            },
+            SearchScoringConfig {
+                established_maturity_multiplier: 4.0,
+                ..defaults
+            },
+        ];
+        let maturities = [
+            RetrievalMaturity::Working,
+            RetrievalMaturity::Episodic,
+            RetrievalMaturity::Semantic,
+            RetrievalMaturity::ProceduralCandidate,
+            RetrievalMaturity::ProceduralEstablished,
+            RetrievalMaturity::ProceduralProven,
+            RetrievalMaturity::ProceduralDeprecated,
+            RetrievalMaturity::ProceduralRetired,
+        ];
+        for config in configs {
+            let bound = config.ranking_bound();
+            assert!(bound.is_finite() && bound >= 1.0);
+            for maturity in maturities {
+                for scope_match in [false, true] {
+                    for base in [0.0, 0.25, 0.75, 1.0] {
+                        let signals = SearchScoringSignals {
+                            scope_match,
+                            ..SearchScoringSignals::new(base, maturity)
+                        };
+                        let score = final_score(signals, config);
+                        assert!(
+                            score <= bound + f32::EPSILON * bound,
+                            "{maturity:?}, scope={scope_match}, base={base}: {score} > {bound}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pack_projection_preserves_distinct_proven_rule_scores() {
+        let config = SearchScoringConfig::default();
+        assert_close(config.ranking_bound(), 1.8);
+        let bases = [0.7, 0.8, 0.9, 1.0];
+        let projected = bases.map(|base| {
+            let signals = SearchScoringSignals {
+                scope_match: true,
+                ..SearchScoringSignals::new(base, RetrievalMaturity::ProceduralProven)
+            };
+            let score = final_score(signals, config);
+            (score / config.ranking_bound()).clamp(0.0, 1.0)
+        });
+        // The old 1.2 bound clipped every one of these distinct scores to 1.0.
+        for (actual, expected) in projected.into_iter().zip(bases) {
+            assert_close(actual, expected);
+        }
+        assert!(projected.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn policy_hash_invalidates_legacy_pack_normalization() {
+        let config = SearchScoringConfig::default();
+        // Reproduce the pre-fix cache identity: it bound configuration but not
+        // the fixed proven-rule multiplier or the resulting pack projection.
+        let mut legacy = blake3::Hasher::new();
+        legacy.update(super::SEARCH_SCORING_POLICY_V1.as_bytes());
+        for (name, value) in [
+            ("recency_tau_days", config.recency_tau_days),
+            ("confidence_floor", config.confidence_floor),
+            ("utility_floor", config.utility_floor),
+            ("harmful_penalty_per_hit", config.harmful_penalty_per_hit),
+            ("harmful_penalty_floor", config.harmful_penalty_floor),
+            ("scope_match_bonus", config.scope_match_bonus),
+            ("candidate_multiplier", config.candidate_maturity_multiplier),
+            (
+                "established_multiplier",
+                config.established_maturity_multiplier,
+            ),
+        ] {
+            legacy.update(&(name.len() as u64).to_le_bytes());
+            legacy.update(name.as_bytes());
+            legacy.update(&value.to_bits().to_le_bytes());
+        }
+        let legacy_hash = format!("blake3:{}", legacy.finalize().to_hex());
+        assert_ne!(config.policy_hash(), legacy_hash);
+
+        let name = "ranking_bound";
+        legacy.update(&(name.len() as u64).to_le_bytes());
+        legacy.update(name.as_bytes());
+        legacy.update(&config.ranking_bound().to_bits().to_le_bytes());
+        let expected_hash = format!("blake3:{}", legacy.finalize().to_hex());
+        assert_eq!(config.policy_hash(), expected_hash);
     }
 }
