@@ -17,6 +17,10 @@ use super::{
     optional_text, required_text, stored_memory_from_row,
 };
 
+// Keep exact evidence-time writes within the database temporal boundary.
+#[path = "retrieval_affinity_time.rs"]
+mod retrieval_affinity_time;
+
 const MEMORY_COLUMNS: &str = "id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to";
 const PAGE_SIZE: usize = 128;
 

@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use sqlmodel_core::{Row, Value};
 
@@ -85,9 +85,42 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
-/// Expand one ranked result set into canonicalized pair deltas:
-/// `w(a,b) += 1 / (1 + |rank_a − rank_b|)`.
-fn accumulate_pairs(deltas: &mut BTreeMap<(String, String), f64>, ranked: &[(String, u32)]) -> u64 {
+/// Each edge owns its evidence time. An unrelated row, even in the same
+/// batch or ranked run, cannot rejuvenate it. Instants are compared in UTC;
+/// the spelling or offset of an RFC3339 timestamp is not an ordering key.
+#[derive(Clone, Debug, PartialEq)]
+struct AffinityDelta {
+    weight: f64,
+    last_event_at: DateTime<Utc>,
+}
+
+type AffinityDeltas = BTreeMap<(String, String), AffinityDelta>;
+
+fn accumulate_pair(
+    deltas: &mut AffinityDeltas,
+    left: (&str, u32),
+    right: (&str, u32),
+    event_at: DateTime<Utc>,
+) {
+    let pair = if left.0 < right.0 {
+        (left.0.to_owned(), right.0.to_owned())
+    } else {
+        (right.0.to_owned(), left.0.to_owned())
+    };
+    let delta = deltas.entry(pair).or_insert(AffinityDelta {
+        weight: 0.0,
+        last_event_at: event_at,
+    });
+    delta.weight += 1.0 / (1.0 + f64::from(left.1.abs_diff(right.1)));
+    delta.last_event_at = delta.last_event_at.max(event_at);
+}
+
+/// Expand one pack's ranked result set using that pack's own timestamp.
+fn accumulate_pairs(
+    deltas: &mut AffinityDeltas,
+    ranked: &[(String, u32)],
+    event_at: DateTime<Utc>,
+) -> u64 {
     let bounded = &ranked[..ranked.len().min(RESULT_SET_PAIR_CAP)];
     let mut updated = 0;
     for (left_index, (left_id, left_rank)) in bounded.iter().enumerate() {
@@ -95,13 +128,12 @@ fn accumulate_pairs(deltas: &mut BTreeMap<(String, String), f64>, ranked: &[(Str
             if left_id == right_id {
                 continue;
             }
-            let (memory_a, memory_b) = if left_id < right_id {
-                (left_id.clone(), right_id.clone())
-            } else {
-                (right_id.clone(), left_id.clone())
-            };
-            let rank_gap = f64::from(left_rank.abs_diff(*right_rank));
-            *deltas.entry((memory_a, memory_b)).or_insert(0.0) += 1.0 / (1.0 + rank_gap);
+            accumulate_pair(
+                deltas,
+                (left_id, *left_rank),
+                (right_id, *right_rank),
+                event_at,
+            );
             updated += 1;
         }
     }
@@ -129,7 +161,7 @@ pub fn accumulate_retrieval_affinity(
     connection
         .with_transaction(|| accumulate_in_transaction(connection, workspace_id, now_rfc3339))
         .map_err(|_| {
-            "Retrieval-affinity accumulation did not complete; inspect the retained audit metadata and cursor, then retry the whole refresh through the write owner."
+            "Retrieval-affinity accumulation did not complete; inspect the retained pack/audit metadata and cursor, then retry the whole refresh through the write owner."
                 .to_owned()
         })
 }
@@ -144,8 +176,7 @@ fn accumulate_in_transaction(
 ) -> crate::db::Result<AffinityAccumulationReport> {
     let (pack_cursor, search_cursor) = connection.retrieval_affinity_cursor(workspace_id)?;
 
-    let mut deltas: BTreeMap<(String, String), f64> = BTreeMap::new();
-    let mut latest_event_at = String::new();
+    let mut deltas = AffinityDeltas::new();
     let mut report = AffinityAccumulationReport {
         pack_cursor,
         search_cursor,
@@ -160,17 +191,15 @@ fn accumulate_in_transaction(
         if pack_workspace != workspace_id {
             continue;
         }
+        let event_at = parse_rfc3339(&created_at).ok_or_else(search_observation_error)?;
         let items = connection.get_pack_items(&pack_id)?;
         let mut ranked: Vec<(String, u32)> = items
             .iter()
             .map(|item| (item.memory_id.clone(), item.rank))
             .collect();
         ranked.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        report.pairs_updated += accumulate_pairs(&mut deltas, &ranked);
+        report.pairs_updated += accumulate_pairs(&mut deltas, &ranked, event_at);
         report.pack_records_consumed += 1;
-        if created_at > latest_event_at {
-            latest_event_at = created_at;
-        }
     }
 
     let search = accumulate_search_page(
@@ -183,19 +212,14 @@ fn accumulate_in_transaction(
     report.search_cursor = search.cursor;
     report.search_rows_consumed = search.consumed;
     report.pairs_updated += search.pairs;
-    latest_event_at = latest_event_at.max(search.latest_event_at);
-
     if !deltas.is_empty() {
-        let event_at = if latest_event_at.is_empty() {
-            now_rfc3339.to_owned()
-        } else {
-            latest_event_at
-        };
-        let rows: Vec<(String, String, f64)> = deltas
+        let rows = deltas
             .into_iter()
-            .map(|((memory_a, memory_b), delta)| (memory_a, memory_b, delta))
-            .collect();
-        connection.apply_retrieval_affinity_deltas(workspace_id, &rows, &event_at)?;
+            .map(|((memory_a, memory_b), delta)| {
+                (memory_a, memory_b, delta.weight, delta.last_event_at)
+            })
+            .collect::<Vec<_>>();
+        connection.apply_retrieval_affinity_timed_deltas(workspace_id, &rows)?;
     }
     connection.write_retrieval_affinity_cursor(
         workspace_id,
@@ -220,7 +244,7 @@ struct SearchObservation {
 struct SearchRun {
     query_hash: Option<String>,
     last_rank: u32,
-    members: Vec<(String, u32)>,
+    members: Vec<(String, u32, DateTime<Utc>)>,
 }
 
 struct SearchPage {
@@ -228,7 +252,6 @@ struct SearchPage {
     raw_rows: usize,
     consumed: u64,
     pairs: u64,
-    latest_event_at: String,
 }
 
 fn search_observation_error() -> crate::db::DbError {
@@ -289,7 +312,7 @@ impl SearchRun {
         &mut self,
         row: &Row,
         workspace_id: &str,
-        deltas: Option<&mut BTreeMap<(String, String), f64>>,
+        deltas: Option<&mut AffinityDeltas>,
     ) -> crate::db::Result<(bool, u64)> {
         if row.get(1).and_then(Value::as_str) != Some(workspace_id) {
             *self = Self::default();
@@ -337,32 +360,30 @@ impl SearchRun {
             .get(5)
             .and_then(Value::as_str)
             .ok_or_else(search_observation_error)?;
-        if parse_rfc3339(timestamp).is_none() {
-            return Err(search_observation_error());
-        }
+        let event_at = parse_rfc3339(timestamp).ok_or_else(search_observation_error)?;
         // Cap by ORIGINAL result rank, not by page position or by the count
         // left after native targets were removed. A later page never reopens
         // a saturated run. At most 31 earlier ranks can precede an eligible hit.
         if observation.rank as usize > RESULT_SET_PAIR_CAP {
             return Ok((true, 0));
         }
-        if self.members.iter().any(|(earlier, _)| earlier == id) {
+        if self.members.iter().any(|(earlier, _, _)| earlier == id) {
             return Err(search_observation_error());
         }
         let mut pairs = 0;
         if let Some(deltas) = deltas {
-            for (earlier, rank) in &self.members {
-                let pair = if earlier.as_str() < id {
-                    (earlier.clone(), id.to_owned())
-                } else {
-                    (id.to_owned(), earlier.clone())
-                };
-                *deltas.entry(pair).or_insert(0.0) +=
-                    1.0 / (1.0 + f64::from(observation.rank.abs_diff(*rank)));
+            for (earlier, rank, earlier_at) in &self.members {
+                accumulate_pair(
+                    deltas,
+                    (earlier, *rank),
+                    (id, observation.rank),
+                    event_at.max(*earlier_at),
+                );
                 pairs += 1;
             }
         }
-        self.members.push((id.to_owned(), observation.rank));
+        self.members
+            .push((id.to_owned(), observation.rank, event_at));
         Ok((true, pairs))
     }
 }
@@ -376,7 +397,7 @@ fn accumulate_search_page(
     workspace_id: &str,
     cursor: i64,
     limit: u32,
-    deltas: &mut BTreeMap<(String, String), f64>,
+    deltas: &mut AffinityDeltas,
 ) -> crate::db::Result<SearchPage> {
     if cursor < 0 {
         return Err(search_observation_error());
@@ -411,7 +432,6 @@ fn accumulate_search_page(
         raw_rows: rows.len(),
         consumed: 0,
         pairs: 0,
-        latest_event_at: String::new(),
     };
     for row in rows {
         let position = search_row_cursor(&row)?;
@@ -423,13 +443,6 @@ fn accumulate_search_page(
         page.pairs += pairs;
         if memory {
             page.consumed += 1;
-            let timestamp = row
-                .get(5)
-                .and_then(Value::as_str)
-                .ok_or_else(search_observation_error)?;
-            if timestamp > page.latest_event_at.as_str() {
-                page.latest_event_at = timestamp.to_owned();
-            }
         }
     }
     Ok(page)
@@ -457,14 +470,22 @@ pub fn materialize_retrieval_affinity_snapshot(
         return Ok(AffinityMaterialization::Cold);
     }
 
-    let as_of = edges
-        .iter()
-        .map(|(_, _, _, last_event_at)| last_event_at.as_str())
-        .max()
-        .unwrap_or_default()
-        .to_owned();
-    let as_of_parsed = parse_rfc3339(&as_of);
+    const INVALID_STATE: &str =
+        "Retrieval-affinity snapshot has invalid time or weight state; inspect the retained projection.";
+    let mut as_of_parsed: Option<DateTime<Utc>> = None;
+    for (_, _, weight, last_event_at) in &edges {
+        let event_at = parse_rfc3339(last_event_at).ok_or_else(|| INVALID_STATE.to_owned())?;
+        if !weight.is_finite() || *weight < 0.0 {
+            return Err(INVALID_STATE.to_owned());
+        }
+        as_of_parsed = Some(as_of_parsed.map_or(event_at, |previous| previous.max(event_at)));
+    }
+    let as_of_parsed = as_of_parsed.ok_or_else(|| INVALID_STATE.to_owned())?;
+    let as_of = as_of_parsed.to_rfc3339_opts(SecondsFormat::Nanos, true);
 
+    if !half_life_days.is_finite() {
+        return Err(INVALID_STATE.to_owned());
+    }
     let half_life = if half_life_days > 0.0 {
         half_life_days
     } else {
@@ -473,22 +494,26 @@ pub fn materialize_retrieval_affinity_snapshot(
     let mut nodes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut decayed_edges: Vec<serde_json::Value> = Vec::new();
     for (memory_a, memory_b, weight, last_event_at) in &edges {
-        let delta_days = match (as_of_parsed, parse_rfc3339(last_event_at)) {
-            (Some(as_of_ts), Some(event_ts)) => {
-                (as_of_ts - event_ts).num_seconds().max(0) as f64 / 86_400.0
-            }
-            _ => 0.0,
-        };
+        let event_at = parse_rfc3339(last_event_at).ok_or_else(|| INVALID_STATE.to_owned())?;
+        let delta_days = (as_of_parsed - event_at)
+            .to_std()
+            .map_err(|_| INVALID_STATE.to_owned())?
+            .as_secs_f64()
+            / 86_400.0;
         let decayed = weight * 2f64.powf(-delta_days / half_life);
         if decayed < EDGE_EPSILON {
             continue;
+        }
+        let rounded = (decayed * 1_000_000.0).round() / 1_000_000.0;
+        if !rounded.is_finite() {
+            return Err(INVALID_STATE.to_owned());
         }
         nodes.insert(memory_a.clone());
         nodes.insert(memory_b.clone());
         decayed_edges.push(serde_json::json!({
             "a": memory_a,
             "b": memory_b,
-            "weight": (decayed * 1_000_000.0).round() / 1_000_000.0,
+            "weight": rounded,
         }));
     }
     if decayed_edges.is_empty() {
@@ -550,6 +575,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    include!("retrieval_affinity_time_tests.rs");
 
     fn stream_id(number: u128) -> String {
         MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string()
