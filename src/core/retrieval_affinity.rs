@@ -470,8 +470,7 @@ pub fn materialize_retrieval_affinity_snapshot(
         return Ok(AffinityMaterialization::Cold);
     }
 
-    const INVALID_STATE: &str =
-        "Retrieval-affinity snapshot has invalid time or weight state; inspect the retained projection.";
+    const INVALID_STATE: &str = "Retrieval-affinity snapshot has invalid time or weight state; inspect the retained projection.";
     let mut as_of_parsed: Option<DateTime<Utc>> = None;
     for (_, _, weight, last_event_at) in &edges {
         let event_at = parse_rfc3339(last_event_at).ok_or_else(|| INVALID_STATE.to_owned())?;
