@@ -121,10 +121,11 @@ impl Stream {
         }
         let limit_slot = params.len() + 1;
         params.push(Value::BigInt(i64::try_from(limit).map_err(|_| error())?));
-        // First ten columns deliberately share admission::denial's source
-        // projection. LEFT joins expose missing owners rather than hiding them.
+        // Columns 0..10 plus the appended seal fields (22..25) form the
+        // admission projection. Keep full seal authority in this metadata
+        // page, before ranking or bodies. LEFT joins expose missing owners.
         let sql = format!(
-            "SELECT m.id, m.workspace_id, m.created_at, m.updated_at, m.valid_from, m.valid_to, m.superseded_at, m.tombstoned_at, s.memory_id, s.revealed_at, i.memory_id, i.anchor_kind, i.anchor_value_hash, i.normalized_path, i.symbol, i.freshness_state, a.freshness_state, i.generation, m.level, m.kind, m.confidence, a.memory_id FROM memory_anchor_index i LEFT JOIN memories m ON m.id = i.memory_id LEFT JOIN memory_seals s ON s.memory_id = m.id LEFT JOIN memory_anchors a ON a.memory_id = i.memory_id AND a.anchor_kind = i.anchor_kind AND a.anchor_value_hash = i.anchor_value_hash WHERE i.workspace_id = ?1 AND i.anchor_kind = '{}'{predicate} ORDER BY i.memory_id ASC, i.anchor_kind ASC, i.anchor_value_hash ASC LIMIT ?{limit_slot}",
+            "SELECT m.id, m.workspace_id, m.created_at, m.updated_at, m.valid_from, m.valid_to, m.superseded_at, m.tombstoned_at, s.memory_id, s.revealed_at, i.memory_id, i.anchor_kind, i.anchor_value_hash, i.normalized_path, i.symbol, i.freshness_state, a.freshness_state, i.generation, m.level, m.kind, m.confidence, a.memory_id, s.content_commitment, s.sealed_at, s.reveal_verified FROM memory_anchor_index i LEFT JOIN memories m ON m.id = i.memory_id LEFT JOIN memory_seals s ON s.memory_id = m.id LEFT JOIN memory_anchors a ON a.memory_id = i.memory_id AND a.anchor_kind = i.anchor_kind AND a.anchor_value_hash = i.anchor_value_hash WHERE i.workspace_id = ?1 AND i.anchor_kind = '{}'{predicate} ORDER BY i.memory_id ASC, i.anchor_kind ASC, i.anchor_value_hash ASC LIMIT ?{limit_slot}",
             self.kind
         );
         db.query(&sql, &params).map_err(|_| error())
@@ -416,6 +417,8 @@ mod review_tests;
 mod tests {
     use super::*;
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+
+    include!("recall_seal_tests.rs");
 
     const WORKSPACE: &str = "wsp_00000000000000000000000701";
     const BASE: &str = "2026-01-01T00:00:00Z";

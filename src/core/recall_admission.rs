@@ -13,6 +13,59 @@ use super::RecallDegradation;
 #[cfg(test)]
 use crate::db::DbConnection;
 
+/// Decode the complete seal projected by `scan::Stream::page`, not merely
+/// its reveal timestamp. A timestamp alone is not a verified reveal. The
+/// canonical validator owns commitment syntax, paired reveal state and exact
+/// RFC3339 chronology; malformed metadata withholds only this memory.
+///
+/// The five NULL cells of an absent LEFT join are the only unsealed case.
+/// Missing columns, wrong types or mismatched identity never grant admission.
+/// No body, hash recomputation, extra query or transaction is needed here.
+fn seal_denial(row: &sqlmodel_core::Row, id: &str) -> Option<&'static str> {
+    if [8, 9, 22, 23, 24]
+        .into_iter()
+        .all(|column| matches!(row.get(column), Some(Value::Null)))
+    {
+        return None;
+    }
+    let (
+        Some(Value::Text(seal_id)),
+        Some(Value::Text(commitment)),
+        Some(Value::Text(sealed_at)),
+    ) = (row.get(8), row.get(22), row.get(23))
+    else {
+        return Some("malformed");
+    };
+    if seal_id != id {
+        return Some("malformed");
+    }
+    let revealed_at = match row.get(9) {
+        Some(Value::Null) => None,
+        Some(Value::Text(value)) => Some(value.as_str()),
+        _ => return Some("malformed"),
+    };
+    let verified = match row.get(24) {
+        Some(Value::Null) => None,
+        Some(value) => match value.as_i64() {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => return Some("malformed"),
+        },
+        None => return Some("malformed"),
+    };
+    if crate::models::validate_attestation_seal_fields(
+        commitment,
+        sealed_at,
+        revealed_at,
+        verified,
+    )
+    .is_err()
+    {
+        return Some("malformed");
+    }
+    revealed_at.is_none().then_some("sealed")
+}
+
 fn timestamp(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ()> {
     match value {
         Some(Value::Null) => Ok(None),
@@ -37,17 +90,8 @@ pub(super) fn denial(
     if !matches!(row.get(7), Some(Value::Null)) {
         return Some("tombstoned");
     }
-    match (row.get(8), row.get(9)) {
-        (Some(Value::Null), Some(Value::Null)) => {}
-        (Some(Value::Text(seal_id)), Some(Value::Text(_))) if seal_id == id => {
-            if timestamp(row.get(9)).is_err() {
-                return Some("malformed");
-            }
-        }
-        (Some(Value::Text(seal_id)), Some(Value::Null)) if seal_id == id => {
-            return Some("sealed");
-        }
-        _ => return Some("malformed"),
+    if let Some(reason) = seal_denial(row, id) {
+        return Some(reason);
     }
     let (Ok(Some(created)), Ok(Some(updated)), Ok(start), Ok(end), Ok(superseded)) = (
         timestamp(row.get(2)),
