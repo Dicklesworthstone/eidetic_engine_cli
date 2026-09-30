@@ -299,9 +299,7 @@ mod population_tests {
                 .verify_connection(&db)
                 .expect_err("hidden trust rows must prevent publication");
             let message = error.message();
-            assert!(message.contains(&format!(
-                "Restored durable population differs for {table}"
-            )));
+            assert!(message.contains(&format!("Restored durable population differs for {table}")));
             assert!(!message.contains(&source));
             assert!(!message.contains("PRIVATE_TRUST_SENTINEL"));
             // Refusal is read-only: it must not release quarantines, reveal

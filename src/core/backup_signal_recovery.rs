@@ -240,8 +240,7 @@ mod population_tests {
                 row.provenance_hash = row.computed_provenance_hash();
                 db.insert_outcome_evidence_for_recovery(&row)
                     .map_err(|error| error.to_string())?;
-                rows.insert_outcome(&row)
-                    .map_err(|error| error.message())?;
+                rows.insert_outcome(&row).map_err(|error| error.message())?;
             }
             _ => return Err("unhandled signal population fixture".to_owned()),
         }
@@ -300,9 +299,7 @@ mod population_tests {
                 .verify_connection(&db)
                 .expect_err("hidden learning signals must prevent publication");
             let message = error.message();
-            assert!(message.contains(&format!(
-                "Restored durable population differs for {table}"
-            )));
+            assert!(message.contains(&format!("Restored durable population differs for {table}")));
             assert!(!message.contains(&source));
             assert!(!message.contains("PRIVATE_SIGNAL_SENTINEL"));
             exact
