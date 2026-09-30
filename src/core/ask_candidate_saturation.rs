@@ -1,4 +1,4 @@
-//! Reclaim saturated exact-copy slots for distinct, already-supported answers.
+//! Reclaim redundant exact-copy slots for distinct, already-supported answers.
 //!
 //! This is not semantic deduplication: bodies and every span-scoring input
 //! must match exactly. Independent provenance remains independent, and enough
@@ -24,11 +24,12 @@ fn source_signature(candidate: &AskCandidate) -> SourceSignature<'_> {
 }
 
 /// Run after lineage diversity and before the existing opposition reservations.
-/// Only slots beyond demonstrated full corroboration are exchangeable. Keep
-/// the raw anchor, original source IDs, exact bodies, and all weaker evidence
-/// unless a supported, previously unrepresented body can use redundant slots.
-/// Selection frontiers are budget-bounded. The optional bundle pass sorts
-/// borrowed corpus references, never cloned bodies or an unbounded span pool.
+/// Copies of an already represented lineage, or independent copies beyond full
+/// corroboration, are exchangeable. Keep the raw anchor, original source IDs,
+/// exact bodies, and all weaker evidence unless a supported, previously
+/// unrepresented body can use redundant slots. Selection frontiers are bounded
+/// by the budget. The optional bundle pass sorts borrowed corpus references,
+/// never cloned bodies or an unbounded span pool.
 pub(super) fn preserve_distinct_answers<'a>(
     request: &AskRequest,
     question_terms: &[String],
@@ -37,14 +38,15 @@ pub(super) fn preserve_distinct_answers<'a>(
     groups: &BTreeMap<String, String>,
     scorer: SpanScorer<'_>,
 ) {
-    // Match clustering's capped logarithmic multiplier. Do not hard-code a
-    // count of copies, confuse source IDs with lineages, or round down the
-    // number of independent observations needed to saturate the multiplier.
-    let Some(support_limit) =
-        (1..ranked.len()).find(|&count| 1.0 + 0.1 * (count as f32).ln() >= CORROBORATION_CAP)
-    else {
+    if ranked.len() < 2 {
         return;
-    };
+    }
+    // Match clustering's capped logarithmic multiplier. A smaller budget may
+    // never reach the cap, but copies of one lineage are still redundant.
+    // Retain every independent vote until the cap is actually reached.
+    let support_limit = (1..ranked.len())
+        .find(|&count| 1.0 + 0.1 * (count as f32).ln() >= CORROBORATION_CAP)
+        .unwrap_or(ranked.len());
     let mut support: BTreeMap<SourceSignature<'_>, BTreeSet<&str>> = BTreeMap::new();
     let mut retained = Vec::with_capacity(ranked.len());
     let mut redundant = Vec::new();
@@ -56,10 +58,11 @@ pub(super) fn preserve_distinct_answers<'a>(
         // Matching only the body could discard a distinct trust/confidence
         // input that changes scores for its other spans. Require all three.
         let origins = support.entry(source_signature(candidate)).or_default();
-        if origins.len() >= support_limit {
+        if origins.len() >= support_limit
+            || !origins.insert(support_key(&candidate.memory_id, groups))
+        {
             redundant.push(entry);
         } else {
-            origins.insert(support_key(&candidate.memory_id, groups));
             retained.push(entry);
         }
     }
@@ -107,16 +110,18 @@ pub(super) fn preserve_distinct_answers<'a>(
     // Individually supported answers retain priority. Otherwise unused slots
     // can carry ALL the sources needed for an independently supported answer;
     // taking one subthreshold source would not make that answer reachable.
-    retained.extend(corroborated_answers(
+    let available = ranked.len() - retained.len();
+    let corroborated = corroborated_answers(
         request,
         question_terms,
         unique,
         &admitted_bodies,
         groups,
         scorer,
-        ranked.len() - retained.len(),
+        available,
         support_limit,
-    ));
+    );
+    retained.extend(corroborated);
     let spare = ranked.len() - retained.len();
     retained.extend(redundant.into_iter().take(spare));
     retained.sort();
@@ -163,8 +168,8 @@ fn corroborated_answers<'a>(
         (0..=max_support).map(|_| Vec::new()).collect();
     for body in candidates.chunk_by(|left, right| left.content == right.content) {
         let mut best_bundle: Option<Vec<RankedCandidate<'a>>> = None;
-        for signature in body
-            .chunk_by(|left, right| source_signature(left) == source_signature(right))
+        for signature in
+            body.chunk_by(|left, right| source_signature(left) == source_signature(right))
         {
             // chunk_by only yields nonempty slices, ordered by source ID
             // within one body/confidence/trust signature.
@@ -236,7 +241,10 @@ fn corroborated_answers<'a>(
 mod tests {
     use super::*;
     use crate::core::ask::selection::select_candidates_with_scorer;
-    use crate::core::ask::{AskSpan, clustering, native};
+    use crate::core::ask::{
+        ASK_CANDIDATE_SCAN_CAP, AskSpan, ask_data_json, clustering, evaluate_ask,
+        evaluate_ask_scored, native,
+    };
 
     const COMMON: &str = "The cache read path reuses cached responses.";
     const DISTINCT: &str = "Migration checks validate schema compatibility before deployment.";
@@ -330,7 +338,11 @@ mod tests {
     #[test]
     fn copies_of_one_origin_do_not_become_independent_support() {
         let mut rows = corpus();
-        for (index, row) in rows.iter_mut().filter(|row| row.content == DISTINCT).enumerate() {
+        for (index, row) in rows
+            .iter_mut()
+            .filter(|row| row.content == DISTINCT)
+            .enumerate()
+        {
             row.provenance_uri = Some(format!("file://one-observation.md#L{}", index + 1));
         }
         let selected = select(&rows, 32);
@@ -369,7 +381,10 @@ mod tests {
         assert!(distinct_ids(&select(&rows, 32)).is_empty());
         rows.push(candidate("z-third", DISTINCT, 0.5));
         assert!(distinct_ids(&select(&rows, 23)).is_empty());
-        assert_eq!(distinct_ids(&select(&rows, 24)), ["z-first", "z-second", "z-third"]);
+        assert_eq!(
+            distinct_ids(&select(&rows, 24)),
+            ["z-first", "z-second", "z-third"]
+        );
         assert!(0.5 * (1.0 + 0.1 * 2.0_f32.ln()) < AskRequest::default().min_confidence);
         assert!(0.5 * (1.0 + 0.1 * 3.0_f32.ln()) >= AskRequest::default().min_confidence);
     }
@@ -383,16 +398,16 @@ mod tests {
         let scorer = |_: &[String], text: &str, _: f32, _: &str| {
             if text == DISTINCT { 0.54 } else { 0.7 }
         };
-        let selected = select_candidates_with_scorer(
-            &AskRequest::default(),
-            &[],
-            &rows,
-            32,
-            &scorer,
-        )
-        .expect("valid source identities");
+        let selected =
+            select_candidates_with_scorer(&AskRequest::default(), &[], &rows, 32, &scorer)
+                .expect("valid source identities");
         assert_eq!(distinct_ids(&selected), ["z-first", "z-second"]);
-        assert!(selected.iter().filter(|row| row.content == DISTINCT).all(|row| row.confidence == 0.1));
+        assert!(
+            selected
+                .iter()
+                .filter(|row| row.content == DISTINCT)
+                .all(|row| row.confidence == 0.1)
+        );
     }
 
     #[test]
@@ -408,7 +423,13 @@ mod tests {
         let selected = select(&rows, 32);
         assert_eq!(selected.len(), 32);
         assert!(distinct_ids(&selected).is_empty());
-        assert_eq!(selected.iter().filter(|row| row.memory_id.starts_with("y-")).count(), 11);
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|row| row.memory_id.starts_with("y-"))
+                .count(),
+            11
+        );
     }
 
     #[test]
@@ -421,14 +442,198 @@ mod tests {
         for _ in 0..8 {
             rows.reverse();
             assert_eq!(
-                select(&rows, 32).iter().map(|row| row.memory_id.clone()).collect::<Vec<_>>(),
+                select(&rows, 32)
+                    .iter()
+                    .map(|row| row.memory_id.clone())
+                    .collect::<Vec<_>>(),
                 expected,
             );
             rows.rotate_left(7);
             assert_eq!(
-                select(&rows, 32).iter().map(|row| row.memory_id.clone()).collect::<Vec<_>>(),
+                select(&rows, 32)
+                    .iter()
+                    .map(|row| row.memory_id.clone())
+                    .collect::<Vec<_>>(),
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn repeated_excerpts_release_slots_before_the_independent_support_cap() {
+        for prefix in ["file://incident.md#L", "cass-session://incident#L"] {
+            let mut rows: Vec<_> = (0..80)
+                .map(|index| {
+                    let mut row = candidate(&format!("a-{index:05}"), COMMON, 0.7);
+                    row.provenance_uri = Some(format!("{prefix}{}", index + 1));
+                    row
+                })
+                .collect();
+            let mut other = candidate("z-distinct", DISTINCT, 0.6);
+            other.provenance_uri = Some(format!("{prefix}81"));
+            rows.push(other);
+            for limit in 1..=32 {
+                let selected = select(&rows, limit);
+                assert_eq!(selected.len(), limit);
+                assert_eq!(selected[0].memory_id, "a-00000");
+                assert_eq!(distinct_ids(&selected).len(), usize::from(limit > 1));
+                let expected: Vec<_> = selected
+                    .iter()
+                    .map(|row| row.memory_id.clone())
+                    .collect();
+                rows.reverse();
+                assert_eq!(
+                    select(&rows, limit)
+                        .iter()
+                        .map(|row| row.memory_id.clone())
+                        .collect::<Vec<_>>(),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_origin_does_not_make_distinct_scoring_inputs_disposable() {
+        for variant in 0..3 {
+            let mut rows = vec![
+                candidate("a", COMMON, 0.7),
+                candidate("b", COMMON, 0.7),
+                candidate("z", DISTINCT, 0.6),
+            ];
+            for (index, row) in rows.iter_mut().enumerate() {
+                row.provenance_uri = Some(format!("file://one.md#L{}", index + 1));
+            }
+            match variant {
+                0 => rows[1].confidence = 0.69,
+                1 => rows[1].trust_class = "cass_evidence".to_owned(),
+                _ => rows[1].content.push_str(" Another relevant fact."),
+            }
+            let selected = select(&rows, 2);
+            assert_eq!(selected[0].memory_id, "a");
+            assert_eq!(selected[1].memory_id, "b");
+        }
+    }
+
+    #[test]
+    fn duplicate_slots_stay_unchanged_without_a_supported_replacement() {
+        for confidence in [0.1, 0.54] {
+            let mut rows: Vec<_> = (0..80)
+                .map(|index| {
+                    let mut row = candidate(&format!("a-{index:05}"), COMMON, 0.7);
+                    row.provenance_uri = Some(format!("file://one.md#L{}", index + 1));
+                    row
+                })
+                .collect();
+            let mut other = candidate("z", DISTINCT, confidence);
+            other.provenance_uri = Some("file://one.md#L81".to_owned());
+            rows.push(other);
+            let ids: Vec<_> = select(&rows, 32)
+                .iter()
+                .map(|row| row.memory_id.clone())
+                .collect();
+            assert_eq!(
+                ids,
+                (0..32)
+                    .map(|index| format!("a-{index:05}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn unclusterable_spans_cannot_manufacture_a_support_bundle() {
+        let mut rows = corpus();
+        for row in rows.iter_mut().filter(|row| row.content == DISTINCT) {
+            row.content = "+++".to_owned();
+        }
+        assert!(crate::core::ask::tokenize_for_ask("+++").is_empty());
+        assert!(select(&rows, 32).iter().all(|row| row.content == COMMON));
+    }
+
+    #[test]
+    fn public_answers_expose_corroborated_evidence_beyond_the_scan_cap() {
+        let mut rows: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 8)
+            .map(|index| candidate(&format!("a-{index:05}"), COMMON, 0.7))
+            .collect();
+        rows.push(candidate("z-first", DISTINCT, 0.54));
+        rows.push(candidate("z-second", DISTINCT, 0.54));
+        let request = AskRequest {
+            question: "cache migration deployment".to_owned(),
+            ..AskRequest::default()
+        };
+        let scorer = |_: &[String], _: &str, confidence: f32, _: &str| confidence;
+        for degraded in [false, true] {
+            let report = evaluate_ask_scored(&request, &rows, &scorer, degraded);
+            assert!(!report.abstained && !report.conflict_detected);
+            assert!(!report.extractiveness_violated);
+            assert_eq!(report.candidates_scanned, rows.len());
+            assert_eq!(report.citations.len(), 2);
+            let distinct = &report.citations[1];
+            assert_eq!(distinct.memory_id, "z-first");
+            assert_eq!(distinct.text, DISTINCT);
+            assert_eq!(distinct.confidence, 0.54);
+            assert_eq!(distinct.provenance_uri.as_deref(), Some("manual://cli"));
+            assert_eq!(
+                DISTINCT.get(distinct.byte_start..distinct.byte_end),
+                Some(distinct.text.as_str()),
+            );
+            assert!(report.answer_text.as_ref().unwrap().contains(DISTINCT));
+            rows.reverse();
+            assert_eq!(
+                ask_data_json(&report),
+                ask_data_json(&evaluate_ask_scored(&request, &rows, &scorer, degraded)),
+            );
+        }
+    }
+
+    #[test]
+    fn public_answers_keep_distinct_same_origin_commands_without_a_copy_bonus() {
+        const SOFT: &str =
+            "Run git reset --soft HEAD in the workspace before starting the release.";
+        const HARD: &str =
+            "Run git reset --hard HEAD in the workspace before starting the release.";
+        let mut rows: Vec<_> = (0..ASK_CANDIDATE_SCAN_CAP + 8)
+            .map(|index| {
+                let mut row = candidate(&format!("a-{index:05}"), SOFT, 1.0);
+                row.provenance_uri = Some(format!("cass-session://incident#L{}", index + 1));
+                row
+            })
+            .collect();
+        let mut other = candidate("z-other", HARD, 1.0);
+        other.provenance_uri = Some("cass-session://incident#L1000".to_owned());
+        rows.push(other);
+        let request = AskRequest {
+            question: SOFT.to_owned(),
+            ..AskRequest::default()
+        };
+        let scorer = |_: &[String], _: &str, _: f32, _: &str| 0.7;
+        for report in [
+            evaluate_ask(&request, &rows),
+            evaluate_ask_scored(&request, &rows, &scorer, false),
+            evaluate_ask_scored(&request, &rows, &scorer, true),
+        ] {
+            assert!(!report.abstained && !report.conflict_detected);
+            assert!(!report.extractiveness_violated);
+            assert_eq!(report.citations.len(), 2);
+            assert_eq!(report.confidence_components.corroboration, 1.0);
+            assert_eq!(report.citations[0].memory_id, "a-00000");
+            assert_eq!(report.citations[1].memory_id, "z-other");
+            for citation in &report.citations {
+                let source = rows
+                    .iter()
+                    .find(|row| row.memory_id == citation.memory_id)
+                    .unwrap();
+                assert_eq!(
+                    source.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str()),
+                );
+                assert_eq!(citation.provenance_uri, source.provenance_uri);
+                assert_eq!(citation.confidence, source.confidence);
+            }
+        }
+        let before = ask_data_json(&evaluate_ask(&request, &rows));
+        rows.reverse();
+        assert_eq!(before, ask_data_json(&evaluate_ask(&request, &rows)));
     }
 }
