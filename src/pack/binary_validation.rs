@@ -2,61 +2,245 @@
 //!
 //! The v1 frame hashes its JSON footer, not its separate item blob. Geometry
 //! checks alone therefore cannot establish that zero-copy item reads agree
-//! with the response being replayed. Deserialize only the content projection,
-//! compare every item in order, and discard the temporary strings afterwards.
-//! The owning view caches the verdict for its immutable borrowed frame.
+//! with the response being replayed. Stream the content projection and compare
+//! each decoded string immediately, without retaining a second copy of the
+//! pack. Unescaped strings borrow the input; escaped strings use the JSON
+//! decoder's reusable scratch buffer. Unknown fields are parsed but discarded.
+//! The owning view exposes no item before the whole document passes and caches
+//! only the verdict for its immutable borrowed frame.
 
 use serde::Deserialize;
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use super::{PackBinaryError, PackBinaryView};
+use super::{PackBinaryError, PackBinaryItemEntry, PackBinaryView};
 
-#[derive(Deserialize)]
-struct CanonicalResponse {
-    data: CanonicalData,
+const INVALID_PROJECTION: &str =
+    "canonical JSON must contain data.pack.items with string content fields";
+const COUNT_MISMATCH: &str = "binary item count differs from the canonical response";
+const CONTENT_MISMATCH: &str = "binary item bytes differ from the canonical response";
+
+// Deserialize field names without allocating a String for every map key.
+// Escaped JSON keys are still compared after decoding, including duplicates.
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(field_identifier, rename_all = "lowercase")]
+enum Field {
+    Data,
+    Pack,
+    Items,
+    Content,
+    #[serde(other)]
+    Other,
 }
 
-#[derive(Deserialize)]
-struct CanonicalData {
-    pack: CanonicalPack,
+struct Check<'frame> {
+    bytes: &'frame [u8],
+    entries: &'frame [PackBinaryItemEntry],
+    failure: Option<PackBinaryError>,
 }
 
-#[derive(Deserialize)]
-struct CanonicalPack {
-    // The batch renderer merges native memories and evidence into this array.
-    // Do not deserialize just the in-memory draft's memory-only collection.
-    items: Vec<CanonicalItem>,
+impl Check<'_> {
+    fn reject<E: de::Error>(&mut self, index: Option<usize>, reason: &'static str) -> E {
+        self.failure = Some(PackBinaryError::InvalidItemContent { index, reason });
+        E::custom("invalid binary pack item projection")
+    }
 }
 
-#[derive(Deserialize)]
-struct CanonicalItem {
-    content: String,
+// Each object has exactly one required projection field. All other fields
+// retain the previous derived-struct behavior: validate JSON, then ignore.
+struct Object<'check, 'frame> {
+    check: &'check mut Check<'frame>,
+    field: Field,
+    index: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for Object<'_, '_> {
+    type Value = ();
+
+    fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
+        if self.field == Field::Content && self.index >= self.check.entries.len() {
+            // The frame table is already geometry-checked. An extra canonical
+            // item cannot be legitimate, regardless of the size of its payload.
+            return Err(self.check.reject(None, COUNT_MISMATCH));
+        }
+        decoder.deserialize_struct(
+            "CanonicalProjection",
+            &["data", "pack", "items", "content"],
+            self,
+        )
+    }
+}
+
+impl<'de> Visitor<'de> for Object<'_, '_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a canonical pack projection object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut seen = false;
+        while let Some(field) = map.next_key::<Field>()? {
+            if field == self.field {
+                if seen {
+                    return Err(de::Error::custom("duplicate canonical projection field"));
+                }
+                seen = true;
+                map.next_value_seed(FieldValue(Object {
+                    check: &mut *self.check,
+                    field: self.field,
+                    index: self.index,
+                }))?;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        if seen {
+            Ok(())
+        } else {
+            Err(de::Error::custom("missing canonical projection field"))
+        }
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        // Preserve the one-field positional representation accepted by the
+        // former derived structs. The normal renderer still emits objects.
+        if sequence
+            .next_element_seed(FieldValue(Object {
+                check: &mut *self.check,
+                field: self.field,
+                index: self.index,
+            }))?
+            .is_none()
+            || sequence.next_element::<IgnoredAny>()?.is_some()
+        {
+            return Err(de::Error::custom("invalid canonical projection field count"));
+        }
+        Ok(())
+    }
+}
+
+struct FieldValue<'check, 'frame>(Object<'check, 'frame>);
+
+impl<'de> DeserializeSeed<'de> for FieldValue<'_, '_> {
+    type Value = ();
+
+    fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
+        match self.0.field {
+            Field::Data => Object {
+                field: Field::Pack,
+                ..self.0
+            }
+            .deserialize(decoder),
+            Field::Pack => Object {
+                field: Field::Items,
+                ..self.0
+            }
+            .deserialize(decoder),
+            Field::Items => Items {
+                check: self.0.check,
+            }
+            .deserialize(decoder),
+            Field::Content => Content {
+                check: self.0.check,
+                index: self.0.index,
+            }
+            .deserialize(decoder),
+            Field::Other => Err(de::Error::custom("unknown canonical projection field")),
+        }
+    }
+}
+
+struct Items<'check, 'frame> {
+    check: &'check mut Check<'frame>,
+}
+
+impl<'de> DeserializeSeed<'de> for Items<'_, '_> {
+    type Value = ();
+
+    fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
+        decoder.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Items<'_, '_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the ordered canonical pack items")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        let mut index = 0;
+        while sequence
+            .next_element_seed(Object {
+                check: &mut *self.check,
+                field: Field::Content,
+                index,
+            })?
+            .is_some()
+        {
+            index += 1;
+        }
+        if index != self.check.entries.len() {
+            return Err(self.check.reject(None, COUNT_MISMATCH));
+        }
+        Ok(())
+    }
+}
+
+struct Content<'check, 'frame> {
+    check: &'check mut Check<'frame>,
+    index: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for Content<'_, '_> {
+    type Value = ();
+
+    fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
+        decoder.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Content<'_, '_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("byte-exact canonical item content")
+    }
+
+    fn visit_str<E: de::Error>(self, text: &str) -> Result<(), E> {
+        // Bounds and contiguity were already checked by PackBinaryView::parse;
+        // Object checked the item index before deserializing this payload.
+        // Do not call item_slice here: it invokes this cached validation.
+        let entry = &self.check.entries[self.index];
+        if text.as_bytes() != &self.check.bytes[entry.offset..entry.offset + entry.len] {
+            return Err(self.check.reject(Some(self.index), CONTENT_MISMATCH));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate(view: &PackBinaryView<'_>) -> Result<(), PackBinaryError> {
     let json = view.canonical_json()?;
-    let response: CanonicalResponse =
-        serde_json::from_str(json).map_err(|_| PackBinaryError::InvalidItemContent {
-            index: None,
-            reason: "canonical JSON must contain data.pack.items with string content fields",
-        })?;
-    let items = response.data.pack.items;
-    if items.len() != view.entries.len() {
-        return Err(PackBinaryError::InvalidItemContent {
-            index: None,
-            reason: "binary item count differs from the canonical response",
-        });
+    let mut check = Check {
+        bytes: view.bytes,
+        entries: &view.entries,
+        failure: None,
+    };
+    let mut decoder = serde_json::Deserializer::from_str(json);
+    let result = Object {
+        check: &mut check,
+        field: Field::Data,
+        index: 0,
     }
-    for (index, (item, entry)) in items.iter().zip(&view.entries).enumerate() {
-        // Bounds and contiguity were already checked by PackBinaryView::parse.
-        // Do not call item_slice here: it invokes this cached validation.
-        if item.content.as_bytes() != &view.bytes[entry.offset..entry.offset + entry.len] {
-            return Err(PackBinaryError::InvalidItemContent {
-                index: Some(index),
-                reason: "binary item bytes differ from the canonical response",
-            });
-        }
-    }
-    Ok(())
+    .deserialize(&mut decoder)
+    .and_then(|()| decoder.end());
+    result.map_err(|_| {
+        check.failure.unwrap_or(PackBinaryError::InvalidItemContent {
+            index: None,
+            reason: INVALID_PROJECTION,
+        })
+    })
 }
 
 #[cfg(test)]
@@ -202,5 +386,84 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("private-original"));
         assert!(!message.contains("private-tampered"));
+    }
+
+    #[test]
+    fn large_mixed_pack_keeps_borrowed_item_slices_and_one_cached_verdict() {
+        let content = ["ordinary source text", "café\n\"quoted\" \\ evidence", ""];
+        let contents = (0..2048)
+            .map(|index| content[index % content.len()])
+            .collect::<Vec<_>>();
+        let bytes = frame(&contents);
+        let view = PackBinaryView::parse_verified(&bytes).expect("large mixed pack");
+        assert_eq!(view.item_count(), contents.len());
+        for (index, expected) in contents.iter().enumerate() {
+            let actual = view.item_slice(index).expect("verified item");
+            assert_eq!(actual, expected.as_bytes());
+            assert_eq!(actual.as_ptr(), bytes[view.entries[index].offset..].as_ptr());
+        }
+        assert_eq!(view.item_validation.get(), Some(&Ok(())));
+    }
+
+    #[test]
+    fn extra_item_is_refused_before_its_payload_is_deserialized() {
+        let bytes = frame(&[]);
+        let view = PackBinaryView::parse(&bytes).expect("empty frame");
+        let mut check = Check {
+            bytes: view.bytes,
+            entries: &view.entries,
+            failure: None,
+        };
+        let entries = std::iter::once_with(|| -> (&'static str, &'static str) {
+            panic!("an excess item payload must never be visited")
+        });
+        let decoder =
+            serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new(entries);
+        assert!(
+            Object {
+                check: &mut check,
+                field: Field::Content,
+                index: 0,
+            }
+            .deserialize(decoder)
+            .is_err()
+        );
+        assert_eq!(
+            check.failure,
+            Some(PackBinaryError::InvalidItemContent {
+                index: None,
+                reason: COUNT_MISMATCH,
+            })
+        );
+    }
+
+    #[test]
+    fn escaped_keys_unknown_metadata_and_positional_structs_remain_compatible() {
+        for canonical in [
+            r#"{"d\u0061ta":{"pack":{"it\u0065ms":[{"cont\u0065nt":"alpha"}]}}}"#,
+            r#"{"metadata":{"nested":[null,true,7]},"data":{"ignored":"value","pack":{"items":[{"metadata":[1,2],"content":"alpha"}],"tail":false}}}"#,
+            r#"[[[[["alpha"]]]]]"#,
+        ] {
+            let bytes = serialize_pack_binary(canonical, &[b"alpha"], 0);
+            let view = PackBinaryView::parse_verified(&bytes).expect("compatible projection");
+            assert_eq!(view.item_slice(0).expect("content"), b"alpha");
+        }
+    }
+
+    #[test]
+    fn valid_item_prefix_never_hides_late_syntax_duplicates_or_trailing_documents() {
+        for canonical in [
+            r#"{"data":{"pack":{"items":[{"content":"alpha"}]}},"tail":[}"#,
+            r#"{"data":{"pack":{"items":[{"content":"alpha"}]}},"data":{}}"#,
+            r#"{"data":{"pack":{"items":[{"content":"alpha"}]},"pack":{}}}"#,
+            r#"{"data":{"pack":{"items":[{"content":"alpha","cont\u0065nt":"alpha"}]}}}"#,
+            r#"{"data":{"pack":{"items":[{"content":"alpha"}]}}} {}"#,
+            r#"[[[[["alpha","extra field"]]]]]"#,
+        ] {
+            let bytes = serialize_pack_binary(canonical, &[b"alpha"], 0);
+            let view = PackBinaryView::parse(&bytes).expect("hash-checked frame");
+            assert!(view.item_slice(0).is_err());
+            assert!(PackBinaryView::parse_verified(&bytes).is_err());
+        }
     }
 }
