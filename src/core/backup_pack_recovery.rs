@@ -110,7 +110,12 @@ impl PackExpectation {
             })?;
             actual.insert_pack(&history)?;
         }
-        self.rows.verify(&actual, PACK_TABLES)
+        // The record reader is workspace-scoped and each child reader starts
+        // from those admitted records. Matching their projection cannot expose
+        // foreign packs or orphan selections, impressions and baselines. The
+        // isolated side store must contain exactly the admitted population,
+        // including at the second fence after derived-state rebuilding.
+        self.rows.verify_complete(&actual, db, PACK_TABLES)
     }
 }
 
@@ -157,3 +162,125 @@ impl Rows {
 #[cfg(test)]
 #[path = "backup_pack_recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod population_tests {
+    use super::*;
+    use crate::db::{CreatePackRecordInput, CreateWorkspaceInput};
+    use crate::models::{PackId, WorkspaceId};
+    use uuid::Uuid;
+
+    type TestResult = Result<(), String>;
+
+    fn workspace(db: &DbConnection, n: u128) -> Result<String, String> {
+        let id = WorkspaceId::from_uuid(Uuid::from_u128(n)).to_string();
+        db.insert_workspace(
+            &id,
+            &CreateWorkspaceInput {
+                path: format!("/pack-recovery-population/{n}"),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(id)
+    }
+
+    fn empty_pack(db: &DbConnection, workspace_id: &str, n: u128) -> Result<String, String> {
+        let id = PackId::from_uuid(Uuid::from_u128(n)).to_string();
+        db.insert_pack_record_with_timings_task_lens_and_evidence(
+            &id,
+            &CreatePackRecordInput {
+                task_paths: Vec::new(),
+                workspace_id: workspace_id.to_owned(),
+                query: "PRIVATE_FOREIGN_PACK_QUERY".to_owned(),
+                profile: "balanced".to_owned(),
+                max_tokens: 4000,
+                used_tokens: 0,
+                item_count: 0,
+                omitted_count: 0,
+                pack_hash: crate::core::backup::hash_bytes(b"empty recovery pack"),
+                degraded_json: None,
+                created_by: None,
+            },
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(id)
+    }
+
+    #[test]
+    fn empty_pack_population_is_valid() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let target = workspace(&db, 1)?;
+        PackExpectation::from_assets(&[], "empty-backup", &target)
+            .map_err(|error| error.message())?
+            .verify_connection(&db)
+            .map_err(|error| error.message())
+    }
+
+    #[test]
+    fn exact_legacy_pack_population_preserves_admission_order() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let target = workspace(&db, 1)?;
+        let ids = vec![empty_pack(&db, &target, 80)?, empty_pack(&db, &target, 3)?];
+        let mut rows = Rows::default();
+        for id in &ids {
+            let history = db
+                .get_pack_history_for_recovery(id)
+                .map_err(|error| error.to_string())?;
+            rows.insert_pack(&history)
+                .map_err(|error| error.message())?;
+        }
+        PackExpectation {
+            workspace_id: target,
+            rows,
+            admission_order: ids,
+        }
+        .verify_connection(&db)
+        .map_err(|error| error.message())
+    }
+
+    #[test]
+    fn publication_recheck_rejects_a_pack_hidden_in_another_workspace() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let target = workspace(&db, 1)?;
+        let foreign = workspace(&db, 2)?;
+        let expected = PackExpectation::from_assets(&[], "empty-backup", &target)
+            .map_err(|error| error.message())?;
+        expected
+            .verify_connection(&db)
+            .map_err(|error| error.message())?;
+
+        let hidden = empty_pack(&db, &foreign, 23)?;
+        assert!(
+            db.list_pack_record_ids_for_recovery(&target)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert_eq!(
+            db.count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        // The old scoped-content comparison accepted this same projection.
+        expected
+            .rows
+            .verify(&Rows::default(), PACK_TABLES)
+            .map_err(|error| error.message())?;
+        let error = expected
+            .verify_connection(&db)
+            .expect_err("a foreign pack must not pass the publication recheck");
+        let message = error.message();
+        assert!(message.contains("Restored durable population differs for pack_records"));
+        assert!(!message.contains(&foreign));
+        assert!(!message.contains(&hidden));
+        assert!(!message.contains("PRIVATE_FOREIGN_PACK_QUERY"));
+        Ok(())
+    }
+}
