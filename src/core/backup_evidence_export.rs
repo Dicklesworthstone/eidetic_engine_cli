@@ -7,6 +7,9 @@
 
 use super::{BackupCassEvidenceRecord, RedactionLevel, hash_bytes, redact_content};
 
+#[path = "backup_evidence_metadata.rs"]
+mod metadata;
+
 fn canonical_digest(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == 64
@@ -30,6 +33,32 @@ pub(super) fn redact_identity(key: &str, level: RedactionLevel) -> String {
     crate::output::jsonl_export::redact_recovery_identity(key, level)
 }
 
+fn export_reference(value: &str, level: RedactionLevel, admitted: bool) -> String {
+    if canonical_digest(value, "blake3:")
+        || (admitted && redact_content(value, level) == value)
+    {
+        value.to_owned()
+    } else {
+        opaque_reference(value)
+    }
+}
+
+fn structural_role(role: &str) -> bool {
+    matches!(
+        role,
+        "user"
+            | "assistant"
+            | "system"
+            | "developer"
+            | "tool"
+            | "unknown"
+            | "agentsmd_import"
+            | "docs_bootstrap"
+            | "journal_distill"
+            | "reinforcement"
+    )
+}
+
 pub(super) fn redact_evidence(
     row: &mut BackupCassEvidenceRecord,
     level: RedactionLevel,
@@ -39,39 +68,42 @@ pub(super) fn redact_evidence(
     if level == RedactionLevel::None {
         return;
     }
+    let cass_span_id = export_reference(&row.cass_span_id, level, provenance_admitted);
+    let upstream_ref_hash = row
+        .upstream_ref_hash
+        .as_deref()
+        .map(|value| export_reference(value, level, provenance_admitted));
+    let redact_role = row.role.as_deref().is_some_and(|role| {
+        !structural_role(role)
+            && (!provenance_admitted || redact_content(role, level) != role)
+    });
+    let redact_metadata = row
+        .metadata_json
+        .as_deref()
+        .is_some_and(|raw| !metadata::safe_to_retain(raw, level));
+    let auxiliary_changed = cass_span_id != row.cass_span_id
+        || upstream_ref_hash != row.upstream_ref_hash
+        || redact_role
+        || redact_metadata;
+    row.cass_span_id = cass_span_id;
+    row.upstream_ref_hash = upstream_ref_hash;
+    if redact_role {
+        row.role = None;
+    }
     let excerpt = redact_content(
         &row.excerpt,
-        if provenance_admitted {
+        if provenance_admitted && !auxiliary_changed {
             level
         } else {
             RedactionLevel::Full
         },
     );
-    if !provenance_admitted {
+    if excerpt != row.excerpt || !provenance_admitted || auxiliary_changed {
         row.cass_span_id = opaque_reference(&row.cass_span_id);
         row.upstream_ref_hash = row.upstream_ref_hash.as_deref().map(opaque_reference);
-        // span_kind is constrained by the DB to message/tool_call/tool_result/
-        // file/summary. It must stay structural, even for denied legacy rows.
-        // A legacy role, unlike span_kind, can contain arbitrary source text.
-        if !matches!(
-            row.role.as_deref(),
-            None | Some(
-                "user"
-                    | "assistant"
-                    | "system"
-                    | "developer"
-                    | "tool"
-                    | "unknown"
-                    | "agentsmd_import"
-                    | "docs_bootstrap"
-                    | "journal_distill"
-                    | "reinforcement"
-            )
-        ) {
+        if row.role.as_deref().is_some_and(|role| !structural_role(role)) {
             row.role = None;
         }
-    }
-    if excerpt != row.excerpt || !provenance_admitted {
         row.excerpt = excerpt;
         row.content_hash = hash_bytes(row.excerpt.as_bytes());
         row.canonical_excerpt_hash = None;
