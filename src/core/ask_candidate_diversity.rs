@@ -526,22 +526,20 @@ mod tests {
 
     #[test]
     fn duplicate_budget_counts_independent_lineages_not_row_ids() {
-        for origins in [20, 21] {
+        for origins in [1, 2, 20, 21] {
             let mut rows = duplicate_corpus(80);
             for (index, row) in rows.iter_mut().enumerate() {
                 row.provenance_uri = Some(format!("file://origin-{}.md#L1", index % origins));
             }
             let mut alternative = distinct_candidate("z-supported", 0.6);
             // Reuse an existing lineage so ordinary source diversity cannot
-            // rescue the alternative before the saturated-copy pass runs.
+            // rescue the alternative before the exact-copy pass runs. Copies
+            // of one lineage add no support, even below the saturation cap.
             alternative.provenance_uri = Some("file://origin-0.md#L2".to_owned());
             rows.push(alternative);
             let selected = select(&AskRequest::default(), &rows, 32);
             assert_eq!(selected.len(), 32);
-            assert_eq!(
-                selected.iter().any(|row| row.memory_id == "z-supported"),
-                origins == 21,
-            );
+            assert!(selected.iter().any(|row| row.memory_id == "z-supported"));
             let groups = native::candidate_support_groups(rows.iter(), &BTreeMap::new());
             let retained_origins: BTreeSet<_> = selected
                 .iter()
@@ -549,6 +547,15 @@ mod tests {
                 .map(|row| support_key(&row.memory_id, &groups))
                 .collect();
             assert_eq!(retained_origins.len(), origins);
+            let copies: Vec<_> = selected
+                .iter()
+                .copied()
+                .filter(|row| row.memory_id.starts_with("a-"))
+                .collect();
+            let clusters = clustering::cluster_spans_with_groups(&spans(&copies), &groups);
+            assert_eq!(clusters.len(), 1);
+            let multiplier = (1.0 + 0.1 * (origins as f32).ln()).min(CORROBORATION_CAP);
+            assert_eq!(clusters[0].score.to_bits(), (0.7 * multiplier).to_bits());
         }
     }
 
