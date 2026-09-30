@@ -1,0 +1,235 @@
+name: Prepare bounded facility cache (one-time)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/facility-cache-budget-20260930.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - name: Prepare guarded source blobs and test the real cache kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: nightly
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import base64, hashlib, json, os, pathlib, re, subprocess
+
+          def command(*args, **kwargs):
+              return subprocess.check_output(args, **kwargs)
+
+          def blob_id(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+          source_path = pathlib.Path('src/pack/mod.rs')
+          tests_path = pathlib.Path('src/pack/facility_cache_budget_tests.rs')
+          base = command('git', 'rev-parse', 'HEAD', text=True).strip()
+          assert base == os.environ['GITHUB_SHA']
+          before = source_path.read_bytes()
+          assert blob_id(before) == '2931f76135ae4fbef7843d28bb17625ade72488c', 'Pack source changed; refuse to replace it'
+          tests_before = tests_path.read_bytes()
+          source = before.decode()
+          start = source.index('#[derive(Clone, Debug)]\nstruct FacilitySimilarityCache {')
+          end = source.index('\n#[derive(Clone, Debug)]\nstruct FacilitySelectionQueue {', start)
+          NEW_CACHE = r"""// Bound the optional pairwise matrix, not the caller's candidate pool. Large
+          // pools retain the exact same objective instead of allocating O(n^2) floats or
+          // dropping candidates. The fallback owns a linear-size signature snapshot:
+          // selection takes candidates out of the universe while coverage still needs
+          // their original signatures. This is a matrix-payload limit, not an RSS limit.
+          const FACILITY_SIMILARITY_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+          #[derive(Clone, Debug)]
+          struct FacilitySimilarityCache {
+              width: usize,
+              values: Vec<f32>,
+              fallback_signatures: Vec<CandidateSignature>,
+          }
+
+          impl FacilitySimilarityCache {
+              fn new(universe: &[FacilityCandidateProfile]) -> Self {
+                  Self::with_byte_limit(universe, FACILITY_SIMILARITY_CACHE_MAX_BYTES)
+              }
+
+              fn dense_cell_count(width: usize, max_bytes: usize) -> Option<usize> {
+                  let cells = width.checked_mul(width)?;
+                  let bytes = cells.checked_mul(std::mem::size_of::<f32>())?;
+                  (bytes <= max_bytes).then_some(cells)
+              }
+
+              fn with_byte_limit(universe: &[FacilityCandidateProfile], max_bytes: usize) -> Self {
+                  let width = universe.len();
+                  let mut values = Vec::new();
+                  if let Some(cells) = Self::dense_cell_count(width, max_bytes)
+                      && values.try_reserve_exact(cells).is_ok()
+                  {
+                      values.resize(cells, 0.0_f32);
+                      for left_index in 0..width {
+                          values[left_index * width + left_index] = 1.0;
+                          for right_index in (left_index + 1)..width {
+                              let similarity = facility_signature_similarity(
+                                  &universe[left_index].signature,
+                                  &universe[right_index].signature,
+                              );
+                              values[left_index * width + right_index] = similarity;
+                              values[right_index * width + left_index] = similarity;
+                          }
+                      }
+                      return Self {
+                          width,
+                          values,
+                          fallback_signatures: Vec::new(),
+                      };
+                  }
+
+                  // Matrix allocation is optional. Both a budget miss and a failed
+                  // reservation use the exact comparator; neither changes admission,
+                  // relevance, diversity, tie-breaking, or summation order.
+                  Self {
+                      width,
+                      values,
+                      fallback_signatures: universe
+                          .iter()
+                          .map(|profile| profile.signature.clone())
+                          .collect(),
+                  }
+              }
+
+              fn similarity(&self, universe_index: usize, selected_index: usize) -> f32 {
+                  // Check both coordinates before flattening: an out-of-range column
+                  // otherwise aliases a valid cell in the next row of a dense matrix.
+                  if universe_index >= self.width || selected_index >= self.width {
+                      return 0.0;
+                  }
+                  if !self.values.is_empty() {
+                      // Construction checked width * width before allocating the matrix.
+                      return self.values[universe_index * self.width + selected_index];
+                  }
+                  if universe_index == selected_index {
+                      return 1.0;
+                  }
+
+                  // Match the dense constructor's operand order, including for callers
+                  // that walk a transposed row. This preserves the original f32 bits.
+                  let left_index = universe_index.min(selected_index);
+                  let right_index = universe_index.max(selected_index);
+                  facility_signature_similarity(
+                      &self.fallback_signatures[left_index],
+                      &self.fallback_signatures[right_index],
+                  )
+              }
+          }
+          """
+          source = source[:start] + NEW_CACHE.rstrip() + '\n' + source[end:]
+          needle = 'pub const SUBSYSTEM: &str = "pack";'
+          assert source.count(needle) == 1
+          assert 'mod facility_cache_budget_tests;' not in source
+          source = source.replace(needle, '#[cfg(test)]\n#[path = "facility_cache_budget_tests.rs"]\nmod facility_cache_budget_tests;\n\n' + needle)
+          source_path.write_text(source)
+          subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', str(tests_path)], check=True)
+          # Parse the entire real module without rewriting unrelated code.
+          subprocess.run(['rustfmt', '--edition', '2024', '--config', 'skip_children=true', '--emit', 'stdout', str(source_path)], stdout=subprocess.DEVNULL, check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+
+          # Compile the actual cache, comparator and coverage functions from the patched
+          # source. Only unrelated domain wrappers and fixture construction are reduced.
+          # This is NOT a full Cargo build or the two pack-selection integration tests.
+          def item(pattern):
+              match = re.search(pattern, source, re.M | re.S)
+              assert match, pattern
+              return match.group(0)
+
+          def function(name):
+              return item(r'^fn ' + re.escape(name) + r'\([^\n]*.*?^\}')
+
+          harness = r"""#![allow(dead_code)]
+          use std::cmp::Ordering;
+          use std::cell::Cell;
+          type MemoryId = u128;
+          type PackCandidate = ();
+          type PackItemRedaction = ();
+          thread_local! { static FACILITY_MARGINAL_GAIN_EVALUATIONS: Cell<usize> = const { Cell::new(0) }; }
+          """
+          harness += item(r'^const FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR:[^;]+;') + '\n'
+          harness += '#[derive(Clone, Debug, Eq, PartialEq)]\n' + item(r'^pub\(crate\) struct CandidateSignature \{.*?^\}') + '\n'
+          harness += '#[derive(Clone, Debug)]\n' + item(r'^struct FacilityCandidateProfile \{.*?^\}') + '\n'
+          harness += NEW_CACHE + '\n'
+          for name in ['facility_signature_similarity', 'content_overlap_similarity_terms', 'is_sorted_and_deduped', 'sorted_term_intersection_count', 'facility_marginal_gain_cached', 'update_facility_coverages_cached']:
+              harness += function(name) + '\n'
+          harness += r"""
+          fn profiles() -> Vec<FacilityCandidateProfile> {
+              let data = [
+                  (1, "bounded worker retries with backoff"),
+                  (2, "worker retries after transient failures"),
+                  (3, "bounded worker retries with backoff"),
+                  (4, "preserve a durable transaction journal"),
+                  (5, "record the incident identifier"),
+                  (6, "the transaction journal is durable"),
+                  (1, "same identity from another retrieval path"),
+              ];
+              data.into_iter().enumerate().map(|(index, (memory_id, content))| {
+                  let mut terms: Vec<String> = content.split_whitespace().map(str::to_owned).collect();
+                  terms.sort_unstable(); terms.dedup();
+                  FacilityCandidateProfile {
+                      candidate: Some(()),
+                      signature: CandidateSignature {
+                          memory_id,
+                          diversity_key: [0, 1, 4].contains(&index).then(|| "workers".to_owned()),
+                          normalized_content: content.to_owned(), content_terms: terms,
+                      },
+                      weight: 0.3 + index as f32 * 0.1, redactions: vec![],
+                  }
+              }).collect()
+          }
+          """
+          tests = tests_path.read_text()
+          harness += tests[tests.index('fn assert_pairwise_equal('):tests.index('fn assert_selection_queue_parity(')]
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'facility-cache-prepared'
+          out.mkdir(exist_ok=True)
+          harness_path = out / 'facility_cache_kernel.rs'
+          harness_path.write_text(harness)
+          for mode, flags in [('debug', []), ('optimized', ['-O'])]:
+              binary = out / ('cache-tests-' + mode)
+              subprocess.run(['rustc', '--edition', '2024', '--test', *flags, str(harness_path), '-o', str(binary)], check=True)
+              result = command(str(binary), '--nocapture', text=True)
+              (out / (mode + '-tests.txt')).write_text(result)
+              print(result)
+              assert '9 passed; 0 failed' in result
+
+          manifest = {'base': base, 'entries': [], 'validation': {'kernel_tests': '9 passed in debug and optimized builds', 'full_cargo_tests': 'not run', 'selection_integration_tests': 'included, not run', 'rustfmt': 'new tests formatted; complete pack module parsed'}}
+          api = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs'
+          for path, previous in [(source_path, before), (tests_path, tests_before)]:
+              data = path.read_bytes()
+              expected = blob_id(data)
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
+              created = json.loads(command('gh', 'api', api, '--input', '-', input=payload))
+              assert created['sha'] == expected
+              manifest['entries'].append({'path': str(path), 'before': blob_id(previous), 'sha': expected, 'sha256': hashlib.sha256(data).hexdigest()})
+              (out / path.name).write_bytes(data)
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (out / 'source.patch').write_bytes(command('git', 'diff', '--', str(source_path), str(tests_path)))
+          print(json.dumps(manifest, indent=2))
+          PYTHON
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: facility-cache-prepared-${{ github.run_id }}
+          path: ${{ runner.temp }}/facility-cache-prepared/
+          retention-days: 7
+          if-no-files-found: error
