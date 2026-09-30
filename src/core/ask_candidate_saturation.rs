@@ -3,7 +3,8 @@
 //! This is not semantic deduplication: bodies and every span-scoring input
 //! must match exactly. Independent provenance remains independent, and enough
 //! of it is retained to reach the existing corroboration cap. A new body must
-//! clear the ordinary evidence floor without a manufactured support bonus.
+//! clear the ordinary evidence floor, alone or with a complete independently
+//! corroborating bundle. Selecting a bundle never changes a source's score.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,11 +15,20 @@ use super::{
 
 type SourceSignature<'a> = (&'a str, u32, &'a str);
 
+fn source_signature(candidate: &AskCandidate) -> SourceSignature<'_> {
+    (
+        candidate.content.as_str(),
+        candidate.confidence.to_bits(),
+        candidate.trust_class.as_str(),
+    )
+}
+
 /// Run after lineage diversity and before the existing opposition reservations.
 /// Only slots beyond demonstrated full corroboration are exchangeable. Keep
 /// the raw anchor, original source IDs, exact bodies, and all weaker evidence
-/// unless a supported, previously unrepresented body can use a redundant slot.
-/// All auxiliary selection sets are bounded by the caller's existing budget.
+/// unless a supported, previously unrepresented body can use redundant slots.
+/// Selection frontiers are budget-bounded. The optional bundle pass sorts
+/// borrowed corpus references, never cloned bodies or an unbounded span pool.
 pub(super) fn preserve_distinct_answers<'a>(
     request: &AskRequest,
     question_terms: &[String],
@@ -45,12 +55,7 @@ pub(super) fn preserve_distinct_answers<'a>(
         // Matching only the best sentence would lose other facts in the body.
         // Matching only the body could discard a distinct trust/confidence
         // input that changes scores for its other spans. Require all three.
-        let key = (
-            candidate.content.as_str(),
-            candidate.confidence.to_bits(),
-            candidate.trust_class.as_str(),
-        );
-        let origins = support.entry(key).or_default();
+        let origins = support.entry(source_signature(candidate)).or_default();
         if origins.len() >= support_limit {
             redundant.push(entry);
         } else {
@@ -95,12 +100,335 @@ pub(super) fn preserve_distinct_answers<'a>(
             by_body.remove(worst.candidate.content.as_str());
         }
     }
-    if best.is_empty() {
-        return;
+    for entry in &best {
+        admitted_bodies.insert(entry.candidate.content.as_str());
     }
     retained.extend(best);
+    // Individually supported answers retain priority. Otherwise unused slots
+    // can carry ALL the sources needed for an independently supported answer;
+    // taking one subthreshold source would not make that answer reachable.
+    retained.extend(corroborated_answers(
+        request,
+        question_terms,
+        unique,
+        &admitted_bodies,
+        groups,
+        scorer,
+        ranked.len() - retained.len(),
+        support_limit,
+    ));
     let spare = ranked.len() - retained.len();
     retained.extend(redundant.into_iter().take(spare));
     retained.sort();
     ranked.copy_from_slice(&retained);
+}
+
+/// Find complete exact-body support bundles, never speculative partial ones.
+/// A sorted vector of borrowed candidates permits one pass over each signature
+/// without a map of corpus-sized support sets. For a cost k, at most limit/k
+/// bundles can ever fit. Retaining only that many best bundles of each cost
+/// preserves score-ordered greedy selection, including smaller bundles that
+/// still fit after a higher-ranked large bundle has consumed most of the space.
+#[allow(clippy::too_many_arguments)]
+fn corroborated_answers<'a>(
+    request: &AskRequest,
+    question_terms: &[String],
+    unique: &BTreeMap<&str, &'a AskCandidate>,
+    admitted_bodies: &BTreeSet<&str>,
+    groups: &BTreeMap<String, String>,
+    scorer: SpanScorer<'_>,
+    limit: usize,
+    support_limit: usize,
+) -> Vec<RankedCandidate<'a>> {
+    use crate::core::ask::{segment_spans, tokenize_for_ask};
+
+    let max_support = support_limit.min(limit);
+    if max_support < 2 {
+        return Vec::new();
+    }
+    let mut candidates: Vec<_> = unique
+        .values()
+        .copied()
+        .filter(|candidate| {
+            !candidate.content.trim().is_empty()
+                && !admitted_bodies.contains(candidate.content.as_str())
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        source_signature(left)
+            .cmp(&source_signature(right))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    let mut by_cost: Vec<Vec<Vec<RankedCandidate<'a>>>> =
+        (0..=max_support).map(|_| Vec::new()).collect();
+    for body in candidates.chunk_by(|left, right| left.content == right.content) {
+        let mut best_bundle: Option<Vec<RankedCandidate<'a>>> = None;
+        for signature in body
+            .chunk_by(|left, right| source_signature(left) == source_signature(right))
+        {
+            // chunk_by only yields nonempty slices, ordered by source ID
+            // within one body/confidence/trust signature.
+            let first = signature[0];
+            let score = best_span_score(question_terms, first, scorer);
+            if !score.is_finite() || score <= 0.0 || score >= request.min_confidence {
+                continue;
+            }
+            // Clustering requires a posting hit even for exact copies. A
+            // symbol-only span (or all stopwords) cannot corroborate merely
+            // because a semantic scorer returns a positive number for it.
+            let support_score = segment_spans(&first.content)
+                .into_iter()
+                .filter_map(|(start, end)| {
+                    let text = &first.content[start..end];
+                    if tokenize_for_ask(text).is_empty() {
+                        return None;
+                    }
+                    let score = scorer(question_terms, text, first.confidence, &first.trust_class);
+                    (score.is_finite() && score > 0.0).then_some(score)
+                })
+                .fold(0.0, f32::max);
+            let Some(needed) = (2..=max_support).find(|&count| {
+                let multiplier = (1.0 + 0.1 * (count as f32).ln()).min(CORROBORATION_CAP);
+                support_score * multiplier >= request.min_confidence
+            }) else {
+                continue;
+            };
+            let mut origins = BTreeSet::new();
+            let mut bundle = Vec::with_capacity(needed);
+            for &candidate in signature {
+                if origins.insert(support_key(&candidate.memory_id, groups)) {
+                    bundle.push(RankedCandidate { candidate, score });
+                    if bundle.len() == needed {
+                        break;
+                    }
+                }
+            }
+            if bundle.len() != needed {
+                continue;
+            }
+            if best_bundle
+                .as_ref()
+                .is_none_or(|previous| bundle[0] < previous[0])
+            {
+                best_bundle = Some(bundle);
+            }
+        }
+        if let Some(bundle) = best_bundle {
+            let cost = bundle.len();
+            let frontier = &mut by_cost[cost];
+            frontier.push(bundle);
+            frontier.sort_by(|left, right| left[0].cmp(&right[0]));
+            frontier.truncate(limit / cost);
+        }
+    }
+    let mut bundles: Vec<_> = by_cost.into_iter().flatten().collect();
+    bundles.sort_by(|left, right| left[0].cmp(&right[0]));
+    let mut selected = Vec::with_capacity(limit);
+    for bundle in bundles {
+        if bundle.len() <= limit - selected.len() {
+            selected.extend(bundle);
+        }
+    }
+    selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ask::selection::select_candidates_with_scorer;
+    use crate::core::ask::{AskSpan, clustering, native};
+
+    const COMMON: &str = "The cache read path reuses cached responses.";
+    const DISTINCT: &str = "Migration checks validate schema compatibility before deployment.";
+
+    fn candidate(id: &str, body: &str, confidence: f32) -> AskCandidate {
+        AskCandidate {
+            memory_id: id.to_owned(),
+            content: body.to_owned(),
+            confidence,
+            trust_class: "human_explicit".to_owned(),
+            provenance_uri: Some("manual://cli".to_owned()),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            team_provenance: None,
+        }
+    }
+
+    fn corpus() -> Vec<AskCandidate> {
+        let mut rows: Vec<_> = (0..80)
+            .map(|index| candidate(&format!("a-{index:05}"), COMMON, 0.7))
+            .collect();
+        rows.push(candidate("z-first", DISTINCT, 0.54));
+        rows.push(candidate("z-second", DISTINCT, 0.54));
+        rows
+    }
+
+    fn select(rows: &[AskCandidate], limit: usize) -> Vec<&AskCandidate> {
+        select_candidates_with_scorer(
+            &AskRequest::default(),
+            &[],
+            rows,
+            limit,
+            &|_, _, confidence, _| confidence,
+        )
+        .expect("valid source identities")
+    }
+
+    fn distinct_ids<'a>(rows: &[&'a AskCandidate]) -> Vec<&'a str> {
+        rows.iter()
+            .filter(|row| row.content == DISTINCT)
+            .map(|row| row.memory_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_independent_bundle_survives_saturated_results() {
+        let rows = corpus();
+        let selected = select(&rows, 32);
+        assert_eq!(selected.len(), 32);
+        assert_eq!(selected[0].memory_id, "a-00000");
+        assert_eq!(distinct_ids(&selected), ["z-first", "z-second"]);
+        let spans: Vec<_> = selected
+            .iter()
+            .map(|row| AskSpan {
+                memory_id: row.memory_id.clone(),
+                byte_start: 0,
+                byte_end: row.content.len(),
+                text: row.content.clone(),
+                score: row.confidence,
+                memory_confidence: row.confidence,
+                trust_class: row.trust_class.clone(),
+                provenance_uri: row.provenance_uri.clone(),
+                team_provenance: None,
+            })
+            .collect();
+        let groups = native::candidate_support_groups(rows.iter(), &BTreeMap::new());
+        let clusters = clustering::cluster_spans_with_groups(&spans, &groups);
+        assert_eq!(clusters.len(), 2);
+        let distinct = clusters.iter().find(|span| span.text == DISTINCT).unwrap();
+        let expected = 0.54 * (1.0 + 0.1 * 2.0_f32.ln());
+        assert_eq!(distinct.score.to_bits(), expected.to_bits());
+        assert!(distinct.score >= AskRequest::default().min_confidence);
+        assert_eq!(distinct.memory_confidence, 0.54);
+        let common = clusters.iter().find(|span| span.text == COMMON).unwrap();
+        assert_eq!(common.score.to_bits(), (0.7 * CORROBORATION_CAP).to_bits());
+    }
+
+    #[test]
+    fn admission_is_all_or_nothing_and_never_grows_the_budget() {
+        let rows = corpus();
+        for limit in 0..=40 {
+            let selected = select(&rows, limit);
+            assert_eq!(selected.len(), limit);
+            assert_eq!(distinct_ids(&selected).len(), if limit >= 23 { 2 } else { 0 });
+        }
+        let selected = select(&rows, rows.len() + 10);
+        assert_eq!(selected.len(), rows.len());
+        assert_eq!(distinct_ids(&selected).len(), 2);
+    }
+
+    #[test]
+    fn copies_of_one_origin_do_not_become_independent_support() {
+        let mut rows = corpus();
+        for (index, row) in rows.iter_mut().filter(|row| row.content == DISTINCT).enumerate() {
+            row.provenance_uri = Some(format!("file://one-observation.md#L{}", index + 1));
+        }
+        let selected = select(&rows, 32);
+        assert!(distinct_ids(&selected).is_empty());
+        assert_eq!(selected.len(), 32);
+    }
+
+    #[test]
+    fn support_requires_identical_bodies_and_scoring_inputs() {
+        for variant in 0..3 {
+            let mut rows = corpus();
+            let last = rows.last_mut().unwrap();
+            match variant {
+                0 => last.content.push_str(" Additional context."),
+                1 => last.confidence = 0.53,
+                _ => last.trust_class = "cass_evidence".to_owned(),
+            }
+            let selected = select(&rows, 32);
+            assert!(selected.iter().all(|row| row.content == COMMON));
+        }
+        let mut rows = corpus();
+        rows.pop();
+        assert!(distinct_ids(&select(&rows, 32)).is_empty());
+        for row in rows.iter_mut().filter(|row| row.content == DISTINCT) {
+            row.confidence = 0.1;
+        }
+        assert!(distinct_ids(&select(&rows, 32)).is_empty());
+    }
+
+    #[test]
+    fn larger_bundles_need_the_actual_number_of_independent_sources() {
+        let mut rows = corpus();
+        for row in rows.iter_mut().filter(|row| row.content == DISTINCT) {
+            row.confidence = 0.5;
+        }
+        assert!(distinct_ids(&select(&rows, 32)).is_empty());
+        rows.push(candidate("z-third", DISTINCT, 0.5));
+        assert!(distinct_ids(&select(&rows, 23)).is_empty());
+        assert_eq!(distinct_ids(&select(&rows, 24)), ["z-first", "z-second", "z-third"]);
+        assert!(0.5 * (1.0 + 0.1 * 2.0_f32.ln()) < AskRequest::default().min_confidence);
+        assert!(0.5 * (1.0 + 0.1 * 3.0_f32.ln()) >= AskRequest::default().min_confidence);
+    }
+
+    #[test]
+    fn bundle_admission_uses_the_complete_scorer_without_rewriting_confidence() {
+        let mut rows = corpus();
+        for row in rows.iter_mut().filter(|row| row.content == DISTINCT) {
+            row.confidence = 0.1;
+        }
+        let scorer = |_: &[String], text: &str, _: f32, _: &str| {
+            if text == DISTINCT { 0.54 } else { 0.7 }
+        };
+        let selected = select_candidates_with_scorer(
+            &AskRequest::default(),
+            &[],
+            &rows,
+            32,
+            &scorer,
+        )
+        .expect("valid source identities");
+        assert_eq!(distinct_ids(&selected), ["z-first", "z-second"]);
+        assert!(selected.iter().filter(|row| row.content == DISTINCT).all(|row| row.confidence == 0.1));
+    }
+
+    #[test]
+    fn individually_supported_answers_keep_priority_over_bundles() {
+        let mut rows = corpus();
+        for index in 0..11 {
+            rows.push(candidate(
+                &format!("y-{index:05}"),
+                &format!("Independent supported observation {index}."),
+                0.6,
+            ));
+        }
+        let selected = select(&rows, 32);
+        assert_eq!(selected.len(), 32);
+        assert!(distinct_ids(&selected).is_empty());
+        assert_eq!(selected.iter().filter(|row| row.memory_id.starts_with("y-")).count(), 11);
+    }
+
+    #[test]
+    fn bundles_are_deterministic_under_corpus_permutations() {
+        let mut rows = corpus();
+        let expected: Vec<_> = select(&rows, 32)
+            .iter()
+            .map(|row| row.memory_id.clone())
+            .collect();
+        for _ in 0..8 {
+            rows.reverse();
+            assert_eq!(
+                select(&rows, 32).iter().map(|row| row.memory_id.clone()).collect::<Vec<_>>(),
+                expected,
+            );
+            rows.rotate_left(7);
+            assert_eq!(
+                select(&rows, 32).iter().map(|row| row.memory_id.clone()).collect::<Vec<_>>(),
+                expected,
+            );
+        }
+    }
 }
