@@ -22,12 +22,12 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-31
           components: rustfmt
       - name: Prepare guarded source blobs and test the real cache kernel
         env:
           GH_TOKEN: ${{ github.token }}
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-08-31
         run: |
           set -euo pipefail
           python3 - <<'PYTHON'
@@ -167,7 +167,7 @@ jobs:
           type PackItemRedaction = ();
           thread_local! { static FACILITY_MARGINAL_GAIN_EVALUATIONS: Cell<usize> = const { Cell::new(0) }; }
           """
-          harness += item(r'^const FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR:[^;]+;') + '\n'
+          harness += item(r'\bconst\s+FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR\s*:[^;]+;') + '\n'
           harness += '#[derive(Clone, Debug, Eq, PartialEq)]\n' + item(r'^pub\(crate\) struct CandidateSignature \{.*?^\}') + '\n'
           harness += '#[derive(Clone, Debug)]\n' + item(r'^struct FacilityCandidateProfile \{.*?^\}') + '\n'
           harness += NEW_CACHE + '\n'
