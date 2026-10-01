@@ -7365,22 +7365,48 @@ fn model_verification_file_states(
     }
 }
 
+/// THE single decider for the executed backend label. bd-p1b4e.
+///
+/// Neither input is sufficient alone, which is why this exists as one function
+/// rather than as the two-line conditional it replaces at three call sites:
+///
+/// - The RESOLUTION SOURCE alone cannot say it. A registered local model can
+///   fail to load at request time -- `EeLazyModel2VecEmbedder` falls back to the
+///   deterministic hash mid-flight -- so a `Registered` source may still have
+///   executed `hash_fallback`.
+/// - SEMANTIC-NESS alone cannot say it either, and this is the half that was
+///   missing. A remote embedder is also `is_semantic()`, so asking only
+///   `is_semantic()` labels a remote backend `neural_local`.
+///
+/// The consequence of getting it wrong is not cosmetic. `executed_model_resolution`
+/// PRESERVES the source when the backend is `NeuralLocal` (`ready(selected.source)`),
+/// so a Remote source surviving beside a `NeuralLocal` backend reaches
+/// `EmbedderPreparation::new`, where `EmbedModelSource::is_valid_for_backend`
+/// declares that pair invalid -- `Remote` is valid only for `RemoteApi`, asserted
+/// in `src/models/model_registry.rs`. That disagreement was checked by a
+/// `debug_assert!` alone, so a debug build panicked and a release build emitted
+/// `embed_backend=neural_local` beside `source=remote` with nothing to catch it.
+fn executed_embed_backend(source: EmbedModelSource, fast_is_semantic: bool) -> EmbedBackend {
+    if source == EmbedModelSource::Remote {
+        return EmbedBackend::RemoteApi;
+    }
+    if fast_is_semantic {
+        EmbedBackend::NeuralLocal
+    } else {
+        EmbedBackend::HashFallback
+    }
+}
+
 /// Stable, deliberately small backend vocabulary shared by search, pack, and
 /// orient. This reports only a backend that has executed in the current
 /// process; local model availability alone is not execution evidence.
 #[must_use]
 pub(crate) fn active_embed_backend() -> EmbedBackend {
     if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
-        // A remote embedder is also `is_semantic()`, so the backend must come
-        // from the recorded resolution rather than from semantic-ness alone.
-        if selection.model_resolution.source == EmbedModelSource::Remote {
-            return EmbedBackend::RemoteApi;
-        }
-        return if selection.stack.fast().is_semantic() {
-            EmbedBackend::NeuralLocal
-        } else {
-            EmbedBackend::HashFallback
-        };
+        return executed_embed_backend(
+            selection.model_resolution.source,
+            selection.stack.fast().is_semantic(),
+        );
     }
 
     // No process-default embedder has executed yet. Reporting a locally
@@ -7583,6 +7609,14 @@ fn executed_model_resolution(
 ) -> EmbedModelResolution {
     if backend == EmbedBackend::NeuralLocal {
         EmbedModelResolution::ready(selected.source)
+    } else if backend == EmbedBackend::RemoteApi {
+        // bd-p1b4e. Before `executed_embed_backend` existed, no caller could
+        // reach this function with `RemoteApi`, so a remote backend fell into the
+        // final arm and was rewritten to `deterministic_hash()`. That pair is
+        // declared invalid -- `is_valid_for_backend(RemoteApi)` accepts only
+        // `Remote` -- so it would have traded one invalid pair for another. A
+        // remote backend keeps its remote resolution.
+        EmbedModelResolution::ready(selected.source)
     } else if selected.source == EmbedModelSource::RegistryRejected {
         selected.clone()
     } else {
@@ -7623,11 +7657,13 @@ pub(crate) async fn prepare_default_search_embedder(
     }
 
     model_initialization_checkpoint(cx, "after default embedder preparation")?;
-    let backend = if selection.stack.fast().is_semantic() {
-        EmbedBackend::NeuralLocal
-    } else {
-        EmbedBackend::HashFallback
-    };
+    // bd-p1b4e. Reads the same DEFAULT_SEARCH_EMBEDDER that `active_embed_backend`
+    // reads, so it must apply the same rule; asking only `is_semantic()` here was
+    // the twin of a guard that already existed one screen up.
+    let backend = executed_embed_backend(
+        selection.model_resolution.source,
+        selection.stack.fast().is_semantic(),
+    );
     let model_resolution = executed_model_resolution(&selection.model_resolution, backend);
     Ok(EmbedderPreparation::new(
         backend,
@@ -7678,11 +7714,13 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                     source: Box::new(error),
                 })?
             {
-                let backend = if selection.stack.fast().is_semantic() {
-                    EmbedBackend::NeuralLocal
-                } else {
-                    EmbedBackend::HashFallback
-                };
+                // bd-p1b4e. Same rule as `active_embed_backend`, and note that
+                // `selection.model_resolution` is passed into the very next call:
+                // the field needed to decide this was already in scope and unused.
+                let backend = executed_embed_backend(
+                    selection.model_resolution.source,
+                    selection.stack.fast().is_semantic(),
+                );
                 return Ok(EmbedderPreparation::new(
                     backend,
                     selection.model_resolution,
@@ -11011,6 +11049,134 @@ mod tests {
         ensure(
             preparation.fast_embedder.id() == HashEmbedder::default_256().id(),
             "rejected registration must serve the real deterministic hash embedder",
+        )
+    }
+
+    /// bd-p1b4e. The population sweep, not a spot check: for EVERY
+    /// `EmbedModelSource`, the single decider's backend must satisfy the
+    /// project's own validity rule after `executed_model_resolution` runs.
+    ///
+    /// This is the test that would have failed before `executed_embed_backend`
+    /// existed. Three call sites decided this label by asking `is_semantic()`
+    /// alone, which returns true for a remote embedder, so a `Remote` source
+    /// produced a `NeuralLocal` backend -- a pair
+    /// `EmbedModelSource::is_valid_for_backend` declares invalid. Nothing caught
+    /// it in a release build: the only check was a `debug_assert!` inside
+    /// `EmbedderPreparation::new`.
+    ///
+    /// The table is exhaustive by compiler enforcement, not by hand: the `match`
+    /// below has no wildcard arm, so adding a ninth `EmbedModelSource` fails to
+    /// compile here until someone states which backend it executes. That is the
+    /// point -- a sweep that a new variant can slip past is the same
+    /// scope-inheritance failure this bead is about.
+    #[test]
+    fn every_embed_model_source_agrees_with_its_executed_backend() -> TestResult {
+        // (source, whether that source's fast tier is semantic, expected backend)
+        let expectations = [
+            (
+                EmbedModelSource::Registered,
+                true,
+                EmbedBackend::NeuralLocal,
+            ),
+            (
+                EmbedModelSource::Configured,
+                true,
+                EmbedBackend::NeuralLocal,
+            ),
+            (EmbedModelSource::Cache, true, EmbedBackend::NeuralLocal),
+            (
+                EmbedModelSource::Downloaded,
+                true,
+                EmbedBackend::NeuralLocal,
+            ),
+            (EmbedModelSource::Remote, true, EmbedBackend::RemoteApi),
+            (
+                EmbedModelSource::RemoteUnavailable,
+                false,
+                EmbedBackend::HashFallback,
+            ),
+            (
+                EmbedModelSource::DeterministicHash,
+                false,
+                EmbedBackend::HashFallback,
+            ),
+            (
+                EmbedModelSource::RegistryRejected,
+                false,
+                EmbedBackend::HashFallback,
+            ),
+        ];
+
+        // Exhaustiveness guard. No wildcard: a new variant breaks the build here.
+        for (source, _, _) in &expectations {
+            match source {
+                EmbedModelSource::Registered
+                | EmbedModelSource::Configured
+                | EmbedModelSource::Cache
+                | EmbedModelSource::Downloaded
+                | EmbedModelSource::Remote
+                | EmbedModelSource::RemoteUnavailable
+                | EmbedModelSource::DeterministicHash
+                | EmbedModelSource::RegistryRejected => {}
+            }
+        }
+
+        for (source, fast_is_semantic, expected) in expectations {
+            let backend = executed_embed_backend(source, fast_is_semantic);
+            ensure(
+                backend == expected,
+                "source/semantic pair must decide the documented backend",
+            )?;
+
+            let selected = if source == EmbedModelSource::RegistryRejected {
+                EmbedModelResolution::registry_rejected(
+                    "mdl_sweep_fixture",
+                    EmbedRegistryRejectionReason::SourceSymlink,
+                )
+            } else {
+                EmbedModelResolution::ready(source)
+            };
+            let executed = executed_model_resolution(&selected, backend);
+            ensure(
+                executed.is_valid_for_backend(backend),
+                "executed resolution must be valid for the backend it reports",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// bd-p1b4e. PLANTED NEGATIVE for the defect itself, stated in the project's
+    /// own vocabulary rather than mine: the pair the old `is_semantic()`-alone
+    /// inference produced for a remote endpoint is one the registry declares
+    /// invalid. Without this arm the test above could be satisfied by a decider
+    /// that never had a bug to fix.
+    #[test]
+    fn a_remote_source_reported_as_neural_local_is_a_declared_invalid_pair() -> TestResult {
+        let remote = EmbedModelResolution::ready(EmbedModelSource::Remote);
+
+        ensure(
+            !remote.is_valid_for_backend(EmbedBackend::NeuralLocal),
+            "remote source beside a neural_local backend must be invalid, or this \
+             bead's defect was never a defect",
+        )?;
+        ensure(
+            remote.is_valid_for_backend(EmbedBackend::RemoteApi),
+            "remote source must be valid for the remote backend",
+        )?;
+
+        // And the decider must not produce that invalid pair even though a remote
+        // embedder IS semantic, which is the exact trap.
+        ensure(
+            executed_embed_backend(EmbedModelSource::Remote, true) == EmbedBackend::RemoteApi,
+            "a semantic remote embedder must still report remote_api",
+        )?;
+
+        // `executed_model_resolution` must not launder the remote source away
+        // either: before this fix RemoteApi fell through to deterministic_hash().
+        let executed = executed_model_resolution(&remote, EmbedBackend::RemoteApi);
+        ensure(
+            executed.source == EmbedModelSource::Remote,
+            "a remote backend must keep its remote resolution source",
         )
     }
 
