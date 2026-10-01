@@ -134,8 +134,68 @@ fn assert_contract_snapshot(name: &str, value: Value) {
     assert_snapshot!(name, canonical_json_text(value));
 }
 
+/// Placeholder the crate version is normalized to before a snapshot comparison.
+const SCRUBBED_PACKAGE_VERSION: &str = "<scrubbed:eeVersion>";
+
+/// Assert the LIVE crate version, then normalize it away.
+///
+/// Three of these snapshots embedded the crate version as a literal, in a field
+/// and inside prose, so a pure version bump reddened the suite and every release
+/// had to hand-edit them. Cutting 0.16.0 cost a full six-target rebuild because
+/// one of the three was missed (bd-czjln).
+///
+/// Scrubbing does NOT drop a check, for the same reason the goldens' equivalent
+/// does not: `assert_live_package_version` compares the emitted version against
+/// the compiled package FIRST, which is strictly stronger than a frozen literal
+/// — a literal only ever matched one release, and matched it by accident after
+/// that. This mirrors `package_version_golden_format` /
+/// `assert_actual_package_version` in tests/agent_golden_baselines.rs; the
+/// duplication is deliberate for now, and `snapshot_suite_survives_a_pure_version_bump`
+/// below is what pins the two to the same behaviour.
+fn assert_live_package_version(value: &Value) {
+    if let Some(version) = value.pointer("/data/version").and_then(Value::as_str) {
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "emitted /data/version must match the compiled package; a mismatch means the binary \
+             under test is not this source tree, which no snapshot edit can fix"
+        );
+    }
+}
+
+/// Replace every occurrence of the compiled crate version inside any string with
+/// [`SCRUBBED_PACKAGE_VERSION`], at any depth.
+///
+/// A field-only scrub would be insufficient: the doctor contract carries the
+/// version twice inside one human message ("running version X; local source
+/// version X via cargo_toml ..."), not only in `/data/version`.
+fn scrub_package_version(value: &mut Value) {
+    let live = env!("CARGO_PKG_VERSION");
+    match value {
+        Value::String(text) => {
+            if text.contains(live) {
+                *text = text.replace(live, SCRUBBED_PACKAGE_VERSION);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_package_version(item);
+            }
+        }
+        Value::Object(object) => {
+            for (_, item) in object.iter_mut() {
+                scrub_package_version(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn canonical_json_text(value: Value) -> String {
-    match serde_json::to_string_pretty(&canonical_json(value)) {
+    assert_live_package_version(&value);
+    let mut canonical = canonical_json(value);
+    scrub_package_version(&mut canonical);
+    match serde_json::to_string_pretty(&canonical) {
         Ok(serialized) => serialized,
         Err(error) => panic!("serde_json::Value failed canonical serialization: {error}"),
     }
@@ -1686,5 +1746,112 @@ fn renumbering_degraded_prose_repluralizes_at_the_singular_boundary() -> TestRes
     }
 
     println!("renumbered: {renumbered}");
+    Ok(())
+}
+
+/// bd-czjln. The property whose absence cost the v0.16.0 cut a full six-target
+/// rebuild: a pure version bump must not require touching a single snapshot.
+///
+/// Simulates the bump rather than mutating Cargo.toml — it takes output carrying
+/// the live version, rewrites it to an arbitrary different version the way a
+/// release does, and asserts the canonical text is byte-identical either way.
+/// Before the scrub this failed for the three snapshots that embedded a literal.
+#[test]
+fn snapshot_suite_survives_a_pure_version_bump() -> TestResult {
+    let live = env!("CARGO_PKG_VERSION");
+    // Shaped like the doctor contract, which is the hard case: the version
+    // appears in a field AND twice inside one prose message.
+    let emitted = json!({
+        "data": {
+            "version": live,
+            "checks": [{
+                "message": format!(
+                    "running version {live}; local source version {live} via cargo_toml"
+                ),
+            }],
+        },
+    });
+
+    let at_this_release = canonical_json_text(emitted.clone());
+
+    // Now the same payload as some later release would emit it. Rewriting the
+    // pointer alone would not exercise the prose path, so rewrite the whole text.
+    let next = "99.99.99";
+    let rewritten: Value = serde_json::from_str(
+        &serde_json::to_string(&emitted)
+            .map_err(|error| format!("reserialize: {error}"))?
+            .replace(live, next),
+    )
+    .map_err(|error| format!("reparse: {error}"))?;
+
+    // canonical_json_text asserts the LIVE version, so a foreign version must be
+    // scrubbed through the same path without that assertion firing. Do it by
+    // scrubbing against the foreign version explicitly, which is what a future
+    // release's own build would do with its own CARGO_PKG_VERSION.
+    let mut canonical_next = canonical_json(rewritten);
+    scrub_version_for_test(&mut canonical_next, next);
+    let at_next_release = serde_json::to_string_pretty(&canonical_next)
+        .map_err(|error| format!("serialize: {error}"))?;
+
+    if at_this_release != at_next_release {
+        return Err(format!(
+            "a pure version bump changed the canonical text, so every release must hand-edit \
+             snapshots again.\nthis release:\n{at_this_release}\nnext release:\n{at_next_release}"
+        ));
+    }
+
+    // PLANTED NEGATIVE for the scrub itself: with no scrub applied, the two
+    // releases MUST differ. If this ever passes, the scrub is not the reason the
+    // assertion above holds and the test proves nothing.
+    let unscrubbed_this = serde_json::to_string_pretty(&canonical_json(emitted))
+        .map_err(|error| format!("serialize: {error}"))?;
+    if unscrubbed_this.contains(next) || !unscrubbed_this.contains(live) {
+        return Err(
+            "negative control is inert: unscrubbed text did not carry the live version".into(),
+        );
+    }
+
+    println!("version-bump invariant holds; scrubbed to {SCRUBBED_PACKAGE_VERSION}");
+    Ok(())
+}
+
+/// Scrub an explicit version rather than the compiled one, so the bump rehearsal
+/// can stand in for a future release's build.
+fn scrub_version_for_test(value: &mut Value, version: &str) {
+    match value {
+        Value::String(text) => {
+            if text.contains(version) {
+                *text = text.replace(version, SCRUBBED_PACKAGE_VERSION);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_version_for_test(item, version);
+            }
+        }
+        Value::Object(object) => {
+            for (_, item) in object.iter_mut() {
+                scrub_version_for_test(item, version);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// bd-czjln. PLANTED NEGATIVE for the live-version assertion: it must actually
+/// fail when the emitted version is not the compiled one. Without this, the
+/// scrub could be hiding a real mismatch instead of a cosmetic one.
+#[test]
+fn live_package_version_assertion_rejects_a_foreign_version() -> TestResult {
+    let foreign = json!({ "data": { "version": "0.0.1-not-this-build" } });
+    let caught = std::panic::catch_unwind(|| assert_live_package_version(&foreign));
+    if caught.is_ok() {
+        return Err(
+            "assert_live_package_version accepted a foreign version, so the scrub would mask a \
+             binary/source mismatch"
+                .into(),
+        );
+    }
+    println!("foreign version correctly rejected");
     Ok(())
 }

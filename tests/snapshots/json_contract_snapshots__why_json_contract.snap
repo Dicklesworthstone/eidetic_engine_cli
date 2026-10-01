@@ -323,7 +323,7 @@ expression: canonical_json_text(value)
       "workflowId": null
     },
     "verificationEvidence": [],
-    "version": "0.16.0"
+    "version": "<scrubbed:eeVersion>"
   },
   "degraded": [
     {

@@ -292,7 +292,7 @@ expression: canonical_json_text(value)
       "unknownAgeCount": 0,
       "windowHours": 24
     },
-    "version": "0.16.0",
+    "version": "<scrubbed:eeVersion>",
     "workspace": {
       "canonicalRoot": "[WORKSPACE]",
       "configDir": "[WORKSPACE]/.ee",

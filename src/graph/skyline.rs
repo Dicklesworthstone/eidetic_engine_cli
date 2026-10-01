@@ -32,9 +32,54 @@ pub struct KnowledgeSkyline {
     pub row_count: usize,
     pub trust_class_count: usize,
     pub max_onion_layer: usize,
+    /// The actual Pareto frontier. bd-pmgg0.
+    ///
+    /// `rows` below is a layer x trust-class grid of CELL MEANS, which is a
+    /// useful posture summary and is kept, but it is not a skyline: a mean
+    /// cannot express dominance, and averaging is exactly what hides the
+    /// memories a skyline exists to surface. A reader who knows what a skyline
+    /// is will read this surface as a Pareto frontier, so it now contains one.
+    pub frontier: Vec<KnowledgeSkylineFrontierPoint>,
+    pub frontier_size: usize,
     pub rows: Vec<KnowledgeSkylineLayerRow>,
     pub communities: Vec<KnowledgeSkylineCommunitySummary>,
 }
+
+/// One non-dominated memory, with the dimension values that put it there.
+///
+/// The values are reported alongside the id deliberately: a frontier entry
+/// without its coordinates is an assertion the caller cannot check, and the
+/// whole complaint behind bd-pmgg0 was a surface whose numbers did not support
+/// the reading its name invited.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSkylineFrontierPoint {
+    pub memory_id: String,
+    pub trust_class: String,
+    pub trust_rank: u8,
+    pub onion_layer: usize,
+    pub k_truss_rank: usize,
+    pub ppr_percentile: f64,
+    pub age_days: f64,
+    /// Dimensions on which no other memory beats this one. A point can be on the
+    /// frontier without being maximal anywhere -- it merely has to be dominated
+    /// by nobody -- so an empty list here is meaningful, not a bug.
+    pub maximal_dimensions: Vec<&'static str>,
+}
+
+/// The dominance dimensions, all oriented so that HIGHER IS BETTER.
+///
+/// `age_days` is the one that has to be flipped: fresher knowledge is better, so
+/// dominance uses negated age. Getting that backwards would invert the whole
+/// frontier while still producing a plausible-looking answer, which is why the
+/// orientation is stated here once and applied in exactly one function.
+const SKYLINE_DIMENSIONS: [&str; 5] = [
+    "onionLayer",
+    "kTrussRank",
+    "pprPercentile",
+    "recency",
+    "trustRank",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,15 +205,113 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
         })
         .collect::<Vec<_>>();
 
+    let frontier = pareto_frontier(&metrics_by_memory);
+
     KnowledgeSkyline {
         schema: KNOWLEDGE_SKYLINE_SCHEMA_V1,
         node_count: memories.len(),
         row_count: rows.len(),
         trust_class_count: trust_classes.len(),
         max_onion_layer: onion_layers.max_layer,
+        frontier_size: frontier.len(),
+        frontier,
         rows,
         communities: community_summaries(&input.graph, &metrics_by_memory),
     }
+}
+
+/// The five dominance coordinates for one memory, all higher-is-better.
+///
+/// Age is negated here and nowhere else, so the "fresher is better" orientation
+/// lives in one line rather than being restated at each comparison.
+fn dimension_vector(metrics: &MemoryMetrics) -> [f64; 5] {
+    [
+        metrics.onion_layer as f64,
+        metrics.k_truss_rank as f64,
+        finite_or_zero(metrics.ppr_percentile),
+        -finite_or_zero(metrics.age_days),
+        f64::from(crate::core::contradiction_detect::trust_class_rank(
+            metrics.trust_class.as_str(),
+        )),
+    ]
+}
+
+/// Pareto dominance: `left` dominates `right` when it is at least as good on
+/// EVERY dimension and strictly better on AT LEAST ONE.
+///
+/// Both halves matter. Without the second, two identical points would dominate
+/// each other and the frontier would be empty; without the first, the relation
+/// would just be "better somewhere", which is not dominance and would admit
+/// nearly everything.
+fn dominates(left: &[f64; 5], right: &[f64; 5]) -> bool {
+    let mut strictly_better_somewhere = false;
+    for (l, r) in left.iter().zip(right.iter()) {
+        if l < r {
+            return false;
+        }
+        if l > r {
+            strictly_better_somewhere = true;
+        }
+    }
+    strictly_better_somewhere
+}
+
+/// The skyline proper: every memory dominated by no other memory.
+///
+/// O(n^2) by construction. That is deliberate and adequate here -- this runs
+/// over the memories already materialised for the posture grid, not over the
+/// store -- and a divide-and-conquer skyline would trade readability for a
+/// constant factor on an input this size.
+fn pareto_frontier(
+    metrics_by_memory: &BTreeMap<String, MemoryMetrics>,
+) -> Vec<KnowledgeSkylineFrontierPoint> {
+    let points: Vec<(&String, &MemoryMetrics, [f64; 5])> = metrics_by_memory
+        .iter()
+        .map(|(memory_id, metrics)| (memory_id, metrics, dimension_vector(metrics)))
+        .collect();
+
+    // A dimension's maxima, so `maximal_dimensions` reports a fact about the
+    // whole population rather than about the comparison that happened to run last.
+    let mut dimension_max = [f64::NEG_INFINITY; 5];
+    for (_, _, vector) in &points {
+        for (index, value) in vector.iter().enumerate() {
+            if *value > dimension_max[index] {
+                dimension_max[index] = *value;
+            }
+        }
+    }
+
+    let mut frontier = points
+        .iter()
+        .filter(|(_, _, candidate)| {
+            !points
+                .iter()
+                .any(|(_, _, other)| dominates(other, candidate))
+        })
+        .map(|(memory_id, metrics, vector)| {
+            let maximal_dimensions = SKYLINE_DIMENSIONS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| vector[*index] >= dimension_max[*index])
+                .map(|(_, name)| *name)
+                .collect();
+            KnowledgeSkylineFrontierPoint {
+                memory_id: (*memory_id).clone(),
+                trust_class: metrics.trust_class.clone(),
+                trust_rank: crate::core::contradiction_detect::trust_class_rank(
+                    metrics.trust_class.as_str(),
+                ),
+                onion_layer: metrics.onion_layer,
+                k_truss_rank: metrics.k_truss_rank,
+                ppr_percentile: finite_or_zero(metrics.ppr_percentile),
+                age_days: finite_or_zero(metrics.age_days),
+                maximal_dimensions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    sort_by_ulid_payload_or_lexical(&mut frontier, |point| point.memory_id.as_str());
+    frontier
 }
 
 fn skyline_cell(matching: &[&MemoryMetrics], trust_class: &str) -> KnowledgeSkylineCell {
@@ -582,6 +725,183 @@ mod tests {
         assert_eq!(deciles.get(first), Some(&0));
         assert_eq!(deciles.get(second), Some(&5));
         assert_eq!(deciles.get(third), Some(&9));
+    }
+
+    #[test]
+    /// bd-pmgg0. THE test this change exists to pass: the Pareto frontier and the
+    /// cell-mean grid must DISAGREE on a fixture, in both directions. A test that
+    /// passes under the old grid-only implementation would prove nothing, because
+    /// the complaint was never that the grid is wrong -- it is that a grid of
+    /// means is not a skyline and cannot answer what a skyline answers.
+    ///
+    /// The fixture is a complete graph, so onion layer and k-truss are uniform
+    /// and dominance turns on the three dimensions the test controls exactly:
+    /// ppr percentile, recency, and trust rank. The trade-offs are deliberate --
+    /// each memory is best at something, or dominated outright:
+    ///   "0" human_explicit,  ppr 0.1 (worst),  oldest -> top trust only
+    ///   "1" agent_assertion, ppr 0.9 (best),   middle -> top ppr only
+    ///   "2" agent_validated, ppr 0.5,          newest -> top recency only
+    ///   "3" agent_assertion, ppr 0.2,          old    -> beaten by "1" on every
+    ///       dimension at equal trust, so it is DOMINATED and must not appear
+    #[test]
+    fn frontier_and_cell_mean_grid_disagree_in_both_directions() {
+        let input = KnowledgeSkylineInput {
+            graph: Graph::complete_graph(CompatibilityMode::Strict, 4),
+            memories: vec![
+                memory("0", "human_explicit", 1),
+                memory("1", "agent_assertion", 8),
+                memory("2", "agent_validated", 15),
+                memory("3", "agent_assertion", 2),
+            ],
+            ppr_scores: ppr(&[("0", 0.1), ("1", 0.9), ("2", 0.5), ("3", 0.2)]),
+            as_of: ts(16),
+        };
+
+        let skyline = compute_knowledge_skyline(&input);
+        let on_frontier: BTreeSet<&str> = skyline
+            .frontier
+            .iter()
+            .map(|point| point.memory_id.as_str())
+            .collect();
+
+        assert!(
+            !on_frontier.is_empty(),
+            "a populated store must have a non-empty frontier"
+        );
+        assert_eq!(skyline.frontier_size, skyline.frontier.len());
+
+        // "3" is dominated by "1": same trust class, lower ppr, older. The grid
+        // still counts it in a cell; the skyline must not list it.
+        assert!(
+            !on_frontier.contains("3"),
+            "a memory beaten on every dimension must not be on the frontier, got {on_frontier:?}"
+        );
+
+        // The cell-mean view, read off the SAME output, so the two readings are
+        // compared rather than asserted separately.
+        let cells: Vec<&KnowledgeSkylineCell> = skyline
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .filter(|cell| cell.count > 0)
+            .collect();
+        assert!(!cells.is_empty(), "fixture produced no populated cells");
+        let best_cell = cells
+            .iter()
+            .max_by(|left, right| left.ppr_percentile.total_cmp(&right.ppr_percentile))
+            .expect("populated cells exist");
+        let worst_cell = cells
+            .iter()
+            .min_by(|left, right| left.ppr_percentile.total_cmp(&right.ppr_percentile))
+            .expect("populated cells exist");
+        assert_ne!(
+            best_cell.trust_class, worst_cell.trust_class,
+            "fixture is inert: the grid's best and worst cells must differ"
+        );
+
+        // DIRECTION A: the grid's best-mean cell holds more than its frontier
+        // member, so ranking cells by mean points a reader at a memory the
+        // skyline excludes.
+        assert!(
+            best_cell.count > 1,
+            "fixture is inert: the best-mean cell must contain a dominated memory too"
+        );
+
+        // DIRECTION B: a frontier member sits in the cell the grid ranks WORST.
+        // "0" is the unique top of trust rank, so nothing dominates it, yet its
+        // cell's mean ppr is the lowest. Averaging buries exactly the memory a
+        // skyline exists to surface.
+        let buried = skyline
+            .frontier
+            .iter()
+            .find(|point| point.trust_class == worst_cell.trust_class)
+            .unwrap_or_else(|| {
+                panic!(
+                    "fixture is inert: no frontier member in the worst-mean cell ({})",
+                    worst_cell.trust_class
+                )
+            });
+        assert!(
+            buried.maximal_dimensions.contains(&"trustRank"),
+            "the buried frontier member should be there on trust rank, got {:?}",
+            buried.maximal_dimensions
+        );
+
+        println!(
+            "frontier={on_frontier:?} best_mean_cell={} worst_mean_cell={}",
+            best_cell.trust_class, worst_cell.trust_class
+        );
+    }
+
+    /// bd-pmgg0. The defining property, checkable from the output alone: no
+    /// frontier member may dominate another. If one did, the "frontier" would be
+    /// something else wearing the name, which is the defect this bead is about.
+    #[test]
+    fn frontier_members_never_dominate_each_other() {
+        let input = KnowledgeSkylineInput {
+            graph: graph([("a", "b"), ("b", "c"), ("a", "c"), ("c", "d"), ("d", "e")]),
+            memories: vec![
+                memory("a", "human_explicit", 1),
+                memory("b", "agent_validated", 4),
+                memory("c", "agent_assertion", 7),
+                memory("d", "peer_human_attested", 10),
+                memory("e", "legacy_import", 14),
+            ],
+            ppr_scores: ppr(&[("a", 0.8), ("b", 0.4), ("c", 0.6), ("d", 0.2), ("e", 0.1)]),
+            as_of: ts(16),
+        };
+
+        let skyline = compute_knowledge_skyline(&input);
+        assert!(!skyline.frontier.is_empty(), "frontier must not be empty");
+
+        let coordinates = |point: &KnowledgeSkylineFrontierPoint| {
+            [
+                point.onion_layer as f64,
+                point.k_truss_rank as f64,
+                point.ppr_percentile,
+                -point.age_days,
+                f64::from(point.trust_rank),
+            ]
+        };
+        for left in &skyline.frontier {
+            for right in &skyline.frontier {
+                if left.memory_id == right.memory_id {
+                    continue;
+                }
+                assert!(
+                    !dominates(&coordinates(left), &coordinates(right)),
+                    "{} dominates {} yet both are on the frontier",
+                    left.memory_id,
+                    right.memory_id
+                );
+            }
+        }
+    }
+
+    /// bd-pmgg0. Controls for `dominates` itself, because a relation that
+    /// answered `true` or `false` unconditionally would satisfy one direction of
+    /// each test above and still look fine.
+    #[test]
+    fn dominance_requires_at_least_as_good_everywhere_and_strictly_better_once() {
+        let base = [1.0, 1.0, 0.5, -3.0, 4.0];
+        let better_once = [1.0, 1.0, 0.6, -3.0, 4.0];
+        let worse_once = [1.0, 1.0, 0.4, -3.0, 4.0];
+        let mixed = [2.0, 1.0, 0.4, -3.0, 4.0];
+
+        assert!(dominates(&better_once, &base), "strictly better on one");
+        assert!(!dominates(&base, &better_once), "dominance is asymmetric");
+        assert!(!dominates(&base, &base), "a point cannot dominate itself");
+        assert!(!dominates(&mixed, &base), "better on one, worse on another");
+        assert!(!dominates(&base, &mixed), "and neither way round");
+        assert!(dominates(&base, &worse_once), "worse on exactly one");
+
+        // Recency orientation: fresher must beat older, all else equal. Getting
+        // this backwards inverts the whole frontier while still looking plausible.
+        let fresher = [1.0, 1.0, 0.5, -1.0, 4.0];
+        assert!(
+            dominates(&fresher, &base),
+            "a fresher memory must dominate an older identical one"
+        );
     }
 
     #[test]

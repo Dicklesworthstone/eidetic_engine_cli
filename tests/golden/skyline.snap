@@ -4,6 +4,8 @@
   "rowCount": 1,
   "trustClassCount": 0,
   "maxOnionLayer": 0,
+  "frontier": [],
+  "frontierSize": 0,
   "rows": [
     {
       "onionLayer": 0,
