@@ -102,6 +102,249 @@
         }
       }
     },
+    "taskFrames": {
+      "type": "object",
+      "description": "Additive recorded-goal lane read from .ee/task_frames.json, outside the database snapshot. Surfacing a frame never adopts, activates, completes or reopens it; several frames require an explicit selection. activeTotal and excludedTotal are null when the file could not be read, not when it is empty. degradedCode is resume_task_frames_unavailable or resume_task_frames_excluded when set. Omission remains valid for older v1 producers.",
+      "required": [
+        "schema",
+        "source",
+        "status",
+        "snapshotScope",
+        "nonExecutingContract",
+        "activeTotal",
+        "excludedTotal",
+        "truncated",
+        "selectionRequired",
+        "frames",
+        "degradedCode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "ee.resume.task_frames.v1"
+        },
+        "source": {
+          "const": ".ee/task_frames.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "empty",
+            "available",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "snapshotScope": {
+          "const": "independent_task_frame_file"
+        },
+        "nonExecutingContract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "activeTotal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "excludedTotal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "selectionRequired": {
+          "type": "boolean"
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "selectionReason",
+              "rootGoal",
+              "status",
+              "currentFocus",
+              "updatedAt",
+              "blockers",
+              "activeSubgoalsTotal",
+              "subgoalsTruncated",
+              "subgoals",
+              "textTruncated",
+              "redaction"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "selectionReason": {
+                "const": "unfinished_task_frame"
+              },
+              "rootGoal": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "open",
+                  "active",
+                  "blocked",
+                  "completed",
+                  "abandoned"
+                ]
+              },
+              "currentFocus": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updatedAt": {
+                "type": "string"
+              },
+              "blockers": {
+                "type": "object",
+                "required": [
+                  "total",
+                  "truncated",
+                  "items"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  },
+                  "items": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "activeSubgoalsTotal": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "subgoalsTruncated": {
+                "type": "boolean"
+              },
+              "subgoals": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "selectionReason",
+                    "parentId",
+                    "title",
+                    "status",
+                    "updatedAt",
+                    "blockers",
+                    "textTruncated",
+                    "redaction"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "selectionReason": {
+                      "const": "unfinished_subgoal"
+                    },
+                    "parentId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "draft",
+                        "open",
+                        "active",
+                        "blocked",
+                        "completed",
+                        "abandoned"
+                      ]
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "blockers": {
+                      "type": "object",
+                      "required": [
+                        "total",
+                        "truncated",
+                        "items"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "truncated": {
+                          "type": "boolean"
+                        },
+                        "items": {
+                          "type": "array",
+                          "maxItems": 4,
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "textTruncated": {
+                      "type": "boolean"
+                    },
+                    "redaction": {
+                      "$ref": "#/$defs/redaction"
+                    }
+                  }
+                }
+              },
+              "textTruncated": {
+                "type": "boolean"
+              },
+              "redaction": {
+                "$ref": "#/$defs/redaction"
+              }
+            }
+          }
+        },
+        "degradedCode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
     "openLoops": {
       "type": "object",
       "required": [
