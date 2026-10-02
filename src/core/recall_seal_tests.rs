@@ -116,9 +116,11 @@ fn seal_invalid_fields_never_become_revealed_advice() {
             .unwrap();
         let result = scan(&db, &seal_queries()[0], 100, 10);
         assert!(result.rows.is_empty(), "{assignment}");
-        assert!(result.degraded.iter().any(|d| {
-            d.code == "recall_source_filtered" && d.message.contains("malformed=1")
-        }));
+        assert!(
+            result.degraded.iter().any(|d| {
+                d.code == "recall_source_filtered" && d.message.contains("malformed=1")
+            })
+        );
         let output = format!("{:?}", result.degraded);
         assert!(!output.contains("PRIVATE-BROKEN"));
         assert!(!output.contains(&hidden));
@@ -135,9 +137,21 @@ fn seal_verified_reveal_uses_exact_instant_order_not_text_order() {
     for (sealed, revealed, visible) in [
         ("2026-01-01T02:00:00+02:00", BASE, true),
         ("2026-01-01T00:00:00-02:00", "2026-01-01T01:00:00Z", false),
-        ("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.100000000Z", true),
-        ("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.100000001Z", true),
-        ("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.099999999Z", false),
+        (
+            "2026-01-01T00:00:00.1Z",
+            "2026-01-01T00:00:00.100000000Z",
+            true,
+        ),
+        (
+            "2026-01-01T00:00:00.1Z",
+            "2026-01-01T00:00:00.100000001Z",
+            true,
+        ),
+        (
+            "2026-01-01T00:00:00.1Z",
+            "2026-01-01T00:00:00.099999999Z",
+            false,
+        ),
     ] {
         db.execute_raw(&format!(
             "UPDATE memory_seals SET sealed_at = '{sealed}', revealed_at = '{revealed}'"
@@ -172,11 +186,8 @@ fn seal_closed_plaintext_and_invalid_reveals_are_absent_from_public_output() {
             assert!(report.continuation_cursor.is_none());
             assert!(report.degraded.iter().any(|d| d.message.contains(reason)));
             for output in [
-                super::super::recall_data_json(
-                    &report,
-                    &super::super::RecallQueryEcho::default(),
-                )
-                .to_string(),
+                super::super::recall_data_json(&report, &super::super::RecallQueryEcho::default())
+                    .to_string(),
                 super::super::render_recall_markdown(&report, &[]),
                 format!("{report:?}"),
             ] {
@@ -186,7 +197,10 @@ fn seal_closed_plaintext_and_invalid_reveals_are_absent_from_public_output() {
             }
         }
         // The source stayed intact: withholding is not a silent rewrite.
-        assert_eq!(db.get_memory(&hidden).unwrap().unwrap().content, SEALED_RECALL_BODY);
+        assert_eq!(
+            db.get_memory(&hidden).unwrap().unwrap().content,
+            SEALED_RECALL_BODY
+        );
     }
 }
 
@@ -196,7 +210,12 @@ fn seal_invalid_pages_do_not_starve_a_later_public_source() {
     allow_legacy_seal_rows(&db);
     db.with_transaction(|| {
         for number in 1..=PAGE_SIZE + 2 {
-            let id = seed(&db, u32::try_from(number).unwrap(), SEALED_RECALL_BODY, 0.99);
+            let id = seed(
+                &db,
+                u32::try_from(number).unwrap(),
+                SEALED_RECALL_BODY,
+                0.99,
+            );
             seed_revealed_seal(&db, &id);
         }
         db.execute_raw("UPDATE memory_seals SET reveal_verified = 0")?;
@@ -207,20 +226,33 @@ fn seal_invalid_pages_do_not_starve_a_later_public_source() {
     let result = scan(&db, &seal_queries()[0], 1024, 1);
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0].memory_id, format!("mem_{:026}", 9999));
-    assert!(result.degraded.iter().any(|d| d.message.contains("malformed=258")));
-    assert!(!result.degraded.iter().any(|d| d.code == "recall_scan_incomplete"));
+    assert!(
+        result
+            .degraded
+            .iter()
+            .any(|d| d.message.contains("malformed=258"))
+    );
+    assert!(
+        !result
+            .degraded
+            .iter()
+            .any(|d| d.code == "recall_scan_incomplete")
+    );
 }
 
 #[test]
 fn seal_missing_authority_column_cannot_return_a_partial_report() {
     let db = fixture();
     seed(&db, 1, PUBLIC_RECALL_BODY, 0.9);
-    db.execute_raw("ALTER TABLE memory_seals RENAME COLUMN reveal_verified TO unavailable_verification")
-        .unwrap();
+    db.execute_raw(
+        "ALTER TABLE memory_seals RENAME COLUMN reveal_verified TO unavailable_verification",
+    )
+    .unwrap();
     let error = super::super::run_recall(&db, WORKSPACE, &seal_queries()[0]).unwrap_err();
     assert!(error.to_string().contains("no partial result"));
     assert!(!error.to_string().contains(PUBLIC_RECALL_BODY));
-    db.begin_read_snapshot().expect("owned recall snapshot released on failure");
+    db.begin_read_snapshot()
+        .expect("owned recall snapshot released on failure");
     db.rollback_read_snapshot().unwrap();
 }
 
@@ -230,24 +262,29 @@ fn seal_authority_and_bodies_stay_in_the_same_read_only_snapshot() {
     let path = root.path().join("recall-seals.db");
     let writer = DbConnection::open_file(&path).unwrap();
     writer.migrate().unwrap();
-    writer.insert_workspace(
-        WORKSPACE,
-        &CreateWorkspaceInput {
-            path: root.path().to_string_lossy().into_owned(),
-            name: None,
-        },
-    ).unwrap();
+    writer
+        .insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: root.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
     let id = seed(&writer, 1, SEALED_RECALL_BODY, 0.9);
     allow_legacy_seal_rows(&writer);
     seed_revealed_seal(&writer, &id);
     let reader = DbConnection::open_file_read_only(&path).unwrap();
     let query = &seal_queries()[0];
     let at = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-        .unwrap().with_timezone(&Utc);
+        .unwrap()
+        .with_timezone(&Utc);
     let snapshot = super::super::RecallReadSnapshot::begin_db(&reader).unwrap();
     let before = super::super::run_recall_in_snapshot(&reader, WORKSPACE, query, at).unwrap();
     assert_eq!(before.items.len(), 1);
-    writer.execute_raw("UPDATE memory_seals SET reveal_verified = 0").unwrap();
+    writer
+        .execute_raw("UPDATE memory_seals SET reveal_verified = 0")
+        .unwrap();
     let pinned = super::super::run_recall_in_snapshot(&reader, WORKSPACE, query, at).unwrap();
     assert_eq!(pinned.items, before.items);
     snapshot.finish_db().unwrap();
@@ -255,7 +292,11 @@ fn seal_authority_and_bodies_stay_in_the_same_read_only_snapshot() {
     let audits = writer.count_table_rows("audit_log").unwrap();
     let next = super::super::run_recall(&reader, WORKSPACE, query).unwrap();
     assert!(next.items.is_empty());
-    assert!(next.degraded.iter().any(|d| d.message.contains("malformed=1")));
+    assert!(
+        next.degraded
+            .iter()
+            .any(|d| d.message.contains("malformed=1"))
+    );
     assert_eq!(writer.get_memory(&id).unwrap(), body);
     assert_eq!(writer.count_table_rows("audit_log").unwrap(), audits);
 }
@@ -265,13 +306,17 @@ fn seal_absent_join_and_incomplete_projection_are_distinct() {
     let db = fixture();
     let id = seed(&db, 1, PUBLIC_RECALL_BODY, 0.9);
     let at = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-        .unwrap().with_timezone(&Utc);
+        .unwrap()
+        .with_timezone(&Utc);
     let mut cells = vec![Value::Null; 25];
     cells[0] = Value::Text(id.clone());
     cells[1] = Value::Text(WORKSPACE.to_owned());
     cells[2] = Value::Text(BASE.to_owned());
     cells[3] = Value::Text(BASE.to_owned());
-    let select = (1..=25).map(|n| format!("?{n}")).collect::<Vec<_>>().join(", ");
+    let select = (1..=25)
+        .map(|n| format!("?{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let query = format!("SELECT {select}");
     let admit = |cells: &[Value]| {
         let rows = db.query(&query, cells).unwrap();
@@ -279,7 +324,11 @@ fn seal_absent_join_and_incomplete_projection_are_distinct() {
     };
     assert_eq!(admit(&cells), None, "all five absent seal cells");
     cells[22] = Value::Text(seal_commitment());
-    assert_eq!(admit(&cells), Some("malformed"), "an inconsistent absent join");
+    assert_eq!(
+        admit(&cells),
+        Some("malformed"),
+        "an inconsistent absent join"
+    );
     cells[8] = Value::Text("not-the-source-memory".to_owned());
     cells[9] = Value::Text(BASE.to_owned());
     cells[23] = Value::Text(BASE.to_owned());
@@ -287,7 +336,10 @@ fn seal_absent_join_and_incomplete_projection_are_distinct() {
     assert_eq!(admit(&cells), Some("malformed"), "wrong seal owner");
     cells[8] = Value::Text(id.clone());
     assert_eq!(admit(&cells), None, "complete verified seal");
-    let short = (1..=22).map(|n| format!("?{n}")).collect::<Vec<_>>().join(", ");
+    let short = (1..=22)
+        .map(|n| format!("?{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows = db.query(&format!("SELECT {short}"), &cells[..22]).unwrap();
     assert_eq!(
         super::super::admission::denial(&rows[0], &id, WORKSPACE, at),

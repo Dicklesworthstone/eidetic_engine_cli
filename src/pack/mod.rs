@@ -30,6 +30,10 @@ pub mod budget_classifier;
 #[path = "native_evidence_guard_tests.rs"]
 mod native_evidence_guard_tests;
 
+#[cfg(test)]
+#[path = "facility_cache_budget_tests.rs"]
+mod facility_cache_budget_tests;
+
 pub const SUBSYSTEM: &str = "pack";
 pub const PACK_COMMAND: &str = "pack";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
@@ -8125,38 +8129,91 @@ impl PartialOrd for FacilityQueueEntry {
     }
 }
 
+// Bound the optional pairwise matrix, not the caller's candidate pool. Large
+// pools retain the exact same objective instead of allocating O(n^2) floats or
+// dropping candidates. The fallback owns a linear-size signature snapshot:
+// selection takes candidates out of the universe while coverage still needs
+// their original signatures. This is a matrix-payload limit, not an RSS limit.
+const FACILITY_SIMILARITY_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 struct FacilitySimilarityCache {
     width: usize,
     values: Vec<f32>,
+    fallback_signatures: Vec<CandidateSignature>,
 }
 
 impl FacilitySimilarityCache {
     fn new(universe: &[FacilityCandidateProfile]) -> Self {
+        Self::with_byte_limit(universe, FACILITY_SIMILARITY_CACHE_MAX_BYTES)
+    }
+
+    fn dense_cell_count(width: usize, max_bytes: usize) -> Option<usize> {
+        let cells = width.checked_mul(width)?;
+        let bytes = cells.checked_mul(std::mem::size_of::<f32>())?;
+        (bytes <= max_bytes).then_some(cells)
+    }
+
+    fn with_byte_limit(universe: &[FacilityCandidateProfile], max_bytes: usize) -> Self {
         let width = universe.len();
-        let mut values = vec![0.0_f32; width.saturating_mul(width)];
-        for left_index in 0..width {
-            values[left_index * width + left_index] = 1.0;
-            for right_index in (left_index + 1)..width {
-                let similarity = facility_signature_similarity(
-                    &universe[left_index].signature,
-                    &universe[right_index].signature,
-                );
-                values[left_index * width + right_index] = similarity;
-                values[right_index * width + left_index] = similarity;
+        let mut values = Vec::new();
+        if let Some(cells) = Self::dense_cell_count(width, max_bytes)
+            && values.try_reserve_exact(cells).is_ok()
+        {
+            values.resize(cells, 0.0_f32);
+            for left_index in 0..width {
+                values[left_index * width + left_index] = 1.0;
+                for right_index in (left_index + 1)..width {
+                    let similarity = facility_signature_similarity(
+                        &universe[left_index].signature,
+                        &universe[right_index].signature,
+                    );
+                    values[left_index * width + right_index] = similarity;
+                    values[right_index * width + left_index] = similarity;
+                }
             }
+            return Self {
+                width,
+                values,
+                fallback_signatures: Vec::new(),
+            };
         }
-        Self { width, values }
+
+        // Matrix allocation is optional. Both a budget miss and a failed
+        // reservation use the exact comparator; neither changes admission,
+        // relevance, diversity, tie-breaking, or summation order.
+        Self {
+            width,
+            values,
+            fallback_signatures: universe
+                .iter()
+                .map(|profile| profile.signature.clone())
+                .collect(),
+        }
     }
 
     fn similarity(&self, universe_index: usize, selected_index: usize) -> f32 {
-        let Some(offset) = universe_index
-            .checked_mul(self.width)
-            .and_then(|base| base.checked_add(selected_index))
-        else {
+        // Check both coordinates before flattening: an out-of-range column
+        // otherwise aliases a valid cell in the next row of a dense matrix.
+        if universe_index >= self.width || selected_index >= self.width {
             return 0.0;
-        };
-        self.values.get(offset).copied().unwrap_or(0.0)
+        }
+        if !self.values.is_empty() {
+            // Construction checked width * width before allocating the matrix.
+            return self.values[universe_index * self.width + selected_index];
+        }
+        if universe_index == selected_index {
+            return 1.0;
+        }
+
+        // Match the dense constructor's operand order, including for callers
+        // that walk a transposed row. This preserves the original f32 bits.
+        let left_index = universe_index.min(selected_index);
+        let right_index = universe_index.max(selected_index);
+        facility_signature_similarity(
+            &self.fallback_signatures[left_index],
+            &self.fallback_signatures[right_index],
+        )
     }
 }
 

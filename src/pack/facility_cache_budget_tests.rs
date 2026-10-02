@@ -21,13 +21,37 @@ fn candidate(number: u128, content: &str, section: PackSection) -> PackCandidate
 
 fn profiles() -> Vec<FacilityCandidateProfile> {
     let mut result: Vec<_> = [
-        (1, "bounded worker retries with backoff", PackSection::ProceduralRules),
-        (2, "worker retries after transient failures", PackSection::Failures),
-        (3, "bounded worker retries with backoff", PackSection::Evidence),
-        (4, "preserve a durable transaction journal", PackSection::Decisions),
+        (
+            1,
+            "bounded worker retries with backoff",
+            PackSection::ProceduralRules,
+        ),
+        (
+            2,
+            "worker retries after transient failures",
+            PackSection::Failures,
+        ),
+        (
+            3,
+            "bounded worker retries with backoff",
+            PackSection::Evidence,
+        ),
+        (
+            4,
+            "preserve a durable transaction journal",
+            PackSection::Decisions,
+        ),
         (5, "record the incident identifier", PackSection::Artifacts),
-        (6, "the transaction journal is durable", PackSection::Evidence),
-        (1, "same identity from another retrieval path", PackSection::ProceduralRules),
+        (
+            6,
+            "the transaction journal is durable",
+            PackSection::Evidence,
+        ),
+        (
+            1,
+            "same identity from another retrieval path",
+            PackSection::ProceduralRules,
+        ),
     ]
     .into_iter()
     .map(|(number, content, section)| {
@@ -90,12 +114,25 @@ fn checked_matrix_sizing_includes_bytes_and_accepts_exact_boundary() {
     assert_eq!(FacilitySimilarityCache::dense_cell_count(0, 0), Some(0));
     assert_eq!(FacilitySimilarityCache::dense_cell_count(1, 3), None);
     assert_eq!(FacilitySimilarityCache::dense_cell_count(1, 4), Some(1));
-    assert_eq!(FacilitySimilarityCache::dense_cell_count(2_048, limit), Some(4_194_304));
-    assert_eq!(FacilitySimilarityCache::dense_cell_count(2_049, limit), None);
-    assert_eq!(FacilitySimilarityCache::dense_cell_count(usize::MAX, usize::MAX), None);
+    assert_eq!(
+        FacilitySimilarityCache::dense_cell_count(2_048, limit),
+        Some(4_194_304)
+    );
+    assert_eq!(
+        FacilitySimilarityCache::dense_cell_count(2_049, limit),
+        None
+    );
+    assert_eq!(
+        FacilitySimilarityCache::dense_cell_count(usize::MAX, usize::MAX),
+        None
+    );
     // The square fits in usize, but converting its cells to bytes does not.
     let byte_overflow_width = 1_usize << ((usize::BITS - 2) / 2);
-    assert!(byte_overflow_width.checked_mul(byte_overflow_width).is_some());
+    assert!(
+        byte_overflow_width
+            .checked_mul(byte_overflow_width)
+            .is_some()
+    );
     assert_eq!(
         FacilitySimilarityCache::dense_cell_count(byte_overflow_width, usize::MAX),
         None
@@ -210,12 +247,24 @@ fn assert_selection_queue_parity(lod_budget_shares: Option<PackLodBudgetShares>)
     let mut selected_count = 0;
     loop {
         let dense_pick = dense_queue.select(
-            &universe, &dense_coverages, &dense, used_tokens, budget,
-            &quotas, &section_usage, &lod_usage,
+            &universe,
+            &dense_coverages,
+            &dense,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
         );
         let fallback_pick = fallback_queue.select(
-            &universe, &fallback_coverages, &fallback, used_tokens, budget,
-            &quotas, &section_usage, &lod_usage,
+            &universe,
+            &fallback_coverages,
+            &fallback,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
         );
         assert_eq!(
             dense_pick.map(|(index, gain)| (index, gain.to_bits())),
@@ -230,7 +279,12 @@ fn assert_selection_queue_parity(lod_budget_shares: Option<PackLodBudgetShares>)
         }
         let source = universe[index].candidate.take().unwrap();
         let plan = pack_lod_candidate_plan(
-            &source, used_tokens, budget, &quotas, &section_usage, &lod_usage,
+            &source,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
         )
         .unwrap();
         used_tokens += plan.candidate.estimated_tokens;
@@ -248,7 +302,10 @@ fn assert_selection_queue_parity(lod_budget_shares: Option<PackLodBudgetShares>)
         selected_count += 1;
         assert!(selected_count <= universe.len());
     }
-    assert!(selected_count > 1, "fixture must exercise multiple selection rounds");
+    assert!(
+        selected_count > 1,
+        "fixture must exercise multiple selection rounds"
+    );
 }
 
 #[test]
