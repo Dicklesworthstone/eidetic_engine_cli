@@ -25,7 +25,7 @@ use serde::Deserialize;
 use sqlmodel_core::{Row, Value};
 
 use crate::db::{CreateGraphSnapshotInput, DbConnection, GraphSnapshotType};
-use crate::models::MemoryId;
+use crate::models::{EvidenceId, MemoryId, RuleId};
 
 /// Degraded code when the affinity snapshot is absent (cold start).
 pub const RETRIEVAL_AFFINITY_COLD_CODE: &str = "retrieval_affinity_cold";
@@ -355,7 +355,17 @@ impl SearchRun {
             .get(3)
             .and_then(Value::as_str)
             .ok_or_else(search_observation_error)?;
-        MemoryId::from_str(id).map_err(|_| search_observation_error())?;
+        if MemoryId::from_str(id).is_err() {
+            // `ee search` audits every hit as "memory", including admitted
+            // rule and evidence hits. A well-formed rule or evidence ID is a
+            // native target recorded under the wrong type: its rank already
+            // delimited the run above, and it never becomes an edge. Any
+            // other undecodable ID still holds the entire prefix.
+            if RuleId::from_str(id).is_ok() || EvidenceId::from_str(id).is_ok() {
+                return Ok((false, 0));
+            }
+            return Err(search_observation_error());
+        }
         let timestamp = row
             .get(5)
             .and_then(Value::as_str)
@@ -707,6 +717,49 @@ mod tests {
                 .unwrap()
                 .search_rows_consumed,
             0
+        );
+    }
+
+    /// `ee search` audits admitted rule and evidence hits with target type
+    /// "memory". Such rows must delimit the run like native targets instead of
+    /// stalling every later refresh, while an ID of no known kind still fails
+    /// closed and holds the cursor.
+    #[test]
+    fn memory_labelled_rule_and_evidence_hits_delimit_the_run_without_stalling() {
+        let (_temp, connection, workspace) = seeded_connection();
+        let first = stream_id(1);
+        let second = stream_id(2);
+        let rule = RuleId::from_uuid(uuid::Uuid::from_u128(11)).to_string();
+        let evidence = EvidenceId::from_uuid(uuid::Uuid::from_u128(12)).to_string();
+        connection
+            .with_transaction(|| {
+                stream_hit(&connection, &workspace, "memory", &rule, "mislabelled", 1)?;
+                stream_hit(&connection, &workspace, "memory", &first, "mislabelled", 2)?;
+                stream_hit(&connection, &workspace, "memory", &evidence, "mislabelled", 3)?;
+                stream_hit(&connection, &workspace, "memory", &second, "mislabelled", 4)
+            })
+            .expect("search-shaped observations");
+        let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)
+            .expect("mislabelled native hits must not stall the refresh");
+        assert_eq!((report.search_rows_consumed, report.pairs_updated), (2, 1));
+        let edges = connection
+            .list_retrieval_affinity_edges(&workspace)
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!((&edges[0].0, &edges[0].1), (&first, &second));
+        assert!(
+            (edges[0].2 - 1.0 / 3.0).abs() < 1e-9,
+            "native hits keep their original ranks"
+        );
+        assert!(report.search_cursor > 0);
+
+        let (_temp, connection, workspace) = seeded_connection();
+        stream_hit(&connection, &workspace, "memory", &first, "unknown", 1).unwrap();
+        stream_hit(&connection, &workspace, "memory", "not_an_id", "unknown", 2).unwrap();
+        assert!(accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW).is_err());
+        assert_eq!(
+            connection.retrieval_affinity_cursor(&workspace).unwrap(),
+            (0, 0)
         );
     }
 
