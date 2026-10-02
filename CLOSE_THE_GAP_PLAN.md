@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-09-04)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -8,6 +8,22 @@
 > `docs/archive/close_the_gap_2026-05.md`. This file is the in-place Part III
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
+>
+> **2026-10-01 real-data re-baseline (§16, read this first).** The shipped
+> `v0.16.0` now passes the small-store loop end to end: concurrent determinism,
+> complete fresh-store backup, and cited `ask`. On real Claude Code transcripts
+> it fails usefulness and scale:
+> - CASS is refused at its standard install path, and the documented config
+>   opt-in is dead code;
+> - evidence is packed as raw JSONL;
+> - session proposals are template junk;
+> - search and pack take 9–11 s after 4.9k spans;
+> - every write rebuilds the whole index (a regression since 2026-08-06) and
+>   leaves a full retained copy, with a hard failure after 1,000 writes.
+>
+> Main is red on `CI Static`. Children `.41`–`.65` own the fixes, and §16.5
+> defines the outcome metrics (UTR / TTFUC / PAP / FAR / WCS) that gate them.
+> The §8 rows below were revised in place.
 >
 > Companions: `docs/adr/0085-typed-pack-entity-identity.md`,
 > `docs/adr/0086-team-memory-confederation.md`,
@@ -1111,14 +1127,14 @@ candidate before `.2` changes the implementation.
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
 | 3 | Manual memory → DB → search → pack → why | **WORKING (bounded release proof)** | Fresh v0.14.4 isolated serial offline probe returns the exact memory, pack provenance, and persisted ledger through why. Current-source and concurrent acceptance remain `.10`, `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING** | Exact pinned no-mock proof now covers canonical-path import/retry, exact typed search, direct evidence pack persistence, verified replay, typed why, outcome recording, and fail-closed denied evidence; §A records the commits and invocation. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released concurrent lexical-arm divergence has a focused source fix/proof in `.23`. Whole publication/model concurrency and fresh-workspace fallback remain `.2`, `.3`, `.10`, `bd-fresh-workspace-hash-fallback-kvltg`. |
-| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **UNPROVEN** | Released-binary semantics diverged. ADR 0087 is a `proposed` contract, not implementation; `.1`, `.10`, `.2`, `.3` own closure. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL (plumbing WORKING; usefulness WRONG_APPROACH on real transcripts)** | 2026-10-01 (§16): the pinned fixture loop in §A still holds. On real Claude Code transcripts, though, `cass` at its standard path is refused by default and the documented `[cass].binary` opt-in is dead code (R1). Spans are raw JSONL envelopes, about 35% scaffolding (R2). Import takes about 18 s per session (R11). Search and pack slow to 9–11 s after 4.9k spans (R4). Owners: `.43`, `.44`, `.45`, `.47`, `.48`, `.64`. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING on small stores; REGRESSED at realistic evidence scale** | 2026-10-01: public v0.16.0 reports `rrf_fused`/`neural_local`, and 8/8 concurrent searches agree. With 4.9k CASS spans, search takes 11.1 s because of triple full admission scans plus N+1 hydration (§16 R4). Owners: `.64`, `.47`; whole-process concurrency still `.2`, `.3`. |
+| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **WORKING (bounded, released binary)** | 2026-10-01: v0.16.0 serial packs are byte-stable; 6/6 concurrent packs equal the serial hash; packs and searches racing a writer report one coherent stale-flagged snapshot (§16.2). The 100-run, linearizability and crash matrix remain `.3`. ADR 0087 identity slices remain `bd-pack-identity-*`. |
 | 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
-| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **PARTIAL / UNPROVEN** | Rules are stored, indexed, and can hydrate content through a linked source `MemoryId`; native rule identity and the exact later-pack E2E remain open under `bd-3h6bz`, ADR 0085, and `.17`. |
+| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WRONG_APPROACH on real transcripts** | 2026-10-01 (§16 R3, R7): `review session --propose` on a real session gave 6/10 raw-envelope template candidates at confidence 0.85. The session-arc path read "0 failed" as a failure. Sourceless native rules are searchable and cited by `ask` but cannot be packed (`ee.pack.v3` slice c unlanded). Owners: `.46`, `.59`, `.60`, `bd-vp087`, `bd-2vq2z.9`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
-| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, non-mutating auth-key dry-run, task-episode recovery, and aggregate CASS recovery exist. Other durable tables and full evolved-store/current-candidate proof remain open. `.13`, `.14`. |
+| 11 | Complete durable backup, verify, migration, restore, and rebuild | **WORKING on a fresh store; evolved-store proof open** | 2026-10-01: v0.16.0 `recoveryInventory` reports complete schema and snapshot coverage with 0 uncovered required tables; verify passes; side-path restore selects identical pack items (§16.2). `.13` is proof-owed (commented). Evolved, CASS-populated stores remain `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
 | 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
 | 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN as a complete set** | The focused CASS loop now passes its retained pinned-source test (§A); this does not prove all eight. `bd-2mpct`, `bd-2mpct.1`, and `.17` own exact complete coverage. |
@@ -1126,11 +1142,11 @@ candidate before `.2` changes the implementation.
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The 2026-09-17 amendment, decided on delegated authority, resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
-| 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Historical focused checks are retained; the 2026-09-04 current-source attempt is infrastructure-blocked. The complete candidate manifest is absent and all hosted workflows remain manually disabled. `.5`, `.17`, `.18`, `.19`. |
-| 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README now labels the old baseline historical/advisory. Current-candidate raw samples, whole-command/sequence SLOs, correctness and resource evidence remain `.6`; inner packing timers are insufficient. |
+| 19 | Canonical readiness verification and green CI | **REGRESSED (main red) / UNPROVEN** | 2026-10-01: `CI Static` has been red on main since 2026-09-30 on four steps, including an 11-test file declared by no module whose companion source exists only in a delivery-workflow patch (§16 R6, `.41`). There is no test-id manifest, the proof capsule never populates, and 44 of 80 per-feature workflows publish to main (§16 R8; `.5`, `.58`, `bd-fy92m`). Full `CI` has been disabled since 2026-08-27. |
+| 20 | Reproducible performance and usable first-agent latency | **FAILING at realistic scale** | 2026-10-01: about 1.1 s of model cold start in every process (R14, `.61`). `remember` is O(corpus) because incremental intake became test-only on 2026-08-06 (R13, `.57`). Search, pack and status take 11 s / 8.7 s / 3 s after 4.9k spans, and the warm daemon does not help (R4, `.64`, `.47`). README rows remain historical; `.6` owns evidence. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
-| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **PARTIAL / UNPROVEN as a readiness gate** | Current shell script has exact v2 assertions; released-binary run is 6/7 because of the test-root symlink alias, and the physical-path why control passes. Default manual loop also passes separately. Full candidate/automatic-freshness proof remains `.5`, `.17`, `bd-2mpct`. |
-| 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL** | Five-command core exists, while README promotes broader overlapping flows and latency remains unproven. `.6`, `.9`. |
+| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **WORKING (released binary, serial)** | 2026-10-01: public v0.16.0 init → remember → search → pack → why → replay → outcome → ask passes black-box in an isolated store (§16.2). Readiness-gate wiring remains `.5`/`.17`. |
+| 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL (fails once CASS history is imported)** | 2026-10-01: TTFUC is about 1.3 s on 10 memories but 8.7 s once 4.9k CASS spans are imported. The outcome metrics (UTR/TTFUC/PAP/FAR/WCS) and the hook budget are now defined in §16.5 and gated by `.50`. |
 | 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
 
 ---
@@ -1191,6 +1207,27 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.35` | P1 | Bridge advice still targets Part II and recommends the already-active Part III | Active-phase advice distinguishes source coverage, behavioral proof, and tracker activity; unknown remains explicit. |
 | `bd-reality-core-convergence-1azkt.36` | P1 | Metadata-complete input and missing blocking edges can imply false completion | Independent positive/negative graph/evidence fixtures plus real shell advisory tests, integrated through `.17`. |
 | `bd-reality-core-convergence-1azkt.37` | P1 | Downstream tests omit changed sibling unit tests and dev/bench feature targets | Execute exact pinned upstream API negatives and the supported matrix; source identity from `.18`, acceptance consumed by `.19`. |
+| `bd-reality-core-convergence-1azkt.41` | P0 | Main red on 4 `CI Static` steps; unlanded delivery-patch test file | Green main at one SHA, plus a guard for the class |
+| `bd-reality-core-convergence-1azkt.42` | P0 | Every write keeps a full index copy; hard failure after 1,000 | Bounded, lease-safe retained generations; audited vacuum; cap recovery |
+| `bd-reality-core-convergence-1azkt.43` | P0 | No real-shape oracle; every fixture is clean | Schema-faithful CASS corpus, scale generator, split judgments |
+| `bd-reality-core-convergence-1azkt.44` | P1 | cass refused at its standard path; `[cass].binary` dead code | Hash-pinned explicit trust wired everywhere; doctor check |
+| `bd-reality-core-convergence-1azkt.45` | P0 | Evidence is raw JSONL envelopes | Typed transcript projection; turn-level units; UTR ≥ 0.95 |
+| `bd-reality-core-convergence-1azkt.46` | P0 | Session proposals are junk | Projected, correctly detected, corroboration-weighted, abstaining proposals |
+| `bd-reality-core-convergence-1azkt.47` | P0 | Evidence-scale latency | Materialized verdicts (I-1), scale invariance (I-2), SLOs |
+| `bd-reality-core-convergence-1azkt.48` | P1 | Import about 18 s per session | Profiled, batched, ≥ 5× throughput |
+| `bd-reality-core-convergence-1azkt.49` | P1 | Over-broad instruction-risk quarantine | Contextual, measured screening (FPR ≤ 5%, FNR 0%) |
+| `bd-reality-core-convergence-1azkt.50` | P0 | No real-data release gate | Real-corpus gate in ENFORCE mode; one Real-Data Suite stage |
+| `bd-reality-core-convergence-1azkt.51` | P1 | README and AGENTS claims vs real behavior | Docs truth after the fixes |
+| `bd-reality-core-convergence-1azkt.52`–`.56` | P2/P3 | why-not typed ids; eval outside repo; hits-profile code; leaked model staging; pack timing noise | Small truth fixes |
+| `bd-reality-core-convergence-1azkt.57` | P0 | Incremental intake regressed to full rebuild per write | LSM-style delta generations inside safe publication; WCS ≤ 0.15 |
+| `bd-reality-core-convergence-1azkt.58` | P0 | Unreachable tests and publishing workflows | Inventory drift check in CI Static; shard runners; recorded retirement decision |
+| `bd-reality-core-convergence-1azkt.59` | P1 | Packs carry fragments, not incidents | Derived incident cards as typed evidence entities (ADR amendment) |
+| `bd-reality-core-convergence-1azkt.60` | P1 | Error-fingerprint store never fed by CASS | Failure arcs → fingerprints + repair links |
+| `bd-reality-core-convergence-1azkt.61` | P1 | About 1.1 s model cold start per process | mmap plus compiled tokenizer cache upstream; ≤ 0.2 s |
+| `bd-reality-core-convergence-1azkt.62` | P1 | Swarm never runs ee on its own history | Redacted own-corpus dogfood reports |
+| `bd-reality-core-convergence-1azkt.63` | P0 | Gate would be built last | Report-mode probe first; v0.16.0 baselines |
+| `bd-reality-core-convergence-1azkt.64` | P0 | Triple admission scans plus N+1 | No-contract-change read-path hotfix |
+| `bd-reality-core-convergence-1azkt.65` | P1 | 0.16.0 users carry R1/R4/R5 | 0.16.1 candidate; publication only with explicit human approval |
 
 **2026-08-24 coverage result (historical).** At that audit's start, closing all 122 nonclosed records would
 still have left determinism attribution, score truth, complete recovery,
@@ -1438,6 +1475,10 @@ The bridge may archive only when all of the following are simultaneously true:
 - CASS evidence follows ADR 0085 live admission and privacy policy end to end.
 - The documented primary first-agent journey works within its declared latency
   posture without requiring a daemon.
+- The real-corpus gate (`.50`) runs in ENFORCE mode on the candidate and is
+  green for UTR, TTFUC, PAP, FAR, WCS, bounded retention and the hook budget on
+  the real-shape oracle corpus (`.43`). Clean-fixture proofs alone are
+  insufficient (2026-10-01).
 - One immutable current SHA is green for format, clippy `-D warnings`, complete
   required tests, exact North Stars, representative E2Es, dependency audit,
   and the canonical readiness manifest.
@@ -1452,3 +1493,401 @@ The bridge may archive only when all of the following are simultaneously true:
 Bead-count percentage, file presence, command registration, an abstention
 sentinel, a scheduled CI success with substantive jobs skipped, or a remote
 run that timed out/OOMed is not sufficient closure evidence.
+
+---
+
+## 16. 2026-10-01 reality check: real-data re-baseline
+
+**Verdict.** On the small, clean data its own tests use, `ee` now works. Use
+the shipped `v0.16.0` binary on real Claude Code transcripts, though, and two
+of its five jobs break down. Ingest (CASS) and Learn produce mostly noise and
+slow down sharply with corpus size. Retrieve and Pack slow down too, and Pack
+fills the token budget with JSON scaffolding. Main is red again, and no single
+gate can say otherwise.
+
+That is a different failure shape from every earlier pass. The 2026-09-04 gaps
+in concurrency determinism, backup coverage and `ask` usefulness are closed in
+the shipped binary. The failures the swarm cannot see are the ones that only
+show up on real-shaped data at realistic scale. Every committed acceptance
+fixture is clean, synthetic, and small.
+
+### 16.1 Evidence authority
+
+| Item | Value |
+| --- | --- |
+| Source HEAD | `552f7ba4f` (2026-10-01 20:38Z), package `0.16.0`, 243 commits after `v0.16.0` |
+| Shipped binary | public `v0.16.0` `ee-aarch64-apple-darwin.tar.xz`, SHA-256 verified against its published `.sha256`; `ee version --json` attests clean `b445401ac`, release profile, `aarch64-apple-darwin` |
+| Probe isolation | Private `XDG_*` roots under the gitignored `.ntm/reality-check-2026-10-01/`. The pinned Model2Vec model came from the local cache, with `EE_EMBED_DOWNLOAD=off`. The real CASS corpus was used through an explicit `EE_CASS_BINARY` opt-in. |
+| Hosted CI | `CI`, `Release` and `macOS EE Artifact` have been `disabled_manually` since 2026-08-27. `CI Static` now also runs `clippy --all-targets -D warnings`, `cargo xwin check` for `x86_64-pc-windows-msvc`, and cargo-deny. It was last green on `b979c1777` (2026-09-29) and has been red from 2026-09-30 through `552f7ba4f`. |
+| Distribution | GitHub `v0.16.0`: 6 native targets plus checksums, installers, and `release-probe-aarch64-apple-darwin.json` (12 checks, `verdict: pass`). crates.io `eidetic-engine` 0.16.0. Homebrew formula 0.16.0, whose SHA matches the release asset. Unsigned: no Sigstore, SLSA, or `ee-v0.16.0-manifest.json` asset, although AGENTS.md lists the manifest as expected. |
+| Tracker | 4,767 records: 268 open, 46 `blocked`, 2 in progress, 3 deferred. 261 records closed since 2026-09-17. Bridge epic children: 15 closed, 25 open, 2 blocked. |
+| Velocity | 2,754 commits on main since 2026-09-04. Since 2026-09-17, 1,385 were not tracker syncs, and their top scopes are `ask` 79, `backup` 78, `search` 70, `e2e` 48, `pack` 41, `doctor` 41. |
+
+Static gates at HEAD all pass locally:
+- vision coverage: 142 surfaces, 135 behaviorally exercised, 0% gap
+- closure lint
+- contract-drift radar: 601 fixture codes, 0 violations
+- bridge staleness, which now names Part III correctly
+
+They still prove presence, not behavior.
+
+### 16.2 What works in the shipped binary
+
+Black-box on `v0.16.0`, each with retained JSON under `probe/out/`:
+
+1. **Walking skeleton.** `init → remember ×8 → search → pack → why → pack
+   replay → outcome → ask` works. Provenance, trust, and selection reasons are
+   present, and `why` resolves the persisted pack selection.
+2. **Determinism and concurrency (closes the `0.14.x` failure).**
+   - 8 concurrent identical searches: one result order and `rrf_fused` throughout.
+   - 6 concurrent read-only packs: one hash, equal to the serial hash.
+   - 6 packs and 4 searches racing one `remember`: all report one coherent
+     snapshot with a truthful `search_index_stale`.
+   - Serial reruns are byte-stable.
+3. **Backup and recovery.** `recoveryInventory` reports
+   `schemaCoverageComplete=true`, `uncoveredRequiredTableCount=0`. Verify
+   passes, side-path restore completes (6.6 s), and the restored store selects
+   the identical pack items. The component digests differ only in request,
+   rendered-text and degraded, which are legitimate path and index-freshness
+   differences.
+4. **`ask`.**
+   - A direct hit is answered with the exact memory span cited (confidence 0.68).
+   - An unrelated question abstains (`no_confident_answer`).
+   - A native rule is cited by `RuleId`.
+5. **Honest posture.**
+   - A distractor query is flagged `weak_query_recall`.
+   - `status`, `index status` and `doctor` agree.
+   - A stale model receipt is named, with a working repair (`ee model fetch`
+     re-minted it, and `status` dropped from 0.49 s to 0.17 s).
+6. **Distribution.** GitHub, crates.io and Homebrew agree at 0.16.0, and the
+   binary self-attests its commit.
+
+### 16.3 What does not work: new failures found on real data
+
+| # | Finding (measured) | Status | Owner |
+| --- | --- | --- | --- |
+| R1 | **CASS is refused by default.** `cass` at `~/.local/bin/cass` (its standard install path) is outside ee's auto-trust allowlist, which holds only `/usr/local/bin`, `/usr/bin` and `/opt/homebrew/bin` (`src/cass/client.rs:233`). README Quick Start step 2 therefore fails with `cass_unavailable`. README never mentions `EE_CASS_BINARY`, which works. The documented `[cass].binary` config opt-in is dead code: config parses it (`src/config/merge.rs:52`), but `ee import cass`, `status` and output discovery all call `discover_import_binary(None)` (`src/cli/mod.rs:24270`, `src/core/status.rs:1386`, `src/output/mod.rs:10038`). The security rationale (EE-3qgw) is sound; the onboarding is not. | NOT WORKING (first run) | NO_BEAD at audit → `.44` |
+| R2 | **Evidence is raw transcript JSONL.** Every Claude Code span is the verbatim `cass view` line, envelope included: `{"parentUuid":…,"isSidechain":…,"promptId":…,"message":{…}}`. This is by design (`src/cass/ingestion.rs:5-7`). Search shows it, and a 3,000-token pack spent 2,949 tokens on six such lines, about 35% of them scaffolding characters. A role and text extractor exists (`curate_session_arc_text.rs:18`), but only session-arc curation uses it. | WRONG_APPROACH (usefulness) | NO_BEAD at audit → `.45` (+ `.59` cards) |
+| R3 | **Learn from sessions produces junk.** `ee review session <id> --propose` on a real session returned 10 candidates. Six read "For \`formatting\` work, follow the evidence-backed procedure shown in this session: {\"parentUuid\":…" at confidence 0.85. `review_candidate_content` takes the first 180 characters of two raw excerpts, which is all metadata. `review_candidate_confidence` is `0.45 + 0.08 × span_count` (`src/core/curate.rs:4111-4150`). Its unit test uses the clean excerpt "Run golden tests / Keep JSON stable". The other four candidates came from the existing session-arc proposer (`curate_session_arc*.rs`). It projects text, but it read "bridge suite passed … (21 passed, 0 failed …)" as a failure and proposed the generic "use the observed repair for this failure". | WRONG_APPROACH (Learn job) | NO_BEAD at audit → `.46` (quality across both proposers; `bd-2vq2z.9` keeps the linked-pair schema) |
+| R4 | **Retrieval scale cliff.** Importing 3 sessions (4,919 spans: 970 admitted, 3,949 quarantined) took `search` from 1.25 s to **11.1 ± 0.35 s**, `pack` to 8.7 ± 0.7 s and `status` to 3.0 s, all CPU-bound. A warm daemon does not help (pack 9.4 s, search 13.3 s). The cause: each search runs the full evidence admission scan three times (pre-read reconcile, search status, model lifecycle). Each scan reruns classification, hashing, JSON parses and screening on every row, quarantined rows included (`index.rs:8656`, `db/mod.rs:15470-15580`). Evidence hits are then hydrated with two point queries each (`search.rs:13733-13763`). HEAD raised that pool from 10 to 100 (`search.rs:9496`), so unreleased source may be worse. No benchmark seeds evidence spans. README's table (38 ms search on 120k docs) is about 300× off. | REGRESSED at realistic scale | root cause NO_BEAD at audit → `.64` (hotfix slice) + `.47` |
+| R5 | **Retained index generations never reclaimed.** Every publication, including each `remember`, keeps a full index copy (`index.previous.NNN`); the probe store had 12 after 12 writes. `allocate_retained_index_dir` gives up after 1,000 (`index.rs:5540-5556`), after which every publication fails. `ee index vacuum` only previews. Disk use grows as writes × index size. | LATENT HARD FAILURE | `.42` (P0); `.16` now depends on it |
+| R6 | **Main is red now on four `CI Static` steps at `552f7ba4f`.** (a) Module reachability: `src/pack/facility_cache_budget_tests.rs` (11 `#[test]`, added in `fe4c6c7cc`) is declared by no `mod` and cannot compile against HEAD. It calls `with_byte_limit`, `dense_cell_count` and `fallback_signatures`, which exist only inside the `facility-cache-budget-20260930.yml` delivery patch. (b) `cargo fmt --check` fails on 5 files (`ask_candidate_saturation.rs`, `backup_evidence_export.rs`, `backup_evidence_metadata.rs`, `recall_admission.rs`, `pack/binary_validation.rs`). (c) The include!-only format gate fails too. (d) `clippy --all-targets -D warnings` fails on a duplicated `#[test]` at `src/graph/skyline.rs:746` (from `552f7ba4f`). CI Static was last green on `b979c1777` (2026-09-29). | REGRESSED (main) | NO_BEAD at audit → `.41`; class guard `.58`; lane analysis `bd-fy92m` |
+| R7 | **Native rules cannot be packed.** A sourceless `ee rule add` rule is the top search hit and is cited by `ask`, but `pack` drops it (`context_rule_hit_unhydrated`, `context.rs:13588`). ADR 0085 slice c (`ee.pack.v3` typed `RuleId` items) has not landed; `PackEntityRef` is "deliberately not wired" (`src/pack/mod.rs:1200`). `ee why rule_<id>` fails in `v0.16.0` but is fixed on main (`1f7d8df78`). `ee why-not` rejects rule ids at HEAD. | PARTIAL | `bd-vp087` (P1) |
+| R8 | **Verification is fragmented and partly untestable.** There are 80 per-feature workflows. 44 publish to main (`contents: write` or `git push`), and 38 apply patches or assert blob hashes at runtime. Most of their latest runs are red, and the tested tree is often not a main tree. The proof capsule emitter never populates (`manifestHash: None`). There is no list of required test IDs; `verify-budget.toml` lists 119 stages, not tests. | PARTIAL / proof hole | `bd-fy92m` (P0), `.5`, `.19` |
+| R9 | **Pack admits off-topic memories when the budget allows.** "prepare release" packed all 9 memories, including "The office espresso machine needs descaling" (relevance 0.47, floor 0). An unrelated search returned 9/9 hits, correctly flagged `weak`. | PARTIAL | `.11`, `.12` |
+| R10 | **Stack boundary.** Local ACL-push PPR still runs in production through `ee graph suggest-links` (`src/cli/mod.rs:36410`); production pack PPR correctly degrades. FrankenNetworkX 0.3.0 still has no personalization. Local cosine ranks semantic spans in `ask` (`src/core/ask_semantic.rs:262-279`), and causal ancestry uses a local BFS (`src/graph/causal.rs:401`). | PARTIAL | `.4`, `.15` |
+| R11 | **Ingest throughput.** `ee import cass --limit 3` took 54 s, about 18 s per session. README claims 4.1 s p50 for `--limit 50`. | NOT MEETING CLAIM | NO_BEAD at audit → `.48` |
+| R12 | **Small truth defects.** `ee eval list` exits 2 outside the ee repo (`Fixture directory does not exist: tests/fixtures/eval`). `graph_feature_disabled` is still emitted for the `graph.feature.hits_profiles.enabled=false` config case. 414 empty `.potion-multilingual-128M-download-*` staging dirs have leaked into the model root. `pack_assembly_elapsed_over_budget` fires on every pack because model load counts as assembly time. `review_stopword`/kind detection use substring heuristics. The over-broad instruction-risk phrase `curl` (Medium) quarantines any span containing "curl" (`policy/mod.rs:1533-1538`). | MINOR / PARTIAL | NO_BEAD at audit → `.49` (curl), `.52`–`.56` |
+| R13 | **Every write rebuilds the whole index (regression).** Incremental intake shipped in June (`bd-d67os.6`, `.7`, closed 2026-06-18, ADR 0078). On 2026-08-06, `a968f7f44`/`a7b486d63` made the incremental apply paths `#[cfg(test)]` (`src/core/index.rs:3220-3300`) when cancellation-safe staged publication landed. Production now labels single writes `single_document_as_full_rebuild` (`index.rs:3988`). Measured on v0.16.0: `remember` costs 1.7–2.6 s on 10 memories but 6.5–6.8 s on 983 indexed documents, and each write adds a full retained copy (R5). Write cost and disk growth are both O(corpus). Frankensearch supports incremental upsert and soft-delete on both tiers, so this is an ee wiring choice. | REGRESSED (closed bead, lost property) | NO_BEAD at audit → `.57` |
+| R14 | **About 1.1 s Model2Vec cold start in every process.** A JSON trace of one search shows a 1.17 s gap between "model verification receipt accepted" and "Model2Vec model loaded". Every search, pack, ask and remember process pays it (the receipt only skips re-hashing). Harnesses call `ee` many times per session, so this is the floor of every interaction. Static embeddings are a lookup table, so an mmap'd vocabulary plus a pre-compiled tokenizer cache should load in tens of milliseconds. The fix belongs upstream in Frankensearch. | NOT MEETING CLAIM | NO_BEAD at audit → `.61` (upstream) |
+
+Fixed per-command cost is unchanged in kind. `remember` takes 1.7–2.6 s, because it loads the model and publishes a full index generation synchronously. `init` takes 2.1 s, and search/pack about 1.25 s on 10 memories, of which about 1.1 s is model load. This remains `.6`, `.26` and `bd-search-warm-latency-0bh05`.
+
+### 16.4 Answers to the five reality-check questions
+
+1. **Working now:** everything in §16.2. Concurrent determinism, complete
+   small-store recovery, cited `ask`, and coherent posture were all `PARTIAL`
+   or `UNPROVEN` on 2026-09-04.
+2. **Not working:** R1–R14. The decisive ones are R2, R3 and R4. Together they
+   mean a user who follows the README's headline flow ("mines your existing
+   cass corpus") gets a slow store that packs JSON scaffolding and proposes
+   nonsense rules.
+3. **Blocking:**
+   - **No real-shape oracle.** Every acceptance fixture is clean and small, so
+     nothing executes the product on the data it exists for.
+   - **No canonical proof of main.** Full CI has been off for five weeks, and
+     delivery workflows publish trees that differ from what they tested. As a
+     result, main can be red (R6) while 80 workflows run.
+   - **Effort concentrated on hardening already-working paths.** Since 09-17,
+     backup has had 78 commits and ask 79, while first contact with real data
+     was never measured.
+4. **Would closing every open bead close the gap? No.**
+   - R1, R2, R3, R6, R11, R13 (a regression behind closed `bd-d67os.6`/`.7`), R14 and most of R12 had no owner.
+   - R4's root cause and R5's severity were not owned. They are now `.64`/`.47` and `.42`.
+   - §8 row 4 ("CASS … WORKING") and row 9 rest on clean-fixture proofs, so
+     the checklist itself overstated the state.
+5. **Vision goals with no bead:**
+   - Useful CASS mining at realistic scale (README *What You Get*, *CASS
+     Integration*; COMPREHENSIVE_PLAN §15; North Stars 1, 3, 4 and 7, which
+     need imported-session content an agent can read).
+   - Learn that yields reviewable rules from real sessions (Five Core Jobs #4;
+     North Stars 3 and 7).
+   - Interactive latency once CASS history is imported (README *Quick Example*:
+     "fast enough to use before ordinary agent work").
+   - Bounded disk growth under ordinary writes (Product Principles: derived
+     assets are rebuildable and bounded).
+
+### 16.5 Product thesis and outcome metrics
+
+`ee` exists to put the right prior experience in front of an agent, within a
+token budget, quickly enough that the agent asks for it every time. Every Track R
+item is judged by five outcome metrics. Each is measured black-box by the
+real-corpus gate (`.50`) on the real-shape oracle corpus (`.43`), and, when
+opted in, on the developer's own corpus:
+
+| Metric | Definition | v0.16.0 measured | Target |
+| --- | --- | --- | --- |
+| **UTR** useful-token ratio | Pack tokens that are human-meaningful content (not envelope keys, ids or JSON escapes) ÷ pack tokens | about 0.65 on CASS evidence (35% scaffolding) | ≥ 0.95 |
+| **TTFUC** time to first useful context | Wall time for one cold `ee pack` on a store holding the oracle's 5k-span variant | 8.7 s at 4.9k spans | ≤ 2 s cold, ≤ 0.4 s warm |
+| **PAP** proposal acceptance precision | Judged-acceptable `review session --propose` candidates ÷ all candidates | 0/10 on one real session | ≥ 0.7 with recall ≥ 0.7 |
+| **FAR** false-admission rate | Judged distractors admitted into packs ÷ packed items | 1/9 (espresso) on a 10-memory store; uncalibrated | ≤ 0.05 at the calibrated floor |
+| **WCS** write-cost scaling | Slope of log(remember wall) against log(corpus docs) over {1k, 5k, 50k} | O(corpus): 2.0 s → 6.6 s for 10 → 983 docs | slope ≤ 0.15 (near-constant) |
+
+Two invariants follow. They are encoded as tests, so the swarm cannot regress
+them silently:
+- **I-1 (no read-path re-screening).** Interactive read commands never re-run
+  content screening or classification. Admission is decided once per row per
+  policy epoch, at write time.
+- **I-2 (scale invariance).** For every read command, statement count and rows
+  scanned grow at most logarithmically with corpus size. A harness runs each
+  read command at 1k, 5k and 50k documents and fails if the log-log slope of
+  statements executed exceeds 0.2.
+
+### 16.6 Bridge delta: Track S (stability), Track R (real data), Track T (truth)
+
+These are new children of `bd-reality-core-convergence-1azkt`. Existing owners
+keep their scope, and every new P0–P2 child is graph-reachable from `.22`.
+
+**Track S — make main and its proof trustworthy.**
+- **S1 `.41` (P0, R6).** Main green on every `CI Static` step:
+  - land the facility-cache companion source, or allowlist the file with a reason;
+  - fix the formatting drift and the duplicate `#[test]`;
+  - add a guard against test files that depend on unlanded delivery-patch symbols.
+- **S2 `.42` (P0, R5).** Bounded retained generations:
+  - keep the newest K plus every leased generation, garbage-collecting on publish;
+  - audited `index vacuum --apply`;
+  - one-time migration cleanup;
+  - a library-level 1,100-publication test, a 60-write black-box E2E, and a seeded-999 cap-recovery E2E.
+- **S3 `.57` (P0, R13).** Restore incremental intake inside the cancellation-safe
+  publication model. Build the staged generation as the previous generation plus
+  a delta: copy-on-write or hard-linked immutable segment files, Frankensearch
+  `VectorIndex::append`/`soft_delete` and `TantivyIndex::index_document`/
+  `delete_document` on the staged copy, then validate and publish atomically as
+  today. Periodic full rebuild becomes `compact`/`vacuum` maintenance.
+  Acceptance: WCS slope ≤ 0.15. Cancellation leaves no partial active
+  generation (reuse the existing cancellation tests). Each single-write
+  generation's retained delta costs O(delta) bytes, not O(index). Byte-identical
+  search results versus a full rebuild of the same corpus on the oracle.
+
+- **S4 `.58` (P0, R8; needs an orchestrator/human decision).** `.5` already
+  owns the declarative manifest, exact test inventory and shards, and the
+  capsule skeleton. `.58` adds three things:
+  1. A test-file inventory drift check in `CI Static`, so a test file
+     unreachable from any cargo target reds the one hosted gate that executes.
+  2. Per-feature workflows turned into `.5` manifest-shard runners on exact
+     main SHAs, with no runtime patching.
+  3. A recorded orchestrator or human decision on retiring the 44
+     source-publishing workflows; only after that decision are the push steps
+     removed.
+
+  `bd-fy92m` keeps the delivery-lane analysis.
+
+**Track R — the five jobs on real data.**
+- **R-oracle `.43` (P0).** A real-shape corpus. Schema-faithful, authored
+  Claude Code and Codex transcripts with failure→fix arcs, rules, decisions,
+  noise, secrets and injection bait. Plus a scale generator (5k/50k/500k) and
+  judgments (retrieval, proposals, admission). This is the oracle for all of
+  Track R.
+- **R-trust `.44` (P1, R1).** Wire the dead `[cass].binary` override into every
+  discovery site, with hash-pinned explicit trust, a doctor check, a structured
+  `recovery[]` and README coverage. EE-3qgw is preserved.
+- **R-project `.45` (P0, R2).** A typed transcript projection, so search, pack,
+  ask and learn use role, text and tool fields, not envelopes. Also change the
+  *retrieval unit*. One JSONL line (`#L553-553`) is a fragment, so index at
+  turn level (user ask plus assistant answer) with exact line-range
+  provenance and a projected text budget. Tool calls and results contribute only
+  structured metadata (tool name, exit status, shell-parsed redacted command)
+  under the derivation policy in §16.6a.
+- **R-learn `.46` (P0, R3).** Proposal quality across both existing proposers.
+  - The topic-template proposer must stop emitting raw excerpts.
+  - The session-arc proposer must stop reading "0 failed" as a failure and must state the actual repair.
+  - Confidence comes from corroboration, with abstention and dedup.
+  - There is one arc detector, improved in place in `curate_session_arc_sequence.rs`.
+  - `bd-2vq2z.9` keeps the linked-pair schema.
+- **R-cards `.59` (P1).** Derived **incident cards**: symptom, failed attempt, fix, verifying command, with exact spans, in about 60–120 tokens. They are packable as a typed evidence entity, need an ADR amendment, and depend on `bd-vp087`'s typed pack identity. They serve North Stars 1, 3 and 4 directly.
+- **R-fingerprint `.60` (P1).** Feed CASS failure arcs into the existing
+  error-fingerprint store (`src/core/error_recall.rs` canonicalizers,
+  `src/core/error_diagnosis.rs::record_error_fingerprint`, V072
+  `error_fingerprints`) with repair links to the arc's fix spans or incident
+  card. Today the store is populated only by a manual
+  `ee diagnose-error --record`. After this, `ee diagnose-error "<log>"` and
+  `ee pack --error-log "<log>"` recall how the same `(tool, canonical_code)`
+  failure was fixed in prior sessions, with exact provenance. North Star 3
+  becomes automatic: the repeated CI failure is recognised by its canonical
+  code, not by fuzzy text.
+- **R-scale hotfix `.64` (P0).** One admission scan per command, cheap rejects first, batch hydration. No contract change, so it is eligible for 0.16.1.
+- **R-scale `.47` (P0, R4; extends `.64`).** Materialized admission verdicts
+  (I-1) via a migration that preserves the admitted set exactly, a policy epoch, evidence benchmarks, and the I-2
+  harness.
+- **R-coldstart `.61` (P1, R14, upstream).** Frankensearch Model2Vec cold load ≤
+  150 ms on an M-class Mac: mmap the safetensors embedding table, cache a
+  compiled tokenizer artifact beside the verified receipt, and keep verification
+  semantics intact. Consume it in ee through the sibling-crate release flow.
+  Acceptance: a `remember`/`search` cold-process floor (model portion) ≤ 0.2 s,
+  measured black-box.
+- **R-ingest `.48` (P1, R11).** Profile first, then batch, aiming for ≥ 5×
+  throughput. Re-measure README import claims.
+- **R-admit `.49` (P1).** Contextual instruction-risk patterns, measured
+  false-positive ≤ 5% and false-negative 0% on the oracle's bait set.
+- **Probe scaffold `.63` (P0).** The gate's script in REPORT mode, built first so every Track R bead shows its before/after numbers. It records the v0.16.0 baselines.
+- **R-gate `.50` (P0).** A black-box real-corpus gate (trust → import → index →
+  retrieve → pack → learn → recover → retention) that computes UTR, TTFUC, PAP,
+  FAR and WCS. It flips each metric from REPORT to ENFORCE as the metric's owner
+  closes. It owns ONE new `verify.sh` "Real-Data Suite" stage, which needs a
+  budget ruling because `verify-budget.toml` has no headroom, plus the
+  `release-probe` checks.
+- **R-dogfood `.62` (P1).** Continuous own-corpus mode. A scheduled local job on
+  the developer machine runs the R-gate scenario against the swarm's own CASS
+  history using the current candidate binary. It posts a redacted metrics
+  summary (counts, latencies, metric values, hashes, never content) as a
+  comment on the bridge epic. The swarm's own installed `ee` is still 0.14.2.
+  The product's heaviest real user is the swarm, and it is not using the
+  product.
+
+**Track T — truth and small defects.**
+- **T1 `.51` (P1).** README and AGENTS truth after the fixes: CASS opt-in,
+  measured performance, release assets, why/eval scope, Learn wording.
+- **T2 `.52`–`.56` (P2/P3).** `why-not` typed ids; `eval list` outside the
+  repo; the `graph_hits_profiles_disabled` code; leaked model staging plus a
+  precise receipt-stale reason; `pack_assembly_elapsed_over_budget` measuring
+  assembly only.
+
+**Reclassify (proof-owed, not code-owed).**
+- `.13`: complete small-store coverage in the shipped binary. Remaining is `.14`.
+- `.35`: bridge staleness is now Part III-aware.
+
+Both were commented with evidence on 2026-10-01.
+
+### 16.6a Governance and reuse
+
+**Derived incident cards are not memories.** AGENTS.md requires no silent
+memory mutation, and curation is how an excerpt becomes durable memory. So
+incident cards (R-learn) are **derived, rebuildable evidence entities**:
+- they pack as a typed entity under ADR 0085's model (for example
+  `entityKind: evidence_card`, its own id, a derivation version, and the exact
+  source span ids);
+- they are recomputed from admitted spans plus the extractor version, and
+  dropped and rebuilt like indexes;
+- they are never written as memory rows;
+- they become durable only through `review session --propose → curate apply`.
+
+This needs an ADR amendment (0085, or a new ADR) before implementation.
+Cards inherit the most restrictive trust and redaction class of their source
+spans, and never include text from a quarantined span.
+
+**Derivation policy** (shared by `.45`, `.46`, `.59` and `.60`).
+
+| Quarantine class | What it covers | May feed derivations? |
+| --- | --- | --- |
+| (A) Kind/role | tool_call, tool_result, metadata and system/developer records. Not indexable for retrieval; already secret-screened at ingest. | Yes, masked and structured only: arc features, shell-parsed redacted commands, Drain-masked error templates. Any derived text that enters search or pack must itself pass instruction-risk screening and redaction. |
+| (B) Instruction-risk | Injection-like or medium/high instruction-risk content. | Never. |
+
+**Reuse map (no second implementations).**
+
+| Need | Existing machinery to reuse |
+| --- | --- |
+| Command-position and pipe-to-shell detection (R-admit) | `parse_shell_command_segments` in `src/core/preflight_guard.rs:2035`, so preflight and admission classify a command identically |
+| Incident-card sentence selection under a token budget (R-learn) | pack's facility-location / `submodular` objective |
+| Near-duplicate tool output and proposal dedup | `src/search/simhash.rs` (SimHash) |
+| Independent-session corroboration (R-learn confidence) | `ee ask` session-aware corroboration grouping (`src/core/ask_candidate_diversity.rs`) |
+| Failure-class recall (R-fingerprint) | `error_recall` canonicalizers + `error_fingerprints` store |
+| Latency regression decisions (R-scale, R-coldstart, R-gate) | `ee perf compare` / `ee perf budget check` with `ee.perf.v1` artifacts |
+| Release-level black-box checks (R-gate) | `release-probe-*.json` (`ee.release_probe.v1`) |
+| Message text extraction (R-project) | `message_text` (`src/core/curate_session_arc_text.rs:18`), moved and generalized |
+
+**Hook budget.** Managed SessionStart and pre-edit hooks are where TTFUC
+matters most. After R-scale and R-coldstart, the hook path must meet its own
+budget (cold ≤ 1 s, warm ≤ 0.3 s) on the 5k-span oracle variant, or degrade
+to lexical-only memory recall within budget and say so in `degraded[]`.
+
+### 16.6b Algorithmic spine (round 3)
+
+Each method below was chosen because it gives a stated guarantee or complexity
+bound the product needs, stays deterministic, and reuses existing machinery
+where it can. None needs an LLM or a paid API.
+
+| Problem | Method | Why this one | Owner | Proof |
+| --- | --- | --- | --- | --- |
+| Pack and search admit off-topic items (FAR) | **Conformal risk control / Learn-then-Test** (Angelopoulos et al. 2021–22). Choose the smallest admission threshold λ whose upper confidence bound (Hoeffding–Bentkus) on false-admission rate over calibration queries is ≤ α = 0.05 with probability ≥ 1−δ. Persist it as the `calibrationId` that search results already expose. | A finite-sample, distribution-free guarantee on exactly the quantity users feel. The 0.16.0 "heuristic_uncalibrated" label then becomes a real calibration. | `.11`, `.12` (calibration set: `.43` judgments) | Held-out oracle queries keep FAR ≤ α. A recalibration run is byte-reproducible. |
+| No calibration yet (fresh store) | **Unsupervised per-query cutoff.** Largest normalized gap in the sorted relevance scores (elbow), or a 2-component mixture split, used only as an explicitly labelled fallback. | Stops "budget fills with tail" on small stores without pretending to be calibrated. | `.11` | On a 10-memory store, the espresso memory is excluded from "prepare release" and the fallback is labelled. |
+| Find failure→fix arcs in a session | **PELT change-point detection** (Killick et al. 2012) over per-turn features: error-line density, non-zero exit, test-fail tokens, user-correction cues. BIC penalty. | Exact optimal segmentation, O(n) expected, deterministic. Better for byte-stable output than Bayesian online detection. | `.46` | Every scripted oracle arc boundary is recovered within ±1 turn. |
+| Rule confidence that means corroboration | **Beta-Binomial lower bound with a session design effect.** Effective n = n/(1+(m−1)ρ) for m spans per session. Rank candidates by a one-sided **hypergeometric (Fisher) enrichment test**: is the action over-represented in success-terminated arcs versus failure-terminated ones? Apply **Benjamini–Hochberg FDR** at q = 0.1 across a run's candidates. | Span count is not evidence. This gives "the command that actually correlates with fixes", with false discoveries bounded across many candidates. | `.46` | Single-session confidence ≤ 0.6. Monotone in independent sessions. BH keeps planted noise candidates out at the stated q. |
+| Incident card in about 100 tokens | **Budgeted submodular maximization**: facility location plus facet coverage (symptom / attempt / fix / verify) under a token knapsack, using cost-benefit greedy plus the best singleton (Lin & Bilmes 2011). | A provable (1−1/e)/2 approximation, and it reuses pack's `submodular` objective. | `.46` | Each card covers all four facets when present. Token budget is respected. Deterministic tie-breaks. |
+| Canonical error classes from raw tool output | **Drain log-template mining** (He et al. 2017): fixed-depth parse tree that masks numbers, paths and hashes. Feeds the existing message-template layer of `error_recall`. | O(n), deterministic, and exactly the "message-template" key that ADR 0057's layered fingerprint already reserves. | R-fingerprint | The same rustc or cargo failure across 3 sessions maps to one template and one fingerprint. |
+| Near-duplicate tool output and proposals | **MinHash LSH** with b = 10 bands × r = 10 rows (S-curve threshold ≈ 0.79 Jaccard) on top of SimHash for exact-ish dupes. | Bounded false-merge rate at a tunable threshold, and sublinear candidate generation. | `.45`, `.46` | Planted 0.85-similar duplicates collapse. 0.5-similar pairs do not. |
+| Write cost O(corpus) and retained-copy bloat | **LSM-style delta generations.** A staged generation = hard-linked immutable base segments (Tantivy segments, FSVI main) + a small delta (Tantivy upsert, FSVI WAL append/soft-delete). Size-tiered compaction when the delta ratio exceeds a threshold. | O(delta) per write, amortized O(log N) merge. Retained generations share base inodes, so retention costs O(delta). This fixes R5's disk growth at the root and keeps the atomic exchange. | S3 (+ `.42`) | WCS slope ≤ 0.15. Retained bytes per write ≈ delta size. Results are byte-identical to a full rebuild. |
+| Recovery breadth with bounded retention | **Exponential (grandfather-father-son) retention.** Keep generations at publication distances 1, 2, 4, 8, …, so O(log n) retained still covers long recovery windows. | Bounded disk with no loss of the snapshot-bounded recovery feature. | `.42` | Retained count stays ≤ ⌈log2 n⌉+K over 1,100 writes. |
+| Statement count grows with corpus (I-2) | **Empirical complexity regression**: OLS slope of log(statements) and log(wall) against log(N) for N ∈ {1k, 5k, 50k}, with a bootstrap CI. Fail if the CI lower bound > 0.2. Statement count is the primary signal because it is deterministic. | Catches the whole class (any new full scan) rather than one instance. | `.47` | A planted per-search full scan fails the gate (negative control). |
+| Perf regressions versus noise | **Mann–Whitney U + Hodges–Lehmann shift** with a minimum effect of 10%, a bootstrap CI on the p50 and p95 ratios, and SPRT to stop sampling early. | Honest regression calls on 10–30 noisy samples. | `.47`, R-coldstart, `.6` | A 2× synthetic slowdown is flagged. A same-binary rerun is not. |
+| 1.1 s tokenizer and model load per process | **mmap'd embedding table + a minimal perfect hash** (for example PtrHash) over the 500k-token vocabulary, compiled once and cached beside the verified receipt. | O(1) lookups with near-zero load time, and no 18 MB JSON parse per process. | R-coldstart (Frankensearch) | Model portion of a cold `search` ≤ 0.2 s. Vectors are byte-identical to the current embedder. |
+| Admission precision | **Asymmetric-cost operating point on a ROC** over interpretable structural features (shell-parse command position, pipe-to-shell, imperative mood, role). Fixed weights are frozen in code with a test. Hard constraint FNR = 0, minimize FPR. | Transparent, deterministic, and measured instead of guessed phrase lists. | `.49` | Oracle bait FPR ≤ 5%, FNR 0%. |
+
+### 16.7 Order and release steering
+
+```
+.41 main green ─┬─► .58 inventory drift + shard runners (+ .5) ─────────────────────────────┐
+                └─► .65 0.16.1 hotfix ◄── .42 retention, .44 cass trust, .64 read-path hotfix │
+.43 oracle ─┬─► .63 probe scaffold (REPORT mode, v0.16.0 baselines) ─► .62 dogfood         │
+            ├─► .45 projection ─► .46 proposal quality ─┬─► .59 incident cards (+ bd-vp087) ├─► .50 gate (ENFORCE) ─► .19 ─► .27/.20 ─► .21 ─► .22
+            │                                           └─► .60 CASS error recall           │
+            ├─► .47 evidence scale (needs .64) ; .57 incremental intake (needs .42) ────────┤
+            ├─► .48 ingest, .49 admission ──────────────────────────────────────────────────┤
+            └─► .12 quality thresholds (calibration half of judgments)                      │
+.61 cold start (Frankensearch upstream) ────────────────────────────────────────────────────┘
+.51 docs after .44/.45/.46/.47/.48/.57/.61 ; .52–.56 any time.
+```
+
+Ready now (`br ready`): `.41`, `.42`, `.43`, `.44`, `.61`, `.64` (all P0/P1) and the small `.52`–`.56`.
+
+Release steering:
+- Users on 0.16.0 carry the retention time bomb (R5) and the dead config opt-in
+  (R1). A **0.16.1 hotfix**, gated by `.41` and the existing release probe plus
+  the S2 E2E, is worth cutting before the larger contract-changing Track R work
+  (projection changes pack content and hashes, so it ships as 0.17.0).
+- Publication remains the `.20` human authority boundary.
+
+### 16.8 Beads, ambition and refinement record
+
+The workflow ran in the skill's order, applied in place, with no competing plan
+or epic created:
+- **Phase 1 (reality check).** The black-box v0.16.0 probe, a source audit of
+  every probe failure (three read-only investigation agents), static gates, and
+  tracker coverage.
+- **Phase 2 (bridge).** Sections 16.1–16.4 plus the first bridge delta.
+- **Phase 3a (frozen bead prompt).** Baseline children `.41`–`.56` (16 beads),
+  36 blocking edges, and dated evidence comments on `.13`, `.35` (both
+  proof-owed signals), `.4` (local-algorithm census), `.12` (off-topic
+  admission repro), `.16`, `.19`, `bd-vp087`, `bd-fy92m` and
+  `bd-search-warm-latency-0bh05`, plus the epic root.
+- **Phase 4 (three ambition rounds, revised in place).**
+  - Round 1: outcome metrics (UTR / TTFUC / PAP / FAR / WCS), invariants I-1
+    and I-2, turn-level retrieval units, the R13 incremental-intake
+    regression, R14 cold start, the 0.16.1 hotfix, and dogfooding.
+  - Round 2: S4 one proof of main, R-fingerprint, incident-card governance,
+    the reuse map, and the hook budget.
+  - Round 3: the algorithmic spine in §16.6b.
+- **Phase 3a again.** `.57`–`.62` were created, and existing children were
+  revised with ambition content.
+- **Phase 5 (frozen refinement prompt), seven passes:**
+
+| Pass | Finding → change |
+| --- | --- |
+| 1 | `.42` acceptance contradicted its own retention policy; 1,100 black-box writes would take ≥ 37 min, so tests were split into library-level, small black-box and seeded-999 variants. The oracle got a calibration/held-out judgment split and a cass discovery layout. A shared **derivation policy** separates kind/role quarantine (tool records may feed masked derivations) from instruction-risk quarantine (never feeds anything). `.47` materialized verdicts gained a migration-equivalence guarantee, so evidence cannot vanish on upgrade, plus a policy epoch. `.50` gained profiles and pinned cass provisioning. `.44` gained effect, help-prelude, schema and fixture obligations. |
+| 2 | `br ready` hides blocked beads, so the gate would have been built last. Split out `.63` (report-mode probe scaffold, depends only on `.43`) and `.64` (no-contract-change read-path hotfix), and filed `.65` (0.16.1 candidate, human authorization required). `.62` was re-pointed from `.50` to `.63`. |
+| 3 | Non-vacuity. Every absence or bound assertion (`.42`, `.45`, `.46`, `.47`, `.49`, `.57`, `.59`, `.62`, `.64`) is paired with a presence or liveness assertion, so empty output cannot pass. |
+| 4 | `verify-budget.toml` has no headroom and the unmeasured-stage allowance is a ratchet. All Track R E2E scripts therefore run under ONE "Real-Data Suite" stage owned by `.50`, after a recorded budget ruling. Unnamed E2E scripts were named. |
+| 5 | Duplication audit. `.58` overlapped `.5`, so it was re-scoped to the inventory drift check, shard runners and the publishing-workflow decision. `.46` overlapped `bd-2vq2z.9` and the existing session-arc code, so it was re-scoped to proposal quality across both proposers, improving the detector in place. The real-session evidence showed the arc path misreading "21 passed, 0 failed" as a failure. |
+| 6 | `.57` gets a copy fallback where hard links are unsupported (ExFAT/FAT/network filesystems; the dev Mac's external drive is ExFAT). `.44` accepts `cass.exe` on Windows. `.65` release notes cover existing stores near the 1,000-generation cap. `.46`'s title was updated. |
+| 7 | No further material change. Stop condition met. |
+
+**Final validation.**
+- 25 new children (`.41`–`.65`); 4,792 tracker records.
+- `br dep cycles` reports 0 active cycles.
+- `bv --robot-triage` ranks `.5` and `.43` among the top picks, and `bv --robot-plan --label reality-check` names `.43` the highest-impact unblocker.
+- Every P0–P2 child except `.65` is reachable from `.22`. `.65` (a release) and the P3 cosmetic items `.53`, `.54` and `.56` are children only, by design.
+
+**What closing these beads would and would not mean.** Closing every new
+child closes the real-data gap only if `.50`'s metrics are in ENFORCE mode
+and green on a candidate from a green main (`.41`/`.58` → `.19`). Bead count,
+report-mode numbers, or green unit tests on clean fixtures do not meet that
+bar. That is the exact failure this pass found.
