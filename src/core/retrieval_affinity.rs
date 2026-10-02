@@ -735,7 +735,14 @@ mod tests {
             .with_transaction(|| {
                 stream_hit(&connection, &workspace, "memory", &rule, "mislabelled", 1)?;
                 stream_hit(&connection, &workspace, "memory", &first, "mislabelled", 2)?;
-                stream_hit(&connection, &workspace, "memory", &evidence, "mislabelled", 3)?;
+                stream_hit(
+                    &connection,
+                    &workspace,
+                    "memory",
+                    &evidence,
+                    "mislabelled",
+                    3,
+                )?;
                 stream_hit(&connection, &workspace, "memory", &second, "mislabelled", 4)
             })
             .expect("search-shaped observations");
