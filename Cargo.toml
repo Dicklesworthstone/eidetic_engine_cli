@@ -110,18 +110,18 @@ base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3.14" }
 determinism = { package = "ee-determinism", version = "0.1.0" }
-franken-agent-detection = { version = "=0.2.3", default-features = false }
+franken-agent-detection = { version = "=0.3.3", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
 fnx-algorithms = { version = "=0.3.0" }
 fnx-classes = { version = "=0.3.0" }
 fnx-runtime = { version = "=0.3.0", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "=0.6.0", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+frankensearch = { version = "=0.6.1", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
 # EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
 # intentionally disables FrankenSQLite's default extension set, so unify the
 # JSON feature explicitly instead of depending on a transitive default.
-fsqlite = { version = "=0.4.1", default-features = false, features = ["json"] }
+fsqlite = { version = "=0.4.6", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }

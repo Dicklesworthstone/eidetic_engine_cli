@@ -1,5 +1,32 @@
 # Dependency Upgrade Log
 
+## 2026-10-01 — 0.17.0 candidate (release wave)
+
+- **FrankenSQLite 0.4.1 -> 0.4.6, whole family.** Carries 0.4.4's durable
+  pending-freelist repairs and 0.4.6's page-referenced-twice (bd-b5vmw) and
+  lost-index-entry (bd-11sz4) fixes. sqlmodel-frankensqlite 0.5.0 accepts
+  `fsqlite ^0.4.0`. 0.4.7 is deliberately NOT taken: it regresses strict
+  read-only opens (see coding_agent_session_search 0450b116; wait for 0.4.8).
+  The facade pin `fsqlite = "=0.4.6"` does not pin the family: its internal
+  requirements are `^0.4.6`, so a plain `cargo update` resolves the 16 internal
+  crates to 0.4.7. All 17 were pinned to 0.4.6 by resolving them together
+  against temporary `=0.4.6` pins that were then removed; `cargo metadata
+  --locked` accepts the result. Re-check `grep -A1 'name = "fsqlite' Cargo.lock`
+  after any `cargo update`.
+- **frankensearch 0.6.0 -> 0.6.1** (frankensearch-v0.6.1 = 7cc86150): the
+  quill/lexical fixes cass already ships.
+- **franken-agent-detection 0.2.3 -> 0.3.3** (v0.3.3 = f3c00b74): ee
+  re-exports only `AgentDetect*`, `InstalledAgentDetection*` and
+  `default_probe_paths_tilde`, all still public in 0.3.3.
+- Semver-compatible: clap 4.6.7, clap_complete 4.6.11, rustix 1.1.5,
+  tiktoken-rs 0.12.1.
+- Unchanged on purpose: asupersync =0.5.0 (0.6.0 unreleased), sqlmodel 0.5.0,
+  fnx 0.3.0 (latest), wasm-bindgen-futures `<0.4.79` cap.
+- `franken-stack.lock` revisions updated for frankensqlite, frankensearch and
+  franken_agent_detection.
+
+---
+
 **Date:** 2026-08-11  |  **Project:** eidetic_engine_cli  |  **Language:** Rust (franken-stack sibling pins + crates.io)
 
 Scope requested: franken-stack pins, especially the new FrankenSQLite release.
