@@ -65,7 +65,7 @@
               "type": "string",
               "enum": ["success", "no_results", "index_not_found", "index_error"]
             },
-            "embed_backend": { "type": "string", "enum": ["neural_local", "hash_fallback"] },
+            "embed_backend": { "type": "string", "enum": ["neural_local", "remote_api", "hash_fallback"] },
             "query": { "type": "string" },
             "request": { "type": "object" },
             "scopeStats": { "type": "object" },

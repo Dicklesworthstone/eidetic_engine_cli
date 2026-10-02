@@ -3968,7 +3968,8 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
     if !matches!(
         data.get("embed_backend")
             .and_then(serde_json::Value::as_str),
-        Some("neural_local" | "hash_fallback")
+        // remote_api: a configured remote embedder executed the query (3889069d2).
+        Some("neural_local" | "remote_api" | "hash_fallback")
     ) {
         return Err("canonical search embed_backend drifted".to_owned());
     }
