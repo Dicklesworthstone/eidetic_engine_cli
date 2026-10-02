@@ -25,7 +25,7 @@ use serde::Deserialize;
 use sqlmodel_core::{Row, Value};
 
 use crate::db::{CreateGraphSnapshotInput, DbConnection, GraphSnapshotType};
-use crate::models::{EvidenceId, MemoryId, RuleId};
+use crate::models::{EvidenceId, MemoryId, RuleId, SessionId};
 
 /// Degraded code when the affinity snapshot is absent (cold start).
 pub const RETRIEVAL_AFFINITY_COLD_CODE: &str = "retrieval_affinity_cold";
@@ -356,12 +356,13 @@ impl SearchRun {
             .and_then(Value::as_str)
             .ok_or_else(search_observation_error)?;
         if MemoryId::from_str(id).is_err() {
-            // `ee search` audits every hit as "memory", including admitted
-            // rule and evidence hits. A well-formed rule or evidence ID is a
-            // native target recorded under the wrong type: its rank already
-            // delimited the run above, and it never becomes an edge. Any
-            // other undecodable ID still holds the entire prefix.
-            if RuleId::from_str(id).is_ok() || EvidenceId::from_str(id).is_ok() {
+            // `ee search` audits every hit as "memory", including rule,
+            // evidence, session and registered-artifact hits. A well-formed ID
+            // of one of those native kinds is a native target recorded under
+            // the wrong type: its rank already delimited the run above, and it
+            // never becomes an edge. Any other undecodable ID still holds the
+            // entire prefix.
+            if is_native_search_target(id) {
                 return Ok((false, 0));
             }
             return Err(search_observation_error());
@@ -396,6 +397,15 @@ impl SearchRun {
             .push((id.to_owned(), observation.rank, event_at));
         Ok((true, pairs))
     }
+}
+
+/// Native, non-memory IDs that `ee search` can return under the "memory" audit
+/// type.
+fn is_native_search_target(id: &str) -> bool {
+    RuleId::from_str(id).is_ok()
+        || EvidenceId::from_str(id).is_ok()
+        || SessionId::from_str(id).is_ok()
+        || crate::core::context::is_registry_artifact_id(id)
 }
 
 /// Rehydrate only the bounded preceding rank context in the SAME transaction,
@@ -720,17 +730,19 @@ mod tests {
         );
     }
 
-    /// `ee search` audits admitted rule and evidence hits with target type
-    /// "memory". Such rows must delimit the run like native targets instead of
-    /// stalling every later refresh, while an ID of no known kind still fails
-    /// closed and holds the cursor.
+    /// `ee search` audits rule, evidence, session and artifact hits with target
+    /// type "memory". Such rows must delimit the run like native targets
+    /// instead of stalling every later refresh, while an ID of no known kind
+    /// still fails closed and holds the cursor.
     #[test]
-    fn memory_labelled_rule_and_evidence_hits_delimit_the_run_without_stalling() {
+    fn memory_labelled_native_hits_delimit_the_run_without_stalling() {
         let (_temp, connection, workspace) = seeded_connection();
         let first = stream_id(1);
         let second = stream_id(2);
         let rule = RuleId::from_uuid(uuid::Uuid::from_u128(11)).to_string();
         let evidence = EvidenceId::from_uuid(uuid::Uuid::from_u128(12)).to_string();
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(13)).to_string();
+        let artifact = "art_0123456789abcdef0123456789";
         connection
             .with_transaction(|| {
                 stream_hit(&connection, &workspace, "memory", &rule, "mislabelled", 1)?;
@@ -743,7 +755,23 @@ mod tests {
                     "mislabelled",
                     3,
                 )?;
-                stream_hit(&connection, &workspace, "memory", &second, "mislabelled", 4)
+                stream_hit(&connection, &workspace, "memory", &second, "mislabelled", 4)?;
+                stream_hit(
+                    &connection,
+                    &workspace,
+                    "memory",
+                    &session,
+                    "mislabelled",
+                    5,
+                )?;
+                stream_hit(
+                    &connection,
+                    &workspace,
+                    "memory",
+                    artifact,
+                    "mislabelled",
+                    6,
+                )
             })
             .expect("search-shaped observations");
         let report = accumulate_retrieval_affinity(&connection, &workspace, ATOMIC_NOW)

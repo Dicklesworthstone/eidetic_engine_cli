@@ -14033,7 +14033,7 @@ fn resolve_evidence_pack_hit(
     None
 }
 
-fn is_registry_artifact_id(value: &str) -> bool {
+pub(crate) fn is_registry_artifact_id(value: &str) -> bool {
     value.len() == 30
         && value.starts_with("art_")
         && value.strip_prefix("art_").is_some_and(|suffix| {
