@@ -154,6 +154,10 @@ node_modules/
 # directory under tests/logs/; keep them off git.
 tests/logs/
 
+# Advisory report that scripts/e2e_event_contract_radar.sh (also run by
+# scripts/verify.sh) writes to the repo root. Generated output, not source.
+/.e2e-event-contract-radar-report.json
+
 # One-off ad-hoc helper scripts agents occasionally drop in the repo root
 # while investigating an issue. These are not authoritative tooling — they
 # are scratch. Keep them off git so they don't sneak into commits.
