@@ -23,6 +23,7 @@ checked-in Beads records. The durable research ledger is
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 | 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
 | 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh. |
+| 2026-09-26 → 2026-10-02 | **`0.17.0`** retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6. |
 
 Release surface (as of 2026-09-12):
 
@@ -73,6 +74,98 @@ Release surface (as of 2026-09-12):
 Versions `0.4.0`–`0.12.0` are **real published releases** (or tags). Prefer the
 GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
+
+## [0.17.0] - 2026-10-02
+
+Covers `v0.16.0..v0.17.0`: 251 commits before the release commit (201
+non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
+2026-10-01 release wave.
+
+### Retrieval quality ranking
+
+- Search and packs apply an authoritative **quality ranking** on top of engine
+  relevance: confidence, utility, scope match and recency, with the controls
+  validated and exposed under `[scoring]` (ADR 0087 §2c). Recency uses one 30-day
+  time constant for every memory level by default; see *Known open* below.
+- Search can **retrieve from authoritative sources before the index is first
+  published**, under the same source-admission controls as indexed retrieval,
+  and reconciles that unpublished path with current sources and pack handoffs.
+- Explicit **candidate-pool bounds** and a configurable context read pool;
+  `ee pack` resolves an omitted candidate pool from pack configuration (GH #49).
+
+### Packs, resume and native evidence
+
+- Packs expose per-item **evidence freshness and origin** (GH #60), bind the
+  effective reference time to the snapshot identity, and enforce native pack
+  identity while preserving omission history. Persisted pack diffs compare
+  native evidence (`ee.pack.diff.v3`: items are typed entities, not only
+  memory IDs).
+- `ee resume` includes admitted **native transcript history** in the same
+  snapshot as memory authority, and recovers **unfinished task frames and
+  blockers** (`taskFrames`) without adopting, activating or reopening work.
+- `ee focus` recommends native CASS topics without synthetic memories; rule
+  identity is explained and applied index-repair receipts are preserved;
+  native rule feedback applies atomically in its owning workspace.
+- Subscriptions deliver filtered revocations as identity-only invalidations.
+- `ee insights --section knowledgeSkyline` computes a true **Pareto frontier**
+  (onion layer, k-truss rank, PPR percentile, recency, trust rank) alongside
+  the cell-mean grid.
+
+### Storage, recovery and safety
+
+- Explicit recovery of **moved stores** is authenticated; index publication
+  gains rejection-manifest fencing with filesystem fault regressions; fresh
+  read-only retrieval is served while committed daemon acknowledgements are
+  preserved.
+- Backup restore fences the complete restored populations (pack history,
+  trust rows, learning signals) and keeps restored authority through the final
+  publication boundary.
+- `ee ask` reclaims same-lineage duplicate copies without losing independent
+  support and admits complete corroborated answer bundles past duplicate
+  saturation; pack verification streams canonical items without copying the
+  pack.
+
+### Fixed in this cut
+
+- A search that returned any rule, evidence, session or registered-artifact
+  hit stopped the retrieval-affinity refresh for good: every later refresh
+  failed and the affinity snapshot never updated again (since cdc948e2f).
+  Such hits now delimit the run like native targets; malformed rows still fail
+  closed.
+- `ee resume --json` emitted `taskFrames`, which `ee.resume.v1` did not
+  declare under `additionalProperties: false`, so every resume report failed
+  validation against the published schema. The schema now declares it.
+- With a remote embedding endpoint configured, `ee search --use-daemon`
+  rejected the daemon's `remote_api` backend label and silently re-ran every
+  search in process (the remote call twice). `remote_api` is accepted there
+  and in `ee.pack.v2` and `ee.daemon.search.response.v2/v3`.
+- The lib test target compiled again (a duplicated `#[test]` on the skyline
+  frontier test) and `cargo fmt --check` is clean again.
+
+### Dependencies
+
+- FrankenSQLite 0.4.1 -> **0.4.6** for the whole family (page referenced twice
+  across a WAL generation, lost index entries, durable pending-freelist
+  repairs). 0.4.7 is deliberately not used: it regresses strict read-only
+  opens. frankensearch 0.6.0 -> 0.6.1, franken-agent-detection 0.2.3 -> 0.3.3,
+  clap 4.6.7, clap_complete 4.6.11, rustix 1.1.5, tiktoken-rs 0.12.1. See
+  [UPGRADE_LOG.md](UPGRADE_LOG.md).
+
+### Known open at release
+
+- Ranking: the 30-day recency decay applies to every memory level, although
+  the README level table describes procedural memories as decaying slowest,
+  and pack relevance floors (0.05) were not recalibrated for the new score
+  scale. Older procedural knowledge can rank below fresh working notes.
+- Chronic library-test reds remain tracked in bd-rm8wj; the release gate's
+  exact library and contract results for this cut are listed in the GitHub
+  release notes.
+- Deferred review findings (low frequency): a topic with two live decision
+  heads cannot be recorded until one is superseded; one malformed
+  `supersedes` link fails `ee decide list`; store auth keys need read access
+  to every ancestor directory; one session row with `ended_at` before
+  `started_at` fails `ee resume`.
+- Unsigned, like 0.15.x and 0.16.0.
 
 ## [0.16.0] - 2026-09-26
 
