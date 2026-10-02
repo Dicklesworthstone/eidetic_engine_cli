@@ -328,7 +328,10 @@ mod tests {
         for limit in 0..=40 {
             let selected = select(&rows, limit);
             assert_eq!(selected.len(), limit);
-            assert_eq!(distinct_ids(&selected).len(), if limit >= 23 { 2 } else { 0 });
+            assert_eq!(
+                distinct_ids(&selected).len(),
+                if limit >= 23 { 2 } else { 0 }
+            );
         }
         let selected = select(&rows, rows.len() + 10);
         assert_eq!(selected.len(), rows.len());
@@ -477,10 +480,7 @@ mod tests {
                 assert_eq!(selected.len(), limit);
                 assert_eq!(selected[0].memory_id, "a-00000");
                 assert_eq!(distinct_ids(&selected).len(), usize::from(limit > 1));
-                let expected: Vec<_> = selected
-                    .iter()
-                    .map(|row| row.memory_id.clone())
-                    .collect();
+                let expected: Vec<_> = selected.iter().map(|row| row.memory_id.clone()).collect();
                 rows.reverse();
                 assert_eq!(
                     select(&rows, limit)

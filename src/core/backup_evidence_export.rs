@@ -34,9 +34,7 @@ pub(super) fn redact_identity(key: &str, level: RedactionLevel) -> String {
 }
 
 fn export_reference(value: &str, level: RedactionLevel, admitted: bool) -> String {
-    if canonical_digest(value, "blake3:")
-        || (admitted && redact_content(value, level) == value)
-    {
+    if canonical_digest(value, "blake3:") || (admitted && redact_content(value, level) == value) {
         value.to_owned()
     } else {
         opaque_reference(value)
@@ -74,8 +72,7 @@ pub(super) fn redact_evidence(
         .as_deref()
         .map(|value| export_reference(value, level, provenance_admitted));
     let redact_role = row.role.as_deref().is_some_and(|role| {
-        !structural_role(role)
-            && (!provenance_admitted || redact_content(role, level) != role)
+        !structural_role(role) && (!provenance_admitted || redact_content(role, level) != role)
     });
     let redact_metadata = row
         .metadata_json
@@ -101,7 +98,11 @@ pub(super) fn redact_evidence(
     if excerpt != row.excerpt || !provenance_admitted || auxiliary_changed {
         row.cass_span_id = opaque_reference(&row.cass_span_id);
         row.upstream_ref_hash = row.upstream_ref_hash.as_deref().map(opaque_reference);
-        if row.role.as_deref().is_some_and(|role| !structural_role(role)) {
+        if row
+            .role
+            .as_deref()
+            .is_some_and(|role| !structural_role(role))
+        {
             row.role = None;
         }
         row.excerpt = excerpt;

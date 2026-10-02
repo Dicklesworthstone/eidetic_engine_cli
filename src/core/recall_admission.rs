@@ -28,11 +28,8 @@ fn seal_denial(row: &sqlmodel_core::Row, id: &str) -> Option<&'static str> {
     {
         return None;
     }
-    let (
-        Some(Value::Text(seal_id)),
-        Some(Value::Text(commitment)),
-        Some(Value::Text(sealed_at)),
-    ) = (row.get(8), row.get(22), row.get(23))
+    let (Some(Value::Text(seal_id)), Some(Value::Text(commitment)), Some(Value::Text(sealed_at))) =
+        (row.get(8), row.get(22), row.get(23))
     else {
         return Some("malformed");
     };
@@ -53,13 +50,8 @@ fn seal_denial(row: &sqlmodel_core::Row, id: &str) -> Option<&'static str> {
         },
         None => return Some("malformed"),
     };
-    if crate::models::validate_attestation_seal_fields(
-        commitment,
-        sealed_at,
-        revealed_at,
-        verified,
-    )
-    .is_err()
+    if crate::models::validate_attestation_seal_fields(commitment, sealed_at, revealed_at, verified)
+        .is_err()
     {
         return Some("malformed");
     }

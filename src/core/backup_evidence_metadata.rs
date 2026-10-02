@@ -19,9 +19,13 @@ pub(super) fn safe_to_retain(raw: &str, level: RedactionLevel) -> bool {
     }
     let mut remaining = MAX_VALUES;
     let mut decoder = serde_json::Deserializer::from_str(raw);
-    Check { level, remaining: &mut remaining, depth: 0 }
-        .deserialize(&mut decoder)
-        .is_ok()
+    Check {
+        level,
+        remaining: &mut remaining,
+        depth: 0,
+    }
+    .deserialize(&mut decoder)
+    .is_ok()
         && decoder.end().is_ok()
 }
 
@@ -36,7 +40,11 @@ fn refused<E: de::Error>() -> E {
 }
 
 fn check_text<E: de::Error>(text: &str, level: RedactionLevel) -> Result<(), E> {
-    if redact_content(text, level) == text { Ok(()) } else { Err(refused()) }
+    if redact_content(text, level) == text {
+        Ok(())
+    } else {
+        Err(refused())
+    }
 }
 
 impl<'de> DeserializeSeed<'de> for Check<'_> {
@@ -58,11 +66,21 @@ impl<'de> Visitor<'de> for Check<'_> {
         formatter.write_str("bounded redaction-safe evidence metadata")
     }
 
-    fn visit_unit<E: de::Error>(self) -> Result<(), E> { Ok(()) }
-    fn visit_bool<E: de::Error>(self, _value: bool) -> Result<(), E> { Ok(()) }
-    fn visit_i64<E: de::Error>(self, _value: i64) -> Result<(), E> { Ok(()) }
-    fn visit_u64<E: de::Error>(self, _value: u64) -> Result<(), E> { Ok(()) }
-    fn visit_f64<E: de::Error>(self, _value: f64) -> Result<(), E> { Ok(()) }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_bool<E: de::Error>(self, _value: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: de::Error>(self, _value: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: de::Error>(self, _value: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: de::Error>(self, _value: f64) -> Result<(), E> {
+        Ok(())
+    }
 
     fn visit_str<E: de::Error>(self, text: &str) -> Result<(), E> {
         check_text(text, self.level)
@@ -77,19 +95,21 @@ impl<'de> Visitor<'de> for Check<'_> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
-        while sequence.next_element_seed(Check {
-            level: self.level,
-            remaining: &mut *self.remaining,
-            depth: self.depth + 1,
-        })?.is_some() {}
+        while sequence
+            .next_element_seed(Check {
+                level: self.level,
+                remaining: &mut *self.remaining,
+                depth: self.depth + 1,
+            })?
+            .is_some()
+        {}
         Ok(())
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         while let Some(key) = map.next_key::<String>()? {
             check_text(&key, self.level)?;
-            let assignment =
-                serde_json::to_string(&key).map_err(|_| refused::<A::Error>())? + ":";
+            let assignment = serde_json::to_string(&key).map_err(|_| refused::<A::Error>())? + ":";
             check_text(&assignment, self.level)?;
             map.next_value_seed(Check {
                 level: self.level,

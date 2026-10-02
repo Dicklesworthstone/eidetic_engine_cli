@@ -113,7 +113,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
             .is_none()
             || sequence.next_element::<IgnoredAny>()?.is_some()
         {
-            return Err(de::Error::custom("invalid canonical projection field count"));
+            return Err(de::Error::custom(
+                "invalid canonical projection field count",
+            ));
         }
         Ok(())
     }
@@ -236,10 +238,12 @@ pub(super) fn validate(view: &PackBinaryView<'_>) -> Result<(), PackBinaryError>
     .deserialize(&mut decoder)
     .and_then(|()| decoder.end());
     result.map_err(|_| {
-        check.failure.unwrap_or(PackBinaryError::InvalidItemContent {
-            index: None,
-            reason: INVALID_PROJECTION,
-        })
+        check
+            .failure
+            .unwrap_or(PackBinaryError::InvalidItemContent {
+                index: None,
+                reason: INVALID_PROJECTION,
+            })
     })
 }
 
@@ -400,7 +404,10 @@ mod tests {
         for (index, expected) in contents.iter().enumerate() {
             let actual = view.item_slice(index).expect("verified item");
             assert_eq!(actual, expected.as_bytes());
-            assert_eq!(actual.as_ptr(), bytes[view.entries[index].offset..].as_ptr());
+            assert_eq!(
+                actual.as_ptr(),
+                bytes[view.entries[index].offset..].as_ptr()
+            );
         }
         assert_eq!(view.item_validation.get(), Some(&Ok(())));
     }
@@ -417,8 +424,7 @@ mod tests {
         let entries = std::iter::once_with(|| -> (&'static str, &'static str) {
             panic!("an excess item payload must never be visited")
         });
-        let decoder =
-            serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new(entries);
+        let decoder = serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new(entries);
         assert!(
             Object {
                 check: &mut check,
