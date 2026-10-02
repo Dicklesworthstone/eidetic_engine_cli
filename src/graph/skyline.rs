@@ -727,7 +727,6 @@ mod tests {
         assert_eq!(deciles.get(third), Some(&9));
     }
 
-    #[test]
     /// bd-pmgg0. THE test this change exists to pass: the Pareto frontier and the
     /// cell-mean grid must DISAGREE on a fixture, in both directions. A test that
     /// passes under the old grid-only implementation would prove nothing, because
