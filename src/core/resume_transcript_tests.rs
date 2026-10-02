@@ -468,7 +468,7 @@ fn a_shared_database_never_expands_the_addressed_workspace() {
 fn unicode_prefixes_have_exact_offsets_and_do_not_rewrite_the_source_revision() {
     let fixture = Fixture::new();
     let session = fixture.session(1, None, None);
-    let body = format!("{}🦀 remaining source", "a".repeat(4095));
+    let body = format!("{}🦀 remaining source", "word ".repeat(819));
     let row = fixture.evidence(&session, 2, 1, &body, None);
     let history = fixture.state(3).transcript_history;
     let item = &history.sessions[0].items[0];

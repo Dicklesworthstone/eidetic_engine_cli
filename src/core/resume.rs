@@ -1308,7 +1308,7 @@ mod tests {
                     confidence: 0.9,
                     utility: 0.9,
                     importance: 0.9,
-                    provenance_uri: Some("test://resume-long-body".to_owned()),
+                    provenance_uri: Some(format!("ee-mem://{memory_id}")),
                     trust_class: "agent_assertion".to_owned(),
                     trust_subclass: None,
                     tags: vec!["session-long-body".to_owned()],

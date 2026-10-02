@@ -5639,7 +5639,9 @@ mod tests {
         match result {
             Ok(value) => Err(format!("{context}: expected symlink error, got {value:?}")),
             Err(error) => ensure(
-                error.message().contains("symlink"),
+                // Root-owned ancestors can bypass the ancestor permission
+                // walk; the leaf metadata check still rejects the symlink.
+                error.message().contains("symlink") || error.message().contains("non-regular path"),
                 format!("{context}: expected symlink error, got {}", error.message()),
             ),
         }
@@ -6774,7 +6776,7 @@ memories_revised = 3
 
         ensure_symlink_error(
             resume_handoff(&ResumeOptions {
-                path: link,
+                path: link.clone(),
                 use_latest: false,
                 workspace: dir.path().to_path_buf(),
                 max_sections: None,
@@ -6787,6 +6789,13 @@ memories_revised = 3
                 machine_salt_path: None,
             }),
             "resume symlinked handoff capsule",
+        )?;
+        ensure(
+            fs::symlink_metadata(&link)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected handoff capsule symlink should remain untouched",
         )
     }
 

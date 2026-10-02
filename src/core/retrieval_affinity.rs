@@ -1384,11 +1384,10 @@ mod tests {
         timestamp: &str,
     ) {
         for (index, (memory_id, rank)) in hits.iter().enumerate() {
-            let audit_id = format!(
-                "audit_{query_hash}{index:02}{:0width$}",
-                0,
-                width = 26 - query_hash.len().min(24) - 2
-            );
+            // Padding variable-length query names with zeroes aliases names
+            // such as time_pad1 and time_pad10. Hash the delimited identity.
+            let identity = blake3::hash(format!("{query_hash}:{index}").as_bytes()).to_hex();
+            let audit_id = format!("audit_{}", &identity[..26]);
             let details = serde_json::json!({
                 "queryHash": query_hash,
                 "rank": rank,
