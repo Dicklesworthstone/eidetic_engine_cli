@@ -739,7 +739,7 @@ mod tests {
     /// each memory is best at something, or dominated outright:
     ///   "0" human_explicit,  ppr 0.1 (worst),  oldest -> top trust only
     ///   "1" agent_assertion, ppr 0.9 (best),   middle -> top ppr only
-    ///   "2" agent_validated, ppr 0.5,          newest -> top recency only
+    ///   "2" agent_validated, ppr 0.15,         newest -> top recency only
     ///   "3" agent_assertion, ppr 0.2,          old    -> beaten by "1" on every
     ///       dimension at equal trust, so it is DOMINATED and must not appear
     #[test]
@@ -752,7 +752,9 @@ mod tests {
                 memory("2", "agent_validated", 15),
                 memory("3", "agent_assertion", 2),
             ],
-            ppr_scores: ppr(&[("0", 0.1), ("1", 0.9), ("2", 0.5), ("3", 0.2)]),
+            // Avoid a tied mean between the two-member assertion cell and
+            // the single validated point: the former must rank higher.
+            ppr_scores: ppr(&[("0", 0.1), ("1", 0.9), ("2", 0.15), ("3", 0.2)]),
             as_of: ts(16),
         };
 

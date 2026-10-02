@@ -11818,8 +11818,13 @@ mod tests {
 
         #[cfg(feature = "lexical-bm25")]
         {
-            let report = crate::core::search::run_search(&fixture.search_options())
-                .map_err(|error| error.to_string())?;
+            let report =
+                crate::core::search::run_search(&fixture.search_options()).map_err(|error| {
+                    format!(
+                        "{error}; repaired corpus compatibility: {:?}",
+                        validate_index_corpus_compatibility(&index)
+                    )
+                })?;
             assert_eq!(report.results.len(), 1);
             assert_eq!(report.results[0].doc_id, format!("mem_{:026}", 1));
         }
@@ -11953,7 +11958,11 @@ mod tests {
         assert!(!index_corpus_compatibility_is_current(&index));
         fixture.request("2026-09-22T00:15:00Z")?;
         assert!(fixture.repair(64)?);
-        assert!(index_corpus_compatibility_is_current(&index));
+        assert!(
+            index_corpus_compatibility_is_current(&index),
+            "repaired corpus compatibility: {:?}",
+            validate_index_corpus_compatibility(&index)
+        );
         assert_eq!(
             open_fast_vector_index_read_only(&index)
                 .map_err(|error| error.detail)?

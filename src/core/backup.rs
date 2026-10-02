@@ -18076,8 +18076,17 @@ mod tests {
         let path = "derived/lab/episodes/invalid.json";
         // Authentic bytes can still be semantically unrestorable. This reaches
         // the episode phase after JSONL memory import, not an early MAC refusal.
-        let bytes = br#"{"schema":"ee.backup.derived.lab_episode.v1","episode":{}}"#;
-        write_new_relative_file(&backup_path, path, bytes).map_err(|e| e.message())?;
+        // Identity must pass the frozen history expectation before database
+        // creation; missing payload fields fail only during episode import.
+        let bytes = serde_json::to_vec(&json!({
+            "schema": "ee.backup.derived.lab_episode.v1",
+            "episode": {
+                "id": "ep_000000000000000000000000099",
+                "workspaceId": WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string(),
+            },
+        }))
+        .map_err(|e| e.to_string())?;
+        write_new_relative_file(&backup_path, path, &bytes).map_err(|e| e.message())?;
         let (_, mut manifest) = read_backup_manifest(&backup_path).map_err(|e| e.message())?;
         if manifest.get("derived").is_none() {
             manifest["derived"] = json!([]);
@@ -18089,13 +18098,21 @@ mod tests {
                 BackupDerivedAssetReport {
                     path: path.to_owned(),
                     kind: "lab_episode".to_owned(),
-                    hash: Some(hash_bytes(bytes)),
+                    hash: Some(hash_bytes(&bytes)),
                     byte_size: Some(bytes.len() as u64),
                     captured_at: None,
                     episode_id_if_lab: None,
                 }
                 .manifest_json(),
             );
+        let episode_inventory = manifest["recoveryInventory"]["tables"]
+            .as_array_mut()
+            .ok_or("recovery inventory missing")?
+            .iter_mut()
+            .find(|table| table["table"] == "task_episodes")
+            .ok_or("episode inventory missing")?;
+        episode_inventory["rowCount"] = json!(1);
+        episode_inventory["snapshotCovered"] = json!(true);
         let root = StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
         authenticate_backup_manifest(&mut manifest, &root).map_err(|e| e.message())?;
         fs::write(
@@ -18111,8 +18128,12 @@ mod tests {
             restore_graph_cache: false,
             dry_run: false,
         })
-        .expect_err("missing episode id must reject the late restore phase");
-        assert!(error.message().contains("id"), "{}", error.message());
+        .expect_err("missing episode payload must reject the late restore phase");
+        assert!(
+            error.message().contains("retrievedMemoryIds"),
+            "{}",
+            error.message()
+        );
         assert!(
             !side.join(WORKSPACE_MARKER).exists(),
             "partial store became discoverable"
@@ -18297,6 +18318,12 @@ mod tests {
 
     #[test]
     fn restore_backup_to_side_path_preserves_history_without_optional_caches() -> TestResult {
+        assert_backup_history_round_trip(false)
+    }
+
+    #[test]
+    fn standard_backup_round_trip_preserves_canonical_evidence_metadata_and_lineage() -> TestResult
+    {
         assert_backup_history_round_trip(false)
     }
 
@@ -18543,8 +18570,10 @@ mod tests {
                     },
                 )
                 .map_err(|e| e.to_string())?;
+                let source_workspaces = db.list_workspaces().map_err(|e| e.to_string())?;
+                assert_eq!(source_workspaces.len(), 2);
                 db.close().map_err(|e| e.to_string())?;
-                let partial = create_backup(&BackupCreateOptions {
+                let scoped = create_backup(&BackupCreateOptions {
                     workspace_path: workspace,
                     database_path: None,
                     output_dir: None,
@@ -18555,15 +18584,21 @@ mod tests {
                     dry_run: false,
                 })
                 .map_err(|e| e.message())?;
-                let coverage = partial
+                let coverage = scoped
                     .recovery_inventory
                     .entries
                     .iter()
                     .find(|e| e.table == "workspaces")
                     .ok_or("workspace coverage")?;
-                assert_eq!(coverage.row_count, 2);
-                assert!(!coverage.snapshot_covered);
-                assert_eq!(partial.status, "partial");
+                assert_eq!(coverage.row_count, 1);
+                assert!(coverage.snapshot_covered);
+                assert_eq!(scoped.status, "completed");
+                let db = DbConnection::open_file_read_only(&database).map_err(|e| e.to_string())?;
+                assert_eq!(
+                    db.list_workspaces().map_err(|e| e.to_string())?,
+                    source_workspaces,
+                    "scoped backup must preserve both source workspace rows"
+                );
             }
         }
         Ok(())
@@ -28316,6 +28351,25 @@ mod tests {
             )?;
         }
         let mut expected_admitted_evidence = source_admitted_evidence;
+        ensure(
+            expected_admitted_evidence
+                .metadata_json
+                .as_deref()
+                .is_some_and(|raw| raw.contains("secretRedactionStatus"))
+                && expected_admitted_evidence.canonical_provenance_revision > 0
+                && expected_admitted_evidence.security_policy_epoch > 0,
+            "round-trip fixture contains canonical security metadata and lineage",
+        )?;
+        ensure_equal(
+            restored_admitted_evidence.metadata_json.as_deref(),
+            expected_admitted_evidence.metadata_json.as_deref(),
+            "canonical security metadata survives the backup round trip",
+        )?;
+        ensure_equal(
+            restored_admitted_evidence.upstream_ref_hash.as_deref(),
+            expected_admitted_evidence.upstream_ref_hash.as_deref(),
+            "canonical upstream lineage survives the backup round trip",
+        )?;
         expected_admitted_evidence.workspace_id = restored_workspace_id.clone();
         expected_admitted_evidence.memory_id = Some(restored_memory_id.clone());
         let mut expected_denied_evidence = source_denied_evidence;

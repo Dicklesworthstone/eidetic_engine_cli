@@ -19812,7 +19812,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
         ensure(
             report.results.iter().any(|hit| hit.doc_id == seed_id),
-            "the real stale-index search must still execute against the old lexical index",
+            "the live source search must retain the previously indexed seed",
         )?;
 
         let mut session = SearchAdvisorySession::default();
@@ -19839,8 +19839,17 @@ mod tests {
             format!("large-gap response omitted explicit rebuild repair: {first}"),
         )?;
         ensure(
-            repeated["degraded"] == serde_json::json!([]),
-            format!("repeat rendering must suppress both warning prose entries: {repeated}"),
+            repeated["degraded"].as_array().is_some_and(|entries| {
+                entries.iter().all(|entry| {
+                    entry["code"] != "search_index_stale"
+                        && entry["code"] != "search_index_large_gap"
+                }) && entries
+                    .iter()
+                    .any(|entry| entry["code"] == "search_live_snapshot_lexical")
+            }),
+            format!(
+                "repeat rendering must suppress stale/gap advisories and retain live-source truth: {repeated}"
+            ),
         )?;
         ensure(
             repeated["indexFreshness"]
@@ -21260,7 +21269,23 @@ mod tests {
             search
                 .degraded
                 .iter()
-                .any(|entry| entry.code == "evidence_live_admission_filtered")
+                .any(|entry| entry.code == "search_live_snapshot_lexical")
+        );
+
+        // Explicit reference-time retrieval keeps the indexed path, which
+        // must independently reject the same newly denied evidence.
+        let indexed = run_search(&SearchOptions {
+            as_of: Some(chrono::Utc::now()),
+            ..base_options.clone()
+        })
+        .map_err(|error| format!("post-denial indexed search failed: {error}"))?;
+        assert!(indexed.results.iter().all(|hit| hit.doc_id != evidence_id));
+        assert!(indexed.results.iter().any(|hit| hit.doc_id == memory_id));
+        assert!(
+            indexed
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "evidence_live_admission_filtered" })
         );
 
         let assist = run_search(&SearchOptions {

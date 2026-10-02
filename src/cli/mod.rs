@@ -75491,7 +75491,7 @@ mod tests {
                 "--database",
                 database_arg.as_str(),
                 "--command-timeout-ms",
-                "1",
+                "300000",
                 "--json",
             ]
             .iter()
@@ -75502,7 +75502,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Storage,
+            &ProcessExitCode::SearchIndex,
             "full orient pack failure exit",
         )?;
         ensure(
@@ -75519,7 +75519,7 @@ mod tests {
         )?;
         ensure_equal(
             &envelope["error"]["code"],
-            &serde_json::json!("storage"),
+            &serde_json::json!("search_index"),
             "full orient pack failure code",
         )?;
         ensure(

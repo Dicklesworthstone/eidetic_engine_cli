@@ -489,12 +489,22 @@ mod tests {
     use super::*;
 
     fn fixture() -> tempfile::TempDir {
-        tempfile::tempdir_in(
+        let directory = tempfile::tempdir_in(
             std::env::temp_dir()
                 .canonicalize()
                 .expect("physical temporary root"),
         )
-        .expect("temporary directory")
+        .expect("temporary directory");
+        // Low-level publishers require an already-private key directory.
+        // Do not let the host's umask decide whether these fixtures reach
+        // their injected write and publication failures.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+                .expect("private fixture directory");
+        }
+        directory
     }
 
     #[cfg(unix)]

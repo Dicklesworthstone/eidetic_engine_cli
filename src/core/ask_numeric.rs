@@ -64,14 +64,11 @@ pub(crate) fn conflicts(left: &str, left_negated: bool, right: &str, right_negat
 /// different environments, unknown values and qualified prose are not support
 /// for a known setting. Unparsed pairs retain the existing prose safeguards.
 pub(super) fn settings_compatible(left: &str, right: &str) -> bool {
-    // This guard is also used by span clustering after its Jaccard check.
-    // Reversed commands contain the same words but are not corroboration.
-    if !super::ordering::compatible(left, right) {
-        return false;
-    }
     match (setting_claim(left), setting_claim(right)) {
         (Some(left), Some(right)) => left.template == right.template && left.value == right.value,
-        (None, None) => true,
+        // Recognized settings already bind their complete template and value.
+        // Unparsed commands still require ordering and literal agreement.
+        (None, None) => super::ordering::compatible(left, right),
         _ => false,
     }
 }
@@ -756,6 +753,23 @@ mod tests {
         assert!(settings_compatible(
             "ordinary prose",
             "other ordinary prose"
+        ));
+    }
+
+    #[test]
+    fn unparsed_settings_keep_command_literal_safeguards() {
+        for (left, right) in [
+            ("Run cp source target.", "Run cp target source."),
+            ("Run PORT=5432 app", "Run PORT = 5432 app"),
+            ("`PORT=1+2`", "`PORT = 1+2`"),
+            ("`NO_RETRY=enabled`", "`NO_RETRY=disabled`"),
+        ] {
+            assert!(!settings_compatible(left, right), "{left} / {right}");
+            assert!(!settings_compatible(right, left), "symmetry");
+        }
+        assert!(settings_compatible(
+            "Run cp source target.",
+            "Run cp source target."
         ));
     }
 

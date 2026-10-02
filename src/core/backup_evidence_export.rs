@@ -281,4 +281,29 @@ mod tests {
             assert_eq!(value, original);
         }
     }
+
+    #[test]
+    fn canonical_metadata_key_does_not_hide_a_secret_value_in_backup_export() {
+        for raw in [
+            r#"{"secretRedactionStatus":"api_key=CANONICAL_VALUE_CANARY"}"#,
+            r#"{"secretRedactionStatus":"api_key=CANONICAL_VALUE_CANARY","secretRedactionStatus":"clean"}"#,
+        ] {
+            let mut value = row();
+            value.metadata_json = Some(raw.to_owned());
+            // Even independently admitted provenance cannot exempt metadata values.
+            redact_evidence(&mut value, RedactionLevel::Standard, true);
+            assert!(value.metadata_json.is_none());
+            assert_eq!(value.excerpt, "[REDACTED]");
+            assert_eq!(value.secret_redaction_status, "redacted");
+            assert!(value.canonical_excerpt_hash.is_none());
+            assert_eq!(value.canonical_provenance_revision, 0);
+            assert_eq!(value.search_eligibility, "denied");
+            assert_eq!(value.pack_eligibility, "denied");
+            assert!(
+                !serde_json::to_string(&value)
+                    .expect("backup row")
+                    .contains("CANONICAL_VALUE_CANARY")
+            );
+        }
+    }
 }

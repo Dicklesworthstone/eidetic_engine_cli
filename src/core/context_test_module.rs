@@ -1372,8 +1372,26 @@ mod tests {
                 "worker performed real retrieval"
             );
             assert!(
-                !handoff.can_reuse_for_pack(),
-                "a stale retrieval must return to the caller's canonical index repair path"
+                handoff.can_reuse_for_pack(),
+                "complete live source retrieval can be reused without repairing the persisted index"
+            );
+            assert_eq!(
+                handoff.report.source_mode_applied,
+                crate::core::search::SearchSourceMode::LexicalOnly
+            );
+            assert!(
+                handoff
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| { entry.code == "search_live_snapshot_lexical" })
+            );
+            assert!(
+                handoff
+                    .report
+                    .index_freshness
+                    .as_ref()
+                    .is_some_and(|freshness| { freshness.stale })
             );
             Ok(sender.send(handoff).is_err())
         });
@@ -8165,6 +8183,11 @@ pub fn unrelated_context() -> u64 {{
                 },
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET created_at = '2097-12-31T00:00:00Z', updated_at = '2097-12-31T00:00:00Z'",
+            )
+            .map_err(|error| error.to_string())?;
         drop(connection);
 
         let base_options = super::ContextPackOptions {
@@ -8182,7 +8205,7 @@ pub fn unrelated_context() -> u64 {{
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
-            as_of: None,
+            as_of: Some(query_time("2098-01-01T00:00:00Z")),
             include_expired: false,
             include_future: false,
             include_stale: false,
@@ -8216,6 +8239,7 @@ pub fn unrelated_context() -> u64 {{
 
             let response = super::run_context_pack(&base_options)
                 .map_err(|error| format!("pool_size={pool_size} context pack failed: {error:?}"))?;
+            assert_eq!(response.data.pack.items.len(), 1, "pool_size={pool_size}");
             assert!(
                 response
                     .data
@@ -8988,9 +9012,15 @@ pub fn unrelated_context() -> u64 {{
                     trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
                     trust_subclass: Some("test".to_owned()),
                     tags: vec!["release".to_owned()],
-                    valid_from: Some("2099-06-01T00:00:00Z".to_owned()),
+                    valid_from: Some("2098-01-02T00:00:00Z".to_owned()),
                     valid_to: None,
                 },
+            )
+            .map_err(|error| error.to_string())?;
+        // Keep quality recency material while testing validity independently.
+        connection
+            .execute_raw(
+                "UPDATE memories SET created_at = '2097-12-31T00:00:00Z', updated_at = '2097-12-31T00:00:00Z'",
             )
             .map_err(|error| error.to_string())?;
         drop(connection);
@@ -9146,7 +9176,7 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(first_timed.data.pack.hash, same_millisecond.data.pack.hash);
 
         let mut replay_options = base_options;
-        replay_options.as_of = Some(query_time("2099-06-15T00:00:00Z"));
+        replay_options.as_of = Some(query_time("2098-01-03T00:00:00Z"));
         let replay_response = super::run_context_pack(&replay_options)
             .map_err(|error| format!("as-of replay context pack failed: {error:?}"))?;
         assert!(

@@ -13,6 +13,28 @@ const MAX_BYTES: usize = 64 * 1024;
 const MAX_VALUES: usize = 4096;
 const MAX_DEPTH: usize = 32;
 
+// These are the structural names emitted by db::prepare_evidence_security,
+// not secret-bearing text. Exempt names only: every value (including values
+// under these names and earlier duplicate members) still visits Check.
+fn canonical_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "schema"
+            | "producerKind"
+            | "screeningVersion"
+            | "securityPolicyEpoch"
+            | "secretRedactionStatus"
+            | "redactionClasses"
+            | "instructionRisk"
+            | "searchEligibility"
+            | "packEligibility"
+            | "canonicalProvenanceRevision"
+            | "canonicalExcerptHash"
+            | "upstreamRefHash"
+            | "sourceMetadataHash"
+    )
+}
+
 pub(super) fn safe_to_retain(raw: &str, level: RedactionLevel) -> bool {
     if raw.len() > MAX_BYTES || matches!(level, RedactionLevel::Paranoid | RedactionLevel::Full) {
         return false;
@@ -108,9 +130,12 @@ impl<'de> Visitor<'de> for Check<'_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         while let Some(key) = map.next_key::<String>()? {
-            check_text(&key, self.level)?;
-            let assignment = serde_json::to_string(&key).map_err(|_| refused::<A::Error>())? + ":";
-            check_text(&assignment, self.level)?;
+            if !canonical_metadata_key(&key) {
+                check_text(&key, self.level)?;
+                let assignment =
+                    serde_json::to_string(&key).map_err(|_| refused::<A::Error>())? + ":";
+                check_text(&assignment, self.level)?;
+            }
             map.next_value_seed(Check {
                 level: self.level,
                 remaining: &mut *self.remaining,
@@ -118,5 +143,29 @@ impl<'de> Visitor<'de> for Check<'_> {
             })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_key_names_do_not_exempt_secret_values_or_unknown_keys() {
+        assert!(safe_to_retain(
+            r#"{"secretRedactionStatus":"clean","redactionClasses":[]}"#,
+            RedactionLevel::Standard,
+        ));
+        for raw in [
+            r#"{"secretRedactionStatus":"api_key=CANONICAL_VALUE_CANARY"}"#,
+            r#"{"secretRedactionStatus":"\u0061pi_key=CANONICAL_VALUE_CANARY"}"#,
+            r#"{"secretRedactionStatus":"api_key=CANONICAL_VALUE_CANARY","secretRedactionStatus":"clean"}"#,
+            r#"{"secretRedactionStatus":{"nested":"api_key=CANONICAL_VALUE_CANARY"}}"#,
+            r#"{"secretRedactionStatusExtra":"clean"}"#,
+            r#"{"SecretRedactionStatus":"clean"}"#,
+            r#"{"api_key":"otherwise benign"}"#,
+        ] {
+            assert!(!safe_to_retain(raw, RedactionLevel::Standard), "{raw}");
+        }
     }
 }

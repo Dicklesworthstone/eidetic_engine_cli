@@ -8,8 +8,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "bv_history",
@@ -18,8 +24,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "degraded_fixture",
@@ -28,8 +40,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "e2e_event_log",
@@ -38,8 +56,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "git_metadata",
@@ -48,8 +72,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "pack_diff",
@@ -58,8 +88,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "pack_replay",
@@ -68,8 +104,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "perf_report",
@@ -78,8 +120,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "rch_selector_admission",
@@ -88,8 +136,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "support_bundle",
@@ -98,8 +152,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "swarm_replay",
@@ -108,8 +168,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     },
     {
       "kind": "verification_evidence",
@@ -118,8 +184,14 @@
       "malformed": 1,
       "stale": 1,
       "failedVerdictPreserved": true,
-      "degradedCodes": ["matrix_degraded", "regression_evidence_malformed"],
-      "redactionStatuses": ["safe", "unknown"]
+      "degradedCodes": [
+        "matrix_degraded",
+        "regression_evidence_malformed"
+      ],
+      "redactionStatuses": [
+        "safe",
+        "unknown"
+      ]
     }
   ]
 }

@@ -77,8 +77,8 @@ future changelog pass expands those rows into full capability sections.
 
 ## [0.17.0] - 2026-10-02
 
-Covers `v0.16.0..v0.17.0`: 251 commits before the release commit (201
-non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
+Covers `v0.16.0..v0.17.0`: 258 commits before the release commit (208
+non-merge: 22 features, 77 fixes, 3 performance changes), cut in the
 2026-10-01 release wave.
 
 ### Retrieval quality ranking
@@ -139,6 +139,13 @@ non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
   rejected the daemon's `remote_api` backend label and silently re-ran every
   search in process (the remote call twice). `remote_api` is accepted there
   and in `ee.pack.v2` and `ee.daemon.search.response.v2/v3`.
+- Standard backups preserve canonical evidence security metadata and lineage
+  (GH #61). The metadata scanner exempts only the fixed canonical key names;
+  secret-bearing values, including escaped and duplicate fields, still cause
+  redaction and revoke the copied evidence's search and pack admission.
+- Recognized settings with equivalent spacing and quoting can corroborate
+  each other again; their template and value must agree exactly. Unparsed
+  command literals retain the existing ordering safeguards.
 - The lib test target compiled again (a duplicated `#[test]` on the skyline
   frontier test) and `cargo fmt --check` is clean again.
 
@@ -153,6 +160,10 @@ non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
 
 ### Known open at release
 
+- Archives carry SHA-256 checksums and Minisign signatures. The installers
+  retain their existing checksum and optional Sigstore verification paths;
+  Minisign sidecars do not satisfy `--require-provenance`. No Sigstore bundles
+  or SLSA attestations are published, as in v0.16.0.
 - Ranking: the 30-day recency decay applies to every memory level, although
   the README level table describes procedural memories as decaying slowest,
   and pack relevance floors (0.05) were not recalibrated for the new score
@@ -160,12 +171,30 @@ non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
 - Chronic library-test reds remain tracked in bd-rm8wj; the release gate's
   exact library and contract results for this cut are listed in the GitHub
   release notes.
+- Two requested-index-repair tests publish a synthetic embedder identity but
+  validate it against the process default model
+  ([GH #64](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/64)).
+  Their fixture and compatibility validator are unchanged from v0.16.0;
+  incompatible embedding backends remain rejected.
 - Deferred review findings (low frequency): a topic with two live decision
   heads cannot be recorded until one is superseded; one malformed
   `supersedes` link fails `ee decide list`; store auth keys need read access
   to every ancestor directory; one session row with `ended_at` before
   `started_at` fails `ee resume`.
-- Unsigned, like 0.15.x and 0.16.0.
+- The explicit `ee install --manifest` consumer expects
+  `ee.release_manifest.v1`, while DSR emits its own build-manifest schema and
+  the canonical repository filename. These are not interchangeable
+  ([DSR #18](https://github.com/Dicklesworthstone/doodlestein_self_releaser/issues/18)).
+  The default shell and PowerShell installers use archive checksum sidecars.
+- The explicit daemon write RPC rejects JSON null for optional string fields,
+  although the internal typed payload serializer emits it for absent values
+  ([GH #62](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/62)).
+  This behavior predates v0.16.0; automatic CLI remember routing is unaffected.
+- With `HOME`/`USERPROFILE` unset, search configuration cannot expand its
+  built-in tilde paths even when `XDG_DATA_HOME` selects a valid global store
+  ([GH #63](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/63)).
+  Set a valid home directory in that environment; configuration errors remain
+  explicit rather than silently selecting defaults.
 
 ## [0.16.0] - 2026-09-26
 

@@ -90,9 +90,20 @@ fn compatible_negation_cannot_steal_the_numeric_opposition_slot() {
     .unwrap();
     assert_eq!(selected.len(), ASK_CANDIDATE_SCAN_CAP);
     assert!(selected.iter().any(|row| row.memory_id == "z-opposition"));
-    assert!(!selected.iter().any(|row| row.memory_id == "b-compatible"));
+    // Distinct-body admission may retain compatible evidence without using
+    // it as an opposing claim or displacing the real alternative.
+    assert!(selected.iter().any(|row| row.memory_id == "b-compatible"));
     let report = evaluate_ask(&request, &rows);
     assert_numeric_answer(&report, &rows);
+    assert!(
+        !report
+            .sides
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|side| &side.citations)
+            .any(|citation| citation.memory_id == "b-compatible")
+    );
     assert_eq!(
         report.sides.as_ref().unwrap()[1].citations[0].memory_id,
         "z-opposition"
