@@ -130,8 +130,14 @@ impl CassError {
                 "set EE_CASS_BINARY to an absolute, trusted cass executable (e.g. `EE_CASS_BINARY=$(command -v cass)`) or set [cass.binary] in config; ee only auto-runs a bare `cass` on PATH or a trusted absolute path to a file named `cass`",
             ),
             Self::BinaryNotFound { .. } => Some("install cass or set [cass.binary] in config"),
+            // bd-reality-core-convergence-1azkt.44: name the DURABLE route
+            // first. This is the hint an operator whose cass lives under HOME
+            // actually sees, and until the config override was wired it could
+            // only honestly offer the per-process env var. Offering the env
+            // var alone now understates the fix and leaves the config route
+            // undiscoverable, which is the onboarding failure this came from.
             Self::FoundButUntrusted { .. } => Some(
-                "cass is already installed but outside ee's trusted allowlist; set EE_CASS_BINARY to its absolute path (or move the cass binary into a system bin such as /usr/local/bin) to let ee use it",
+                "cass is already installed but outside ee's trusted allowlist; set [cass] binary to its absolute path in .ee/config.toml (or ~/.config/ee/config.toml) to trust it durably, or set EE_CASS_BINARY to the same path for a single process",
             ),
             Self::ContractMismatch { .. } => Some("upgrade cass to a compatible contract version"),
             Self::Degraded { repair_hint, .. } => Some(repair_hint.as_str()),
