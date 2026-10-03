@@ -1381,9 +1381,20 @@ fn workspace_database_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
 }
 
+/// Whether `cass` is usable from this workspace.
+///
+/// bd-reality-core-convergence-1azkt.44: takes the workspace so the operator's
+/// `[cass] binary` opt-in is honoured here too. Reporting "cass unavailable"
+/// while `ee import cass` succeeds on the same override is the drift this
+/// argument exists to prevent. `None` keeps the trusted-location-only answer
+/// for callers with no addressed workspace.
 #[must_use]
-pub fn probe_cass_capability() -> CapabilityStatus {
-    cass_discovery_to_capability(crate::cass::discover_import_binary(None))
+pub fn probe_cass_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    let config_override =
+        workspace_path.and_then(crate::core::config_surface::cass_import_binary_override);
+    cass_discovery_to_capability(crate::cass::discover_import_binary(
+        config_override.as_deref(),
+    ))
 }
 
 fn cass_discovery_to_capability(

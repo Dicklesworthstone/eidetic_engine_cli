@@ -414,6 +414,50 @@ pub fn merged_workspace_config(
     })
 }
 
+/// The operator's `[cass] binary` override for this workspace, if any
+/// (bd-reality-core-convergence-1azkt.44).
+///
+/// `cass` auto-discovery deliberately ignores HOME-relative locations
+/// (EE-3qgw), so an operator whose `cass` lives under `~/.local/bin` must opt
+/// in explicitly. `src/cass/client.rs` has always accepted that opt-in as a
+/// `config_override` argument and documents `[cass.binary]` as the way to
+/// supply it, but every call site passed `None`, which left `EE_CASS_BINARY`
+/// as the only working route. This is the single resolver those call sites
+/// share, so `ee import cass`, `ee status` and `ee capabilities` cannot drift
+/// apart on which binary they believe is in play.
+///
+/// Returns the configured value verbatim. Validation is deliberately NOT done
+/// here: `discover_import_binary` owns the absolute-path, file-name,
+/// no-symlink-component and executable checks, and it already ignores the
+/// built-in `cass` default because a relative default carries no operator
+/// intent. Duplicating any of that would create a second implementation that
+/// can drift from the one that actually gates execution.
+///
+/// An unreadable or malformed config yields `None` rather than an error: a
+/// capability probe and a discovery hint must degrade to the trusted-location
+/// allowlist, exactly as before this was wired, instead of failing the command.
+#[must_use]
+pub fn cass_import_binary_override(workspace_root: &Path) -> Option<PathBuf> {
+    match merged_workspace_config(workspace_root) {
+        Ok(merged) => merged
+            .values
+            .cass
+            .binary
+            .as_deref()
+            .map(str::trim)
+            .filter(|binary| !binary.is_empty())
+            .map(PathBuf::from),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::cass::discovery",
+                %error,
+                "failed to resolve [cass] binary from config; falling back to trusted locations"
+            );
+            None
+        }
+    }
+}
+
 /// The pack candidate pool for one request (GH #49): an explicit value wins,
 /// otherwise the merged `pack.candidate_pool` (project, then user, then the
 /// built-in 100). Every entry point (`ee pack`, `ee context`, `ee orient`,
@@ -1270,9 +1314,9 @@ mod config_candidate_pool_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
-        graph_config_keys, merged_config_with_environment, publish_config_temp_file, set_config,
-        show_config,
+        ConfigSurfaceOptions, cass_import_binary_override,
+        ensure_config_write_path_is_regular_or_missing, get_config, graph_config_keys,
+        merged_config_with_environment, publish_config_temp_file, set_config, show_config,
     };
     use crate::config::{
         ConfigValueSource, HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
@@ -1317,6 +1361,45 @@ mod tests {
         let after = fs::read_to_string(temp.path().join(".ee/config.toml"))
             .map_err(|error| error.to_string())?;
         assert_eq!(before, after);
+        Ok(())
+    }
+
+    /// bd-reality-core-convergence-1azkt.44. Both arms run against the PROJECT
+    /// layer, which outranks any `~/.config/ee/config.toml` this host happens
+    /// to carry, so neither assertion depends on the developer's home config.
+    ///
+    /// The positive and the negative are deliberately in one test: a resolver
+    /// hard-wired to `None` fails the first assertion and one hard-wired to
+    /// `Some` fails the second, so neither degenerate implementation is green.
+    #[test]
+    fn cass_binary_override_is_read_from_config_and_blank_is_not_an_opt_in() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+
+        fs::write(
+            root.join(".ee").join("config.toml"),
+            "[cass]\nbinary = \"/opt/custom/bin/cass\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            cass_import_binary_override(root),
+            Some(std::path::PathBuf::from("/opt/custom/bin/cass")),
+            "a configured [cass] binary must reach discovery verbatim"
+        );
+
+        // Whitespace carries no operator intent, so it must not displace the
+        // trusted-location allowlist with a path that can never validate.
+        fs::write(
+            root.join(".ee").join("config.toml"),
+            "[cass]\nbinary = \"   \"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            cass_import_binary_override(root),
+            None,
+            "a blank [cass] binary must fall through to trusted locations"
+        );
         Ok(())
     }
 

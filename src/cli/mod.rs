@@ -24267,7 +24267,15 @@ where
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
-    let cass_client = match discover_import_binary(None).map(CassClient::from_discovered) {
+    // bd-reality-core-convergence-1azkt.44: honour the operator's `[cass]
+    // binary` opt-in. Auto-discovery excludes HOME-relative paths on purpose
+    // (EE-3qgw), so this override is the documented route for a `cass` under
+    // `~/.local/bin` -- the exact layout README Quick Start step 2 hits.
+    let cass_config_binary =
+        crate::core::config_surface::cass_import_binary_override(&options.workspace_path);
+    let cass_client = match discover_import_binary(cass_config_binary.as_deref())
+        .map(CassClient::from_discovered)
+    {
         Ok(client) => client,
         Err(error) => {
             let domain_error = DomainError::Import {

@@ -254,7 +254,7 @@ impl CapabilitiesReport {
         let search_status = probe_search_capability(workspace_path);
         let graph_status = probe_graph_capability();
         let mesh_status = probe_mesh_capability();
-        let cass_status = probe_cass_capability();
+        let cass_status = probe_cass_capability(workspace_path);
         let index = IndexCapabilitySummary::gather(workspace_path);
 
         let subsystems = vec![

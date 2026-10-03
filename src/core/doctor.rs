@@ -364,7 +364,7 @@ impl DoctorReport {
             check_daemon_socket_reachable(workspace_path).advisory(),
             check_rch_worker_pressure(&rch_worker_pressure).advisory(),
             check_rch_verify_ledger(&verification_ledger).advisory(),
-            check_cass().advisory(),
+            check_cass(workspace_path).advisory(),
             check_wal_pressure(workspace_path).advisory(),
         ];
 
@@ -3855,8 +3855,8 @@ fn format_static_codes(codes: &[&'static str]) -> String {
     }
 }
 
-fn check_cass() -> CheckResult {
-    cass_check_from_capability(probe_cass_capability())
+fn check_cass(workspace_path: Option<&Path>) -> CheckResult {
+    cass_check_from_capability(probe_cass_capability(workspace_path))
 }
 
 fn cass_check_from_capability(capability: crate::models::CapabilityStatus) -> CheckResult {

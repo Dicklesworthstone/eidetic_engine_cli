@@ -1732,10 +1732,21 @@ import_batch_size = 200
 
 [cass]
 enabled = true
-binary  = "cass"                    # path or PATH lookup
+binary  = "/opt/homebrew/bin/cass"  # ABSOLUTE path; see the note below
 since   = "90d"                     # CASS lookback for import planning and policies
 subprocess_timeout_secs = 30        # wall-clock budget per cass subprocess call
                                     # (raise for large corpora; env override: EE_CASS_TIMEOUT_SECS)
+
+# `binary` is the opt-in for a `cass` that auto-discovery will not take on its
+# own. Import discovery trusts only `/usr/local/bin`, `/usr/bin` and
+# `/opt/homebrew/bin`; HOME-relative locations such as `~/.local/bin/cass` and
+# `~/.cargo/bin/cass` are excluded deliberately, so that a writable HOME cannot
+# make `ee` execute a planted binary. Point `binary` at an absolute path you
+# have consciously trusted (a bare `cass` is ignored — it names no location),
+# or set `EE_CASS_BINARY` for a single process. Either way the path is still
+# checked: absolute, named `cass`, no symlinked component, and executable.
+# Without one of them, `ee import cass` reports `cass_unavailable` and names
+# the untrusted path it found.
 
 [search]
 default_speed   = "balanced"         # fast | balanced | thorough
@@ -2798,9 +2809,12 @@ The DB has advanced past the index generation. Rebuild:
 ee index rebuild --workspace .
 ```
 
-### `error: cass binary not found`
+### `error: cass binary not found` / `cass_unavailable`
 
-Either install `cass` or disable CASS import:
+Two different conditions share this area, and the error text distinguishes
+them. Read it before acting.
+
+**`cass` is genuinely absent.** Install it, or turn CASS import off:
 
 ```bash
 # Install
@@ -2809,6 +2823,36 @@ cargo install --path /dp/coding_agent_session_search
 # Or disable in your config file
 # [cass]
 # enabled = false
+```
+
+**`cass` is installed somewhere `ee` will not execute from.** The error names
+the path it found and reports `cass_unavailable`. Import discovery trusts only
+`/usr/local/bin`, `/usr/bin` and `/opt/homebrew/bin`; HOME-relative locations
+are excluded on purpose, so that a writable HOME cannot make `ee` run a planted
+binary. Note that `cargo install` puts `cass` in `~/.cargo/bin`, which is one
+of the excluded locations — installing it that way does not make it
+discoverable by itself.
+
+Opt in explicitly with the absolute path the error reported. Either route
+works for `ee import cass`, `ee status` and `ee doctor` alike:
+
+```bash
+# Durable: add it to this workspace's .ee/config.toml, or to
+# ~/.config/ee/config.toml to cover every workspace. There is no
+# `ee config set` key for this yet; edit the file.
+printf '[cass]\nbinary = "%s/.cargo/bin/cass"\n' "$HOME" >> .ee/config.toml
+
+# Or for a single process
+EE_CASS_BINARY="$HOME/.cargo/bin/cass" ee import cass --workspace . --json
+```
+
+`EE_CASS_BINARY` takes precedence over the config value when both are set.
+
+The path is still validated on every use: absolute, named `cass`, no symlinked
+component, and executable. Confirm it took effect with:
+
+```bash
+ee doctor --workspace . --json | jq '.data.checks[] | select(.name == "cass")'
 ```
 
 `ee` continues to work without `cass`; explicit `ee remember` is unaffected.
