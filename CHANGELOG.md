@@ -78,7 +78,7 @@ future changelog pass expands those rows into full capability sections.
 ## [0.17.0] - 2026-10-02
 
 Covers `v0.16.0..v0.17.0`: 258 commits before the release commit (208
-non-merge: 22 features, 77 fixes, 3 performance changes), cut in the
+non-merge: 22 features, 76 fixes, 3 performance changes), cut in the
 2026-10-01 release wave.
 
 ### Retrieval quality ranking
