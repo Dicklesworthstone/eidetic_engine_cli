@@ -217,6 +217,61 @@ impl IndexCapabilitySummary {
     }
 }
 
+/// Where `ee` resolved an external binary, as DATA rather than as a lookup the
+/// renderer performs for itself (bd-reality-core-convergence-1azkt.44).
+///
+/// `ee capabilities` used to call `discover_import_binary(None)` from inside
+/// the JSON writer. That hard-coded `None` meant the `binaries.cass` block
+/// disagreed with `ee import cass`, `ee status` and `ee doctor` the moment an
+/// operator set `[cass] binary`, and it put a discovery call in the output
+/// layer, which is the wrong direction for `cli -> core -> output`. Resolving
+/// once in `core` and rendering the result keeps the four surfaces answering
+/// from one lookup.
+#[derive(Clone, Debug)]
+pub struct BinaryDiscoverySummary {
+    /// Absolute path that passed validation, or `None` when discovery failed.
+    pub discovered_at: Option<String>,
+    /// Stable wire label for the mechanism that resolved it.
+    pub source: &'static str,
+    /// Whether the resolved path passed the trust/permission checks.
+    pub trusted: bool,
+    /// Operator-facing reason, present only when discovery failed.
+    pub error: Option<String>,
+}
+
+/// Resolve `cass` for this workspace exactly as the import path would.
+///
+/// Routes through the same `cass_import_binary_override` resolver that
+/// `ee import cass`, `ee status` and `ee doctor` use, so `ee capabilities`
+/// cannot report a binary the import path would refuse, or vice versa. A
+/// workspace of `None` (no addressed workspace) keeps the trusted-locations
+/// answer rather than inventing one.
+#[must_use]
+fn gather_cass_binary_discovery(workspace_path: Option<&Path>) -> BinaryDiscoverySummary {
+    let config_override =
+        workspace_path.and_then(crate::core::config_surface::cass_import_binary_override);
+    match crate::cass::discover_import_binary(config_override.as_deref()) {
+        Ok(found) => BinaryDiscoverySummary {
+            discovered_at: Some(found.path.display().to_string()),
+            source: match found.source {
+                crate::cass::DiscoverySource::EnvVar => "env_EE_CASS_BINARY",
+                crate::cass::DiscoverySource::Config => "config_cass_binary",
+                crate::cass::DiscoverySource::Path => "trusted_allowlist",
+            },
+            trusted: true,
+            error: None,
+        },
+        // Honest null plus source="missing", so an agent reading the response
+        // knows the state without parsing the message.
+        Err(error) => BinaryDiscoverySummary {
+            discovered_at: None,
+            source: "missing",
+            trusted: false,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 /// Full capabilities report returned by the capabilities command.
 #[derive(Clone, Debug)]
 pub struct CapabilitiesReport {
@@ -228,6 +283,8 @@ pub struct CapabilitiesReport {
     pub output_formats: Vec<OutputFormatEntry>,
     pub index: IndexCapabilitySummary,
     pub toon: ToonOutputCapability,
+    /// `cass` discovery for the addressed workspace, honouring `[cass] binary`.
+    pub cass_binary: BinaryDiscoverySummary,
 }
 
 impl CapabilitiesReport {
@@ -407,6 +464,7 @@ impl CapabilitiesReport {
             output_formats,
             index,
             toon: ToonOutputCapability::gather(),
+            cass_binary: gather_cass_binary_discovery(workspace_path),
         }
     }
 

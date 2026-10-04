@@ -9977,7 +9977,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
         // EE_* environment overrides. Agents reading capabilities can
         // determine which discovery source produced each binary, so
         // error.recovery hints from F1 are reproducible / verifiable.
-        write_capabilities_binaries_block(d);
+        write_capabilities_binaries_block(d, report);
         write_capabilities_env_overrides_block(d);
         write_capabilities_index_block(d, report);
         write_capabilities_output_metadata(d, report, true);
@@ -10032,37 +10032,27 @@ fn write_capabilities_index_block(builder: &mut JsonBuilder, report: &Capabiliti
 ///
 /// Future recovery work can add `recovery[]` (matching F1) when
 /// `discoveredAt` is null.
-fn write_capabilities_binaries_block(builder: &mut JsonBuilder) {
+/// Render the binaries block from the ALREADY-RESOLVED report
+/// (bd-reality-core-convergence-1azkt.44).
+///
+/// This used to call `discover_import_binary(None)` itself. That hard-coded
+/// `None` ignored the operator's `[cass] binary`, so this block could report
+/// `source: "missing"` for a binary `ee import cass` was happily using, and it
+/// performed a discovery lookup from the output layer. The lookup now happens
+/// once in `core::capabilities`; this function only renders what it found.
+fn write_capabilities_binaries_block(builder: &mut JsonBuilder, report: &CapabilitiesReport) {
     builder.field_object("binaries", |bins| {
         bins.field_object("cass", |cass| {
-            let discovery = crate::cass::discover_import_binary(None);
-            match discovery {
-                Ok(found) => {
-                    cass.field_str("discoveredAt", &found.path.display().to_string());
-                    cass.field_str("source", source_label(found.source));
-                    cass.field_bool("trusted", true);
-                }
-                Err(error) => {
-                    // Honest null + source = "missing" so an agent reading
-                    // the response knows what's happening without parsing
-                    // the error message.
-                    cass.field_str("source", "missing");
-                    cass.field_str("error", &error.to_string());
-                    cass.field_bool("trusted", false);
-                }
+            if let Some(path) = report.cass_binary.discovered_at.as_deref() {
+                cass.field_str("discoveredAt", path);
             }
+            cass.field_str("source", report.cass_binary.source);
+            if let Some(error) = report.cass_binary.error.as_deref() {
+                cass.field_str("error", error);
+            }
+            cass.field_bool("trusted", report.cass_binary.trusted);
         });
     });
-}
-
-/// Map a `DiscoverySource` to a stable wire-form string.
-fn source_label(source: crate::cass::DiscoverySource) -> &'static str {
-    use crate::cass::DiscoverySource;
-    match source {
-        DiscoverySource::EnvVar => "env_EE_CASS_BINARY",
-        DiscoverySource::Config => "config_cass_binary",
-        DiscoverySource::Path => "trusted_allowlist",
-    }
 }
 
 /// Emit `envOverrides` capability block (F4).
@@ -15901,7 +15891,7 @@ pub fn render_capabilities_json_filtered(
             // Bead bd-17c65.6.4 (F4) — binaries + envOverrides in
             // capabilities. Always emit regardless of profile (lite vs
             // full) since these are critical for agent discoverability.
-            write_capabilities_binaries_block(d);
+            write_capabilities_binaries_block(d, report);
             write_capabilities_env_overrides_block(d);
             write_capabilities_index_block(d, report);
             write_capabilities_output_metadata(d, report, true);
