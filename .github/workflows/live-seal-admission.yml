@@ -65,7 +65,7 @@ jobs:
           6 core::memory_lifecycle::seal_admission_tests::
           14 core::ask::corpus::source_authority_tests::
           8 core::ask::corpus::rule_lineage_tests::
-          4 core::resume::snapshot::seal_authority_tests::
+          10 core::resume::snapshot::seal_authority_tests::
           CASES
           exit "$failed"
       - name: Record all-target compile, lint, and formatting verdicts
