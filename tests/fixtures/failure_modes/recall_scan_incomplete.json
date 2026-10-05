@@ -10,5 +10,5 @@
     "setup_commands": ["Seed more qualifying anchors than the scan or retained result ceiling; bounded equivalents run in core::recall::scan::tests"],
     "invocation": "ee recall --path '*' --workspace . --json"
   },
-  "expected_emission": {"code": "recall_scan_incomplete", "severity": "medium", "message_contains": ["not exhaustive workspace recall", "retained admitted candidates"]}
+  "expected_emission": {"code": "recall_scan_incomplete", "severity": "medium", "message_contains": ["not exhaustive workspace recall", "retained admitted candidates"], "repair_contains": "Narrow --path, --symbol, --kind or --level"}
 }

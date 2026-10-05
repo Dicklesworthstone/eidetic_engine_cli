@@ -13521,7 +13521,7 @@ ee recall --path src/substituted.rs --workspace . --json
 
 **Expected emission.** Message contains: `without matching canonical anchors ... cannot invent code provenance`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee index rebuild --workspace .`
 
 **Fixture.** [`tests/fixtures/failure_modes/recall_anchor_filtered.json`](../tests/fixtures/failure_modes/recall_anchor_filtered.json)
 
@@ -13643,7 +13643,7 @@ ee recall --path '*' --workspace . --json
 
 **Expected emission.** Message contains: `not exhaustive workspace recall ... retained admitted candidates`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Narrow --path, --symbol, --kind or --level`
 
 **Fixture.** [`tests/fixtures/failure_modes/recall_scan_incomplete.json`](../tests/fixtures/failure_modes/recall_scan_incomplete.json)
 

@@ -10,5 +10,5 @@
     "setup_commands": ["Seed canonical anchors and a substituted derived locator using core::recall::scan::tests::canonical_anchor_hash_prevents_index_locator_substitution"],
     "invocation": "ee recall --path src/substituted.rs --workspace . --json"
   },
-  "expected_emission": {"code": "recall_anchor_filtered", "severity": "medium", "message_contains": ["without matching canonical anchors", "cannot invent code provenance"]}
+  "expected_emission": {"code": "recall_anchor_filtered", "severity": "medium", "message_contains": ["without matching canonical anchors", "cannot invent code provenance"], "repair_contains": "ee index rebuild --workspace ."}
 }
