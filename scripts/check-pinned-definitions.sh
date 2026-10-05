@@ -51,10 +51,40 @@ PINNED=(
 # The pattern requires the trailing ':' of a const declaration and a boundary
 # before `const`, so RAW_TOKEN_PATTERNS_V2 and a mention in prose do not count.
 # No '\b': that is a GNU extension and CI and macOS would disagree.
+#
+# SCRATCH TREES ARE EXCLUDED, AND THAT IS NOT COSMETIC. Agent working
+# directories under this repo hold whole COPIES of src/, so the scan counted
+# the same module-level const once per copy and failed on a clean tree:
+#
+#     .ntm/swarm/evidence/rc-20260924/tree/src/policy/mod.rs:2240:  RAW_TOKEN_PATTERNS
+#     .ntm/fmt2/tree/src/policy/mod.rs:2393:                        RAW_TOKEN_PATTERNS
+#     src/policy/mod.rs:2393:                                       RAW_TOKEN_PATTERNS   <- the only real one
+#
+# At the time of this fix .ntm held 4113 .rs files and beads_compliance_audit
+# 4244, against 527 in src/ -- so ~94% of the scanned population was copies.
+# Every such copy is git-ignored, so CI's fresh checkout passed while every
+# agent's local run failed. A gate that is red only where people work, and
+# green where it is enforced, trains them to ignore it.
+#
+# The list is NEGATIVE (exclude scratch) rather than positive (enumerate
+# source roots) on purpose: a new scratch directory makes this gate fail
+# loudly and someone extends the list, whereas a new *source* root would
+# silently fall outside a positive list and stop being guarded at all. Loud
+# beats silent for a pin whose whole job is to notice a second definition.
+#
+# No git here: REPO_ROOT is script-relative by design, and this gate must keep
+# working in checkouts with no .git (the RCH clean-overlay lane has none).
 scan_definitions() {
     local root="$1" name="$2"
     grep -rnE "(^|[^A-Za-z0-9_])const[[:space:]]+${name}[[:space:]]*:" \
-        --include='*.rs' "$root" 2>/dev/null || true
+        --include='*.rs' \
+        --exclude-dir='.git' \
+        --exclude-dir='.ntm' \
+        --exclude-dir='.rch' \
+        --exclude-dir='target' \
+        --exclude-dir='tmp' \
+        --exclude-dir='beads_compliance_audit' \
+        "$root" 2>/dev/null || true
 }
 
 # Check one pinned identifier. Prints its hits, always.
@@ -163,7 +193,29 @@ if [[ "${1:-}" == "--self-test" ]]; then
     printf 'const PINNED_TABLE: &[&str] = &["b"];\n' >"$other/src/notes.txt"
     arm "$other" 0 "a non-.rs file naming the identifier is not counted"
 
-    echo "self-test: $((6 - failures))/6 passed"
+    # A COPY OF THE TREE IN AN AGENT SCRATCH DIRECTORY IS NOT A SECOND
+    # DEFINITION. This is the arm the exclusion exists for: before it, .ntm
+    # and beads_compliance_audit copies made a clean tree read as 3 and the
+    # gate failed locally while passing in CI.
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/pinned-scratch.XXXXXX")" || exit 3
+    mkdir -p "$scratch/src" "$scratch/.ntm/fmt2/tree/src" "$scratch/beads_compliance_audit/tree/src"
+    printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$scratch/src/real.rs"
+    printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$scratch/.ntm/fmt2/tree/src/copy.rs"
+    printf 'const PINNED_TABLE: &[&str] = &["a"];\n' \
+        >"$scratch/beads_compliance_audit/tree/src/copy.rs"
+    arm "$scratch" 0 "copies under scratch dirs are excluded, so one real definition passes"
+
+    # ...AND THE EXCLUSION MUST NOT SWALLOW REAL SOURCE. Without this, an
+    # over-broad --exclude-dir would make the arm above pass for the wrong
+    # reason and quietly stop guarding a whole subtree.
+    nested="$(mktemp -d "${TMPDIR:-/tmp}/pinned-nested.XXXXXX")" || exit 3
+    mkdir -p "$nested/src/policy" "$nested/.ntm/tree/src"
+    printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$nested/src/policy/mod.rs"
+    printf 'const PINNED_TABLE: &[&str] = &["b"];\n' >"$nested/src/policy/shadow.rs"
+    printf 'const PINNED_TABLE: &[&str] = &["c"];\n' >"$nested/.ntm/tree/src/copy.rs"
+    arm "$nested" 1 "a real second definition still FAILS while a scratch copy is ignored"
+
+    echo "self-test: $((8 - failures))/8 passed"
     [ "$failures" -eq 0 ] || exit 2
     exit 0
 fi
