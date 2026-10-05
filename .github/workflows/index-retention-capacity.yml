@@ -9,12 +9,12 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: index-retention-capacity
+  group: index-retention-capacity-macos
   cancel-in-progress: false
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 10
     permissions:
       contents: write
