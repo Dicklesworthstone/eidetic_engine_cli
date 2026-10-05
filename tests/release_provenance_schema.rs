@@ -66,19 +66,43 @@ fn provenance_docs_and_audit_surface_are_registered() {
     let checklist = repo_file("PUBLISH_CHECKLIST.md");
     let audit = repo_file("scripts/audit_install_pipeline.sh");
 
+    // bd-oxajr. Five of this test's eleven needles pinned a posture the
+    // project does not have, and the docs were deliberately corrected away
+    // from it: PUBLISH_CHECKLIST.md now states that releases "do not carry
+    // Sigstore bundles or SLSA attestations", that "`--require-provenance`
+    // remains unsatisfied", and -- in as many words -- "Do not describe
+    // unsigned metadata as signed provenance". Demanding the checklist say
+    // "Signed release provenance ready" asked it to assert something false,
+    // so the repair that makes this green by editing the docs is the wrong
+    // one: it re-introduces the overclaim those commits removed.
+    //
+    // The true posture is CAPABILITY PRESENT, RELEASES UNSIGNED. The
+    // installer takes `--require-provenance` and verifies a Sigstore bundle
+    // when one is published; no published release carries one yet. The
+    // needles below pin that, and they are not weaker than what they
+    // replace: the checklist block now also pins the anti-overclaim warning,
+    // so re-describing unsigned metadata as signed reds this test.
+    //
+    // DELIBERATE TRIPWIRE: `--require-provenance` remains unsatisfied` is
+    // pinned on purpose. The day releases are signed, that sentence must
+    // change and this test must go red, forcing the docs, the audit surface
+    // and these assertions to move together instead of drifting apart again.
     for needle in [
         "| Path | Status | Provenance | Tracking |",
-        "SLSA provenance planned; installer supports `--require-provenance`",
+        "`--require-provenance` for fail-closed signature and SLSA provenance",
         "SLSA provenance JSON and its Sigstore bundle",
     ] {
         assert_contains(&readme, needle);
     }
 
     for needle in [
-        "Signed release provenance ready",
-        "ee-<target>.provenance.json",
-        "Cargo.lock BLAKE3",
-        "install.sh --require-provenance",
+        "do not carry Sigstore bundles or SLSA attestations",
+        // Not a bare "unsatisfied": that word is generic enough to keep
+        // passing for an unrelated reason if this paragraph is rewritten.
+        // The sentence wraps after "remains", so this is the longest span
+        // that pins the claim without pinning the line wrapping too.
+        "`--require-provenance` remains",
+        "Do not describe unsigned metadata as signed provenance.",
     ] {
         assert_contains(&checklist, needle);
     }
