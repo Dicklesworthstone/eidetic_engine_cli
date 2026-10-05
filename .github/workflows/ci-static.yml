@@ -274,6 +274,27 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.bead_triage_self_test.outcome == 'success' }}
         run: python3 ./scripts/bead-evidence-triage.py --limit 40
 
+      # bd-223vl and bd-6oqlx both ask, in the same words, for a gate that fails
+      # when a surface function is reachable only from test code. A fn existing is
+      # not a capability, and the way it hides is identical in both areas: unit
+      # tests pass, every reader assumes it runs, nothing calls it outside
+      # #[cfg(test)]. Self-test first, per the bd-yytkz note above: two of its
+      # arms encode mistakes I made by hand before writing it -- an intra-module
+      # dispatch table must count as production, and production code AFTER a test
+      # module must not be swallowed -- so if those regress the gate silently
+      # inverts.
+      - name: Production reachability guard --self-test
+        id: reachability_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-production-reachability.py --self-test
+
+      # This one IS a gate, not advisory: the nine known test-only surfaces are
+      # in a shrink-only baseline, so it is green at HEAD and fails only on a NEW
+      # test-only surface or on a baselined entry that has become reachable.
+      - name: Production reachability guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.reachability_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-production-reachability.py
+
       # bd-yytkz. Self-test FIRST and as its own step: if the guard's failure
       # arms have stopped working, the audit below is a clean answer from a
       # broken instrument, and a combined step would report that as one green.
