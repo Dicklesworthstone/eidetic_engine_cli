@@ -53,7 +53,7 @@ diff --git a/src/core/index_retention_names.rs b/src/core/index_retention_names.
 new file mode 100644
 --- /dev/null
 +++ b/src/core/index_retention_names.rs
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,259 @@
 +//! Retained index names shared by publication and snapshot recovery.
 +//!
 +//! Three digits are a minimum display width, not a lifetime publication limit.
@@ -61,6 +61,7 @@ new file mode 100644
 +//! generation. The caller owns the publication lease and no-replace rename.
 +
 +use std::collections::BTreeSet;
++use std::ffi::OsStr;
 +use std::io;
 +use std::path::{Path, PathBuf};
 +
@@ -79,6 +80,10 @@ new file mode 100644
 +    (number > 0).then_some(number)
 +}
 +
++fn os_sequence(name: &OsStr, prefix: &str) -> Option<u32> {
++    name.to_str().and_then(|name| sequence(name, prefix))
++}
++
 +fn successor(number: u32) -> io::Result<u32> {
 +    number.checked_add(1).ok_or_else(|| {
 +        io::Error::other("retained index generation sequence space is exhausted")
@@ -94,7 +99,7 @@ new file mode 100644
 +    for entry in std::fs::read_dir(parent)? {
 +        let entry = entry?;
 +        let name = entry.file_name();
-+        if let Some(number) = name.to_str().and_then(|name| sequence(name, prefix)) {
++        if let Some(number) = os_sequence(&name, prefix) {
 +            occupied.insert(number);
 +        }
 +    }
@@ -294,7 +299,16 @@ new file mode 100644
 +        use std::os::unix::ffi::OsStringExt;
 +        let root = TestDirectory::new()?;
 +        let entry = std::ffi::OsString::from_vec(b"index.previous.\xff001".to_vec());
-+        std::fs::create_dir(root.0.join(entry))?;
++        // Exercise the exact directory-entry classifier on every Unix host.
++        // Apple's native filesystem refuses this filename before read_dir can
++        // return it; Linux additionally exercises the real enumeration path.
++        assert_eq!(os_sequence(&entry, &name(0)), None);
++        #[cfg(target_os = "linux")]
++        std::fs::create_dir(root.0.join(&entry))?;
++        assert_eq!(
++            os_sequence(std::ffi::OsStr::new("index.previous.1000"), &name(0)),
++            Some(1000)
++        );
 +        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(0)));
 +        Ok(())
 +    }
