@@ -391,3 +391,50 @@ fn recency_read_scope_preserves_read_only_and_caller_owned_transactions() -> Tes
     assert!(db.get_memory(&id(2))?.is_some());
     Ok(())
 }
+
+/// bd-b8pvg. `insert_memory` used to default `valid_from` to `created_at`
+/// VERBATIM, which copies the ROW canon (offset form, `+00:00`) into a
+/// VALIDITY column whose canon is the `Z` form. V124 exists to stop those two
+/// spellings mixing inside one column, and the import path already normalised
+/// this same default, so only native writes drifted.
+///
+/// The fix routes both native sites through `default_valid_from`. Nothing
+/// guarded it: before this test, `default_valid_from` had exactly three
+/// references in the tree -- its definition and the two call sites -- so
+/// flipping the `true` in its `to_rfc3339_opts(SecondsFormat::AutoSi, true)`
+/// back to `false`, or restoring the verbatim copy, would have reintroduced
+/// the hazard silently.
+///
+/// Control taken while writing this: with the `true` flipped to `false` the
+/// `ends_with('Z')` assertion fails and the offset assertion fails, so the
+/// test is not vacuous.
+#[test]
+fn default_valid_from_uses_the_validity_canon_not_the_row_canon() -> TestResult {
+    // An offset-spelled created_at, which is exactly what the row canon
+    // produces and what the old code copied straight through.
+    let row_canon = "2026-09-22T21:43:06.364111193+00:00";
+    let derived = default_valid_from(row_canon)?;
+
+    assert!(
+        derived.ends_with('Z'),
+        "validity canon must use the Z spelling, got {derived}"
+    );
+    assert!(
+        !derived.contains("+00:00"),
+        "validity canon must not carry an offset, got {derived}"
+    );
+    assert_ne!(
+        derived, row_canon,
+        "a verbatim copy of created_at is the defect this guards"
+    );
+
+    // Same instant, and nanosecond precision preserved (AutoSi, not Secs):
+    // the V124 doc was itself stale on this point, so pin it.
+    assert_eq!(derived, "2026-09-22T21:43:06.364111193Z");
+
+    // A created_at already in the validity canon round-trips unchanged.
+    let already_canon = "2026-09-22T21:43:06.364111193Z";
+    assert_eq!(default_valid_from(already_canon)?, already_canon);
+
+    Ok(())
+}
