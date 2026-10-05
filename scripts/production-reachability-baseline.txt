@@ -1,0 +1,51 @@
+# Surface functions reachable ONLY from test code (bd-223vl, bd-6oqlx).
+#
+# Each line is an accepted, PRE-EXISTING test-only surface: a function that
+# exists, whose unit tests pass, and which nothing calls outside a
+# `#[cfg(test)]` module. They are baselined rather than wired here because
+# wiring nine doctor fixers at once needs a finding string, two dispatch arms
+# and a test each -- that is bd-223vl's work, not a side effect of adding the
+# gate that makes it visible.
+#
+# THIS LIST MAY ONLY SHRINK. scripts/check-production-reachability.py fails in
+# BOTH directions: a new test-only surface is an error, and an entry here that
+# has since become reachable is ALSO an error telling you to delete the line.
+# That second direction is what stops a baseline decaying into a permanent
+# ignore-list, and it is copied deliberately from
+# tests/fixtures/e2e_invocation/orphan_baseline.txt.
+#
+# To retire an entry: give the fixer a `finding` string, add an arm to
+# `fix_dispatch_for_finding` and a mapping in `fix_finding_for_check`
+# (src/core/doctor_fixers.rs), then delete the line here.
+#
+# ---------------------------------------------------------------------------
+# 2026-10-05, measured by this gate at 79b4cf29a: 31 surfaces examined, 9
+# test-only. All nine are `ee doctor --fix` fixers and all nine are the
+# population bd-223vl named. The ten fixers the dispatch table DOES route
+# (fix_database_*, fix_search_index_*, fix_schema_migration_pending,
+# fix_cass_integration_drift) are correctly absent from this list: the table
+# lives in the same file as the fixers, and this gate counts an intra-module
+# dispatch as production, which a sweep that excludes the defining file cannot.
+#
+# NOTE ON fix_graph_snapshot_stale, because it corrects an earlier claim of
+# mine on bd-223vl. I first reported it as reachable, because `grep -rlw` found
+# it in src/cli/mod.rs. Both of those references -- lines 87615 and 87623 -- are
+# INSIDE a `#[cfg(test)]` module in that file. It is test-only like the other
+# eight, so bd-223vl's finding is 9 of 9, not 8 of 9. A word-boundary grep
+# cannot tell a test caller from a production one; that is the whole reason this
+# gate brace-matches test regions instead.
+#
+# The five scoring-stack surfaces bd-6oqlx names (final_score,
+# anchor_match_score, bead_affinity_score, stale_anchor_floor,
+# freshness_drift_multiplier) are NOT here: all five have production callers at
+# HEAD, which is consistent with the wiring recorded on that bead.
+# ---------------------------------------------------------------------------
+fix_agent_coordination_stale_lease
+fix_beads_jsonl_drift
+fix_graph_snapshot_stale
+fix_policy_safety_inconsistent
+fix_snapshot_backup_owed
+fix_state_file_permission_drift
+fix_wal_checkpoint_pending
+fix_workspace_config_atomic_rewrite
+fix_workspace_config_malformed_toml
