@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/temporal-source-sha.log"
           grep -Fq 'mod memory_temporal;' src/db/mod.rs
-          grep -Fq 'typed_revision.apply(&conn, &new_id)?;' src/core/memory.rs
+          grep -Fq 'typed_revision.apply(&conn, &new_id, recorded_at)?;' src/core/memory.rs
           git archive --format=tar.gz --output="$RUNNER_TEMP/temporal-source.tar.gz" HEAD \
             src/db/mod.rs src/db/memory_temporal.rs src/db/memory_temporal_tests.rs \
             src/core/memory.rs src/core/memory_revision_typed.rs src/core/jsonl_import.rs \

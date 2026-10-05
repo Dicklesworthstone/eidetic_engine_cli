@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/lifecycle-source.log"
-          grep -Fq 'typed_revision.apply(&conn, &new_id)?;' src/core/memory.rs
+          grep -Fq 'typed_revision.apply(&conn, &new_id, recorded_at)?;' src/core/memory.rs
           grep -Fq 'mod memory_temporal;' src/db/mod.rs
           cargo build --locked --bin ee 2>&1 | tee "$RUNNER_TEMP/lifecycle-build.log"
       - name: Exercise capture, typed revision and two recovery cycles
