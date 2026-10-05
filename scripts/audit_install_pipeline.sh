@@ -145,8 +145,8 @@ dependency_resolution_inventory() {
         results="$(jq -c --argjson item "$item" '. + [$item]' <<<"$results")"
     done <<'EOF'
 asupersync|0.5.0|direct|Cargo.toml dependencies|must_be_published
-franken-agent-detection|0.2.3|direct|Cargo.toml dependencies|must_be_published
-frankensearch|0.6.0|direct|Cargo.toml dependencies|must_be_published
+franken-agent-detection|0.3.3|direct|Cargo.toml dependencies|must_be_published
+frankensearch|0.6.1|direct|Cargo.toml dependencies|must_be_published
 fnx-algorithms|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
 fnx-classes|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
 fnx-runtime|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
@@ -157,30 +157,30 @@ asupersync-macros|0.5.0|transitive|asupersync 0.5.0 workspace dependency|must_be
 franken-kernel|0.5.0|transitive|asupersync 0.5.0 workspace dependency|must_be_published
 franken-evidence|0.5.0|transitive|asupersync 0.5.0 workspace dependency|must_be_published
 franken-decision|0.5.0|transitive|asupersync 0.5.0 workspace dependency|must_be_published
-fsqlite|0.4.1|transitive|sqlmodel-frankensqlite dependency|must_be_published
-fsqlite-core|0.4.1|transitive|sqlmodel-frankensqlite dependency|must_be_published
-fsqlite-error|0.4.0|transitive|sqlmodel-frankensqlite dependency|must_be_published
-fsqlite-types|0.4.0|transitive|sqlmodel-frankensqlite dependency|must_be_published
-fsqlite-func|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-ext-fts5|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-ext-json|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-ast|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-btree|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-pager|0.4.1|transitive|frankensqlite feature surface|must_be_published
-fsqlite-parser|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-planner|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-vdbe|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-vfs|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-wal|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-mvcc|0.4.0|transitive|frankensqlite feature surface|must_be_published
-fsqlite-observability|0.4.0|transitive|frankensqlite feature surface|must_be_published
-frankensearch-core|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-embed|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-index|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-lexical|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-storage|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-fusion|0.3.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
-frankensearch-rerank|0.4.0|transitive|frankensearch 0.6.0 workspace dependency|must_be_published
+fsqlite|0.4.6|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-core|0.4.6|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-error|0.4.6|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-types|0.4.6|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-func|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ext-fts5|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ext-json|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ast|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-btree|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-pager|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-parser|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-planner|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-vdbe|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-vfs|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-wal|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-mvcc|0.4.6|transitive|frankensqlite feature surface|must_be_published
+fsqlite-observability|0.4.6|transitive|frankensqlite feature surface|must_be_published
+frankensearch-core|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-embed|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-index|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-lexical|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-storage|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-fusion|0.3.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
+frankensearch-rerank|0.4.1|transitive|frankensearch 0.6.1 workspace dependency|must_be_published
 fnx-cgse|0.2.2|transitive|franken_networkx feature surface|graph_feature_or_publish
 fnx-convert|0.2.0|transitive|franken_networkx feature surface|graph_feature_or_publish
 EOF
