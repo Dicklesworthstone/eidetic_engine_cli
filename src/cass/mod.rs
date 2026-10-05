@@ -38,9 +38,11 @@ pub mod import;
 pub mod process;
 pub mod session;
 
+mod import_discovery;
+
 pub use client::{
     CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES, discover,
-    discover_import_binary, discover_with_override,
+    discover_with_override,
 };
 pub use contract::{
     CassContract, REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
@@ -52,6 +54,7 @@ pub use import::{
     CassImportReport, ImportSessionStatus, ImportedCassSession, import_cass_sessions,
     parse_import_since_duration, parse_sessions_json_summary, parse_view_json_summary,
 };
+pub use import_discovery::discover_import_binary;
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 pub use session::{
     CassAgent, CassAggregationBucket, CassIndexFreshness, CassRole, CassSearchCacheStats,
