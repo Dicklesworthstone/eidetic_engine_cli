@@ -5384,16 +5384,11 @@ fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
     })
 }
 
+#[path = "index_retention_names.rs"]
+mod retention_names;
+
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
-    if name == retained_prefix {
-        return Some(0);
-    }
-    let suffix = name.strip_prefix(retained_prefix)?.strip_prefix('.')?;
-    if suffix.len() != 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let sequence = suffix.parse::<u32>().ok()?;
-    (sequence > 0).then_some(sequence)
+    retention_names::sequence(name, retained_prefix)
 }
 
 /// Recognize only a formerly live directory stranded by an interrupted
@@ -5540,20 +5535,13 @@ fn find_latest_recoverable_retained_dir_for_snapshot(
 fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
     let parent = index_parent(index_dir);
     let base = index_base_name(index_dir)?;
-    for sequence in 0_u32..1000 {
-        let candidate = if sequence == 0 {
-            parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}"))
-        } else {
-            parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}.{sequence:03}"))
-        };
-        if !path_exists_no_follow(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(IndexRebuildError::Index(
-        "Failed to allocate retained index generation directory".to_string(),
-    ))
+    ensure_index_path_has_no_symlinks(parent, "allocate retained index generation")?;
+    let prefix = format!("{base}{INDEX_RETAINED_SUFFIX}");
+    retention_names::allocate(parent, &prefix).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to allocate retained index generation directory: {error}"
+        ))
+    })
 }
 
 fn allocate_rejected_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {

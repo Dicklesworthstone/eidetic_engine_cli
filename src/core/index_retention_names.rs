@@ -1,0 +1,283 @@
+//! Retained index names shared by publication and snapshot recovery.
+//!
+//! Three digits are a minimum display width, not a lifetime publication limit.
+//! This module only inspects names; it never deletes, renames, or activates a
+//! generation. The caller owns the publication lease and no-replace rename.
+
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::io;
+use std::path::{Path, PathBuf};
+
+pub(super) fn sequence(name: &str, prefix: &str) -> Option<u32> {
+    if name == prefix {
+        return Some(0);
+    }
+    let suffix = name.strip_prefix(prefix)?.strip_prefix('.')?;
+    if !(3..=10).contains(&suffix.len())
+        || (suffix.len() > 3 && suffix.starts_with('0'))
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let number = suffix.parse::<u32>().ok()?;
+    (number > 0).then_some(number)
+}
+
+fn os_sequence(name: &OsStr, prefix: &str) -> Option<u32> {
+    name.to_str().and_then(|name| sequence(name, prefix))
+}
+
+fn successor(number: u32) -> io::Result<u32> {
+    number
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("retained index generation sequence space is exhausted"))
+}
+
+/// Find the first unused canonical name. The caller must validate the parent
+/// path against symlinks before entering and must publish with no replacement.
+/// Files and dangling links occupy names just as directories do. A large sparse
+/// sequence does not hide a lower free slot or imply that the space is full.
+pub(super) fn allocate(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    let mut occupied = BTreeSet::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(number) = os_sequence(&name, prefix) {
+            occupied.insert(number);
+        }
+    }
+
+    let mut number = 0;
+    for used in occupied {
+        if used != number {
+            break;
+        }
+        number = successor(number)?;
+    }
+    loop {
+        let name = if number == 0 {
+            prefix.to_owned()
+        } else {
+            format!("{prefix}.{number:03}")
+        };
+        let candidate = parent.join(name);
+        // Directory enumeration is not a reservation. Recheck without following
+        // links; a concurrent creation must not authorize an overwrite. Other
+        // inspection failures propagate rather than masquerading as absence.
+        match std::fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => number = successor(number)?,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // Keep these filesystem tests dependency-free so the exact production
+    // module can also run under rustc --test when the full stack is unavailable.
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> io::Result<Self> {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "ee-retention-names-{}-{stamp}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            #[cfg(unix)]
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            // Only this test's freshly created private temporary directory.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn name(number: u32) -> String {
+        if number == 0 {
+            "index.previous".to_owned()
+        } else {
+            format!("index.previous.{number:03}")
+        }
+    }
+
+    #[test]
+    fn names_round_trip_through_the_entire_sequence_range() {
+        for number in [0, 1, 9, 99, 999, 1000, 1101, 10_000, u32::MAX] {
+            assert_eq!(sequence(&name(number), &name(0)), Some(number));
+        }
+    }
+
+    #[test]
+    fn aliases_overflow_and_uncommitted_names_are_rejected() {
+        for suffix in [
+            ".",
+            ".0",
+            ".01",
+            ".000",
+            ".0001",
+            ".01000",
+            ".+1000",
+            ".-001",
+            ".1000x",
+            ".1000/child",
+            ".4294967296",
+            ".999999999999999999999",
+            ".staging.1000",
+            ".1000.rejected",
+            ".１０００",
+            ".1000 ",
+        ] {
+            assert_eq!(sequence(&format!("{}{suffix}", name(0)), &name(0)), None);
+        }
+        assert_eq!(sequence("other.previous.1000", &name(0)), None);
+    }
+
+    #[test]
+    fn publication_can_allocate_after_1101_retained_generations() -> TestResult {
+        let root = TestDirectory::new()?;
+        for number in 0..=1100 {
+            std::fs::create_dir(root.0.join(name(number)))?;
+        }
+        let sentinel = root.0.join(name(999)).join("keep");
+        std::fs::write(&sentinel, b"immutable recovery bytes")?;
+        let candidate = allocate(&root.0, &name(0))?;
+        assert_eq!(candidate, root.0.join(name(1101)));
+        assert!(!candidate.try_exists()?);
+        assert_eq!(std::fs::read(sentinel)?, b"immutable recovery bytes");
+        assert_eq!(
+            candidate
+                .file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|s| sequence(s, &name(0))),
+            Some(1101)
+        );
+        assert_eq!(std::fs::read_dir(&root.0)?.count(), 1101);
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_history_reuses_first_gap_without_overwriting_files() -> TestResult {
+        let root = TestDirectory::new()?;
+        let occupied_file = root.0.join(name(0));
+        std::fs::write(&occupied_file, b"not an index")?;
+        for number in [1, 3, 1000, u32::MAX] {
+            std::fs::create_dir(root.0.join(name(number)))?;
+        }
+        std::fs::create_dir(root.0.join("index.previous.0002"))?;
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(2)));
+        assert_eq!(std::fs::read(occupied_file)?, b"not an index");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_and_unrelated_histories_leave_the_base_name_available() -> TestResult {
+        let root = TestDirectory::new()?;
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(0)));
+        for entry in [
+            "index",
+            ".index.publish-1000",
+            "other.previous",
+            "index.previous.000",
+        ] {
+            std::fs::create_dir(root.0.join(entry))?;
+        }
+        std::fs::create_dir(root.0.join(name(u32::MAX)))?;
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(0)));
+        Ok(())
+    }
+
+    #[test]
+    fn custom_index_basename_keeps_allocation_and_recovery_aligned() -> TestResult {
+        let root = TestDirectory::new()?;
+        let prefix = "資料.search.previous";
+        std::fs::create_dir(root.0.join(prefix))?;
+        std::fs::create_dir(root.0.join(format!("{prefix}.001")))?;
+        assert_eq!(
+            allocate(&root.0, prefix)?,
+            root.0.join(format!("{prefix}.002"))
+        );
+        assert_eq!(sequence(&format!("{prefix}.1000"), prefix), Some(1000));
+        Ok(())
+    }
+
+    #[test]
+    fn parent_inspection_failure_is_not_an_available_name() -> TestResult {
+        let root = TestDirectory::new()?;
+        let parent = root.0.join("not-a-directory");
+        std::fs::write(&parent, b"untouched")?;
+        assert!(allocate(&parent, &name(0)).is_err());
+        assert!(allocate(&root.0.join("missing"), &name(0)).is_err());
+        assert_eq!(std::fs::read(parent)?, b"untouched");
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_overflow_is_reported_instead_of_wrapping() -> TestResult {
+        assert_eq!(successor(u32::MAX - 1)?, u32::MAX);
+        assert!(successor(u32::MAX).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_and_live_symlinks_occupy_names_without_being_followed() -> TestResult {
+        let root = TestDirectory::new()?;
+        let missing = root.0.join("must-not-be-created");
+        std::os::unix::fs::symlink(&missing, root.0.join(name(0)))?;
+        let target = root.0.join("outside-generation");
+        std::fs::create_dir(&target)?;
+        std::fs::write(target.join("keep"), b"target bytes")?;
+        std::os::unix::fs::symlink(&target, root.0.join(name(1)))?;
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(2)));
+        assert_eq!(std::fs::read_link(root.0.join(name(0)))?, missing);
+        assert!(!missing.try_exists()?);
+        assert_eq!(std::fs::read(target.join("keep"))?, b"target bytes");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_names_do_not_hide_a_canonical_free_slot() -> TestResult {
+        use std::os::unix::ffi::OsStringExt;
+        let root = TestDirectory::new()?;
+        let entry = std::ffi::OsString::from_vec(b"index.previous.\xff001".to_vec());
+        // Exercise the exact directory-entry classifier on every Unix host.
+        // Apple's native filesystem refuses this filename before read_dir can
+        // return it; Linux additionally exercises the real enumeration path.
+        assert_eq!(os_sequence(&entry, &name(0)), None);
+        #[cfg(target_os = "linux")]
+        std::fs::create_dir(root.0.join(&entry))?;
+        assert_eq!(
+            os_sequence(std::ffi::OsStr::new("index.previous.1000"), &name(0)),
+            Some(1000)
+        );
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(0)));
+        Ok(())
+    }
+}
