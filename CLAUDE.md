@@ -31,11 +31,12 @@ src/
 ├── core/                # Business logic
 │   ├── effect.rs        # Command effect declarations (read_only, durable_write)
 │   ├── search.rs        # Hybrid search via frankensearch
-│   ├── pack.rs          # Context pack assembly with provenance
-│   ├── remember.rs      # Memory storage
+│   ├── context.rs       # Context pack assembly with provenance
+│   ├── memory.rs        # Memory storage (remember_memory, revisions, validity)
 │   ├── learn.rs         # Procedural rule distillation
 │   └── ...
 ├── db/                  # SQLModel/FrankenSQLite schema and migrations
+├── pack/                # Pack binary format, budget classifier, validation
 ├── search/              # Search index management
 ├── eval/                # Evaluation runner and fixtures
 └── output/              # JSON/Markdown/TOON formatters
