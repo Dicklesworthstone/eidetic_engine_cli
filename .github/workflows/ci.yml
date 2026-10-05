@@ -343,7 +343,27 @@ jobs:
         shard:
           - lib-cache-cass-config
           - lib-cli
-          - lib-core
+          # bd-479c6: `core::` was ONE shard carrying 5992 of the lib suite's
+          # 11973 tests -- 50% in a single matrix entry. Measured 2026-10-05: a
+          # run of `--lib core::` with --test-threads=1 completed 204 of 5976
+          # announced tests inside 7200s INCLUDING a cold build, i.e. 3.4%. The
+          # 90m `timeout` below would therefore kill it, so this shard could not
+          # finish in its own budget and re-enabling ci.yml would have produced a
+          # timeout on the largest shard rather than a test result.
+          #
+          # Split by FIRST LETTER of the core submodule, which is expressible as
+          # a libtest substring filter (`core::a` matches only immediately after
+          # `core::`) where an alphabetical RANGE is not. Balanced to 952-1063
+          # tests each, putting every piece in the same size class as lib-cli
+          # (870). scripts/check-shard-coverage.py asserts the union of these
+          # filters claims every letter exactly once, so a new `core::k*` module
+          # cannot land in no shard.
+          - lib-core-a
+          - lib-core-c
+          - lib-core-m
+          - lib-core-r
+          - lib-core-s
+          - lib-core-rest
           - lib-curate-daemon
           - lib-db
           - lib-eval-graph
@@ -442,8 +462,28 @@ jobs:
             lib-cli)
               run_test "cargo test --lib cli::" cargo test --workspace --lib --jobs 1 cli:: -- --test-threads=1 --nocapture
               ;;
-            lib-core)
-              run_test "cargo test --lib core::" cargo test --workspace --lib --jobs 1 core:: -- --test-threads=1 --nocapture
+            # bd-479c6: six letter-keyed slices of `core::`, 952-1063 tests each.
+            # Filters go AFTER `--` because libtest takes several and cargo does
+            # not. Keep these arms and scripts/check-shard-coverage.py's letter
+            # map in step: that script fails when a core submodule's first letter
+            # is claimed by no arm or by two.
+            lib-core-a)
+              run_test "cargo test --lib core::a core::i" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::a core::i
+              ;;
+            lib-core-c)
+              run_test "cargo test --lib core::c core::q core::f" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::c core::q core::f
+              ;;
+            lib-core-m)
+              run_test "cargo test --lib core::m core::b core::v core::l" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::m core::b core::v core::l
+              ;;
+            lib-core-r)
+              run_test "cargo test --lib core::r core::p core::d" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::r core::p core::d
+              ;;
+            lib-core-s)
+              run_test "cargo test --lib core::s core::u" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::s core::u
+              ;;
+            lib-core-rest)
+              run_test "cargo test --lib core:: remaining letters" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::e core::g core::h core::j core::o core::t core::w core::k core::n core::x core::y core::z
               ;;
             lib-curate-daemon)
               run_test "cargo test --lib curate::" cargo test --workspace --lib --jobs 1 curate:: -- --test-threads=1 --nocapture

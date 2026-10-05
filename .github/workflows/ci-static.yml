@@ -295,6 +295,23 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.reachability_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-production-reachability.py
 
+      # bd-479c6. ci.yml's `core::` shard was split six ways by submodule first
+      # letter, because it carried 50% of the lib suite and measurably could not
+      # finish inside its own 90m budget. A letter-keyed split has exactly one
+      # failure mode and it is silent: a new `src/core/kafka_bridge.rs` whose
+      # letter no arm claims runs in NO shard while the matrix stays green. This
+      # guard asserts every letter is claimed exactly once -- including the
+      # letters no module uses yet, because catching it when the module lands is
+      # too late. Self-test first; four of its ten arms are refusals.
+      - name: Shard coverage guard --self-test
+        id: shard_coverage_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-shard-coverage.py --self-test
+
+      - name: Shard coverage guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.shard_coverage_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-shard-coverage.py
+
       # bd-yytkz. Self-test FIRST and as its own step: if the guard's failure
       # arms have stopped working, the audit below is a clean answer from a
       # broken instrument, and a combined step would report that as one green.
