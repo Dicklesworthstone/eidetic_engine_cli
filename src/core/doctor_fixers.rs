@@ -563,7 +563,21 @@ pub fn fix_finding_for_check(
     match error_code {
         Some("EE-E300") => Some("search_index_missing"),
         Some("EE-E301") => Some("search_index_stale"),
-        Some("EE-E700") => Some("schema_migration_pending"),
+        // bd-tgz18: EE-E700 is MIGRATION_REQUIRED, and the advisory
+        // `shard_fanout` check reuses it for "the catalog or workspace shard
+        // is not ready" (src/core/doctor.rs:3448). Unguarded, that routed a
+        // missing shard catalog to fix_schema_migration_pending, so
+        // `ee doctor --fix` recorded run_migration guidance for a problem no
+        // migration addresses -- a real code dispatched to the wrong fixer,
+        // which is worse than no dispatch because the guidance looks
+        // authoritative.
+        //
+        // Shard readiness has no fixer, so the honest answer is no dispatch:
+        // fix_mode_for_check then reports Manual. Guarded on this one arm
+        // rather than excluding the check wholesale, so that if shard_fanout
+        // ever emits a code that genuinely has a fixer, this does not swallow
+        // it silently. Whoever adds a shard fixer removes this guard.
+        Some("EE-E700") if check_name != "shard_fanout" => Some("schema_migration_pending"),
         Some("EE-E507") => Some("cass_integration_drift"),
         _ if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
@@ -777,6 +791,30 @@ mod tests {
         assert_eq!(
             fix_finding_for_check(Some("EE-E102"), "shard_fanout", false),
             None
+        );
+        // bd-tgz18. The shard_fanout check reuses EE-E700 for an unready
+        // shard catalog, which is not a pending schema migration. Observed on
+        // a release binary before the fix: `ee doctor --fix` returned
+        // fixerResults [{findingCode: schema_migration_pending, operation:
+        // run_migration, outcome: guidance_recorded}] for an empty
+        // EE_SHARDS_DIR.
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E700"), "shard_fanout", false),
+            None,
+            "an unready shard catalog must not be routed to the schema-migration fixer"
+        );
+        // The positive control for that guard: the SAME code from any other
+        // check still reaches the migration fixer, so the guard is narrow
+        // rather than a blanket suppression of EE-E700.
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E700"), "schema_migrations", false),
+            Some("schema_migration_pending"),
+            "EE-E700 outside shard_fanout must still dispatch the migration fixer"
+        );
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E700"), "shard_fanout", false),
+            (FixMode::Manual, None),
+            "with no dispatch, --fix must report the shard problem as Manual"
         );
         assert_eq!(fix_finding_for_check(None, "database", false), None);
         assert!(fix_dispatch_for_finding(&root(), "graph_snapshot_stale").is_none());
