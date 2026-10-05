@@ -152,15 +152,16 @@ fn outcome_count_value(excerpt: &str, token: (usize, &str)) -> Option<bool> {
     if start > 0 {
         let previous = bytes[start - 1];
         if matches!(previous, b'.' | b'/' | b'\\' | b'+' | b'-')
-            || (matches!(previous, b',' | b':')
-                && start > 1
-                && bytes[start - 2].is_ascii_digit())
+            || (matches!(previous, b',' | b':') && start > 1 && bytes[start - 2].is_ascii_digit())
         {
             return Some(true);
         }
     }
     if end + 1 < bytes.len()
-        && matches!(bytes[end], b'.' | b',' | b':' | b'/' | b'\\' | b'+' | b'-' | b'*')
+        && matches!(
+            bytes[end],
+            b'.' | b',' | b':' | b'/' | b'\\' | b'+' | b'-' | b'*'
+        )
         && bytes[end + 1].is_ascii_alphanumeric()
     {
         return Some(true);
@@ -170,11 +171,7 @@ fn outcome_count_value(excerpt: &str, token: (usize, &str)) -> Option<bool> {
     Some(value.bytes().any(|byte| byte != b'0'))
 }
 
-fn outcome_count(
-    excerpt: &str,
-    tokens: &[(usize, &str)],
-    index: usize,
-) -> Option<bool> {
+fn outcome_count(excerpt: &str, tokens: &[(usize, &str)], index: usize) -> Option<bool> {
     let (start, word) = tokens[index];
     let whitespace_between = |left: usize, right: usize| {
         let gap = &excerpt[left..right];
@@ -203,8 +200,7 @@ fn outcome_count(
     });
     let after = tokens.get(index + 1).and_then(|token| {
         let gap = excerpt[start + word.len()..token.0].trim();
-        matches!(gap, ":" | "=")
-            .then(|| outcome_count_value(excerpt, *token).unwrap_or(true))
+        matches!(gap, ":" | "=").then(|| outcome_count_value(excerpt, *token).unwrap_or(true))
     });
     match (before, after) {
         // Conflicting counters must never turn a positive failure into zero.
@@ -377,9 +373,18 @@ mod counted_outcome_tests {
     #[test]
     fn ambiguous_numeric_suffixes_are_not_erased_as_zero_counts() {
         for text in [
-            "1.0 failed", ".0 failed", "10/0 failed", "-0 failed", "+0 failed",
-            "1,000 failed", "failed: 0.5", "failed: 0/1", "failed: 0+1",
-            "failed: 0e3", "version_0 failed", "v0 failed",
+            "1.0 failed",
+            ".0 failed",
+            "10/0 failed",
+            "-0 failed",
+            "+0 failed",
+            "1,000 failed",
+            "failed: 0.5",
+            "failed: 0/1",
+            "failed: 0+1",
+            "failed: 0e3",
+            "version_0 failed",
+            "v0 failed",
         ] {
             let outcome = outcome_signal_text(text);
             assert_eq!(outcome.text, text, "{text}");

@@ -94,9 +94,8 @@ fn trusted_sibling_with(
         return None;
     }
     let own = inspect(executable).ok()?;
-    let trusted = |entry: Entry| {
-        entry.mode & 0o022 == 0 && (entry.owner == 0 || entry.owner == own.owner)
-    };
+    let trusted =
+        |entry: Entry| entry.mode & 0o022 == 0 && (entry.owner == 0 || entry.owner == own.owner);
     if !own.file || own.mode & 0o111 == 0 || !trusted(own) {
         return None;
     }

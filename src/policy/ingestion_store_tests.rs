@@ -325,7 +325,9 @@ fn encoded_json_credentials_are_scrubbed_before_storage_and_search_projection() 
         let document = crate::search::evidence_span_to_document(&admitted).into_indexable();
         for text in [&admitted.excerpt, &document.content] {
             let decoded: serde_json::Value = serde_json::from_str(text)?;
-            let body = decoded["message"]["content"].as_str().ok_or("message missing")?;
+            let body = decoded["message"]["content"]
+                .as_str()
+                .ok_or("message missing")?;
             assert!(body.contains("Compilation succeeded."));
             assert!(body.contains("Tests passed."));
             assert!(!body.contains(&token));
@@ -340,8 +342,8 @@ fn encoded_json_credentials_are_scrubbed_before_storage_and_search_projection() 
 fn legacy_encoded_credentials_fail_live_admission_even_with_consistent_hashes() -> TestResult {
     let (db, ws, session_id) = database()?;
     let id = EvidenceId::from_uuid(Uuid::from_u128(900)).to_string();
-    let clean = serde_json::json!({"type": "assistant", "content": "Compilation succeeded."})
-        .to_string();
+    let clean =
+        serde_json::json!({"type": "assistant", "content": "Compilation succeeded."}).to_string();
     db.insert_evidence_span(&id, &input(&ws, &session_id, &clean))?;
     let mut stored = db.get_evidence_span(&id)?.ok_or("missing evidence")?;
     let session = db.get_session(&session_id)?.ok_or("missing session")?;
@@ -349,7 +351,8 @@ fn legacy_encoded_credentials_fail_live_admission_even_with_consistent_hashes() 
     let token = format!("ghp_{}", "Q".repeat(36));
     stored.excerpt = serde_json::json!({"type": "assistant", "content":
         format!("Compilation succeeded. label-{token}")})
-        .to_string().replace("ghp_", "\\u0067hp_");
+    .to_string()
+    .replace("ghp_", "\\u0067hp_");
     assert!(!super::screen_scanning_view(&stored.excerpt).0.redacted);
     stored.content_hash = hash(&stored.excerpt);
     stored.canonical_excerpt_hash = Some(stored.content_hash.clone());
@@ -377,10 +380,16 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
     );
     let id = EvidenceId::from_uuid(Uuid::from_u128(901)).to_string();
     db.insert_evidence_span(&id, &input(&ws, &session_id, &raw))?;
-    let stored = db.get_evidence_span(&id)?.ok_or("missing quarantined record")?;
+    let stored = db
+        .get_evidence_span(&id)?
+        .ok_or("missing quarantined record")?;
     assert!(!stored.excerpt.contains(&token));
     assert!(!stored.excerpt.contains(&"Q".repeat(36)));
-    assert!(stored.redaction_classes_json.contains("external_ingestion_encoded_json_unreadable"));
+    assert!(
+        stored
+            .redaction_classes_json
+            .contains("external_ingestion_encoded_json_unreadable")
+    );
     assert!(!stored.is_search_admitted_for_session(&ws, &session));
     assert!(!stored.is_direct_pack_admitted_for_session(&ws, &session));
     assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
