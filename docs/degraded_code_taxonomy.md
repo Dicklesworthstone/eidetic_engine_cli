@@ -257,17 +257,21 @@ memory bodies in `sources[]`.
 > a new code, add a row here in the same commit. The
 > `tests/degraded_code_taxonomy_consistency_test.rs` enforces this.
 
-### `build_time` (11 codes — surfaced through `ee capabilities`)
+### `build_time` (13 codes — surfaced through `ee capabilities`)
 
 | Code | Surface | Feature flag | Notes |
 |------|---------|--------------|-------|
 | `agent_detection_unavailable` | agent sources, doctor | (binary detection logic) | Reflects compile-time exclusion of agent-detection paths. |
 | `diagram_backend_unavailable` | doctor, dependency contract | (mermaid renderer feature) | Mermaid backend not linked. |
+| `focus_suggest_unimplemented` | focus suggest | (phase-1 surface) | CLI surface and `ee.focus.suggest.v1` are pinned; the scoring behind them is not built. Determined by the binary, not by the request. |
+| `lexical_ram_tier_not_implemented` | status, doctor | (lexical RAM-tier scaffold) | HISTORICAL. Emitted while bd-21xbi exposed a scaffold with no live loader. Classified here because the emission tracked what was built; verify before treating as live. |
 | `lexical_unavailable` | search | `frankensearch/lexical` | BM25 arm disabled at build. |
 | `mcp_feature_disabled` | mcp manifest, mcp serve-stdio | `mcp` | MCP discovery remains available, but the stdio adapter is disabled in this build. |
 | `mcp_unavailable` | doctor, dependency contract | `mcp` | MCP adapter feature off. |
 | `runtime_unavailable` | status, doctor | `asupersync` | Runtime feature off (defensive; should never fire in a real build). |
 | `search_unimplemented` | status | `frankensearch` core feature | Whole search subsystem disabled. |
+| `serve_unavailable_v1` | serve, serve_localhost | serve (reporting only) | The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface rather than starting the localhost adapter. Fixed by the binary, not the request. |
+| `situation_decisioning_unavailable` | situation show, situation explain | (persisted situation storage) | RETIRED legacy code. Returned while persisted situation storage was unimplemented. Kept classified because its fixture still exists; retire the fixture and this row together. |
 | `storage_unimplemented` | status | `fsqlite` core feature | Whole storage subsystem disabled. |
 | `toon_unavailable` | status, doctor | TOON renderer feature | TOON format renderer unavailable or explicitly disabled. |
 
@@ -282,6 +286,23 @@ memory bodies in `sources[]`.
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
 ### `response_time` codes — stay in `degraded[]`
+
+#### Recall admission and egress (5)
+Every one of these depends on the state of the addressed store or of the
+request, not on what was compiled, so they stay in `degraded[]`.
+
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `recall_anchor_filtered` | medium | A matching reverse-index locator has no canonical anchor, or the normalized path/symbol no longer hashes to the canonical identity |
+| `recall_egress_redacted` | info | A current source carries legacy or explicitly allowed private text, labels or provenance; public-egress policy applies before preview |
+| `recall_scan_incomplete` | medium | The metadata scan or admitted-candidate retention limit was reached; `totalMatched` and budget-cursor claims are limited to retained rows |
+| `recall_source_filtered` | low | A code anchor remains indexed after its owning memory expires, is superseded, sealed, or moved outside this workspace |
+| `quarantined_memory_filtered` | low | A current source memory has pending feedback quarantine in its owning workspace; retrieval withholds the candidate before ranking (surfaces: search, context, pack) |
+
+#### Toolchain provenance (1)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `toolchain_git_repository_absent` | info | `diag toolchain-provenance` found no git repository at or above the workspace, so it cannot establish whether declared scripts are tracked |
 
 #### Recipe retrieval
 | Code | Severity (canonical) | Bead |
