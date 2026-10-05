@@ -278,3 +278,114 @@ fn contextual_provider_survives_screening_as_safe_evidence_not_as_a_credential()
     db.close()?;
     Ok(())
 }
+
+#[test]
+fn encoded_json_credentials_are_scrubbed_before_storage_and_search_projection() -> TestResult {
+    let (db, ws, session_id) = database()?;
+    let session = db.get_session(&session_id)?.ok_or("missing session")?;
+    for (index, &(prefix, reason, minimum, contextual)) in
+        crate::policy::RAW_TOKEN_PATTERNS.iter().enumerate()
+    {
+        let token = format!("{prefix}{}", "Q".repeat(minimum));
+        let context = if contextual {
+            "Twilio account SID: "
+        } else {
+            ""
+        };
+        let encoded_prefix = format!("\\u{:04x}{}", prefix.as_bytes()[0], &prefix[1..]);
+        let raw = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content":
+                format!("Compilation succeeded. {context}label-{token} Tests passed.")}
+        })
+        .to_string()
+        .replace(prefix, &encoded_prefix);
+        let id = EvidenceId::from_uuid(Uuid::from_u128(800 + index as u128)).to_string();
+        let mut record = input(&ws, &session_id, &raw);
+        record.cass_span_id = format!("encoded-line-{index}");
+        record.start_line = 7 + index as u32;
+        record.end_line = record.start_line;
+        db.insert_evidence_span(&id, &record)?;
+        let admitted = db
+            .get_search_admitted_evidence_span(&id, &ws)?
+            .ok_or("safe encoded evidence was not admitted")?;
+        assert_eq!(admitted.id, id);
+        assert_eq!(admitted.session_id, session_id);
+        assert_eq!(admitted.cass_span_id, record.cass_span_id);
+        assert_eq!(admitted.start_line, record.start_line);
+        assert_eq!(admitted.end_line, record.end_line);
+        assert!(admitted.is_direct_pack_admitted_for_session(&ws, &session));
+        assert_eq!(admitted.secret_redaction_status, "redacted");
+        assert!(admitted.redaction_classes_json.contains(reason));
+        assert_eq!(admitted.content_hash, hash(&admitted.excerpt));
+        assert_eq!(
+            admitted.canonical_excerpt_hash.as_deref(),
+            Some(admitted.content_hash.as_str())
+        );
+        let document = crate::search::evidence_span_to_document(&admitted).into_indexable();
+        for text in [&admitted.excerpt, &document.content] {
+            let decoded: serde_json::Value = serde_json::from_str(text)?;
+            let body = decoded["message"]["content"].as_str().ok_or("message missing")?;
+            assert!(body.contains("Compilation succeeded."));
+            assert!(body.contains("Tests passed."));
+            assert!(!body.contains(&token));
+        }
+        assert!(!serde_json::to_string(&document.metadata)?.contains(&token));
+    }
+    db.close()?;
+    Ok(())
+}
+
+#[test]
+fn legacy_encoded_credentials_fail_live_admission_even_with_consistent_hashes() -> TestResult {
+    let (db, ws, session_id) = database()?;
+    let id = EvidenceId::from_uuid(Uuid::from_u128(900)).to_string();
+    let clean = serde_json::json!({"type": "assistant", "content": "Compilation succeeded."})
+        .to_string();
+    db.insert_evidence_span(&id, &input(&ws, &session_id, &clean))?;
+    let mut stored = db.get_evidence_span(&id)?.ok_or("missing evidence")?;
+    let session = db.get_session(&session_id)?.ok_or("missing session")?;
+    assert!(stored.is_search_admitted_for_session(&ws, &session));
+    let token = format!("ghp_{}", "Q".repeat(36));
+    stored.excerpt = serde_json::json!({"type": "assistant", "content":
+        format!("Compilation succeeded. label-{token}")})
+        .to_string().replace("ghp_", "\\u0067hp_");
+    assert!(!super::screen_scanning_view(&stored.excerpt).0.redacted);
+    stored.content_hash = hash(&stored.excerpt);
+    stored.canonical_excerpt_hash = Some(stored.content_hash.clone());
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(stored.metadata_json.as_deref().ok_or("missing metadata")?)?;
+    metadata["canonicalExcerptHash"] = stored.content_hash.clone().into();
+    stored.metadata_json = Some(serde_json::to_string(&metadata)?);
+    assert!(!stored.is_search_admitted_for_session(&ws, &session));
+    assert!(!stored.is_direct_pack_admitted_for_session(&ws, &session));
+    let document = crate::search::evidence_span_to_document(&stored).into_indexable();
+    assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
+    assert!(!serde_json::to_string(&document.metadata)?.contains(&token));
+    db.close()?;
+    Ok(())
+}
+
+#[test]
+fn malformed_encoded_records_remain_quarantined_after_database_screening() -> TestResult {
+    let (db, ws, session_id) = database()?;
+    let session = db.get_session(&session_id)?.ok_or("missing session")?;
+    let token = format!("ghp_{}", "Q".repeat(36));
+    let raw = format!(
+        "{{\"type\":\"assistant\",\"content\":\"\\u0067hp_{}\",\"metadata\":{{\"x\":1,\"x\":2}}}}",
+        "Q".repeat(36),
+    );
+    let id = EvidenceId::from_uuid(Uuid::from_u128(901)).to_string();
+    db.insert_evidence_span(&id, &input(&ws, &session_id, &raw))?;
+    let stored = db.get_evidence_span(&id)?.ok_or("missing quarantined record")?;
+    assert!(!stored.excerpt.contains(&token));
+    assert!(!stored.excerpt.contains(&"Q".repeat(36)));
+    assert!(stored.redaction_classes_json.contains("external_ingestion_encoded_json_unreadable"));
+    assert!(!stored.is_search_admitted_for_session(&ws, &session));
+    assert!(!stored.is_direct_pack_admitted_for_session(&ws, &session));
+    assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
+    let document = crate::search::evidence_span_to_document(&stored).into_indexable();
+    assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
+    db.close()?;
+    Ok(())
+}

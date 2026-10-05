@@ -3,14 +3,17 @@
 //! Preserve normal technical prose, source paths and redacted safe evidence;
 //! do not use the public-replay policy that replaces whole fields or treats
 //! instruction-like content as a secret. Provider token lengths and contextual
-//! guards stay shared with the ordinary policy. Only left-boundary authority
-//! differs: a label fused to a credential does not make that credential safe.
+//! guards stay shared with the ordinary policy. A fused label or Unicode-escaped
+//! JSON spelling does not make a credential safe.
 
 #[cfg(test)]
 use super::redact_secret_like_content;
 use super::{
     ExternalIngestionScreenReport, detect_instruction_like_content, redact_git_capture_text,
 };
+
+#[path = "ingestion_json.rs"]
+mod encoded_json;
 
 // The streaming CASS reader independently enforces this line limit. Apply a
 // bound here too for callers that supply external text directly (docs, journal,
@@ -21,10 +24,75 @@ pub(super) fn screen(content: &str) -> ExternalIngestionScreenReport {
     screen_with_span_count(content).0
 }
 
-/// Count distinct detector matches on the original input, including embedded
-/// bearers. Overlapping detector matches remain separate, as in the generic
-/// policy; pre-existing placeholders are not new matches or redactions.
+/// Count detector matches before replacement, including embedded bearers.
+/// For JSON carrying Unicode escapes, decode before matching so raw-line PII
+/// replacement cannot split an encoded credential. Count the selected view,
+/// not both encodings of one secret. Clean records retain their original bytes.
 pub(super) fn screen_with_span_count(content: &str) -> (ExternalIngestionScreenReport, usize) {
+    // Enforce the whole-input bound before allocating any decoded JSON tree.
+    if content.len() <= MAX_SCAN_BYTES {
+        match encoded_json::canonicalize(content) {
+            Ok(Some(canonical)) => {
+                let decoded = screen_scanning_view(&canonical);
+                if decoded.0.redacted {
+                    if !encoded_json::is_unique_json(&decoded.0.content)
+                        || super::classify_transcript_record(&canonical)
+                            != super::classify_transcript_record(&decoded.0.content)
+                    {
+                        return withhold_encoded_record(
+                            content,
+                            "external_ingestion_encoded_json_redaction_invalid",
+                        );
+                    }
+                    return decoded;
+                }
+                let original = screen_scanning_view(content);
+                // Expose newly decoded instruction signals to live admission,
+                // but do not canonicalize harmless escaped Unicode or examples.
+                if !original.0.redacted
+                    && decoded
+                        .0
+                        .signal_codes
+                        .iter()
+                        .any(|code| !original.0.signal_codes.contains(code))
+                {
+                    return decoded;
+                }
+                return original;
+            }
+            Err(_) => {
+                return withhold_encoded_record(
+                    content,
+                    "external_ingestion_encoded_json_unreadable",
+                );
+            }
+            Ok(None) => {}
+        }
+    }
+    screen_scanning_view(content)
+}
+
+fn withhold_encoded_record(
+    content: &str,
+    reason: &'static str,
+) -> (ExternalIngestionScreenReport, usize) {
+    // Do not guess a duplicate key's role, retain encoded secrets on parse
+    // failure, or turn a rejected tool record into plain-text message evidence.
+    // The unknown record kind fails transcript admission; only its digest and
+    // a fixed reason survive. No source text appears in diagnostics either.
+    let marker = serde_json::json!({
+        "type": "external_ingestion_withheld",
+        "reason": reason,
+        "sourceDigest": format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+    })
+    .to_string();
+    let mut report = screen_scanning_view(&marker).0;
+    report.redacted = true;
+    report.redacted_reasons.push(reason.to_owned());
+    (report, 1)
+}
+
+fn screen_scanning_view(content: &str) -> (ExternalIngestionScreenReport, usize) {
     let (content, redacted, mut reasons, span_count) = if content.len() > MAX_SCAN_BYTES {
         (
             format!(
