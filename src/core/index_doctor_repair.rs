@@ -7,12 +7,12 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    DEFAULT_SEARCH_EMBEDDER, DbConnection, IndexGenerationLease, IndexRebuildError,
-    build_index_generation, cached_local_selection, collect_workspace_index_source_snapshot,
-    default_embedder_settings, default_workspace_database_path,
-    embedder_fingerprint_for_index_metadata, ensure_index_path_has_no_symlinks,
-    hash_fallback_embedder_stack, index_checkpoint, resolve_index_workspace_id,
-    sync_index_directory, sync_index_generation, validate_built_generation, write_index_metadata,
+    DbConnection, IndexGenerationLease, IndexRebuildError, build_index_generation,
+    cached_local_selection, collect_workspace_index_source_snapshot, default_embedder_settings,
+    default_workspace_database_path, embedder_fingerprint_for_index_metadata,
+    ensure_index_path_has_no_symlinks, hash_fallback_embedder_stack, index_checkpoint,
+    resolve_index_workspace_id, sync_index_directory, sync_index_generation,
+    validate_built_generation, write_index_metadata,
 };
 use crate::core::remote_embed::{EmbedBackendSelection, configured_embed_backend};
 
@@ -83,13 +83,23 @@ pub(crate) async fn stage(
     let db = DbConnection::open_file_read_only(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, workspace)?;
     let source = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
-    // An empty repair must not load or download a model to embed nothing.
+    // An empty repair must not load or download a model to embed nothing, and
+    // must not REGISTER one either.
+    //
+    // bd-71a77: this branch used to fall back to the hash tier only when
+    // DEFAULT_SEARCH_EMBEDDER was unset, and otherwise reuse whatever model the
+    // PROCESS had already loaded. That satisfied the no-fetch rule above --
+    // reusing a loaded model downloads nothing -- while still writing an
+    // `Available` model-registry row for a workspace that never embedded
+    // anything with it. In a long-lived process (the daemon, the lib test
+    // binary) that leaks one workspace's model into another's registry, which
+    // is order-dependent contamination rather than a stable wrong answer.
+    //
+    // Ruling R1 on bd-2q8hn: the zero-document path ALWAYS takes the hash tier,
+    // as rebuild_index_with_cx already does (src/core/index.rs:1776). Nothing is
+    // embedded here, so there is nothing to prove and no model to record.
     let stack = if source.documents_total == 0 {
-        DEFAULT_SEARCH_EMBEDDER
-            .get()
-            .map_or_else(hash_fallback_embedder_stack, |selection| {
-                selection.stack.clone()
-            })
+        hash_fallback_embedder_stack()
     } else {
         // A doctor repair never fetches (bd-65jem). The default Auto stack is
         // a lazy downloader that pulled the ~531 MiB model into the user model
