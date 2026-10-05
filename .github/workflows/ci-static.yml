@@ -312,6 +312,22 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.shard_coverage_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-shard-coverage.py
 
+      # bd-lagsa. A step running several test-result assertions under `set -e`
+      # stops at the first failing one and silently skips the rest, and the log
+      # does not say so: an absent "test result:" line looks exactly like a test
+      # that was never going to run. Measured twice on 2026-10-05 -- a stale pin
+      # that was grep 1 of 4 had been hiding 93 tests since 2026-09-26, and
+      # another at check 4 of 8 was hiding three groups, a suite and a
+      # git-diff guard. 13 such steps are baselined shrink-only.
+      - name: Step assertion isolation --self-test
+        id: step_isolation_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-step-assertion-isolation.py --self-test
+
+      - name: Step assertion isolation
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.step_isolation_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-step-assertion-isolation.py
+
       # bd-yytkz. Self-test FIRST and as its own step: if the guard's failure
       # arms have stopped working, the audit below is a clean answer from a
       # broken instrument, and a combined step would report that as one green.

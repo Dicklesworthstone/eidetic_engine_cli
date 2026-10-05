@@ -1,0 +1,64 @@
+# Workflow steps where ONE failing assertion silently skips the rest (bd-lagsa).
+#
+# Each line is an accepted, PRE-EXISTING at-risk step: it runs two or more
+# test-result assertions and aborts on the first failure instead of collecting
+# failures into a flag. They are baselined rather than rewritten here because
+# converting a step to an accumulator changes what it reports on failure, and that
+# belongs with whoever owns the lane.
+#
+# THIS LIST MAY ONLY SHRINK. scripts/check-step-assertion-isolation.py fails in
+# BOTH directions: a new at-risk step is an error, and an entry here that now
+# accumulates is ALSO an error telling you to delete the line.
+#
+# To retire an entry, convert the step to the accumulator idiom already used by the
+# seven safe steps in this repo, then delete its line:
+#
+#     set -uo pipefail
+#     failed=0
+#     cargo test ... > "$log" 2>&1 || failed=1
+#     grep -Eq 'test result: ok\. ...' "$log" || failed=1
+#     ...
+#     exit "$failed"
+#
+# ---------------------------------------------------------------------------
+# WHY THIS MATTERS, measured twice on 2026-10-05 rather than argued:
+#
+#   doctor-repair-receipts   a stale `7 passed` pin was grep 1 of 4. Correcting it
+#                            resumed dispatch (28 tests), runtime (53) and cli (12)
+#                            -- 93 TESTS that had not executed since 2026-09-26,
+#                            with nothing in the log saying they were missing.
+#   primary-recovery         a stale `14 passed` pin was check 4 of 8, hiding three
+#                            test groups, a suite, and a `git diff --exit-code`
+#                            working-tree guard.
+#
+# So a brittle assertion is not merely noisy; in an aborting step it is a kill
+# switch for everything downstream of it. An absent `test result:` line is not
+# visually distinguishable from a test that was never going to run.
+#
+# promotion-recovery.yml is the counter-example and the reason the accumulator
+# idiom is the fix: it carried TWO stale counts, and because it accumulates BOTH
+# suites still ran and both reported `0 failed`, which is how both wrong numbers
+# were visible at once.
+#
+# NOTE ON THE TWO ENTRIES WHOSE PINS I ALREADY FIXED. doctor-repair-receipts and
+# primary-recovery appear here even though their stale counts are corrected
+# (167bdca48, d4b45f44d). That is deliberate and not an oversight: the fixes
+# removed the CURRENT stale pin, not the structure that lets the NEXT one disable
+# everything after it. The gate measures the structure.
+#
+# Measured at 2c7b5b9a5: 20 multi-assertion steps, 13 at risk, 7 already safe,
+# 18 assertions sitting downstream of a possible first failure.
+# ---------------------------------------------------------------------------
+cass-prefetch-execution-20260920.yml::Execute real lexical reads and worker regressions before publishing wiring
+cass-prefetch-residency-20260920.yml::Integrate and execute residency regressions before publishing source
+contradiction-graph-20260919.yml::Integrate and execute real Rust guard regressions
+core-loop-regressions.yml::Verify relocation and atomicity with real stores
+doctor-index-repair.yml::Exercise real source snapshots and writable projection parity
+doctor-repair-receipts.yml::Test actual builds, source preservation, undo and CLI dispatch
+index-recovery-admission.yml::Execute existing publication and read-lease regressions
+primary-recovery-20260919.yml::Execute primary, lifecycle and maintenance regressions
+runtime-retrieval-20260919.yml::Verify and publish substantive retrieval increments
+session-arc-20260919.yml::Publish tested source directly to main
+session-arc-20260919.yml::Test explicit paired learning and fail-closed source ownership
+session-arc-learning-20260919.yml::Exercise complete learning and independent acceptance before publication
+unpublished-source-retrieval.yml::Verify complete source retrieval and read-only pack
