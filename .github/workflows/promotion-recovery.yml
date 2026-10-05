@@ -58,10 +58,21 @@ jobs:
             status=0
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
             tail -n 120 "$log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$log"; then failed=1; fi
+            # FLOOR, not an exact count. The table said 55 and 8; the suites have
+            # grown to 70 and 16, so this step failed for nine days BECAUSE MORE
+            # TESTS PASS -- both logs read "0 failed" throughout. A floor still
+            # catches what an exact count is for (silent deletion: anything below
+            # the floor fails) without reddening when a suite grows.
+            #
+            # Numeric, not a regex: it reads the count and compares. An empty
+            # `actual` -- no "test result: ok." line at all, which is what a
+            # killed or aborted run looks like -- fails CLOSED, so a missing
+            # result can never be mistaken for a passing one.
+            actual=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed; 0 failed;.*/\1/p' "$log" | head -1)
+            if test "$status" -ne 0 || test -z "$actual" || test "$actual" -lt "$expected"; then failed=1; fi
           done <<'CASES'
-          55 core::global_promotion::
-          8 core::search::rule_admission::memory_revisions::seal_tests::
+          70 core::global_promotion::
+          16 core::search::rule_admission::memory_revisions::seal_tests::
           CASES
           exit "$failed"
       - name: Record production check and edited-file formatting
