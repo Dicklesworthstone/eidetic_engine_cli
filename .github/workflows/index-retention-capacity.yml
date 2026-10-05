@@ -1,0 +1,70 @@
+name: Retained index publication capacity
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/index-retention-capacity.patch
+      - .github/workflows/index-retention-capacity.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: index-retention-capacity
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Apply exact source patch and execute native allocation tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch=scripts/delivery/index-retention-capacity.patch
+          module=src/core/index_retention_names.rs
+          publish=0
+          git rev-parse HEAD
+          rustc --version --verbose
+          if git apply --reverse --check --exclude="$module" "$patch" 2>/dev/null; then
+            test -f "$module"
+            rustfmt --edition 2024 --check "$module"
+          else
+            test "$(git rev-parse HEAD:src/core/index.rs)" = bb62524ef324b41565f8f8a3b743c8278421ebe8
+            test ! -e "$module"
+            git apply --check "$patch"
+            git apply "$patch"
+            rustfmt --edition 2024 "$module"
+            publish=1
+          fi
+          # Compile the exact production naming/allocation module, not a copy
+          # of its algorithm. Full-stack Cargo verification remains separate.
+          printf '#[path = "%s/%s"]\nmod retention_names;\n' "$GITHUB_WORKSPACE" "$module" > "$RUNNER_TEMP/retention_harness.rs"
+          rustc --edition 2024 --deny warnings --test "$RUNNER_TEMP/retention_harness.rs" -o "$RUNNER_TEMP/retention_tests"
+          "$RUNNER_TEMP/retention_tests" --test-threads=1 | tee "$RUNNER_TEMP/retention-tests.log"
+          grep -Fq 'test result: ok. 10 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/retention-tests.log"
+          git diff --check
+          if test "$publish" -eq 1; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- src/core/index.rs "$module"
+            git diff --cached --check
+            git diff --cached --stat
+            git commit -m 'fix(index): remove the 1000-publication retained-generation ceiling' -m 'Share canonical retained-name parsing between allocation and snapshot recovery. Scan occupied names once, reuse sparse gaps, count files and dangling links as occupied, and fail on inspection errors or numeric exhaustion. Keep the existing publication lease, parent symlink checks, no-replace rename and retained data. Ten native filesystem/parser regression tests passed on the exact production module with the pinned nightly, including 1101 occupied generations. This is the hard-cutoff slice of bd-reality-core-convergence-1azkt.42; garbage collection and incremental indexing remain open. Full-crate compilation and product integration tests were not run by this delivery job.'
+            # A concurrent main update must fail, never overwrite peer work.
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD
+          git hash-object "$module"
