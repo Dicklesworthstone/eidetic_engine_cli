@@ -69,7 +69,18 @@ jobs:
           run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle
           run_group core::backup::recovery::history::maintenance::tests 10 maintenance
           run_group core::backup::recovery::tests 15 inventory
-          run_group core::backup::revision_recovery_tests 14 primary
+          # 14 -> 18. DERIVED, not guessed: core::backup::revision_recovery_tests
+          # is src/core/backup_revision_recovery_tests.rs (9 #[test]) plus its
+          # `#[path = "backup_primary_publication_tests.rs"] mod publication`
+          # (9 more) = 18, which is exactly what CI observed before this grep
+          # refused it. Raise this number in the same commit that adds a test to
+          # either file.
+          #
+          # This grep is the FOURTH of eight checks in a `set -euo pipefail`
+          # step, so while it was stale the three named single-test groups, the
+          # jsonl recovery run and the final `git diff --exit-code` below never
+          # executed at all.
+          run_group core::backup::revision_recovery_tests 18 primary
           for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
             run_group "core::backup::tests::$filter" 1 "$filter"
           done
