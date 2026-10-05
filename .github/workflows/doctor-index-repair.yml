@@ -67,11 +67,13 @@ jobs:
           git diff > "$RUNNER_TEMP/doctor-index/source.patch"
       - name: Exercise real source snapshots and writable projection parity
         run: |
-          set -euo pipefail
-          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-index/source-tests.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/source-tests.log"
-          cargo test --locked --lib core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory -- --exact 2>&1 | tee "$RUNNER_TEMP/doctor-index/writable-parity.log"
-          grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/writable-parity.log"
+          set -uo pipefail
+          failed=0
+          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-index/source-tests.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/source-tests.log" || failed=1
+          cargo test --locked --lib core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory -- --exact 2>&1 | tee "$RUNNER_TEMP/doctor-index/writable-parity.log" || failed=1
+          grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/writable-parity.log" || failed=1
+          exit "$failed"
       - name: Publish verified implementation directly to main
         env:
           GH_TOKEN: ${{ github.token }}

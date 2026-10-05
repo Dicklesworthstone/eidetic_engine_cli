@@ -91,24 +91,26 @@ jobs:
           retention-days: 7
       - name: Test explicit paired learning and fail-closed source ownership
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=0
           run_group() {
             local name="$1" filter="$2" count="$3"
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/arc-$name.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-$name.log"; return 1; }
             tail -n 100 "$RUNNER_TEMP/arc-$name.log"
             grep -Eq "test result: ok\\. $count passed; 0 failed;" "$RUNNER_TEMP/arc-$name.log"
           }
-          run_group learning 'core::curate::tests::session_arc_tests' 13
-          run_group review 'core::curate::tests::review_session_' '[1-9][0-9]*'
-          run_group ownership 'core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict' 1
-          run_group drift 'core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift' 1
-          run_group specificity 'specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes' 1
-          cargo test --locked --test session_arc_learning_cli -- --test-threads=2 > "$RUNNER_TEMP/arc-cli.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/arc-cli.log"; exit 1; }
+          run_group learning 'core::curate::tests::session_arc_tests' 13 || failed=1
+          run_group review 'core::curate::tests::review_session_' '[1-9][0-9]*' || failed=1
+          run_group ownership 'core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict' 1 || failed=1
+          run_group drift 'core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift' 1 || failed=1
+          run_group specificity 'specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes' 1 || failed=1
+          cargo test --locked --test session_arc_learning_cli -- --test-threads=2 > "$RUNNER_TEMP/arc-cli.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/arc-cli.log"; failed=1; }
           tail -n 100 "$RUNNER_TEMP/arc-cli.log"
-          grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/arc-cli.log"
-          cargo test --locked --test integration_a_d docs_schemas_match_responses::curate_show_report_matches_schema -- --exact --test-threads=2 > "$RUNNER_TEMP/arc-schema.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-schema.log"; exit 1; }
+          grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/arc-cli.log" || failed=1
+          cargo test --locked --test integration_a_d docs_schemas_match_responses::curate_show_report_matches_schema -- --exact --test-threads=2 > "$RUNNER_TEMP/arc-schema.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-schema.log"; failed=1; }
           tail -n 80 "$RUNNER_TEMP/arc-schema.log"
-          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/arc-schema.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/arc-schema.log" || failed=1
+          exit "$failed"
       - name: Publish tested source directly to main
         run: |
           set -euo pipefail

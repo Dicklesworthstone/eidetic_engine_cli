@@ -172,11 +172,13 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          set -euo pipefail
-          cargo test --locked --lib 'core::index::rollback_durability_tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rollback-tests.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-rollback-tests.log"
-          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-reader-tests.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-reader-tests.log"
+          set -uo pipefail
+          failed=0
+          cargo test --locked --lib 'core::index::rollback_durability_tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rollback-tests.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-rollback-tests.log" || failed=1
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-reader-tests.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-reader-tests.log" || failed=1
+          exit "$failed"
       - name: Check production Clippy and new-source formatting
         if: ${{ !cancelled() }}
         shell: bash

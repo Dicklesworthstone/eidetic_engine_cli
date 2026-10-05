@@ -60,15 +60,19 @@ jobs:
           timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recovery-check.log"
       - name: Execute primary, lifecycle and maintenance regressions
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=0
           run_group() {
             local filter=$1 count=$2 label=$3
-            timeout 20m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-$label.log"
+            # `|| return 1` is required, not decorative: without `set -e` the
+            # function's status is the grep's alone, so a cargo/timeout failure
+            # would be swallowed whenever a stale log still matched.
+            timeout 20m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-$label.log" || return 1
             grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recovery-$label.log"
           }
-          run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle
-          run_group core::backup::recovery::history::maintenance::tests 10 maintenance
-          run_group core::backup::recovery::tests 15 inventory
+          run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle || failed=1
+          run_group core::backup::recovery::history::maintenance::tests 10 maintenance || failed=1
+          run_group core::backup::recovery::tests 15 inventory || failed=1
           # 14 -> 18. DERIVED, not guessed: core::backup::revision_recovery_tests
           # is src/core/backup_revision_recovery_tests.rs (9 #[test]) plus its
           # `#[path = "backup_primary_publication_tests.rs"] mod publication`
@@ -76,17 +80,19 @@ jobs:
           # refused it. Raise this number in the same commit that adds a test to
           # either file.
           #
-          # This grep is the FOURTH of eight checks in a `set -euo pipefail`
+          # This grep WAS the fourth of nine checks in a `set -euo pipefail`
           # step, so while it was stale the three named single-test groups, the
           # jsonl recovery run and the final `git diff --exit-code` below never
-          # executed at all.
-          run_group core::backup::revision_recovery_tests 18 primary
+          # executed at all. The step now accumulates into `failed` (bd-lagsa),
+          # so a stale count here costs one red instead of five silent checks.
+          run_group core::backup::revision_recovery_tests 18 primary || failed=1
           for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
-            run_group "core::backup::tests::$filter" 1 "$filter"
+            run_group "core::backup::tests::$filter" 1 "$filter" || failed=1
           done
-          timeout 15m cargo test --locked --lib core::jsonl_import::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-jsonl.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-jsonl.log"
-          git diff --exit-code
+          timeout 15m cargo test --locked --lib core::jsonl_import::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-jsonl.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-jsonl.log" || failed=1
+          git diff --exit-code || failed=1
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:

@@ -77,19 +77,24 @@ jobs:
           git diff --check
       - name: Exercise complete learning and independent acceptance before publication
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=0
           run_group() {
             local label=$1 filter=$2 count=$3
-            timeout 15m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-$label.log"
+            # `|| return 1` is required, not decorative: without `set -e` the
+            # function's status is the grep's alone, so a cargo/timeout failure
+            # would be swallowed whenever a stale log still matched.
+            timeout 15m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-$label.log" || return 1
             grep -Eq "test result: ok\. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/session-arc-$label.log"
           }
-          run_group learning core::curate::tests::session_arc_tests 21
-          run_group review core::curate::tests::review_session_ '[1-9][0-9]*'
-          run_group ownership core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict 1
-          run_group drift core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift 1
-          run_group specificity specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes 1
-          timeout 15m cargo test --locked --test session_arc_learning_cli -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-cli.log"
-          grep -Fq 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-cli.log"
+          run_group learning core::curate::tests::session_arc_tests 21 || failed=1
+          run_group review core::curate::tests::review_session_ '[1-9][0-9]*' || failed=1
+          run_group ownership core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict 1 || failed=1
+          run_group drift core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift 1 || failed=1
+          run_group specificity specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes 1 || failed=1
+          timeout 15m cargo test --locked --test session_arc_learning_cli -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-cli.log" || failed=1
+          grep -Fq 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-cli.log" || failed=1
+          exit "$failed"
       - name: Commit tested source directly to main without replacing concurrent work
         id: publish
         run: |

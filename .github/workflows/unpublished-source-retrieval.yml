@@ -124,13 +124,14 @@ jobs:
       - name: Verify complete source retrieval and read-only pack
         id: tests
         run: |
-          set -euo pipefail
-          cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log"
-          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log"
+          set -uo pipefail
+          failed=0
+          cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log" || failed=1
+          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log" || failed=1
           while read -r label filter; do
-            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/unpublished/$label.log" 2>&1
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/unpublished/$label.log" 2>&1 || failed=1
             tail -n 80 "$RUNNER_TEMP/unpublished/$label.log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/$label.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/$label.log" || failed=1
           done <<'CASES'
           stale-source stale_read_only_search_retrieves_current_memory_and_rule_corpus_without_writes
           strict-source live_snapshot_fallback_preserves_strict_source_mode_and_cancellation
@@ -138,6 +139,7 @@ jobs:
           epoch-refusal search_refuses_pre_security_epoch_index_before_open
           focus core::focus_suggest::
           CASES
+          exit "$failed"
       - name: Check strict library lint and changed source formatting
         id: lint
         run: |
