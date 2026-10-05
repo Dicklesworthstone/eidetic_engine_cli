@@ -1,4 +1,4 @@
-# ADR 0073: Swarm Repair Plan Contract
+# ADR 0089: Swarm Repair Plan Contract
 
 Status: Accepted
 

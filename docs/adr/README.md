@@ -78,6 +78,7 @@ including rejected alternatives and verification hooks.
 - [ADR 0070: Outcome-Tuned Retrieval Weights via Shadow Policy](0070-outcome-tuned-retrieval-weights.md)
 - [ADR 0071: Memory Debt and Demand-Driven Knowledge Gaps](0071-memory-debt-and-demand-driven-gaps.md)
 - [ADR 0072: Toolchain Provenance Capsule](0072-toolchain-provenance-capsule.md)
+- [ADR 0073: Session Budget Ledger and Cost Planner Substrate](0073-session-budget-ledger.md)
 - [ADR 0074: Embedding Model Lifecycle Readiness](0074-embedding-model-lifecycle-readiness.md)
 - [ADR 0075: Harness Conformance Contract](0075-harness-conformance-contract.md)
 - [ADR 0076: Scale-Envelope Contract](0076-scale-envelope-contract.md)
@@ -93,3 +94,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0086: Team Memory Confederation](0086-team-memory-confederation.md)
 - [ADR 0087: Canonical Deterministic Response and Pack-Hash Contract](0087-canonical-deterministic-response-contract.md)
 - [ADR 0088: `degraded[].repair` is prose; actionability is a separate, declared field](0088-degraded-repair-actionability.md)
+- [ADR 0089: Swarm Repair Plan Contract](0089-swarm-repair-plan-contract.md)
