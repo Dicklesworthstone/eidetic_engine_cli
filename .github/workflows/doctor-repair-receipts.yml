@@ -75,7 +75,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::doctor_runtime::index_repair::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/index-repair.log"
-          grep -Eq 'test result: ok\. 7 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/index-repair.log"
+          # Monotone FLOOR, not an exact count. This pinned `7 passed` and
+          # 1f7d8df78 (2026-09-26) took the suite to 9, so the step had failed
+          # on every run for nine days -- because MORE tests passed. A floor
+          # still catches the thing an exact count is for (silent deletion:
+          # 8 or fewer is refused) without reddening when the suite grows.
+          # Raise the floor when you add tests you want guaranteed present.
+          grep -Eq 'test result: ok\. (9|[1-9][0-9]+) passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/index-repair.log"
           cargo test --locked --lib core::doctor_fixers::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/dispatch.log"
           cargo test --locked --lib core::doctor_runtime::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/runtime.log"
