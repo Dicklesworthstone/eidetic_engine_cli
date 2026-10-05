@@ -767,9 +767,19 @@ impl CommandEffect {
     /// The workspace registry is a separate database file, not a table of the
     /// workspace store, and only `workspace alias` writes it; that entry
     /// declares it as a derived path (bd-hb5os).
+    ///
+    /// bd-acxw6: `db_tables` is a parameter rather than a hard-coded
+    /// `["audit_log"]`. The hard-coded form made every config-write command
+    /// claim an audit row, and measurement (bd-hb5os probe v2) found that not
+    /// one of the four writes one. `write_surfaces` is descriptive — it is the
+    /// measured write set — while `side_effect_class` and `requires_audit`
+    /// stay class-normative, exactly as bd-hb5os left them. Where the two now
+    /// disagree the gap is a real product question, tracked separately, not
+    /// something to paper over by relabelling the class.
     #[must_use]
     pub fn config_write(
         command_path: &'static str,
+        db_tables: Vec<&'static str>,
         workspace_files: Vec<&'static str>,
         idempotency_key: &'static str,
         description: &'static str,
@@ -780,7 +790,7 @@ impl CommandEffect {
             dry_run_effect: None,
             idempotency: IdempotencyClass::Idempotent,
             write_surfaces: WriteSurfaces {
-                db_tables: vec!["audit_log"],
+                db_tables,
                 derived_paths: Vec::new(),
                 workspace_files,
             },
@@ -2833,9 +2843,17 @@ impl EffectManifest {
                 vec!["feedback_events", "learning_observations", "audit_log"],
                 "Close a learning experiment",
             ),
+            // bd-acxw6: the bd-hb5os comment above already recorded that this
+            // command was measured to write no table, but the declaration was
+            // left naming `audit_log`. Execution is refused without
+            // `--dry-run` (src/core/learn.rs:3200, src/cli/mod.rs:26064) and a
+            // dry run persists nothing, so the measured write set is empty.
+            // The class stays `DurableMemoryWrite`: that is what the command
+            // becomes once experiment execution is backed by persisted
+            // ledgers, and the typed refusal is what stands in until then.
             CommandEffect::durable_write(
                 "learn experiment run",
-                vec!["audit_log"],
+                Vec::new(),
                 "Record a learning experiment run",
             ),
             CommandEffect::durable_write(
@@ -3343,16 +3361,50 @@ impl EffectManifest {
 
     fn config_write_commands() -> Vec<CommandEffect> {
         vec![
+            // bd-acxw6: both lists are what `ee init` actually writes, measured
+            // rather than intended (bd-hb5os probe v2).
+            //
+            // Files: `ee.toml` was declared and never written — the string
+            // occurred nowhere else in the tree, and the real config file is
+            // `.ee/config.toml`, already covered by the `.ee/` prefix. The two
+            // guidance files ARE written, at src/core/init.rs:874 and :904, and
+            // are suppressed by `--skip-boilerplate`; a surface that a flag
+            // exists to turn off is a surface the manifest has to name. The
+            // store-auth root key falls under `.ee/` but is named in full
+            // anyway: it is key material, `backup keys import` already names
+            // the identical path, and "does init create key material?" should
+            // not require a reader to reason about prefixes.
+            //
+            // Tables: the six tables init leaves non-empty. `audit_log` is NOT
+            // among them — init creates the table and writes no row into it.
             CommandEffect::config_write(
                 "init",
-                vec![".ee/", "ee.toml"],
+                vec![
+                    "curation_ttl_policies",
+                    "ee_schema_migrations",
+                    "memory_timestamp_spelling_repair_v124",
+                    "model_registry",
+                    "workspace_generations",
+                    "workspaces",
+                ],
+                vec![
+                    ".ee/",
+                    ".ee/keys/store_auth_root.json",
+                    "AGENTS.md",
+                    "CLAUDE.md",
+                ],
                 "workspace root",
                 "Initialize workspace-local ee configuration and storage",
             ),
             {
+                // bd-acxw6: measured to touch no table of the workspace store
+                // and no workspace file. `.ee/workspaces.toml` was declared and
+                // never written; the alias lands in the registry database only,
+                // which is the derived path below.
                 let mut alias = CommandEffect::config_write(
                     "workspace alias",
-                    vec![".ee/workspaces.toml"],
+                    Vec::new(),
+                    Vec::new(),
                     "alias name and workspace root",
                     "Create or update a workspace alias",
                 );
@@ -3410,14 +3462,25 @@ impl EffectManifest {
                 "workspace key path plus --show/--force mode",
                 "Generate or inspect a local certificate signing key",
             ),
+            // bd-acxw6: both were measured to change `.ee/config.toml` and
+            // nothing else — no table of the workspace store, no registry
+            // entry, no `.ee/audit.jsonl` record. That is by construction:
+            // src/mesh/emergency_disable.rs is "deliberately local-only" so
+            // containment still works when the store is unreachable. The
+            // declared tables are corrected here to the measured set; the fact
+            // that an incident-containment command with `--reason` and
+            // `--temporary-for` leaves no audit record anywhere is a product
+            // gap, filed separately, not a declaration to quietly soften.
             CommandEffect::config_write(
                 "mesh disable",
+                Vec::new(),
                 vec![".ee/config.toml"],
                 "workspace id plus mesh disable reason",
                 "Disable mesh synchronization for a workspace",
             ),
             CommandEffect::config_write(
                 "mesh reenable",
+                Vec::new(),
                 vec![".ee/config.toml"],
                 "workspace id plus mesh reenable reason",
                 "Re-enable mesh synchronization for a workspace",
