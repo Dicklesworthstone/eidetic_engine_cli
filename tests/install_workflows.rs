@@ -1899,6 +1899,18 @@ fn install_freshness_claim_gate_e2e_script_bd_3utv2_7() -> TestResult {
             && events.contains("\"freshness_verdict\":\"fresh\""),
         "fresh claim-gate event should pin the authoritative control path",
     )?;
+    // bd-722ix: the shadowed-binary arm above is NOT a control for version
+    // skew. ShadowedBinary outranks Stale in evaluate_install_freshness
+    // (src/core/install.rs:569), so the verdict that actually fires on a host
+    // running an older ee against this tree had no arm until the script grew
+    // one. Pinning it here as well means the script cannot lose that arm
+    // without reddening a Rust test rather than silently shrinking its own
+    // coverage.
+    ensure(
+        events.contains("\"label\":\"skew_claim_gate\"")
+            && events.contains("\"freshness_verdict\":\"stale\""),
+        "version-skew claim-gate event should pin the stale verdict reached without shadowing",
+    )?;
     ensure(
         events.contains("\"stdout_artifact_path\":\"[REPO]/target/ee-install-artifacts/"),
         "script should log scrubbed stdout artifact paths",

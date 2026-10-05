@@ -11,6 +11,18 @@ harness_init "install_freshness"
 ARTIFACT_DIR="$LOG_DIR/artifacts"
 mkdir -p "$ARTIFACT_DIR"
 
+# bd-722ix. The version-skew arm below runs ee from a fixture directory, so the
+# binary can no longer be reached by a path relative to the starting cwd.
+# Resolve it once, before anything changes directory.
+case "$EE_BIN" in
+  /*) EE_BIN_ABS="$EE_BIN" ;;
+  *) EE_BIN_ABS="$PWD/$EE_BIN" ;;
+esac
+
+# Directory run_ee_capture runs ee from. Empty means "wherever the script
+# started", which is what every arm except the version-skew one wants.
+RUN_EE_CWD=""
+
 now_ns() {
   python3 - <<'PY'
 import time
@@ -118,10 +130,15 @@ run_ee_capture() {
 
   local started finished elapsed_ms
   started="$(now_ns)"
-  PATH="$path_value" \
-    EE_DATABASE_PATH="$WS/.ee/e2e-install-freshness.db" \
-    EE_INDEX_DIR="$WS/.ee/e2e-install-freshness-index" \
-    "$EE_BIN" "$@" >"$LAST_STDOUT" 2>"$LAST_STDERR"
+  (
+    if [ -n "$RUN_EE_CWD" ]; then
+      cd "$RUN_EE_CWD" || exit 125
+    fi
+    PATH="$path_value" \
+      EE_DATABASE_PATH="$WS/.ee/e2e-install-freshness.db" \
+      EE_INDEX_DIR="$WS/.ee/e2e-install-freshness-index" \
+      "$EE_BIN_ABS" "$@"
+  ) >"$LAST_STDOUT" 2>"$LAST_STDERR"
   LAST_RC=$?
   finished="$(now_ns)"
   elapsed_ms="$(((finished - started) / 1000000))"
@@ -208,5 +225,72 @@ assert_jq "$fresh_gate_json" '.data.sourceAuthority.installFreshnessVerdict == "
 assert_jq "$fresh_gate_json" '((.data.degradedCodes // []) | index("stale_binary_suspected")) == null' "fresh path does not emit stale binary degradation"
 assert_jq "$fresh_gate_json" 'all(.degraded[]?; ((.sources // []) | index("install-freshness")) == null)' "fresh path has no install-freshness degradation"
 assert_jq "$fresh_gate_json" '((.data.unsafeReasons // []) | index("claim_gate_install_freshness_not_authoritative")) == null' "fresh path leaves downstream gates to decide"
+
+# ---------------------------------------------------------------------------
+# bd-722ix: the VERSION-SKEW arm.
+#
+# evaluate_install_freshness (src/core/install.rs:569) picks one verdict from an
+# ordered chain: MissingRequiredSurface > UnknownSourceVersion >
+# UnknownInstalledVersion > ShadowedBinary > PathBinaryMissing > Stale > Fresh.
+# Until this arm existed the suite asserted two of those seven -- shadowed_binary
+# above and fresh above -- and never `stale`. That is the wrong control for the
+# live hazard: a Mac checkout running ee 0.14.2 against a 0.17.0 tree has ONE ee
+# on PATH, so nothing is shadowed, and `stale` is the arm that actually fires.
+# ShadowedBinary also sits ABOVE Stale in the chain, so the existing fixture --
+# a fake `ee 0.1.0` placed earlier on PATH -- would mask this verdict even if it
+# were reached.
+#
+# Driving `stale` without shadowing means moving the SOURCE version instead of
+# the binary. detect_cargo_toml_source_version (src/core/install.rs:768) walks UP
+# from the current directory for the first Cargo.toml whose [package] name is
+# `eidetic-engine`, so a fixture directory holding such a manifest with an
+# absurd version makes the real, unshadowed binary older than its "source".
+mkdir -p "$WS/fixtures/skew"
+cat >"$WS/fixtures/skew/Cargo.toml" <<'EOF'
+[package]
+name = "eidetic-engine"
+version = "99.99.99"
+EOF
+
+RUN_EE_CWD="$WS/fixtures/skew"
+
+run_ee_capture "skew_install_check" "fresh" "$FRESH_PATH" \
+  install check --workspace "$WS" --offline --json
+skew_install_json="$(cat "$LAST_STDOUT")"
+assert_jq "$skew_install_json" '.success == true' "version-skew install check succeeds as a diagnostic command"
+# Prove the fixture manifest is the one that was read before trusting any
+# verdict derived from it. Without this the arm would still pass if the walk
+# escaped to the repository's own Cargo.toml and found a coincidental mismatch.
+assert_jq "$skew_install_json" '.data.freshness.sourceVersion.version == "99.99.99"' "skew fixture manifest supplied the source version"
+assert_jq "$skew_install_json" '.data.freshness.sourceVersion.source == "cargo_toml"' "source version came from a Cargo.toml, not a release manifest"
+assert_jq "$skew_install_json" '(.data.freshness.sourceVersion.path | test("fixtures/skew/Cargo.toml$"))' "the fixture manifest is the file that was read"
+assert_jq "$skew_install_json" '.data.freshness.installedVersion.version != "99.99.99"' "installed version differs from the fixture source version"
+assert_jq "$skew_install_json" '.data.freshness.comparison == "installed_older_than_source"' "comparison names the skew direction"
+assert_jq "$skew_install_json" '.data.freshness.verdict == "stale"' "pure version skew yields the stale verdict"
+# No `verdict != "shadowed_binary"` assertion here: it cannot fail once the
+# line above passes, and an assertion that cannot fail is decoration. The real
+# control for the precedence concern is the findings check below, which can
+# fail independently of the verdict.
+#
+# Deliberately NOT asserting .data.path.status either. FRESH_PATH appends the
+# ambient PATH, so a host that already has an ee on PATH reports "duplicate"
+# and a CI runner that does not reports "single" -- the status describes the
+# host, not this arm. What the arm needs is that the current binary was not
+# SHADOWED, since that branch outranks Stale and would mask it, and that is a
+# property of the findings rather than of the PATH census.
+assert_jq "$skew_install_json" 'all(.data.findings[]?; .code != "current_binary_shadowed")' "version-skew arm reports no shadowed-binary finding"
+assert_jq "$skew_install_json" '(.data.freshness.blockingFindings // []) == ["installed_binary_stale"]' "stale verdict blocks on exactly the stale-binary finding"
+
+run_ee_capture "skew_claim_gate" "fresh" "$FRESH_PATH" \
+  swarm work-packet --workspace "$WS" --sources none --claim-gate --candidate bd-3utv2.7 --json
+skew_gate_json="$(cat "$LAST_STDOUT")"
+assert_jq "$skew_gate_json" '.success == true' "version-skew claim-gate command returns an envelope"
+assert_jq "$skew_gate_json" '.data.sourceAuthority.installFreshnessVerdict == "stale"' "claim gate propagates the stale verdict"
+assert_jq "$skew_gate_json" '.data.sourceAuthority.installFreshnessAuthoritative == false' "version skew is not authoritative"
+assert_jq "$skew_gate_json" '.data.safeToClaim == false' "version skew alone blocks the claim gate"
+assert_jq "$skew_gate_json" '(.data.degradedCodes // []) | index("stale_binary_suspected") != null' "version skew emits the stale binary degradation code"
+assert_jq "$skew_gate_json" '.data.claimCommandAction == null' "version-skew claim gate never returns a claim command"
+
+RUN_EE_CWD=""
 
 harness_summary
