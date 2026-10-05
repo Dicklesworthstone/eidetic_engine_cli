@@ -112,7 +112,7 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
                 return key
                     .and_then(|key| pending.remove(&key).map(|failure| (failure.text, part)));
             }
-            if topic != "noise" && session_arc_failure_signal(part) {
+            if topic != "noise" && failure_signal(part) {
                 pending.insert(
                     (topic, resources),
                     PendingClause {
@@ -132,14 +132,150 @@ fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
     inline_pairs(excerpt).next()
 }
 
+/// A classification-only view of explicit test/check counters. The original
+/// conversation, evidence hash, locator and proposal excerpts remain unchanged.
+struct OutcomeSignalText<'a> {
+    text: std::borrow::Cow<'a, str>,
+    has_counted_failure: bool,
+}
+
+/// Recognize integer counters, not a trailing zero in a decimal, fraction,
+/// signed value or grouped number. A numeric shape that is not a proven zero
+/// remains a failure veto; it is never used to erase a failure word.
+fn outcome_count_value(excerpt: &str, token: (usize, &str)) -> Option<bool> {
+    let (start, value) = token;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let bytes = excerpt.as_bytes();
+    let end = start + value.len();
+    if start > 0 {
+        let previous = bytes[start - 1];
+        if matches!(previous, b'.' | b'/' | b'\\' | b'+' | b'-')
+            || (matches!(previous, b',' | b':')
+                && start > 1
+                && bytes[start - 2].is_ascii_digit())
+        {
+            return Some(true);
+        }
+    }
+    if end + 1 < bytes.len()
+        && matches!(bytes[end], b'.' | b',' | b':' | b'/' | b'\\' | b'+' | b'-' | b'*')
+        && bytes[end + 1].is_ascii_alphanumeric()
+    {
+        return Some(true);
+    }
+    // No integer conversion: an arbitrarily large positive count still vetoes
+    // a repair rather than overflowing into an unknown or zero observation.
+    Some(value.bytes().any(|byte| byte != b'0'))
+}
+
+fn outcome_count(
+    excerpt: &str,
+    tokens: &[(usize, &str)],
+    index: usize,
+) -> Option<bool> {
+    let (start, word) = tokens[index];
+    let whitespace_between = |left: usize, right: usize| {
+        let gap = &excerpt[left..right];
+        !gap.is_empty() && gap.chars().all(char::is_whitespace)
+    };
+    let before = index.checked_sub(1).and_then(|previous| {
+        let (position, token) = tokens[previous];
+        if !whitespace_between(position + token.len(), start) {
+            return None;
+        }
+        if let Some(count) = outcome_count_value(excerpt, tokens[previous]) {
+            return Some(count);
+        }
+        // Both `0 failed` and `0 tests failed` are explicit quantities.
+        if !matches!(
+            token.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "check" | "checks" | "assertion" | "assertions"
+        ) {
+            return None;
+        }
+        let number = previous.checked_sub(1)?;
+        let (position, token) = tokens[number];
+        whitespace_between(position + token.len(), tokens[previous].0)
+            .then(|| outcome_count_value(excerpt, tokens[number]))
+            .flatten()
+    });
+    let after = tokens.get(index + 1).and_then(|token| {
+        let gap = excerpt[start + word.len()..token.0].trim();
+        matches!(gap, ":" | "=")
+            .then(|| outcome_count_value(excerpt, *token).unwrap_or(true))
+    });
+    match (before, after) {
+        // Conflicting counters must never turn a positive failure into zero.
+        (Some(left), Some(right)) => Some(left || right),
+        (Some(count), None) | (None, Some(count)) => Some(count),
+        (None, None) => None,
+    }
+}
+
+fn outcome_signal_text(excerpt: &str) -> OutcomeSignalText<'_> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (position, ch) in excerpt
+        .char_indices()
+        .chain(std::iter::once((excerpt.len(), ' ')))
+    {
+        if ch.is_alphanumeric() || ch == '_' {
+            let _ = start.get_or_insert(position);
+        } else if let Some(start) = start.take() {
+            tokens.push((start, &excerpt[start..position]));
+        }
+    }
+    let mut zero_words = Vec::new();
+    let mut has_counted_failure = false;
+    for (index, (start, word)) in tokens.iter().copied().enumerate() {
+        let is_failure = match word.to_ascii_lowercase().as_str() {
+            "failed" | "failing" | "failure" | "failures" | "error" | "errors" => true,
+            "passed" | "passing" | "succeeded" | "successes" => false,
+            _ => continue,
+        };
+        match outcome_count(excerpt, &tokens, index) {
+            Some(false) => zero_words.push((start, start + word.len())),
+            Some(true) => has_counted_failure |= is_failure,
+            None => {}
+        }
+    }
+    let text = if zero_words.is_empty() {
+        std::borrow::Cow::Borrowed(excerpt)
+    } else {
+        // Copy once, preserving byte positions and every non-counter word.
+        // A zero success count is neutral too: `0 passed` cannot verify a fix.
+        let mut text = String::with_capacity(excerpt.len());
+        let mut copied = 0;
+        for (start, end) in zero_words {
+            text.push_str(&excerpt[copied..start]);
+            text.extend(std::iter::repeat_n(' ', end - start));
+            copied = end;
+        }
+        text.push_str(&excerpt[copied..]);
+        std::borrow::Cow::Owned(text)
+    };
+    OutcomeSignalText {
+        text,
+        has_counted_failure,
+    }
+}
+
+pub(super) fn failure_signal(excerpt: &str) -> bool {
+    let outcome = outcome_signal_text(excerpt);
+    outcome.has_counted_failure || session_arc_failure_signal(outcome.text.as_ref())
+}
+
 /// Negative or predicted repairs must not become positive lessons merely
 /// because they mention `fixed`, `green`, or `passed`. This is conservative
 /// lexical admission, not proof that an arbitrary natural-language claim is true.
 pub(super) fn resolution_signal(excerpt: &str) -> bool {
-    if !session_arc_resolution_signal(excerpt) {
+    let outcome = outcome_signal_text(excerpt);
+    if outcome.has_counted_failure || !session_arc_resolution_signal(outcome.text.as_ref()) {
         return false;
     }
-    let lowercase = excerpt.to_ascii_lowercase().replace('’', "'");
+    let lowercase = outcome.text.to_ascii_lowercase().replace('’', "'");
     let words: Vec<_> = lowercase
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\'')
         .map(|word| word.trim_matches('\''))
@@ -188,6 +324,92 @@ pub(super) fn resolution_signal(excerpt: &str) -> bool {
                 )
             })
     })
+}
+
+#[cfg(test)]
+mod counted_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn zero_failure_counters_do_not_create_failures_or_veto_success() {
+        for text in [
+            "cargo test passed (21 passed, 0 failed)",
+            "cargo test passed (21 PASSED, 000 FAILED)",
+            "cargo test passed (0 tests failed)",
+            "cargo test passed (errors: 0, failures = 0)",
+            "cargo test passed (errors:0;failures=0)",
+        ] {
+            assert!(!failure_signal(text), "false failure: {text}");
+            assert!(resolution_signal(text), "lost verification: {text}");
+        }
+    }
+
+    #[test]
+    fn positive_failures_veto_repairs_even_when_most_tests_passed() {
+        for text in [
+            "cargo test: 21 passed, 1 failed",
+            "cargo test passed (errors: 2)",
+            "cargo test passed (3 failures)",
+            "cargo test passed (1 assertion failed)",
+            "cargo test passed (0 failed: 2)",
+            "cargo test passed (errors=999999999999999999999999999999)",
+            "cargo test passed (errors: 1,000)",
+            "cargo test passed (errors: 0.5)",
+            "cargo test passed (errors: unknown)",
+        ] {
+            assert!(failure_signal(text), "lost failure: {text}");
+            assert!(!resolution_signal(text), "false repair: {text}");
+        }
+    }
+
+    #[test]
+    fn zero_success_counters_do_not_verify_unexecuted_checks() {
+        for text in [
+            "cargo test: 0 passed, 0 failed",
+            "cargo test: passed=0, failed=0",
+            "cargo test: 0 tests passed, 0 tests failed",
+        ] {
+            assert!(!failure_signal(text), "{text}");
+            assert!(!resolution_signal(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_numeric_suffixes_are_not_erased_as_zero_counts() {
+        for text in [
+            "1.0 failed", ".0 failed", "10/0 failed", "-0 failed", "+0 failed",
+            "1,000 failed", "failed: 0.5", "failed: 0/1", "failed: 0+1",
+            "failed: 0e3", "version_0 failed", "v0 failed",
+        ] {
+            let outcome = outcome_signal_text(text);
+            assert_eq!(outcome.text, text, "{text}");
+            assert!(matches!(outcome.text, std::borrow::Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn zero_counts_do_not_override_negated_or_predicted_repairs() {
+        for text in [
+            "cargo test has not passed (0 failed)",
+            "cargo test should be fixed (0 failed)",
+            "cargo test will be green (0 errors)",
+            "cargo test wasn't fixed (0 failed)",
+        ] {
+            assert!(!resolution_signal(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn counter_normalization_preserves_unicode_and_source_bytes() {
+        let source = "資料 café 🦀 cargo test passed (21 passed, 0 failed)".to_owned();
+        let original = source.clone();
+        let outcome = outcome_signal_text(&source);
+        assert_eq!(source, original);
+        assert_eq!(outcome.text.len(), source.len());
+        assert!(outcome.text.starts_with("資料 café 🦀 cargo test passed"));
+        assert!(outcome.text.contains("21 passed"));
+        assert!(!outcome.text.contains("failed"));
+    }
 }
 
 /// Respect the public limit without persisting only half of a linked proposal.

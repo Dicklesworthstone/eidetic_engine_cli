@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{
     ReviewSessionCandidate, StoredEvidenceSpan, StoredSession, build_session_arc_candidate_pair,
-    review_topic_key, session_arc_failure_signal, session_arc_span_order,
+    review_topic_key, session_arc_span_order,
 };
-use super::{inline_candidates, resolution_signal, text};
+use super::{failure_signal, inline_candidates, resolution_signal, text};
 
 struct PendingFailure<'a> {
     source: &'a StoredEvidenceSpan,
@@ -92,7 +92,7 @@ pub(super) fn candidates(
             // A success mentioning an "error" is not a new failed attempt.
             continue;
         }
-        if topic != "noise" && session_arc_failure_signal(message.as_ref()) {
+        if topic != "noise" && failure_signal(message.as_ref()) {
             let explicitly_marked = message.to_ascii_lowercase().contains("failure arc:");
             pending.insert(
                 (topic, resources),
@@ -394,6 +394,56 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn session_arc_zero_failure_summary_cannot_mint_an_episode() {
+        let report = "cargo test src/api.rs passed (21 passed, 0 failed).";
+        let repair = "Fixed src/api.rs by restoring the expected type.";
+        assert!(mine(&[span("clean", 1, report), span("later", 2, repair)]).is_empty());
+        assert!(mine(&[span("combined", 1, &format!("{report}\n{repair}"))]).is_empty());
+    }
+
+    #[test]
+    fn session_arc_counted_success_closes_a_real_failure_with_original_provenance() {
+        let failure = "cargo test src/api.rs failed.";
+        let repair = "cargo test src/api.rs passed (21 passed, 0 failed).";
+        let spans = [span("failure", 1, failure), span("repair", 2, repair)];
+        let rows = mine(&spans);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(endpoints(&rows), [("failure", "repair")]);
+        for row in &rows {
+            let arc = row.session_arc.as_ref().expect("source-backed arc");
+            assert_eq!(arc.failure_span.content_hash, spans[0].content_hash);
+            assert_eq!(arc.resolution_span.content_hash, spans[1].content_hash);
+            assert_eq!(arc.resolution_span.excerpt, repair);
+            assert!(row.proposed_content.contains("0 failed"));
+        }
+        let combined = span("combined", 1, &format!("{failure}\n{repair}"));
+        let inline = mine(std::slice::from_ref(&combined));
+        assert_eq!(inline.len(), 2);
+        assert_eq!(endpoints(&inline), [("combined", "combined")]);
+        for row in &inline {
+            let arc = row.session_arc.as_ref().unwrap();
+            assert_eq!(arc.failure_span.content_hash, combined.content_hash);
+            assert_eq!(arc.resolution_span.content_hash, combined.content_hash);
+            assert_eq!(arc.resolution_span.excerpt, repair);
+        }
+    }
+
+    #[test]
+    fn session_arc_mixed_test_results_and_zero_runs_do_not_close_a_failure() {
+        for report in [
+            "cargo test src/api.rs: 21 passed, 1 failed.",
+            "cargo test src/api.rs passed (errors: 1).",
+            "cargo test src/api.rs: 0 passed, 0 failed.",
+        ] {
+            let failure = "cargo test src/api.rs failed.";
+            assert!(
+                mine(&[span("failure", 1, failure), span("report", 2, report)]).is_empty(),
+                "{report}"
+            );
+        }
     }
 
     #[test]
