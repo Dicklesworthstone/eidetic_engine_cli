@@ -60,6 +60,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -72,6 +73,18 @@ ASSERT_RE = re.compile(r"test result: ok")
 ACCUM_RE = re.compile(r"\bfailed=1\b|\bstatus=\$\?|\|\|\s*status=|\bfailed=\$\(")
 # Abort-on-error shells.
 ABORT_RE = re.compile(r"set\s+-[a-z]*e[a-z]*\b|set\s+-o\s+errexit|pipefail")
+# A publication side effect performed by the step ITSELF. When a step both
+# asserts and publishes, aborting is a SAFETY INTERLOCK, not an oversight:
+# converting it to accumulate would run the push and only then report failure,
+# landing unverified code on main. Such a step is reported separately and is
+# never demanded for conversion.
+#
+# Deliberately order-blind. These lanes push inside a `for attempt in 1 2 3`
+# retry loop and re-verify after merging origin/main, so an assertion can sit
+# textually AFTER the push it gates (session-arc-20260919.yml does exactly
+# this). Asking only "is there a side effect after the first assertion?" calls
+# that step pure verification and recommends the unsafe change.
+PUBLISH_RE = re.compile(r"\bgit\s+push\b|\bgit\s+commit\b|\bgh\s+release\b")
 # A step header in a workflow job.
 STEP_RE = re.compile(r"^(\s*)-\s+name:\s*(.+?)$", re.M)
 
@@ -89,6 +102,7 @@ def steps(text: str):
 def audit(root: Path) -> dict:
     at_risk = []
     safe = []
+    publish_gated = []
     examined = 0
     for path in sorted(glob.glob(str(root / ".github" / "workflows" / "*.yml"))):
         base = os.path.basename(path)
@@ -103,18 +117,24 @@ def audit(root: Path) -> dict:
             examined += 1
             accumulates = bool(ACCUM_RE.search(body))
             aborts = bool(ABORT_RE.search(body)) and not accumulates
+            publishes = bool(PUBLISH_RE.search(body))
             key = f"{base}::{name}"
-            row = {"step": key, "assertions": count, "atRisk": aborts}
-            if aborts:
+            row = {"step": key, "assertions": count, "atRisk": aborts and not publishes}
+            if aborts and publishes:
+                # Correct by design: the assertions gate this step's own push.
+                row["publishGated"] = True
+                publish_gated.append(row)
+            elif aborts:
                 # n-1 assertions sit downstream of the first failure.
                 row["assertionsAtRisk"] = count - 1
                 at_risk.append(row)
             else:
                 safe.append(row)
     return {
-        "schema": "ee.step_assertion_isolation.v1",
+        "schema": "ee.step_assertion_isolation.v2",
         "multiAssertionSteps": examined,
         "atRisk": sorted(at_risk, key=lambda r: (-r["assertions"], r["step"])),
+        "publishGated": sorted(publish_gated, key=lambda r: r["step"]),
         "safe": sorted(safe, key=lambda r: r["step"]),
         "assertionsAtRisk": sum(r["assertionsAtRisk"] for r in at_risk),
     }
@@ -160,7 +180,8 @@ def main() -> int:
         )
         print(
             f"[step-isolation] multi-assertion steps: {result['multiAssertionSteps']}; "
-            f"at risk: {len(found)}; safe: {len(result['safe'])}; "
+            f"at risk: {len(found)}; publish-gated: {len(result['publishGated'])}; "
+            f"safe: {len(result['safe'])}; "
             f"assertions downstream of a first failure: {result['assertionsAtRisk']}; "
             f"baseline: {len(baseline)}"
         )
@@ -168,6 +189,9 @@ def main() -> int:
             mark = "NEW" if row["step"] in new else "baselined"
             print(f"   [{mark}] {row['assertions']} assertions "
                   f"({row['assertionsAtRisk']} at risk)  {row['step']}")
+        for row in result["publishGated"]:
+            print(f"   [publish-gated, aborting is CORRECT] {row['assertions']} "
+                  f"assertions  {row['step']}")
 
     status = 0
     if new:
@@ -185,15 +209,20 @@ def main() -> int:
         )
         status = 1
     if fixed:
+        gated = {r["step"] for r in result["publishGated"]}
         print(
-            f"\n[step-isolation] FAIL: {len(fixed)} baselined step(s) now accumulate; "
-            f"delete their line(s) from {BASELINE}:",
+            f"\n[step-isolation] FAIL: {len(fixed)} baselined step(s) are no longer "
+            f"at risk; delete their line(s) from {BASELINE}:",
             file=sys.stderr,
         )
         for n in fixed:
-            print(f"    {n}", file=sys.stderr)
+            why = ("now publishes in-step, so aborting is correct"
+                   if n in gated else "now accumulates")
+            print(f"    {n}  ({why})", file=sys.stderr)
         status = 1
-    if status == 0:
+    if status == 0 and not args.json:
+        # Never on the --json path: a trailing prose line makes the document
+        # unparseable ("Extra data"), which is how this was found.
         print("[step-isolation] OK -- no at-risk step beyond the accepted baseline")
     return status
 
@@ -227,6 +256,46 @@ ACCUMULATING = """jobs:
           cargo test --lib b > b.log || failed=1
           grep -Fq 'test result: ok. 4 passed' b.log || failed=1
           exit "$failed"
+"""
+
+# Publishes from inside the step, assertions BEFORE the push. Aborting is the
+# interlock that keeps unverified code off main, so this must NOT be demanded
+# for conversion.
+PUBLISH_GATED = """jobs:
+  verify:
+    steps:
+      - name: Verify then publish in one step
+        run: |
+          set -euo pipefail
+          cargo test --lib a | tee a.log
+          grep -Fq 'test result: ok. 3 passed' a.log
+          cargo test --lib b | tee b.log
+          grep -Fq 'test result: ok. 4 passed' b.log
+          git add -- src/x.rs
+          git commit -m 'feat: x'
+          git push origin HEAD:main
+"""
+
+# The ordering trap. The push comes textually FIRST; the assertions live in the
+# retry loop and gate the NEXT attempt. A predicate that only looks for a side
+# effect AFTER the first assertion calls this pure verification and recommends
+# the unsafe conversion. session-arc-20260919.yml is this shape in production.
+PUBLISH_GATED_IN_LOOP = """jobs:
+  verify:
+    steps:
+      - name: Publish with merge-retry reverification
+        run: |
+          set -euo pipefail
+          git commit -m 'feat: x'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            test "$attempt" -lt 3
+            git merge --no-edit origin/main
+            cargo test --lib a > a.log
+            grep -Fq 'test result: ok. 3 passed' a.log
+            cargo test --lib b > b.log
+            grep -Fq 'test result: ok. 4 passed' b.log
+          done
 """
 
 SINGLE = """jobs:
@@ -282,6 +351,52 @@ def self_test() -> int:
         a4 = audit(r4)
         arm("two steps in one file are attributed separately",
             a4["multiAssertionSteps"] == 2 and len(a4["atRisk"]) == 1)
+
+        # PUBLISH GATE: aborting is correct, so it is NOT an at-risk row.
+        r6 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r6, "e.yml", PUBLISH_GATED)
+        a6 = audit(r6)
+        arm("a step that publishes in-step is NOT demanded for conversion",
+            a6["atRisk"] == [] and len(a6["publishGated"]) == 1)
+        arm("and it is not silently counted as already safe either",
+            a6["safe"] == [] and a6["assertionsAtRisk"] == 0)
+
+        # The ordering trap: push textually before the assertions it gates.
+        r7 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r7, "f.yml", PUBLISH_GATED_IN_LOOP)
+        a7 = audit(r7)
+        arm("a push inside a retry loop still counts as publish-gated, "
+            "though it precedes its assertions",
+            a7["atRisk"] == [] and len(a7["publishGated"]) == 1)
+
+        # CONTROL for the arm above: the same assertions WITHOUT a publish verb
+        # must still be flagged, proving the new branch narrows nothing else.
+        r8 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r8, "g.yml", PUBLISH_GATED_IN_LOOP.replace(
+            "git commit -m 'feat: x'", "echo no-publish").replace(
+            "if git push origin HEAD:main; then break; fi", "if false; then break; fi"))
+        a8 = audit(r8)
+        arm("CONTROL: the same step with the publish verbs removed is flagged "
+            "again", len(a8["atRisk"]) == 1)
+
+        # --json must be a parseable document on BOTH exit paths. It was not:
+        # the trailing "OK" line made the clean run fail with "Extra data".
+        r9 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r9, "b.yml", ACCUMULATING)
+        for label, extra in (("clean", None), ("failing", ABORTING)):
+            if extra:
+                _plant(r9, "a.yml", extra)
+            proc = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "--root", str(r9), "--json"],
+                capture_output=True, text=True,
+            )
+            ok = False
+            try:
+                ok = isinstance(json.loads(proc.stdout), dict)
+            except json.JSONDecodeError:
+                ok = False
+            arm(f"--json stdout parses as one JSON document on the {label} path", ok)
 
         # The baseline must fail in BOTH directions.
         r5 = Path(tempfile.mkdtemp(dir=tmp))

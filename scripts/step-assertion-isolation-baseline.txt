@@ -40,6 +40,41 @@
 # suites still ran and both reported `0 failed`, which is how both wrong numbers
 # were visible at once.
 #
+# NOT EVERY ABORTING STEP IS A DEFECT -- and this list used to claim otherwise.
+# Five of the thirteen original entries publish from INSIDE the asserting step:
+# they run `git commit` and `git push origin HEAD:main` after their greps. For
+# those, `set -e` is a PUBLICATION INTERLOCK, not an oversight. Converting one
+# to the accumulator idiom would run the push and only then exit 1 -- landing
+# unverified code on main and reporting failure afterwards. That is strictly
+# worse than the silent-skip problem this gate was built to find, because a
+# stale pin in a publish-gating step is fail-CLOSED: nothing ships, and the red
+# is visible.
+#
+# So the gate now classifies them instead of demanding their conversion, and
+# the five lines were DELETED from this list:
+#
+#   cass-prefetch-execution    cass-prefetch-residency    contradiction-graph
+#   runtime-retrieval          session-arc "Publish tested source directly to main"
+#
+# The remaining entries are genuine: their workflows either publish in a LATER
+# step (doctor-index-repair, session-arc-learning) or have already published
+# upstream (index-recovery-admission). Accumulating inside those steps is safe
+# precisely because the step still exits 1, so the job fails and a subsequent
+# publish step is skipped. index-recovery-admission already applies the
+# step-level form of this idiom -- `if: ${{ !cancelled() }}` on four
+# consecutive verification steps -- so within-step accumulation matches how
+# that lane is already built.
+#
+# ORDERING TRAP, found by watching a predicate fail on real data rather than by
+# reasoning about it: these lanes push inside a `for attempt in 1 2 3` retry
+# loop and re-verify after merging origin/main, so the assertions can sit
+# textually AFTER the push they gate. A first pass asking "is there a side
+# effect after the FIRST assertion?" classified session-arc's publish step as
+# pure verification and would have recommended the unsafe conversion. The
+# predicate is now order-blind within a step, and the self-test carries both
+# that fixture and a control with the publish verbs stripped out, which must
+# still be flagged.
+#
 # FIRST ENTRY RETIRED, which is what this list is for.
 # doctor-repair-receipts.yml's step -- the one that hid 93 tests -- was converted
 # to the accumulator idiom and its line DELETED. The gate demanded that deletion
@@ -55,16 +90,14 @@
 # Measured at 2c7b5b9a5: 20 multi-assertion steps, 13 at risk, 7 already safe,
 # 18 assertions sitting downstream of a possible first failure. After the
 # doctor-repair-receipts conversion: 12 at risk, 8 safe, 15 assertions at risk.
+# After separating publish-gating steps: 20 examined, 7 at risk, 5 publish-gated,
+# 8 safe, 8 assertions downstream of a first failure. The drop from 15 to 8 is a
+# correction to the measurement, NOT seven steps being fixed.
 # ---------------------------------------------------------------------------
-cass-prefetch-execution-20260920.yml::Execute real lexical reads and worker regressions before publishing wiring
-cass-prefetch-residency-20260920.yml::Integrate and execute residency regressions before publishing source
-contradiction-graph-20260919.yml::Integrate and execute real Rust guard regressions
 core-loop-regressions.yml::Verify relocation and atomicity with real stores
 doctor-index-repair.yml::Exercise real source snapshots and writable projection parity
 index-recovery-admission.yml::Execute existing publication and read-lease regressions
 primary-recovery-20260919.yml::Execute primary, lifecycle and maintenance regressions
-runtime-retrieval-20260919.yml::Verify and publish substantive retrieval increments
-session-arc-20260919.yml::Publish tested source directly to main
 session-arc-20260919.yml::Test explicit paired learning and fail-closed source ownership
 session-arc-learning-20260919.yml::Exercise complete learning and independent acceptance before publication
 unpublished-source-retrieval.yml::Verify complete source retrieval and read-only pack
