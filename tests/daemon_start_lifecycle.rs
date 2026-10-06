@@ -31,14 +31,61 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
+
+/// Build a daemon socket path that is short enough to publish and whose parent is secure.
+///
+/// The caller's tempdir cannot be used on an RCH worker (bd-pichh). It sits under
+/// `/data/rch/eidetic_engine_cli/paired-<32 hex>/.rch-tmp/`, and both refusals there were
+/// measured, not guessed:
+///
+///   - "Refusing to publish daemon socket under insecure parent …: parent mode 0o775"
+///     — 4 of the 5 socket tests in this file failed this way, every time.
+///   - "path must be shorter than SUN_LEN" — the same root produced 133-byte paths in a
+///     sibling test file.
+///
+/// `/tmp` is mode 1777 on both hosts, so the sticky bit satisfies the ancestor check, and
+/// it is short. The directory is then tightened to 0o700 so it passes on its own merits.
+///
+/// The budget is NOT `sun_path`. `start_server` publishes atomically: it binds a TEMP path
+/// first, `socket_path` plus `format!(".tmp.{}", uuid.simple())` = 5 + 32 = 37 bytes
+/// (`src/daemon/server.rs:970`), then renames. A check against the final path alone passed
+/// a 72-byte path that was then refused at 109, so the suffix is accounted for here and the
+/// error reports the measured length.
+fn secure_socket_path(file_name: &str) -> Result<PathBuf, String> {
+    // Short on purpose: a nanosecond stamp would eat a fifth of the usable budget.
+    static NEXT_SOCKET_DIR: AtomicUsize = AtomicUsize::new(0);
+    let dir = Path::new("/tmp").join(format!(
+        "eedl-{}-{}",
+        std::process::id(),
+        NEXT_SOCKET_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).map_err(|error| format!("fixture: create socket dir: {error}"))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("fixture: secure socket dir: {error}"))?;
+    let path = dir.join(file_name);
+    const PUBLISH_SUFFIX_BYTES: usize = 37;
+    const SUN_PATH_BUDGET: usize = 104;
+    let length = path.as_os_str().len();
+    if length + PUBLISH_SUFFIX_BYTES >= SUN_PATH_BUDGET {
+        return Err(format!(
+            "fixture: socket path is {length} bytes and start_server appends \
+             {PUBLISH_SUFFIX_BYTES} for atomic publication, exceeding sun_path \
+             ({SUN_PATH_BUDGET}): {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -280,8 +327,7 @@ fn combine_test_results(result: TestResult, cleanup: TestResult) -> TestResult {
 
 #[test]
 fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-foreground-sigterm.sock");
+    let socket_path = secure_socket_path("ee-daemon-foreground-sigterm.sock")?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(["daemon", "start", "--foreground", "--socket"])
         .arg(&socket_path)
@@ -365,8 +411,7 @@ fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult
 
 #[test]
 fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-lifecycle.sock");
+    let socket_path = secure_socket_path("ee-daemon-lifecycle.sock")?;
 
     let result: TestResult = (|| {
         let envelope = run_daemon_start(&socket_path)?;
@@ -432,8 +477,7 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
 
 #[test]
 fn daemon_stop_detached_child_exits_and_unlinks_socket() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-stop-detached.sock");
+    let socket_path = secure_socket_path("ee-daemon-stop-detached.sock")?;
 
     let result: TestResult = (|| {
         let envelope = run_daemon_start(&socket_path)?;
@@ -468,8 +512,7 @@ fn daemon_stop_detached_child_exits_and_unlinks_socket() -> TestResult {
 
 #[test]
 fn daemon_start_reports_daemon_already_running_when_socket_is_live() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-already-running.sock");
+    let socket_path = secure_socket_path("ee-daemon-already-running.sock")?;
 
     let result: TestResult = (|| {
         let first = run_daemon_start(&socket_path)?;
