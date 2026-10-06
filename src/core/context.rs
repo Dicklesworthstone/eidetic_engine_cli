@@ -3232,19 +3232,25 @@ async fn run_context_pack_with_performance_inner(
         // cooldown window nothing is written yet a request IS pending, and that
         // window is exactly the repeated-pack case the field reports describe.
         //
-        // The sentence does not claim the rebuild HAS run, and names the bound,
-        // because a corpus over the interactive read bound is not repaired by a
-        // later search (src/core/search.rs skips it) and no steward job is
-        // enqueued yet. Appended, so the substrings existing fixtures pin
-        // survive. Code and severity are untouched: `degraded[]` must still say
-        // THIS response was lexical-only.
+        // The sentence does not claim the rebuild HAS run, and it names BOTH
+        // recovery paths, because they are different and an agent acts on the
+        // difference. Under the interactive read bound a later search repairs
+        // the index synchronously; over it, src/core/search.rs:11381-11389
+        // returns early, and the steward's background scheduler is what acts —
+        // `background_scheduler_job_types` pushes `JobType::IndexRebuild`
+        // whenever `pending_index_rebuild_request` finds this marker, so the
+        // marker IS the queue for a large corpus. Naming only the search path
+        // would imply a large workspace needs manual repair when it does not.
+        // Appended, so the substrings existing fixtures pin survive. Code and
+        // severity are untouched: `degraded[]` must still say THIS response was
+        // lexical-only.
         if outcome.leaves_request_pending()
             && let Some(entry) = degraded
                 .iter_mut()
                 .find(|entry| entry.code == degraded_code)
         {
             entry.message.push_str(
-                " Repair scheduled: an index rebuild is queued, and a later search performs it when the corpus is within the interactive read bound.",
+                " Repair scheduled: an index rebuild is queued; a later search performs it when the corpus is within the interactive read bound, and the steward rebuilds it in the background otherwise.",
             );
         }
     }
