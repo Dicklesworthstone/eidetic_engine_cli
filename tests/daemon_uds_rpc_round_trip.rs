@@ -23,7 +23,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -120,13 +120,14 @@ fn secure_socket_path(_root: &Path, file_name: &str) -> Result<PathBuf, String> 
     // `tempfile::tempdir_in` (E0425) is in scope here, unlike in the lib targets --
     // and the directory must outlive this function anyway, since the socket lives in
     // it. It is left for the OS to reap, like any other /tmp scratch dir.
+    // Short on purpose. A 19-digit nanosecond stamp here cost 19 of the ~67 usable
+    // bytes (see the budget below) and pushed the longest socket name over the limit.
+    // A process id plus a monotonic counter is unique within a run and ~14 bytes.
+    static NEXT_SOCKET_DIR: AtomicUsize = AtomicUsize::new(0);
     let unique = format!(
         "eeds-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| format!("fixture: clock before epoch: {error}"))?
-            .as_nanos()
+        NEXT_SOCKET_DIR.fetch_add(1, Ordering::Relaxed)
     );
     let socket_dir = Path::new("/tmp").join(unique);
     fs::create_dir_all(&socket_dir).map_err(|error| format!("create socket dir: {error}"))?;
@@ -139,10 +140,22 @@ fn secure_socket_path(_root: &Path, file_name: &str) -> Result<PathBuf, String> 
     // caller in this file routes through here, so one check covers all of them, and
     // it reports the measured length so the failure is actionable instead of a bare
     // refusal (bd-pichh).
+    // The budget is NOT sun_path. `start_server` publishes atomically: it binds a TEMP
+    // path first, `socket_path` plus `format!(".tmp.{}", uuid.simple())` =
+    // 5 + 32 = 37 bytes (src/daemon/server.rs:970), then renames. So the path handed to
+    // it must leave room for that suffix.
+    //
+    // An earlier version of this check used a flat `>= 100` and passed a 72-byte path
+    // that `start_server` then refused at 72 + 37 = 109. Measuring the final path alone
+    // is the wrong measurement; this is the whole reason the constant is spelled out.
+    const PUBLISH_SUFFIX_BYTES: usize = 37;
+    const SUN_PATH_BUDGET: usize = 104;
     let length = path.as_os_str().len();
-    if length >= 100 {
+    if length + PUBLISH_SUFFIX_BYTES >= SUN_PATH_BUDGET {
         return Err(format!(
-            "fixture: socket path is {length} bytes, too long for sun_path (~104): {}",
+            "fixture: socket path is {length} bytes and start_server appends \
+             {PUBLISH_SUFFIX_BYTES} for atomic publication, exceeding sun_path \
+             ({SUN_PATH_BUDGET}): {}",
             path.display()
         ));
     }
@@ -758,7 +771,7 @@ fn ensure_error_code(response: &DaemonResponse, expected: &str) -> TestResult {
 #[test]
 fn client_round_trip_rejects_response_schema_mismatch() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-client-schema-drift.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-client-schema-drift.sock")?;
 
     let server = spawn_one_response_daemon(
         &socket_path,
@@ -800,7 +813,7 @@ fn client_round_trip_rejects_response_schema_mismatch() -> TestResult {
 #[test]
 fn client_round_trip_rejects_response_request_id_mismatch() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-client-request-id-drift.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-client-request-id-drift.sock")?;
 
     let server = spawn_one_response_daemon(
         &socket_path,
@@ -842,7 +855,7 @@ fn client_round_trip_rejects_response_request_id_mismatch() -> TestResult {
 #[test]
 fn client_round_trip_rejects_response_agent_id_mismatch() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-client-agent-id-drift.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-client-agent-id-drift.sock")?;
 
     let server = spawn_one_response_daemon(
         &socket_path,
@@ -885,7 +898,7 @@ fn client_round_trip_rejects_response_agent_id_mismatch() -> TestResult {
 #[test]
 fn client_round_trip_rejects_response_workspace_id_mismatch() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-client-workspace-id-drift.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-client-workspace-id-drift.sock")?;
 
     let server = spawn_one_response_daemon(
         &socket_path,
@@ -928,7 +941,7 @@ fn client_round_trip_rejects_response_workspace_id_mismatch() -> TestResult {
 #[test]
 fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-rt.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-rt.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -999,7 +1012,7 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
 #[test]
 fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-capabilities.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-capabilities.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2494,7 +2507,7 @@ fn daemon_context_wrong_workspace_returns_method_unauthorized_over_wire() -> Tes
 #[test]
 fn daemon_schema_mismatch_returns_error_envelope_over_wire() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-schema-mismatch.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-schema-mismatch.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2528,7 +2541,7 @@ fn daemon_schema_mismatch_returns_error_envelope_over_wire() -> TestResult {
 #[test]
 fn daemon_unknown_method_returns_error_envelope_over_wire() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-unknown-method.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-unknown-method.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2561,7 +2574,7 @@ fn daemon_unknown_method_returns_error_envelope_over_wire() -> TestResult {
 #[test]
 fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-malformed-json.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-malformed-json.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2613,7 +2626,7 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
 #[test]
 fn daemon_mid_frame_disconnect_closes_without_decode_failed_envelope() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-truncated-frame.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-truncated-frame.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2642,7 +2655,7 @@ fn daemon_mid_frame_disconnect_closes_without_decode_failed_envelope() -> TestRe
 #[test]
 fn daemon_oversize_request_prefix_returns_decode_failed_without_body_allocation() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-oversize-prefix.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-oversize-prefix.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2681,7 +2694,7 @@ fn daemon_oversize_request_prefix_returns_decode_failed_without_body_allocation(
 #[test]
 fn daemon_serves_two_clients_concurrently() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-concurrent-clients.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-concurrent-clients.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2740,7 +2753,7 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
 #[test]
 fn daemon_shutdown_is_idempotent_across_repeated_calls_over_uds() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-idempotent-uds.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-idempotent-uds.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2765,7 +2778,7 @@ fn daemon_shutdown_is_idempotent_across_repeated_calls_over_uds() -> TestResult 
 #[test]
 fn daemon_drop_without_explicit_shutdown_unlinks_socket() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-drop-cleanup.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-drop-cleanup.sock")?;
 
     {
         let handle =
@@ -2786,7 +2799,7 @@ fn daemon_drop_without_explicit_shutdown_unlinks_socket() -> TestResult {
 #[test]
 fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-restart-same-path.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-restart-same-path.sock")?;
 
     let mut first =
         start_server(&socket_path).map_err(|error| format!("first start_server: {error}"))?;
@@ -2829,7 +2842,7 @@ fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
 #[test]
 fn daemon_shutdown_unblocks_accept_loop_without_any_client_connection() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-idle-shutdown.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-idle-shutdown.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
@@ -2855,7 +2868,7 @@ fn daemon_shutdown_unblocks_accept_loop_without_any_client_connection() -> TestR
 #[test]
 fn daemon_shutdown_during_connected_client_returns_structured_response() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-shutdown-client-race.sock");
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-shutdown-client-race.sock")?;
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
