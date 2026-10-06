@@ -53,10 +53,34 @@ jobs:
           git rev-parse HEAD
           echo '6dd7c524de98fdc914328a05fe89c8e10f2352848f75d4f55ca3078871e3864e  scripts/delivery/ask-path-scope.patch' | sha256sum --check
           echo 'adca0a8687d4f21be8c31720b4bc4d3750285e02a5726c09e367fb1a12178d04  scripts/delivery/ask-native-fixture-hashes.patch' | sha256sum --check
-          git apply --check scripts/delivery/ask-path-scope.patch
-          git apply --check scripts/delivery/ask-native-fixture-hashes.patch
-          git apply scripts/delivery/ask-path-scope.patch
-          git apply scripts/delivery/ask-native-fixture-hashes.patch
+          # IDEMPOTENCY GUARDS, one per patch (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # This step applied both patches UNCONDITIONALLY, so it was guaranteed to fail the
+          # moment it succeeded: the next run applies the same patch to a tree that already
+          # contains it and `git apply` refuses. Both patches ARE delivered -- verified in the
+          # tree, not inferred from the lane's own output:
+          #   ask-path-scope          -> `pub fn load_ask_corpus_for_paths(` in src/core/ask_corpus.rs
+          #   ask-native-fixture-hashes -> `blake3::hash(body.as_bytes()).to_hex()` in
+          #                                src/core/ask_evidence_tests.rs
+          # so this lane has been red by construction rather than by any drift.
+          #
+          # ONE GUARD PER PATCH, deliberately. The two patches deliver unrelated things -- a
+          # path-scoped ask corpus and computed blake3 fixture hashes -- so a single shared
+          # marker would skip a genuinely undelivered second patch the moment the first landed.
+          # The sha256 checks above stay unconditional: they verify blob integrity, which is
+          # worth doing whether or not the patch is applied.
+          if ! grep -Fq 'pub fn load_ask_corpus_for_paths(' src/core/ask_corpus.rs; then
+            git apply --check scripts/delivery/ask-path-scope.patch
+            git apply scripts/delivery/ask-path-scope.patch
+          else
+            echo 'ask-path-scope already integrated; skipping its delivery'
+          fi
+          if ! grep -Fq 'blake3::hash(body.as_bytes()).to_hex()' src/core/ask_evidence_tests.rs; then
+            git apply --check scripts/delivery/ask-native-fixture-hashes.patch
+            git apply scripts/delivery/ask-native-fixture-hashes.patch
+          else
+            echo 'ask-native-fixture-hashes already integrated; skipping its delivery'
+          fi
           rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs
           git diff --check
           git diff --stat
