@@ -965,16 +965,44 @@ mod tests {
         assert!(!dir.path().join(KEY_LOCK_FILE_NAME).exists());
     }
 
+    /// Create a FIFO, reporting a fixture failure distinguishably from a refusal.
+    ///
+    /// `std` cannot make a FIFO without `unsafe`, which this crate forbids, so this
+    /// shells out to POSIX `mkfifo`.
+    #[cfg(unix)]
+    fn special_entry_at(path: &std::path::Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("fixture: mkfifo could not run");
+        assert!(
+            status.success(),
+            "fixture: mkfifo refused to create {}",
+            path.display()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn special_key_and_lock_entries_are_refused_without_reading_a_body() {
+        // FIFOs rather than Unix sockets (bd-ns6fp, same defect one module over).
+        // A socket PATH is bounded by sockaddr_un.sun_path, about 104 bytes, and
+        // the fixture sits under TMPDIR -- long on every RCH worker, where the
+        // project lives beneath a paired-<32 hex> directory. `bind` therefore
+        // panicked with "path must be shorter than SUN_LEN" and BOTH assertions
+        // below never ran, so the test reported a product-looking failure while
+        // checking nothing.
+        //
+        // A FIFO is the better fixture anyway: `read_key_file` opens with
+        // OFlags::NONBLOCK precisely so "a swapped FIFO" cannot hang before its
+        // `regular_file` type check, so this exercises the case that code
+        // documents, and it has no path-length bound.
         let dir = fixture();
         let key = dir.path().join(KEY_FILE_NAME);
-        let _key_socket = std::os::unix::net::UnixListener::bind(&key).expect("key socket");
+        special_entry_at(&key);
         assert!(read_key_file(&key).is_err());
-        let _lock_socket =
-            std::os::unix::net::UnixListener::bind(dir.path().join(KEY_LOCK_FILE_NAME))
-                .expect("lock socket");
+        let lock = dir.path().join(KEY_LOCK_FILE_NAME);
+        special_entry_at(&lock);
         assert!(open_key_lock_file(dir.path()).is_err());
     }
 }
