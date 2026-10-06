@@ -90,8 +90,8 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
     let mut following_veto = false;
     for (part, trailer_veto) in parts.iter_mut().rev() {
         *trailer_veto = following_veto;
-        following_veto = process_report_veto(part)
-            .is_some_and(|current_veto| current_veto || following_veto);
+        following_veto =
+            process_report_veto(part).is_some_and(|current_veto| current_veto || following_veto);
     }
     parts
         .into_iter()
@@ -115,9 +115,8 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
                 } else {
                     None
                 };
-                let key = explicitly_linked.or_else(|| {
-                    sequence::matching_subject(&subjects, &topic, &resources)
-                });
+                let key = explicitly_linked
+                    .or_else(|| sequence::matching_subject(&subjects, &topic, &resources));
                 let key = key.or_else(|| {
                     if pending.len() != 1 || !sequence::refers_to_previous_failure(part) {
                         return None;
@@ -259,9 +258,7 @@ fn process_outcome(
     };
     let (last, assignment_required) = match word.to_ascii_lowercase().as_str() {
         "exit_code" | "exit_status" | "exitcode" | "exitstatus" => (index, false),
-        "exit" if followed_by(index, "code") || followed_by(index, "status") => {
-            (index + 1, false)
-        }
+        "exit" if followed_by(index, "code") || followed_by(index, "status") => (index + 1, false),
         "exited"
             if followed_by(index, "with")
                 && (followed_by(index + 1, "code") || followed_by(index + 1, "status")) =>
@@ -290,9 +287,9 @@ fn process_outcome(
     let boundary = tail.is_empty()
         || tail.starts_with(char::is_whitespace)
         || tail.starts_with([',', ';', ')', ']', '}'])
-        || tail.strip_prefix('.').is_some_and(|after| {
-            after.is_empty() || after.starts_with(char::is_whitespace)
-        });
+        || tail
+            .strip_prefix('.')
+            .is_some_and(|after| after.is_empty() || after.starts_with(char::is_whitespace));
     if !boundary {
         // A decimal, fraction, expression, unit or radix prefix is not an
         // integer exit status. In particular `0.5` must never become zero.
@@ -492,7 +489,8 @@ mod counted_outcome_tests {
             "exit_code=999999999999999999999999999999",
             "exit_code=1,exit_code=0",
         ] {
-            let text = format!("Fixed src/api.rs and cargo test passed (21 passed, 0 failed), {result}.");
+            let text =
+                format!("Fixed src/api.rs and cargo test passed (21 passed, 0 failed), {result}.");
             assert!(failure_signal(&text), "lost process failure: {text}");
             assert!(!resolution_signal(&text), "false verified repair: {text}");
         }
@@ -517,7 +515,9 @@ mod counted_outcome_tests {
         let text = "cargo test: 0 passed, 0 failed, exit_code=0";
         assert!(!resolution_signal(text), "an empty run is not verification");
         assert!(!resolution_signal("cargo test is not fixed, exit_code=0"));
-        assert!(!resolution_signal("cargo test should be fixed, exit_code=0"));
+        assert!(!resolution_signal(
+            "cargo test should be fixed, exit_code=0"
+        ));
     }
 
     #[test]

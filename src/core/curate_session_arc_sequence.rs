@@ -486,7 +486,10 @@ mod tests {
             let sources = [span("failure", 1, failure), span("retry", 2, &repair)];
             assert!(mine(&sources).is_empty(), "cross-window: {repair}");
             let body = format!("{failure}\n{repair}");
-            assert!(mine(&[span("combined", 1, &body)]).is_empty(), "inline: {body}");
+            assert!(
+                mine(&[span("combined", 1, &body)]).is_empty(),
+                "inline: {body}"
+            );
         }
         let good = format!("{claim}\nProcess exited with code 0.");
         assert_eq!(
