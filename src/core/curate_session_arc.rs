@@ -79,14 +79,27 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
     let mut pending = BTreeMap::<sequence::FailureKey, PendingClause<'_>>::new();
     // Technical tokens and quoted commands stay intact. A bare occurrence of
     // both keywords in a single clause is not evidence of temporal ordering.
-    clauses::split(excerpt)
+    let mut parts: Vec<_> = clauses::split(excerpt)
         .map(str::trim)
         .filter(|part| !part.is_empty())
+        .map(|part| (part, false))
+        .collect();
+    // Tool summaries often put the final exit status after an optimistic test
+    // summary. Classify contiguous outcome trailers before consuming a failure
+    // so sentence/window boundaries cannot turn a failed retry into a lesson.
+    let mut following_veto = false;
+    for (part, trailer_veto) in parts.iter_mut().rev() {
+        *trailer_veto = following_veto;
+        following_veto = process_report_veto(part)
+            .is_some_and(|current_veto| current_veto || following_veto);
+    }
+    parts
+        .into_iter()
         .enumerate()
-        .filter_map(move |(position, part)| {
+        .filter_map(move |(position, (part, trailer_veto))| {
             let topic = review_topic_key(part);
             let resources = sequence::resource_keys(part);
-            if resolution_signal(part) {
+            if !trailer_veto && resolution_signal(part) {
                 let subjects: Vec<_> = pending.keys().collect();
                 let anchored = subjects.iter().any(|key| !resources.is_disjoint(&key.1));
                 // A marker supplies ordering, not permission to contradict a
@@ -137,11 +150,13 @@ fn inline_pair(excerpt: &str) -> Option<(&str, &str)> {
     inline_pairs(excerpt).next()
 }
 
-/// A classification-only view of explicit test/check counters. The original
-/// conversation, evidence hash, locator and proposal excerpts remain unchanged.
+/// A classification-only view of test counters and observed process outcomes.
+/// The conversation, evidence hash, locator and proposal excerpts stay intact.
 struct OutcomeSignalText<'a> {
     text: std::borrow::Cow<'a, str>,
     has_counted_failure: bool,
+    has_process_failure: bool,
+    has_unverified_process_outcome: bool,
 }
 
 /// Recognize integer counters, not a trailing zero in a decimal, fraction,
@@ -215,6 +230,122 @@ fn outcome_count(excerpt: &str, tokens: &[(usize, &str)], index: usize) -> Optio
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessOutcome {
+    Succeeded,
+    Failed,
+    Unverified,
+}
+
+/// Recognize reported exit results, not shell invocations such as `exit 1`.
+/// Multiple reports are independent: a later zero cannot erase a nonzero exit
+/// from the same observation. Missing/malformed results veto a positive lesson
+/// but do not invent an observed failure or a successful execution.
+fn process_outcome(
+    excerpt: &str,
+    tokens: &[(usize, &str)],
+    index: usize,
+) -> Option<ProcessOutcome> {
+    let (_, word) = tokens[index];
+    let followed_by = |position: usize, expected: &str| {
+        let Some(&(next_start, next_word)) = tokens.get(position + 1) else {
+            return false;
+        };
+        let (start, word) = tokens[position];
+        let gap = &excerpt[start + word.len()..next_start];
+        next_word.eq_ignore_ascii_case(expected)
+            && !gap.is_empty()
+            && gap.chars().all(char::is_whitespace)
+    };
+    let (last, assignment_required) = match word.to_ascii_lowercase().as_str() {
+        "exit_code" | "exit_status" | "exitcode" | "exitstatus" => (index, false),
+        "exit" if followed_by(index, "code") || followed_by(index, "status") => {
+            (index + 1, false)
+        }
+        "exited"
+            if followed_by(index, "with")
+                && (followed_by(index + 1, "code") || followed_by(index + 1, "status")) =>
+        {
+            (index + 2, false)
+        }
+        "exit" => (index, true),
+        _ => return None,
+    };
+    let (start, word) = tokens[last];
+    let suffix = &excerpt[start + word.len()..];
+    let mut value = suffix.trim_start();
+    if let Some(rest) = value.strip_prefix(':').or_else(|| value.strip_prefix('=')) {
+        value = rest.trim_start();
+    } else if assignment_required || (!suffix.is_empty() && suffix.len() == value.len()) {
+        return None;
+    }
+
+    let negative = value.starts_with('-');
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let width = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if width == 0 {
+        return Some(ProcessOutcome::Unverified);
+    }
+    let tail = &digits[width..];
+    let boundary = tail.is_empty()
+        || tail.starts_with(char::is_whitespace)
+        || tail.starts_with([',', ';', ')', ']', '}'])
+        || tail.strip_prefix('.').is_some_and(|after| {
+            after.is_empty() || after.starts_with(char::is_whitespace)
+        });
+    if !boundary {
+        // A decimal, fraction, expression, unit or radix prefix is not an
+        // integer exit status. In particular `0.5` must never become zero.
+        return Some(ProcessOutcome::Unverified);
+    }
+    let nonzero = digits[..width].bytes().any(|byte| byte != b'0');
+    Some(if nonzero {
+        // Avoid integer parsing: even a huge nonzero result cannot overflow
+        // into a successful exit. Negative signal-derived statuses fail too.
+        ProcessOutcome::Failed
+    } else if negative {
+        ProcessOutcome::Unverified
+    } else {
+        ProcessOutcome::Succeeded
+    })
+}
+
+/// Only bare process-result clauses can annotate the preceding observation.
+/// An independent command or ordinary message ends the trailer run instead of
+/// retroactively invalidating an earlier, completed episode.
+fn process_report_veto(excerpt: &str) -> Option<bool> {
+    let lower = excerpt.trim_start().to_ascii_lowercase();
+    let report = [
+        "process exited with code",
+        "process exited with status",
+        "command exited with code",
+        "command exited with status",
+        "exited with code",
+        "exited with status",
+        "exit code",
+        "exit status",
+        "exit_code",
+        "exit_status",
+        "exitcode",
+        "exitstatus",
+    ]
+    .iter()
+    .any(|prefix| {
+        lower.strip_prefix(*prefix).is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with(char::is_whitespace)
+                || suffix.starts_with([':', '='])
+        })
+    }) || lower
+        .strip_prefix("exit")
+        .is_some_and(|suffix| suffix.trim_start().starts_with([':', '=']));
+    if !report {
+        return None;
+    }
+    let outcome = outcome_signal_text(excerpt);
+    Some(outcome.has_process_failure || outcome.has_unverified_process_outcome)
+}
+
 fn outcome_signal_text(excerpt: &str) -> OutcomeSignalText<'_> {
     let mut tokens = Vec::new();
     let mut start = None;
@@ -230,7 +361,14 @@ fn outcome_signal_text(excerpt: &str) -> OutcomeSignalText<'_> {
     }
     let mut zero_words = Vec::new();
     let mut has_counted_failure = false;
+    let mut has_process_failure = false;
+    let mut has_unverified_process_outcome = false;
     for (index, (start, word)) in tokens.iter().copied().enumerate() {
+        match process_outcome(excerpt, &tokens, index) {
+            Some(ProcessOutcome::Failed) => has_process_failure = true,
+            Some(ProcessOutcome::Unverified) => has_unverified_process_outcome = true,
+            Some(ProcessOutcome::Succeeded) | None => {}
+        }
         let is_failure = match word.to_ascii_lowercase().as_str() {
             "failed" | "failing" | "failure" | "failures" | "error" | "errors" => true,
             "passed" | "passing" | "succeeded" | "successes" => false,
@@ -260,12 +398,16 @@ fn outcome_signal_text(excerpt: &str) -> OutcomeSignalText<'_> {
     OutcomeSignalText {
         text,
         has_counted_failure,
+        has_process_failure,
+        has_unverified_process_outcome,
     }
 }
 
 pub(super) fn failure_signal(excerpt: &str) -> bool {
     let outcome = outcome_signal_text(excerpt);
-    outcome.has_counted_failure || session_arc_failure_signal(outcome.text.as_ref())
+    outcome.has_counted_failure
+        || outcome.has_process_failure
+        || session_arc_failure_signal(outcome.text.as_ref())
 }
 
 /// Negative or predicted repairs must not become positive lessons merely
@@ -273,7 +415,11 @@ pub(super) fn failure_signal(excerpt: &str) -> bool {
 /// lexical admission, not proof that an arbitrary natural-language claim is true.
 pub(super) fn resolution_signal(excerpt: &str) -> bool {
     let outcome = outcome_signal_text(excerpt);
-    if outcome.has_counted_failure || !session_arc_resolution_signal(outcome.text.as_ref()) {
+    if outcome.has_counted_failure
+        || outcome.has_process_failure
+        || outcome.has_unverified_process_outcome
+        || !session_arc_resolution_signal(outcome.text.as_ref())
+    {
         return false;
     }
     let lowercase = outcome.text.to_ascii_lowercase().replace('’', "'");
@@ -330,6 +476,91 @@ pub(super) fn resolution_signal(excerpt: &str) -> bool {
 #[cfg(test)]
 mod counted_outcome_tests {
     use super::*;
+
+    #[test]
+    fn process_exits_override_optimistic_test_counters_and_repair_words() {
+        for result in [
+            "Process exited with code 101",
+            "process exited with status 1",
+            "exit code: 130",
+            "EXIT STATUS = 2",
+            "exit_code=1",
+            "exit_status: -9",
+            "exitCode:1",
+            "exitStatus=1",
+            "exit=1",
+            "exit_code=999999999999999999999999999999",
+            "exit_code=1,exit_code=0",
+        ] {
+            let text = format!("Fixed src/api.rs and cargo test passed (21 passed, 0 failed), {result}.");
+            assert!(failure_signal(&text), "lost process failure: {text}");
+            assert!(!resolution_signal(&text), "false verified repair: {text}");
+        }
+    }
+
+    #[test]
+    fn successful_exits_preserve_real_repairs_but_are_not_a_lesson_by_themselves() {
+        for result in [
+            "Process exited with code 0",
+            "exit status: 0",
+            "exit_code=000",
+            "exitCode: 0",
+            "exit=0",
+        ] {
+            let outcome = outcome_signal_text(result);
+            assert!(!outcome.has_process_failure);
+            assert!(!outcome.has_unverified_process_outcome);
+            let text = format!("Fixed src/api.rs by restoring the guard, {result}.");
+            assert!(!failure_signal(&text), "{text}");
+            assert!(resolution_signal(&text), "{text}");
+        }
+        let text = "cargo test: 0 passed, 0 failed, exit_code=0";
+        assert!(!resolution_signal(text), "an empty run is not verification");
+        assert!(!resolution_signal("cargo test is not fixed, exit_code=0"));
+        assert!(!resolution_signal("cargo test should be fixed, exit_code=0"));
+    }
+
+    #[test]
+    fn missing_or_malformed_exit_results_abstain_without_inventing_failures() {
+        for result in [
+            "exit_code=unknown",
+            "exit_code=",
+            "Process exited with code",
+            "exit status: null",
+            "exit_code=0.5",
+            "exit_code=0/1",
+            "exit_code=0x1",
+            "exit_code=0e2",
+            "exit_code=0+1",
+            "exit_code=-0",
+        ] {
+            let text = format!("Fixed src/api.rs by restoring the guard, {result}");
+            let outcome = outcome_signal_text(&text);
+            assert!(outcome.has_unverified_process_outcome, "{text}");
+            assert!(!outcome.has_process_failure, "invented failure: {text}");
+            assert!(!resolution_signal(&text), "invented verification: {text}");
+        }
+    }
+
+    #[test]
+    fn process_result_recognition_does_not_rewrite_or_execute_source_text() {
+        for text in [
+            "The shell helper contains exit 1",
+            "exit().code = 1",
+            "my_exit_code=1",
+            "exit_code_path=1",
+        ] {
+            let outcome = outcome_signal_text(text);
+            assert!(!outcome.has_process_failure, "{text}");
+            assert!(!outcome.has_unverified_process_outcome, "{text}");
+            assert_eq!(outcome.text, text);
+        }
+        let source = "資料 café 🦀 Process exited with code -9";
+        let outcome = outcome_signal_text(source);
+        assert!(outcome.has_process_failure);
+        assert!(matches!(outcome.text, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(outcome.text, source);
+    }
 
     #[test]
     fn zero_failure_counters_do_not_create_failures_or_veto_success() {

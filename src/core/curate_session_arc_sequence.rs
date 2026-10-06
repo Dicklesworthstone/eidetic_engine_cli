@@ -449,6 +449,72 @@ mod tests {
     }
 
     #[test]
+    fn session_arc_nonzero_exit_is_a_failed_attempt_with_original_provenance() {
+        let failure = "cargo test src/api.rs exited with code 101.";
+        let repair = "Fixed src/api.rs by restoring the guard and cargo test passed, exit_code=0.";
+        let spans = [span("failure", 1, failure), span("repair", 2, repair)];
+        let rows = mine(&spans);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(endpoints(&rows), [("failure", "repair")]);
+        for row in &rows {
+            let arc = row.session_arc.as_ref().unwrap();
+            assert_eq!(arc.failure_span.excerpt, failure);
+            assert_eq!(arc.resolution_span.excerpt, repair);
+            assert_eq!(arc.failure_span.content_hash, spans[0].content_hash);
+            assert_eq!(arc.resolution_span.content_hash, spans[1].content_hash);
+        }
+        let combined = span("combined", 1, &format!("{failure}\n{repair}"));
+        let inline = mine(std::slice::from_ref(&combined));
+        assert_eq!(inline.len(), 2);
+        for row in inline {
+            let arc = row.session_arc.unwrap();
+            assert_eq!(arc.failure_span.content_hash, combined.content_hash);
+            assert_eq!(arc.resolution_span.content_hash, combined.content_hash);
+        }
+    }
+
+    #[test]
+    fn session_arc_process_trailers_cannot_turn_a_failed_retry_into_a_repair() {
+        let failure = "cargo test src/api.rs failed.";
+        let claim = "Fixed src/api.rs and cargo test passed (21 passed, 0 failed).";
+        for trailer in [
+            "Process exited with code 101.",
+            "exit_code=unknown",
+            "Process exited with code 0.\nProcess exited with code 1.",
+        ] {
+            let repair = format!("{claim}\n{trailer}");
+            let sources = [span("failure", 1, failure), span("retry", 2, &repair)];
+            assert!(mine(&sources).is_empty(), "cross-window: {repair}");
+            let body = format!("{failure}\n{repair}");
+            assert!(mine(&[span("combined", 1, &body)]).is_empty(), "inline: {body}");
+        }
+        let good = format!("{claim}\nProcess exited with code 0.");
+        assert_eq!(
+            mine(&[span("failure", 1, failure), span("repair", 2, &good)]).len(),
+            2
+        );
+        assert_eq!(
+            mine(&[span("combined", 1, &format!("{failure}\n{good}"))]).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn session_arc_later_independent_process_failure_keeps_an_earlier_lesson() {
+        let failure = "cargo test src/api.rs failed.";
+        let repair = "Fixed src/api.rs by restoring the guard.";
+        let body =
+            format!("{failure}\n{repair}\nThe lint command for src/ui.rs exited with code 1.");
+        let rows = mine(&[span("combined", 1, &body)]);
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let arc = row.session_arc.unwrap();
+            assert_eq!(arc.failure_span.excerpt, failure);
+            assert_eq!(arc.resolution_span.excerpt, repair);
+        }
+    }
+
+    #[test]
     fn session_arc_ordinary_repairs_do_not_need_repeated_subsystem_words() {
         for (failure, repair) in [
             (
@@ -599,12 +665,12 @@ mod tests {
                 assert!(mine(&sources).contains(row));
                 let arc = row.session_arc.as_ref().unwrap();
                 for source in &sources {
-                    let endpoint = if source.id == arc.failure_span.evidence_span_id {
-                        &arc.failure_span
+                    let hash = if source.id == arc.failure_span.evidence_span_id {
+                        &arc.failure_span.content_hash
                     } else {
-                        &arc.resolution_span
+                        &arc.resolution_span.content_hash
                     };
-                    assert_eq!(endpoint.content_hash, source.content_hash);
+                    assert_eq!(hash, &source.content_hash);
                 }
             }
             let mut reversed = spans.clone();
