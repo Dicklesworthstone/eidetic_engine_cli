@@ -54,17 +54,35 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
+          # FLOOR, NOT AN EXACT COUNT (bd-n47uq: gate-maintenance drift, not product).
+          #
+          # This matched `test result: ok. $2 passed; 0 failed; 0 ignored;` as a LITERAL, so it
+          # failed the moment anyone ADDED a test. On 2026-10-06 that is exactly what happened:
+          # core::backup::recovery::history::operational::tests grew from the reviewed 9 to 11
+          # (the two newest operational_fence_* arms), all 11 PASSED, and this step still
+          # reported INVALID TEST INVENTORY and exited 1. Every one of the eleven groups in this
+          # step carried the same trap, so one added test anywhere reds a lane whose suite is
+          # green -- and the green `test result: ok.` lines were sitting in the same log.
+          #
+          # The property worth gating is "at least the reviewed inventory ran and NOTHING
+          # failed", so $2 is now a floor. `0 failed; 0 ignored;` stays inside the matched
+          # pattern, so a run with any failure or any ignored test cannot satisfy the floor, and
+          # an absent line is treated as failure rather than as zero. The observed count is
+          # printed on BOTH paths, so growth stays visible to a reader without reding the lane
+          # and a shortfall names its own numbers instead of leaving them to be counted by hand.
           group() {
+            local actual=""
             if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"; then
               echo "FAILED: $3" | tee -a "$RUNNER_TEMP/recorded-summary.log"
               failed=1
               return
             fi
-            if ! grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recorded-$3.log"; then
-              echo "INVALID TEST INVENTORY: $3" | tee -a "$RUNNER_TEMP/recorded-summary.log"
+            actual=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$RUNNER_TEMP/recorded-$3.log" | head -1)
+            if test -z "$actual" || test "$actual" -lt "$2"; then
+              echo "INVALID TEST INVENTORY: $3 -- passing-with-zero-failures count '${actual:-none}', required floor $2" | tee -a "$RUNNER_TEMP/recorded-summary.log"
               failed=1
             else
-              echo "PASS: $3 ($2 tests)" | tee -a "$RUNNER_TEMP/recorded-summary.log"
+              echo "PASS: $3 ($actual tests ran, floor $2)" | tee -a "$RUNNER_TEMP/recorded-summary.log"
             fi
           }
           group core::backup::recovery_faults 1 fault-control
