@@ -145,11 +145,35 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # FLOOR, NOT AN EXACT COUNT, plus an ATTRIBUTION line.
+          #
+          # This helper grepped for the literal "ok. $expected passed; 0 failed;", so it redded
+          # whenever a family GREW. Measured 2026-10-06 once the delivery guard let these steps
+          # run for the first time since 2026-09-20 -- every test passed and two groups had
+          # grown:
+          #     records     expected 13   actual 13   ok
+          #     inventory   expected 14   actual 15   FAILED on the exact match
+          #     publication expected  2   actual  4   FAILED on the exact match
+          #     existing    expected  1   actual  1   ok
+          # That is bd-qz6dh's retired tripwire: an assertion that reds when someone ADDS a
+          # passing test. A floor keeps what matters -- the group ran, nothing failed, and
+          # coverage has not shrunk -- and stops punishing growth.
+          #
+          # The extraction only matches a "0 failed" result line, so a FAILED run yields an
+          # empty value and the guard fails closed rather than silently passing.
+          #
+          # The ATTRIBUTION line addresses bd-workflow-shared-exit-flag-aav0v: four groups share
+          # one `failed` flag, so without it a red step names no arm and the reader has to count
+          # tests by hand to find which group fired. I had to do exactly that to write this.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" expected="$3" status=0 actual=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/revision-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/revision-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/revision-$name.log"; then failed=1; fi
+            actual=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/revision-$name.log" | head -1)
+            if test "$status" -ne 0 || test -z "$actual" || test "$actual" -lt "$expected"; then
+              echo "ATTRIBUTION: group '$name' FAILED -- cargo exit $status, passing-with-zero-failures count '${actual:-none}', required floor $expected"
+              failed=1
+            fi
           }
           run_group records 'core::jsonl_import::recovery::tests::' 13
           run_group inventory 'core::backup::recovery::tests::' 14
