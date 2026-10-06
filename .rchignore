@@ -131,6 +131,28 @@ recent_commits.txt
 beads_compliance_audit/
 beads_compliance_audit/**
 
+# Same class, found by `du -sm ./* .[a-z]*` against this file afterwards: another
+# ~307 MB of gitignored scratch with no .rchignore coverage. Worth excluding
+# because the FIRST sync to a cold worker pays full price, and that is the sync
+# whose estimate gets a dispatch refused.
+#
+#     .beads/.br_recovery         117 MB
+#     .beads/beads.db.rebuild_*    50 MB   `.beads/*.db` does NOT match these:
+#     .beads/beads.db.malformed_*  44 MB   the name continues past `.db`
+#     .beads/*.jsonl.*.tmp         64 MB   two abandoned export temporaries
+#     diff.txt                     25 MB
+#     .bv                           7 MB
+#
+# .beads/issues.jsonl is deliberately NOT matched by any of these and stays
+# visible, as the block above requires.
+.beads/.br_recovery/
+.beads/.br_recovery/**
+.beads/*.db.*
+.beads/*.tmp
+.bv/
+.bv/**
+/diff.txt
+
 # Agent session reports (multi-pane orchestration artifacts)
 GEMINI_PANE*.md
 GEMINI_PANE_REPORT.md
