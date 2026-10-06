@@ -95,12 +95,58 @@ fn connect_client(socket_path: &Path) -> Result<UnixStream, String> {
     Ok(stream)
 }
 
-fn secure_socket_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
-    let socket_dir = root.join("daemon-sockets");
+/// Build a daemon socket path that is short enough to bind and whose ancestors are
+/// secure enough for `start_server` to accept.
+///
+/// `_root` (each test's tempdir) is deliberately NOT used (bd-pichh). On an RCH worker
+/// it carries TWO independent blockers, and `/tmp` removes both:
+///
+///   - LENGTH. The worker's TMPDIR sits under
+///     `/data/rch/eidetic_engine_cli/paired-<32 hex>/.rch-tmp`, which made this path
+///     **133 bytes** against a ~104-byte `sockaddr_un.sun_path` limit (measured, not
+///     estimated). `bind` would fail in SETUP with "path must be shorter than SUN_LEN",
+///     aborting the test before its subject.
+///   - PERMISSIONS. `/data/rch` is mode 0o775 — group-writable with no sticky bit — so
+///     `start_server` *correctly* refuses to publish a socket beneath it: "ancestor mode
+///     0o775 permits non-owner rename without sticky protection". That refusal is the
+///     security feature, not a bug, and it fired first, masking the length problem.
+///
+/// `/tmp` is mode 1777 on both hosts, so the sticky bit satisfies the ancestor check, and
+/// it is short. No test asserts the socket's location relative to its tempdir — every use
+/// is a connect or a bind — so relocating is behaviour-preserving.
+fn secure_socket_path(_root: &Path, file_name: &str) -> Result<PathBuf, String> {
+    // Built with `std` alone, deliberately. This integration target resolves only
+    // `tempfile::tempdir` -- neither `tempfile::Builder` (E0433) nor
+    // `tempfile::tempdir_in` (E0425) is in scope here, unlike in the lib targets --
+    // and the directory must outlive this function anyway, since the socket lives in
+    // it. It is left for the OS to reap, like any other /tmp scratch dir.
+    let unique = format!(
+        "eeds-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("fixture: clock before epoch: {error}"))?
+            .as_nanos()
+    );
+    let socket_dir = Path::new("/tmp").join(unique);
     fs::create_dir_all(&socket_dir).map_err(|error| format!("create socket dir: {error}"))?;
     fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("secure socket dir permissions: {error}"))?;
-    Ok(socket_dir.join(file_name))
+    let path = socket_dir.join(file_name);
+    // sockaddr_un.sun_path is about 104 bytes. A longer path makes `bind` fail with
+    // "path must be shorter than SUN_LEN" during SETUP, which aborts the test before
+    // its subject and reads as a daemon failure rather than a fixture one. Every
+    // caller in this file routes through here, so one check covers all of them, and
+    // it reports the measured length so the failure is actionable instead of a bare
+    // refusal (bd-pichh).
+    let length = path.as_os_str().len();
+    if length >= 100 {
+        return Err(format!(
+            "fixture: socket path is {length} bytes, too long for sun_path (~104): {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 fn stable_test_workspace_id(workspace: &Path) -> Result<String, String> {
