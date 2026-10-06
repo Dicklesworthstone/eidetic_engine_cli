@@ -126,7 +126,26 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
                 .any(|entry| entry["code"] == "daemon_memory_read_fallback")
         })
     };
-    let missing = read(root, &orient, Some(&root.join("missing.sock")))?;
+    // A SHORT, DEFINITELY-ABSENT socket path, not one under `root`.
+    //
+    // `root` is a tempdir, and on an RCH worker `root.join("missing.sock")` measured about 101
+    // bytes against a usable `sun_path` of 107 on Linux -- six bytes of headroom that nothing
+    // asserted. That matters because `daemon_memory_read_fallback` is emitted for ANY unusable
+    // socket: absent, too long for `sun_path`, or under an unreadable parent. So if the path
+    // had ever crossed the limit this assertion would still have passed, while testing the
+    // length limit instead of the missing daemon it names
+    // (bd-env-satisfied-failure-assertions-0y1e9).
+    //
+    // Under /tmp the path is ~30 bytes, so absence is the only reason the connect can fail.
+    // The pid keeps it unique per run; nothing ever creates it.
+    let missing_socket =
+        PathBuf::from("/tmp").join(format!("eeha-{}-missing.sock", std::process::id()));
+    let missing = read(root, &orient, Some(&missing_socket))?;
+    assert!(
+        !missing_socket.exists(),
+        "the fixture's socket must be ABSENT, or this arm proves nothing: {}",
+        missing_socket.display()
+    );
     assert!(
         has_fallback(&missing),
         "missing daemon must be observable: {missing}"
