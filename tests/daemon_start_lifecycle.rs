@@ -74,6 +74,9 @@ fn secure_socket_path(file_name: &str) -> Result<PathBuf, String> {
         .map_err(|error| format!("fixture: secure socket dir: {error}"))?;
     let path = dir.join(file_name);
     const PUBLISH_SUFFIX_BYTES: usize = 37;
+    // `sun_path` is 108 bytes on Linux and 104 on macOS. The SMALLER value is used
+    // deliberately so this guard refuses a few bytes early on the Linux fleet and never
+    // wrongly admits a path on either platform. Do not "correct" this to 108.
     const SUN_PATH_BUDGET: usize = 104;
     let length = path.as_os_str().len();
     if length + PUBLISH_SUFFIX_BYTES >= SUN_PATH_BUDGET {
@@ -550,11 +553,22 @@ fn daemon_start_reports_daemon_already_running_when_socket_is_live() -> TestResu
 
 #[test]
 fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     // Make the socket's parent path a regular FILE so the child's
     // `create_dir_all` / bind can never succeed; the parent's readiness
     // probe observes the child exit and must emit the honest failure.
-    let blocker = temp.path().join("not-a-dir");
+    //
+    // THE BLOCKER MUST BE THE ONLY REASON THIS FAILS. Under
+    // `tempfile::tempdir()` the enclosing RCH worker sync root is 0o775, so
+    // `start_server` refused to publish for an INSECURE PARENT before it ever
+    // reached the blocker: the assertions below were satisfied by the
+    // environment while this fixture contributed nothing, and deleting the two
+    // lines that build it would not have been noticed. This was the one test in
+    // this file that PASSED while its four siblings failed on that same parent
+    // mode, purely because it wanted a failure
+    // (bd-env-satisfied-failure-assertions-0y1e9). Building the blocker inside
+    // the secure 0o700 short root removes the competing cause, so a failure
+    // here is attributable to the file.
+    let blocker = secure_socket_path("not-a-dir")?;
     fs::write(&blocker, b"blocker").map_err(|error| format!("write blocker: {error}"))?;
     let socket_path = blocker.join("daemon.sock");
 
@@ -578,6 +592,39 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
             codes.contains(&"daemon_start_failed"),
             format!(
                 "unbindable start must carry daemon_start_failed; got degraded codes {codes:?}"
+            ),
+        )?;
+        // DISTINGUISH THE FIXTURE'S FAILURE FROM A SLOW HOST'S. The detached
+        // start surface cannot report WHY the child failed -- it discards the
+        // child's stderr and emits one of exactly two messages, "exited before
+        // its socket became connectable" or "did not become connectable within
+        // the readiness-probe deadline" (src/cli/mod.rs ~:64586). So asserting
+        // the blocker by name is impossible here; `--foreground` is the surface
+        // that carries startup output.
+        //
+        // What IS assertable is that the child died FAST. An unbindable parent
+        // fails at bind, so the child exits early; a loaded host that merely
+        // misses the 5s probe deadline produces the other message. Previously
+        // this test accepted both, so a worker slow enough to blow the deadline
+        // satisfied it without the blocker ever mattering.
+        let messages: Vec<&str> = envelope
+            .pointer("/degraded")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.pointer("/message").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ensure(
+            messages
+                .iter()
+                .any(|message| message.contains("exited before its socket became connectable")),
+            format!(
+                "an unbindable socket parent must make the child exit EARLY, not merely miss \
+                 the readiness deadline -- a deadline miss means a slow host satisfied this \
+                 test without the blocker; got degraded messages {messages:?}"
             ),
         )?;
         Ok(())
