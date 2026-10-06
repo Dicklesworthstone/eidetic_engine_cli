@@ -103,6 +103,34 @@ recent_commits.txt
 .beads/daemon.log
 .beads/last-touched
 
+# Large gitignored scratch that was making `rch exec --job` UNDISPATCHABLE.
+#
+# `--clean-overlay` sends a git baseline plus named overlay paths (measured:
+# 127 MB in 22 s), so it never saw this. `--job` CANNOT be combined with
+# `--clean-overlay`, so it syncs the WORKING TREE, and these three directories
+# are 4523 MB of untracked, gitignored scratch:
+#
+#     .ntm                     2689 MB   agent scratch and job output
+#     .beads/.br_history       1008 MB   br snapshots, 31.4 MB per tracker write
+#     beads_compliance_audit    826 MB   nested clone, 0 tracked files
+#
+# With them included, transfer estimation exceeded its threshold and rch refused
+# every job dispatch with exit 103 ("Transfer estimation indicates skip …
+# Estimated transfer time (353933 ms) exceeds") — on vmi1293453 three times and
+# on hz4 once, so it was the ESTIMATE, not one unlucky worker. Job mode is the
+# only admitted path for a non-cargo command (plain `rch exec` refuses with
+# RCH-E301), so while this persisted NO shell e2e script could run on the fleet,
+# blocking bd-unreachable-e2e-scripts-u14sr Step 1 and bd-q726t site execution.
+#
+# All three are already in .gitignore (:20, :33, :326) and carry no tracked
+# files, so excluding them cannot hide repository content from a build.
+.ntm/
+.ntm/**
+.beads/.br_history/
+.beads/.br_history/**
+beads_compliance_audit/
+beads_compliance_audit/**
+
 # Agent session reports (multi-pane orchestration artifacts)
 GEMINI_PANE*.md
 GEMINI_PANE_REPORT.md
