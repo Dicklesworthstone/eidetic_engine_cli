@@ -130,6 +130,25 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md
+          # NOTHING-TO-COMMIT GUARD, the second half of this lane's idempotency
+          # (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # An unconditional delivery lane has TWO unconditional steps, not one: apply, and
+          # commit. Guarding only the apply converted "fails before verifying" into "verifies,
+          # then fails to commit nothing" -- measured, run 37513255753:
+          #
+          #   5-8. success   (guard + compile + all ask engine and public contract regressions)
+          #     9. failure   nothing to commit, working tree clean   -> exit code 1
+          #
+          # When the delivery was already integrated the apply is skipped, so nothing is staged
+          # and `git commit` exits nonzero under `set -euo pipefail`. Exit 0 instead: the lane's
+          # job is to ensure the feature is on main and verified, and on this path both are
+          # already true. A push with nothing to push is not a success condition worth faking,
+          # which is why this returns early rather than inventing an empty commit.
+          if git diff --cached --quiet; then
+            echo 'delivery already integrated and verified; nothing to commit or push'
+            exit 0
+          fi
           git commit -m 'feat(ask): answer from directory and file rules for explicit task paths' -m 'Add repeatable --path selectors through the public CLI and live corpus. Reuse rule-path normalization and recall matching; preserve memory scope, native identity, exact citation bytes and lifecycle checks. Reject unsafe targets without path disclosure. Six real-store and three public CLI tests cover matching, authorization, concurrent scope updates and nonmutation. Correct existing curation fixtures to invoke real validation and transcript fixtures to use the mandatory blake3 hash prefix without relaxing production integrity. Production compilation, the complete ask engine and all public lifecycle regressions passed before commit.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
