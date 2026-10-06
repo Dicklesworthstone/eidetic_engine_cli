@@ -124,6 +124,15 @@ recent_commits.txt
 #
 # All three are already in .gitignore (:20, :33, :326) and carry no tracked
 # files, so excluding them cannot hide repository content from a build.
+#
+# !! CAVEAT FOR AGENTS USING --result-dir !!
+# rch reads THIS FILE for retrieval as well as transfer (its log says "Loaded N
+# retrieval exclude pattern(s) from .rchignore"). So a `--job --result-dir
+# .ntm/<x>` will sync NOTHING back now. This repo's convention is that agent job
+# output lives under .ntm/, so if your results vanish, that is why: point
+# --result-dir at a path NOT listed here (e.g. a dedicated top-level dir) and
+# copy into .ntm/ afterwards if you want it there. Transfer and retrieval were
+# traded deliberately — .ntm/ is 2689 MB and was making every job dispatch fail.
 .ntm/
 .ntm/**
 .beads/.br_history/
