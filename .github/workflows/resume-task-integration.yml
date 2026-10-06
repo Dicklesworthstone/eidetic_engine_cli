@@ -30,7 +30,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git hash-object src/cli/mod.rs)" = b24d3333595953388402bbba60997510b776c439
           cat > "$RUNNER_TEMP/resume-initializers.patch" <<'PATCH'
           diff --git a/src/cli/mod.rs b/src/cli/mod.rs
           --- a/src/cli/mod.rs
@@ -89,6 +88,17 @@ jobs:
           # on main via the API and breaks without committing when they match -- so it needs no
           # nothing-to-commit guard.
           if ! grep -Fq 'task_frames: crate::core::resume::ResumeTaskFrames::default(),' src/cli/mod.rs; then
+            # The blob pin MOVES IN HERE with the apply, and this is why run 37531124863 still
+            # failed after the guard landed: it sat ABOVE the guard, unconditional, under
+            # `set -e`. src/cli/mod.rs is now a016fd32... and the pin wants b24d3333..., so the
+            # step exited 1 in 15ms with no output at all -- before the guard could skip
+            # anything. A guard placed below an unconditional precondition is unreachable.
+            #
+            # Like the hash pins in revision-record-recovery, it is kept rather than deleted or
+            # re-pinned: on the not-yet-delivered path it is the "safe to patch this exact tree"
+            # check and still does real work. Re-pinning to today's blob would only reset the
+            # clock.
+            test "$(git hash-object src/cli/mod.rs)" = b24d3333595953388402bbba60997510b776c439
             git apply --check "$RUNNER_TEMP/resume-initializers.patch"
             git apply "$RUNNER_TEMP/resume-initializers.patch"
             git diff --check
