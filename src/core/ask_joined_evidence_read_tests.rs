@@ -158,7 +158,10 @@ fn pack_denial_hash_drift_and_private_bodies_remain_withheld() {
     let safe = fixture.evidence(1, BODY);
     let denied = fixture.evidence(2, BODY);
     let tampered = fixture.evidence(3, BODY);
-    fixture.evidence(4, "Run cargo fmt using file:///home/private/withheld-canary.");
+    fixture.evidence(
+        4,
+        "Run cargo fmt using file:///home/private/withheld-canary.",
+    );
     fixture
         .db
         .execute_raw(&format!(
