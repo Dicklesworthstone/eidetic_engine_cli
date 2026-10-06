@@ -55,8 +55,30 @@ jobs:
           git rev-parse HEAD | tee "$RUNNER_TEMP/doctor-index/source-sha.txt"
           rustc --version --verbose > "$RUNNER_TEMP/doctor-index/toolchain.txt"
           patch=scripts/delivery/index-source-snapshot.patch
-          if git apply --reverse --check "$patch"; then
-            echo 'Read-only source capture already integrated'
+          # CONTENT CHECK FIRST (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # `git apply --reverse --check` is a smarter idempotency test than a symbol grep --
+          # it asks about actual content rather than a proxy -- but it is BYTE-EXACT IN ITS
+          # CONTEXT. The patch expects `mod source_snapshot;` near line 59 with specific
+          # neighbours; main has it at line 73 with different ones. So the reverse-check fails
+          # from CONTEXT DRIFT rather than from absence, the else branch runs, and its sha256
+          # pin on src/core/index.rs is stale, so `set -e` exits there.
+          #
+          # The result was a lane reporting a delivery failure for a delivery it had already
+          # made, with no way to tell the difference -- and steps 6 and 7 (verify, publish)
+          # skipped behind it since 2026-09-25.
+          #
+          # The delivery IS integrated, verified in the tree independently of this guard:
+          #   src/core/index.rs:73            mod source_snapshot;
+          #   src/core/index_source_snapshot.rs   exists, 20 KB, dated 2026-09-25
+          # and that single `mod` line is exactly what the 65-line patch adds.
+          #
+          # A symbol check survives reformatting and neighbour edits; the reverse-check stays
+          # as the secondary, because it is strictly more precise when it CAN answer.
+          if grep -Fq 'mod source_snapshot;' src/core/index.rs; then
+            echo 'Read-only source capture already integrated (module declaration present)'
+          elif git apply --reverse --check "$patch"; then
+            echo 'Read-only source capture already integrated (patch reverses cleanly)'
           else
             echo '56fbc09f8f1b0a071872f6514cab89ab711feac15c306d237b0358a839782f0d  src/core/index.rs' | sha256sum --check
             git apply --check "$patch"
