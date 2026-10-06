@@ -119,9 +119,16 @@ fn matching_failure(
     repair: &StoredEvidenceSpan,
     resources: &BTreeSet<String>,
 ) -> Option<FailureKey> {
-    if message.to_ascii_lowercase().contains("fix:") {
-        // An explicit declaration is stronger than inferred topic/resource
-        // agreement. It may describe a change in a different file or subsystem.
+    let eligible: Vec<_> = pending
+        .iter()
+        .filter(|(_, failure)| precedes(failure.source, repair))
+        .collect();
+    let subjects: Vec<_> = eligible.iter().map(|(key, _)| *key).collect();
+    let anchored = subjects.iter().any(|key| !resources.is_disjoint(&key.1));
+    if !anchored && message.to_ascii_lowercase().contains("fix:") {
+        // Explicit ordering may bridge a change in a different subsystem only
+        // when the repair does not name an existing failure's concrete subject.
+        // In particular, an ambiguous anchor cannot fall back to recency.
         if let Some((key, _)) = pending
             .iter()
             .filter(|(_, failure)| failure.explicitly_marked && precedes(failure.source, repair))
@@ -130,11 +137,6 @@ fn matching_failure(
             return Some(key.clone());
         }
     }
-    let eligible: Vec<_> = pending
-        .iter()
-        .filter(|(_, failure)| precedes(failure.source, repair))
-        .collect();
-    let subjects: Vec<_> = eligible.iter().map(|(key, _)| *key).collect();
     if let Some(key) = matching_subject(&subjects, topic, resources) {
         return Some(key);
     }
@@ -549,6 +551,119 @@ mod tests {
         let mut reversed = spans.to_vec();
         reversed.reverse();
         assert_eq!(mine(&reversed), rows);
+    }
+
+    #[test]
+    fn session_arc_explicit_repairs_follow_named_subjects_not_nearest_markers() {
+        let observations = [
+            "Failure arc: cargo test src/api.rs failed.",
+            "Failure arc: cargo test src/ui.rs failed.",
+            "Fix: cargo test src/api.rs passed after adding the missing guard.",
+            "Fix: cargo test src/ui.rs passed after retaining the expected state.",
+        ];
+        // Exercise both historical plain evidence and real-shaped transcript
+        // envelopes. The body chooses the subject; the original span remains
+        // the source of the hash, locator, and application reconstruction.
+        for structured in [false, true] {
+            let spans: Vec<_> = observations
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let excerpt = if structured {
+                        serde_json::json!({"type":"assistant","message":{
+                            "role":"assistant","content":[{"type":"text","text":text}]
+                        }})
+                        .to_string()
+                    } else {
+                        (*text).to_owned()
+                    };
+                    let line = u32::try_from(index).expect("bounded fixture") + 1;
+                    span(&format!("observation-{index}"), line, &excerpt)
+                })
+                .collect();
+            let rows = mine(&spans);
+            assert_eq!(rows.len(), 4);
+            assert_eq!(
+                endpoints(&rows),
+                [
+                    ("observation-0", "observation-2"),
+                    ("observation-1", "observation-3")
+                ]
+            );
+            for row in &rows {
+                let sources: Vec<_> = spans
+                    .iter()
+                    .filter(|source| row.source_ids.contains(&source.id))
+                    .cloned()
+                    .collect();
+                assert!(mine(&sources).contains(row));
+                let arc = row.session_arc.as_ref().unwrap();
+                for source in &sources {
+                    let endpoint = if source.id == arc.failure_span.evidence_span_id {
+                        &arc.failure_span
+                    } else {
+                        &arc.resolution_span
+                    };
+                    assert_eq!(endpoint.content_hash, source.content_hash);
+                }
+            }
+            let mut reversed = spans.clone();
+            reversed.reverse();
+            assert_eq!(mine(&reversed), rows);
+
+            let body = observations.join("\n");
+            let excerpt = if structured {
+                serde_json::json!({"type":"assistant","content":body}).to_string()
+            } else {
+                body
+            };
+            let combined = span("combined", 1, &excerpt);
+            let inline = mine(std::slice::from_ref(&combined));
+            let rules: Vec<_> = inline
+                .iter()
+                .filter(|row| row.candidate_kind == "session_arc_rule")
+                .collect();
+            assert_eq!(inline.len(), 4);
+            for (index, rule) in rules.iter().enumerate() {
+                let arc = rule.session_arc.as_ref().unwrap();
+                assert_eq!(arc.failure_span.excerpt, observations[index]);
+                assert_eq!(arc.resolution_span.excerpt, observations[index + 2]);
+                assert_eq!(arc.failure_span.content_hash, combined.content_hash);
+                assert_eq!(arc.resolution_span.content_hash, combined.content_hash);
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_fix_marker_cannot_resolve_an_ambiguous_named_resource() {
+        let observations = [
+            "Failure arc: cargo fmt src/main.rs failed.",
+            "Failure arc: cargo clippy src/main.rs failed.",
+            "Fix: src/main.rs was repaired by changing its imports.",
+        ];
+        let mut spans: Vec<_> = observations
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let line = u32::try_from(index).expect("bounded fixture") + 1;
+                span(&format!("source-{index}"), line, text)
+            })
+            .collect();
+        assert!(mine(&spans).is_empty());
+        assert!(mine(&[span("combined", 1, &observations.join("\n"))]).is_empty());
+
+        // Rejecting the ambiguous repair must not consume either failure.
+        let repair = "Fix: cargo fmt src/main.rs passed after normalizing its imports.";
+        spans.push(span("format-repair", 4, repair));
+        assert_eq!(endpoints(&mine(&spans)), [("source-0", "format-repair")]);
+        let body = format!("{}\n{repair}", observations.join("\n"));
+        let inline = mine(&[span("combined", 1, &body)]);
+        assert_eq!(inline.len(), 2);
+        for row in inline {
+            let arc = row.session_arc.unwrap();
+            assert_eq!(arc.failure_span.excerpt, observations[0]);
+            assert_eq!(arc.resolution_span.excerpt, repair);
+        }
     }
 
     #[test]

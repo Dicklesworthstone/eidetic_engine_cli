@@ -87,7 +87,13 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
             let topic = review_topic_key(part);
             let resources = sequence::resource_keys(part);
             if resolution_signal(part) {
-                let explicitly_linked = if part.to_ascii_lowercase().contains("fix:") {
+                let subjects: Vec<_> = pending.keys().collect();
+                let anchored = subjects.iter().any(|key| !resources.is_disjoint(&key.1));
+                // A marker supplies ordering, not permission to contradict a
+                // named subject. An ambiguous anchor must remain unresolved;
+                // falling back to the nearest marker would invent causation.
+                let marked_repair = !anchored && part.to_ascii_lowercase().contains("fix:");
+                let explicitly_linked = if marked_repair {
                     pending
                         .iter()
                         .filter(|(_, failure)| failure.explicitly_marked)
@@ -97,7 +103,6 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
                     None
                 };
                 let key = explicitly_linked.or_else(|| {
-                    let subjects: Vec<_> = pending.keys().collect();
                     sequence::matching_subject(&subjects, &topic, &resources)
                 });
                 let key = key.or_else(|| {
