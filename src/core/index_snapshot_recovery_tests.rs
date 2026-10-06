@@ -227,15 +227,36 @@ fn recovery_refuses_redirected_vector_entries_in_live_or_retained_generations() 
 
 #[test]
 fn recovery_refuses_special_entries_before_a_backend_can_open_them() -> TestResult {
-    use std::os::unix::net::UnixListener;
-
     let (_root, index) = fixture()?;
     crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
         let retained = index_parent(&index).join("index.previous");
         build_generation(&cx, &retained, 7).await?;
         build_generation(&cx, &index, 8).await?;
-        let _socket = UnixListener::bind(index.join("unexpected.socket"))
-            .map_err(|error| error.to_string())?;
+        // A FIFO, not a Unix socket (bd-ns6fp). Both are "special entries" to the
+        // reader -- index_read_lease.rs:305 refuses anything that is neither a
+        // directory nor a regular file -- but a socket PATH is bounded by
+        // sockaddr_un.sun_path, about 104 bytes. The fixture canonicalizes a
+        // tempdir, so under a long TMPDIR (every RCH worker: the project sits at
+        // /data/rch/eidetic_engine_cli/paired-<32 hex>/) `bind` failed with
+        // "path must be shorter than SUN_LEN" and the `?` aborted SETUP before the
+        // assertion below. The test then passed judgement on nothing while
+        // reporting a failure that looked like a product defect. mkfifo has no
+        // path bound, so the subject is now reachable wherever the suite runs.
+        //
+        // The two error arms below are deliberately distinct from the assertion:
+        // a fixture that cannot be built must never be mistakable for a reader
+        // that failed to refuse.
+        let special = index.join("unexpected.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&special)
+            .status()
+            .map_err(|error| format!("mkfifo could not run: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "mkfifo refused to create {}: {status}",
+                special.display()
+            ));
+        }
         let lease = IndexGenerationLease::read(&cx, &index)
             .await
             .map_err(|error| error.to_string())?;
