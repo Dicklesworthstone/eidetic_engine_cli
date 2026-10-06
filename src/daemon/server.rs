@@ -12178,8 +12178,30 @@ mod tests {
     /// connection reset.
     #[test]
     fn accept_loop_spawn_failure_returns_overloaded_envelope() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let socket_path = temp.path().join("ee-daemon-spawn-fails.sock");
+        // Bind under a SHORT root rather than TMPDIR (bd-pichh). Unlike the
+        // special-entry tests in this family, the socket IS the subject here --
+        // this exercises the accept loop -- so a FIFO is not a substitute and the
+        // only fix is length. A socket path is bounded by sockaddr_un.sun_path,
+        // about 104 bytes, and TMPDIR on an RCH worker is long enough that
+        // "<tmpdir>/ee-daemon-spawn-fails.sock" exceeded it: `bind` panicked with
+        // "path must be shorter than SUN_LEN" before the accept loop was ever
+        // started, so the test reported an accept-loop failure while never
+        // reaching the accept loop.
+        //
+        // The length assertion is deliberate and reports the measured value, so a
+        // host with a shorter limit fails naming the FIXTURE instead of the
+        // subject.
+        let temp = tempfile::Builder::new()
+            .prefix("eed")
+            .tempdir_in(std::path::Path::new("/tmp"))
+            .expect("fixture: tempdir in /tmp");
+        let socket_path = temp.path().join("s.sock");
+        assert!(
+            socket_path.as_os_str().len() < 100,
+            "fixture: socket path is {} bytes, too long for sun_path: {}",
+            socket_path.as_os_str().len(),
+            socket_path.display()
+        );
         let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
         let (listener, accept_wakeup) = DaemonListener::new(listener).expect("wakeable listener");
         let shutdown = Arc::new(AtomicBool::new(false));
