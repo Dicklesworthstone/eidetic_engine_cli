@@ -1677,17 +1677,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_candidate_rejects_symlink_to_socket() -> TestResult {
-        if std::env::var("TMPDIR")
-            .unwrap_or_default()
-            .contains("USBNVME")
-        {
-            return Ok(());
-        }
         use std::os::unix::{fs::symlink, net::UnixListener};
 
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let socket_path = temp.path().join("tailscaled.sock");
-        let _listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+        // Bind under /tmp rather than TMPDIR (bd-pichh). Two independent causes, and
+        // /tmp answers both, so this test now RUNS on every host instead of being
+        // skipped on one of them:
+        //
+        //   - TMPDIR on the Mac dev host points at an ExFAT USB scratch dir, and
+        //     ExFAT does not support Unix domain sockets at all (AGENTS.md). The
+        //     guard this replaces skipped on TMPDIR.contains("USBNVME") for exactly
+        //     that reason -- correct about the cause, but it returned Ok(()), so the
+        //     suite counted a PASS for a test that bound nothing and asserted
+        //     nothing. A skip that is indistinguishable from a check is the problem
+        //     this bead family exists to remove.
+        //   - a socket path is bounded by sockaddr_un.sun_path, about 104 bytes, and
+        //     TMPDIR is long on an RCH worker for unrelated reasons. The old guard
+        //     did not help there, because the drive name does not appear.
+        //
+        // /tmp is socket-capable and short on both hosts. The fixture errors below
+        // name themselves, so an unbindable path can never be mistaken for the
+        // candidate check failing.
+        let temp = tempfile::Builder::new()
+            .prefix("eets")
+            .tempdir_in(std::path::Path::new("/tmp"))
+            .map_err(|error| format!("fixture: tempdir in /tmp: {error}"))?;
+        let socket_path = temp.path().join("ts.sock");
+        let _listener = UnixListener::bind(&socket_path)
+            .map_err(|error| format!("fixture: bind {}: {error}", socket_path.display()))?;
         let socket_link = temp.path().join("linked.sock");
         symlink(&socket_path, &socket_link).map_err(|error| error.to_string())?;
 
