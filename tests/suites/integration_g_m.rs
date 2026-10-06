@@ -1,5 +1,9 @@
 //! Integration modules G–M. Filter with `cargo test --test integration_g_m <module>::`.
 
+// Declared once here: modules below reach it as `super::isolated_ee`.
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
+
 #[path = "../g4_health_structural_e2e.rs"]
 mod g4_health_structural_e2e;
 #[path = "../g5_curate_decay_e2e.rs"]
@@ -40,6 +44,8 @@ mod harness_conformance_simulator;
 mod hotset_manifest_contract;
 #[path = "../hotset_prewarm_e2e.rs"]
 mod hotset_prewarm_e2e;
+#[path = "../index_retention_e2e.rs"]
+mod index_retention_e2e;
 #[path = "../index_vacuum_e2e.rs"]
 mod index_vacuum_e2e;
 #[path = "../influence_function_why.rs"]

@@ -76,6 +76,8 @@ pub mod audit_actions {
     /// after the store was relocated. Addressing-only; no memory row moves.
     pub const WORKSPACE_RELOCATE: &str = "workspace.relocate";
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
+    /// `ee index vacuum --apply` reclaimed retained derived index generations.
+    pub const INDEX_VACUUM_APPLY: &str = "index.vacuum_apply";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
@@ -350,6 +352,23 @@ pub struct DbConnection {
     mode: DatabaseOpenMode,
     memory_write_owner_gate: Box<Mutex<()>>,
     agent_context_profile_pack_cache: RwLock<Option<AgentContextProfilePackCache>>,
+    /// Bumped before every statement that can change what a later read on this
+    /// connection observes: transaction boundaries and every write. Two reads
+    /// separated by no bump are inside one unchanged view of the database.
+    statement_epoch: std::sync::atomic::AtomicU64,
+    snapshot_memo: Mutex<Option<SnapshotMemoEntry>>,
+}
+
+/// One derived value cached for the lifetime of a single caller-held read
+/// snapshot (bd-reality-core-convergence-1azkt.64).
+///
+/// The entry is valid only while `statement_epoch` is unchanged, so a value
+/// computed inside one pinned snapshot is never served after a commit, a
+/// rollback, a new `BEGIN`, or any write on this connection.
+struct SnapshotMemoEntry {
+    epoch: u64,
+    key: String,
+    value: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1219,6 +1238,8 @@ impl DbConnection {
             mode: config.mode,
             memory_write_owner_gate: Box::new(Mutex::new(())),
             agent_context_profile_pack_cache: RwLock::new(None),
+            statement_epoch: std::sync::atomic::AtomicU64::new(0),
+            snapshot_memo: Mutex::new(None),
         })
     }
 
@@ -2240,8 +2261,50 @@ impl DbConnection {
         self.query_for(DbOperation::Query, sql, params)
     }
 
+    fn bump_statement_epoch(&self) {
+        self.statement_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Return a value memoized inside the caller's current read snapshot.
+    ///
+    /// Callers must only use this while they hold a read transaction on this
+    /// connection; the memo is discarded by any transaction boundary or write.
+    pub(crate) fn snapshot_memo_get<T>(&self, key: &str) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let epoch = self
+            .statement_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        let guard = self.snapshot_memo.lock().ok()?;
+        let entry = guard.as_ref()?;
+        if entry.epoch != epoch || entry.key != key {
+            return None;
+        }
+        entry.value.downcast_ref::<T>().cloned()
+    }
+
+    /// Memoize a value computed inside the caller's current read snapshot.
+    pub(crate) fn snapshot_memo_put<T>(&self, key: String, value: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        let epoch = self
+            .statement_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        if let Ok(mut guard) = self.snapshot_memo.lock() {
+            *guard = Some(SnapshotMemoEntry {
+                epoch,
+                key,
+                value: std::sync::Arc::new(value),
+            });
+        }
+    }
+
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
         self.reject_read_only_write(operation)?;
+        self.bump_statement_epoch();
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -2261,6 +2324,7 @@ impl DbConnection {
     }
 
     fn execute_read_snapshot_raw(&self, operation: DbOperation, sql: &str) -> Result<()> {
+        self.bump_statement_epoch();
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -2277,6 +2341,7 @@ impl DbConnection {
 
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
         self.reject_read_only_write(operation)?;
+        self.bump_statement_epoch();
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -14037,13 +14102,21 @@ pub struct EvidenceAdmissionReport {
 
 impl EvidenceAdmissionReport {
     pub fn record(&mut self, producer: &str, eligibility: &str, validated: bool) {
+        self.record_many(producer, eligibility, validated, 1);
+    }
+
+    /// Record `count` rows that share one producer, eligibility and verdict.
+    pub fn record_many(&mut self, producer: &str, eligibility: &str, validated: bool, count: u32) {
+        if count == 0 {
+            return;
+        }
         let counts = self.by_producer.entry(producer.to_owned()).or_default();
         if validated && eligibility == "admitted" {
-            counts.admitted = counts.admitted.saturating_add(1);
+            counts.admitted = counts.admitted.saturating_add(count);
         } else if eligibility == "quarantined" {
-            counts.quarantined = counts.quarantined.saturating_add(1);
+            counts.quarantined = counts.quarantined.saturating_add(count);
         } else {
-            counts.denied = counts.denied.saturating_add(1);
+            counts.denied = counts.denied.saturating_add(count);
         }
     }
 }
@@ -14064,6 +14137,12 @@ pub(crate) struct SessionReadScan {
     pub rows_read: u64,
     pub max_page_rows: u32,
 }
+
+/// SQL form of [`StoredEvidenceSpan::is_search_admission_candidate`]. Both
+/// columns carry CHECK-constrained vocabularies, so string equality here is
+/// exactly the Rust predicate.
+const EVIDENCE_SEARCH_CANDIDATE_PREDICATE: &str =
+    "e.producer_kind = 'cass_import' AND e.search_eligibility = 'admitted'";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvidenceSearchReadCursor {
@@ -14185,6 +14264,43 @@ impl StoredEvidenceSpan {
         format!("blake3:{}", hasher.finalize().to_hex())
     }
 
+    /// Human-meaningful text of this span for readers (search, pack, ask and
+    /// learn): the message body of a CASS transcript record, labelled with its
+    /// role, never the JSON envelope around it
+    /// (bd-reality-core-convergence-1azkt.45).
+    ///
+    /// Only an envelope that projects completely is replaced: tool, metadata,
+    /// privileged-role, ambiguous or unscreenable records, plain-text excerpts
+    /// and every non-CASS producer keep their exact stored excerpt. The stored
+    /// excerpt, its hash and its line locator remain the provenance.
+    #[must_use]
+    pub fn reader_text(&self) -> std::borrow::Cow<'_, str> {
+        match self.reader_body() {
+            std::borrow::Cow::Owned(text) => match self.role.as_deref() {
+                Some(role @ ("user" | "assistant")) => {
+                    std::borrow::Cow::Owned(format!("{role}: {text}"))
+                }
+                _ => std::borrow::Cow::Owned(text),
+            },
+            borrowed @ std::borrow::Cow::Borrowed(_) => borrowed,
+        }
+    }
+
+    /// [`Self::reader_text`] without the role label, for derivations that read
+    /// sentences (learning, topic keys) rather than show a transcript turn.
+    #[must_use]
+    pub fn reader_body(&self) -> std::borrow::Cow<'_, str> {
+        if EvidenceProducerKind::parse(&self.producer_kind)
+            != Some(EvidenceProducerKind::CassImport)
+        {
+            return std::borrow::Cow::Borrowed(&self.excerpt);
+        }
+        match crate::core::curate::session_arc::text::display_text(&self.excerpt) {
+            Some(std::borrow::Cow::Owned(text)) => std::borrow::Cow::Owned(text.trim().to_owned()),
+            _ => std::borrow::Cow::Borrowed(&self.excerpt),
+        }
+    }
+
     /// Public provenance never contains an upstream path or upstream identifier.
     ///
     /// Only positively identified CASS producers use the `cass-session` scheme.
@@ -14229,12 +14345,15 @@ impl StoredEvidenceSpan {
             || !matches!(self.instruction_risk.as_str(), "none" | "low")
             || !evidence_role_matches_producer(producer_kind, self.role.as_deref())
             || !evidence_span_kind_and_role_are_indexable(&self.span_kind, self.role.as_deref())
-            || (producer_kind == EvidenceProducerKind::CassImport
-                && !crate::policy::classify_transcript_record(&self.excerpt).is_indexable())
         {
             return false;
         }
 
+        // Stored eligibility is a cheap field comparison; transcript
+        // classification parses the excerpt. Every clause is a pure predicate
+        // over this row, so evaluating the cheap reject first leaves every
+        // verdict unchanged while sparing quarantined rows the parse
+        // (bd-reality-core-convergence-1azkt.64).
         let eligibility_is_canonical = match producer_kind {
             EvidenceProducerKind::CassImport => {
                 self.search_eligibility == "admitted" && self.pack_eligibility == "admitted"
@@ -14248,6 +14367,11 @@ impl StoredEvidenceSpan {
             EvidenceProducerKind::LegacyUnknown => false,
         };
         if !eligibility_is_canonical {
+            return false;
+        }
+        if producer_kind == EvidenceProducerKind::CassImport
+            && !crate::policy::classify_transcript_record(&self.excerpt).is_indexable()
+        {
             return false;
         }
 
@@ -14358,9 +14482,16 @@ impl StoredEvidenceSpan {
         expected_workspace_id: &str,
         session: &StoredSession,
     ) -> bool {
-        self.is_derivation_admitted_for_session(expected_workspace_id, session)
-            && EvidenceProducerKind::parse(&self.producer_kind)
-                == Some(EvidenceProducerKind::CassImport)
+        self.is_search_admission_candidate()
+            && self.is_derivation_admitted_for_session(expected_workspace_id, session)
+    }
+
+    /// The two stored fields every search-admitted row must carry. This is the
+    /// exact SQL predicate the bounded admission scan pushes down, so rows
+    /// that fail it are counted without being decoded or re-screened.
+    #[must_use]
+    pub fn is_search_admission_candidate(&self) -> bool {
+        EvidenceProducerKind::parse(&self.producer_kind) == Some(EvidenceProducerKind::CassImport)
             && self.search_eligibility == "admitted"
     }
 
@@ -15305,6 +15436,47 @@ impl DbConnection {
         rows.first().map(stored_evidence_span_from_row).transpose()
     }
 
+    /// Load evidence rows and their joined sessions for many ids with one
+    /// bounded `IN (...)` query per chunk instead of two point reads per id
+    /// (bd-reality-core-convergence-1azkt.64).
+    ///
+    /// Missing ids are simply absent from the result. A span whose session row
+    /// is missing carries `None`, exactly as a separate `get_session` would.
+    pub fn get_evidence_spans_with_sessions(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<(StoredEvidenceSpan, Option<StoredSession>)>> {
+        const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
+        const SESSION_COLUMNS: &str = "s.id, s.workspace_id, s.cass_session_id, s.source_path, s.agent_name, s.model, s.started_at, s.ended_at, s.message_count, s.token_count, s.content_hash, s.metadata_json, s.imported_at, s.updated_at";
+        const CHUNK: usize = 128;
+
+        let mut loaded = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params = chunk
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect::<Vec<_>>();
+            let sql = format!(
+                "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE e.id IN ({placeholders}) ORDER BY e.id ASC"
+            );
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            for row in &rows {
+                loaded.push((
+                    stored_evidence_span_from_row(row)?,
+                    stored_session_from_joined_row(row, 27)?,
+                ));
+            }
+        }
+        Ok(loaded)
+    }
+
     /// Get one positively admitted CASS evidence row from live storage.
     ///
     /// This is the public-content boundary for callers that start from an
@@ -15474,6 +15646,18 @@ impl DbConnection {
         mut visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
     ) -> Result<EvidenceAdmissionScan> {
         let mut scan = EvidenceAdmissionScan::default();
+        // Rows that are not search-admission candidates can never validate.
+        // Account for them with one grouped count instead of decoding,
+        // hashing and re-screening every quarantined excerpt on each read
+        // (bd-reality-core-convergence-1azkt.64). The admitted set and every
+        // report bucket are unchanged; only the work is.
+        for (producer, eligibility, count) in
+            self.count_non_candidate_evidence(workspace_id, session_id)?
+        {
+            scan.admission
+                .record_many(&producer, &eligibility, false, count);
+            scan.rows_read = scan.rows_read.saturating_add(u64::from(count));
+        }
         let mut cursor = None;
         loop {
             let page = self.read_evidence_search_page(workspace_id, session_id, cursor.as_ref())?;
@@ -15566,7 +15750,7 @@ impl DbConnection {
         };
         let limit_parameter = params.len();
         let sql = format!(
-            "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE {where_clause} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
+            "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE {where_clause} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
         );
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter()
@@ -15575,6 +15759,47 @@ impl DbConnection {
                     span: stored_evidence_span_from_row(row)?,
                     session: stored_session_from_joined_row(row, 27)?,
                 })
+            })
+            .collect()
+    }
+
+    /// Group the rows the admission scan never pages: everything outside
+    /// [`EVIDENCE_SEARCH_CANDIDATE_PREDICATE`], keyed by producer and stored
+    /// eligibility, in deterministic order.
+    fn count_non_candidate_evidence(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<Vec<(String, String, u32)>> {
+        let (scope, params) = match session_id {
+            None => (
+                "e.workspace_id = ?1",
+                vec![Value::Text(workspace_id.to_owned())],
+            ),
+            Some(session_id) => (
+                "e.workspace_id = ?1 AND e.session_id = ?2",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(session_id.to_owned()),
+                ],
+            ),
+        };
+        let sql = format!(
+            "SELECT e.producer_kind, e.search_eligibility, COUNT(*) FROM evidence_spans e WHERE {scope} AND NOT ({EVIDENCE_SEARCH_CANDIDATE_PREDICATE}) GROUP BY e.producer_kind, e.search_eligibility ORDER BY e.producer_kind ASC, e.search_eligibility ASC"
+        );
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter()
+            .map(|row| {
+                let producer =
+                    required_text(row, 0, DbOperation::Query, "producer_kind")?.to_owned();
+                let eligibility =
+                    required_text(row, 1, DbOperation::Query, "search_eligibility")?.to_owned();
+                let count = required_i64(row, 2, DbOperation::Query, "evidence_count")?;
+                let count = u32::try_from(count).map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: format!("evidence admission group count {count} must fit u32"),
+                })?;
+                Ok((producer, eligibility, count))
             })
             .collect()
     }

@@ -43,6 +43,14 @@
       "expiresAt": null,
       "reason": null
     },
+    "retention": {
+      "limit": 2,
+      "keptCount": 0,
+      "reclaimableCount": 0,
+      "reclaimableBytes": 0,
+      "kept": [],
+      "reclaimable": []
+    },
     "elapsedMs": 0
   }
 }

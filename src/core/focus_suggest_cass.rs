@@ -30,7 +30,9 @@ pub(super) fn topic(span: &StoredEvidenceSpan) -> Option<CassTopic> {
     let created_at = DateTime::parse_from_rfc3339(&span.created_at)
         .ok()?
         .with_timezone(&Utc);
-    let preview = super::content_preview_tokens(&span.excerpt, super::TOPIC_PREVIEW_CHARS);
+    // Suggest topics in the conversation's words, not envelope keys
+    // (bd-reality-core-convergence-1azkt.45).
+    let preview = super::content_preview_tokens(&span.reader_body(), super::TOPIC_PREVIEW_CHARS);
     if preview.is_empty() {
         return None;
     }

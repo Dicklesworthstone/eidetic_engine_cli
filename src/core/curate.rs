@@ -62,7 +62,7 @@ use crate::models::{
 use crate::search::HashEmbedder;
 
 #[path = "curate_session_arc.rs"]
-mod session_arc;
+pub(crate) mod session_arc;
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -3268,7 +3268,9 @@ fn build_review_session_candidates(
         if span.memory_id.as_deref().is_none_or(str::is_empty) {
             continue;
         }
-        let topic_key = review_topic_key(&span.excerpt);
+        // Topic from the conversation's words, never envelope keys
+        // (bd-reality-core-convergence-1azkt.46).
+        let topic_key = review_topic_key(&span.reader_body());
         if topic_key == "noise" {
             continue;
         }
@@ -3360,7 +3362,7 @@ fn build_bootstrap_session_candidates(
         if !span.memory_id.as_deref().is_none_or(str::is_empty) {
             continue;
         }
-        let topic_key = review_topic_key(&span.excerpt);
+        let topic_key = review_topic_key(&span.reader_body());
         if topic_key == "noise" {
             continue;
         }
@@ -3397,8 +3399,11 @@ fn build_bootstrap_candidate(
     if evidence_ids.is_empty() {
         return None;
     }
-    let proposed_content = review_candidate_content(topic_key, "rule", spans);
-    let confidence = review_candidate_confidence(spans.len());
+    // Abstain unless the session states a concrete, reusable lesson. A topic
+    // cluster with no lesson sentence is not a rule (bd-reality-core-convergence-1azkt.46).
+    let lessons = ReviewLessons::extract(spans)?;
+    let proposed_content = review_candidate_content(topic_key, "rule", &lessons);
+    let confidence = lessons.confidence();
     let content_hash = format!(
         "blake3:{}",
         blake3::hash(proposed_content.as_bytes()).to_hex()
@@ -3412,9 +3417,11 @@ fn build_bootstrap_candidate(
         content_hash.as_str(),
     ]);
     let reason = format!(
-        "Bootstrap candidate: clustered {} cass-imported span(s) for topic `{topic_key}` from session `{}` (no existing memory linked yet — promote to a new memory via `ee curate accept`).",
+        "Bootstrap candidate: {} of {} cass-imported span(s) for topic `{topic_key}` in session `{}` state the lesson; {} (no existing memory linked yet — promote to a new memory via `ee curate accept`).",
+        lessons.supporting_spans,
         evidence_ids.len(),
-        session.id
+        session.id,
+        lessons.confidence_explanation(),
     );
 
     Some(ReviewSessionCandidate {
@@ -3457,8 +3464,9 @@ fn build_review_candidate(
         .min()?
         .to_owned();
     let candidate_kind = review_candidate_kind(spans);
-    let proposed_content = review_candidate_content(topic_key, &candidate_kind, spans);
-    let confidence = review_candidate_confidence(spans.len());
+    let lessons = ReviewLessons::extract(spans)?;
+    let proposed_content = review_candidate_content(topic_key, &candidate_kind, &lessons);
+    let confidence = lessons.confidence();
     let content_hash = format!(
         "blake3:{}",
         blake3::hash(proposed_content.as_bytes()).to_hex()
@@ -3471,9 +3479,11 @@ fn build_review_candidate(
         content_hash.as_str(),
     ]);
     let reason = format!(
-        "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`.",
+        "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`; {} state the lesson; {}.",
         evidence_ids.len(),
-        session.id
+        session.id,
+        lessons.supporting_spans,
+        lessons.confidence_explanation(),
     );
 
     Some(ReviewSessionCandidate {
@@ -3550,8 +3560,11 @@ fn build_session_arc_candidate_pair(
             evidence,
         );
         anti_pattern_content = format!("Anti-pattern for `{topic_key}`:\n{observed}");
+        // State the repair itself, not a generic pointer to it
+        // (bd-reality-core-convergence-1azkt.46).
         rule_content = format!(
-            "Rule for `{topic_key}`: use the observed repair for this failure.\n{observed}"
+            "Rule for `{topic_key}`: when this failure recurs, apply the repair that worked: {}\n{observed}",
+            compact_excerpt(&resolution_span.excerpt),
         );
     }
     let anti_pattern_hash = content_hash_for_candidate(&anti_pattern_content);
@@ -3719,6 +3732,44 @@ fn session_arc_failure_signal(excerpt: &str) -> bool {
                 | "timeout"
         )
     }) || excerpt.to_ascii_lowercase().contains("wrong approach")
+        || (!review_text_is_task_statement(excerpt)
+            && tokens.iter().any(|token| {
+                // Progressive and present-tense observations ("keeps failing",
+                // "the build fails", "hash mismatch") are failures too
+                // (bd-reality-core-convergence-1azkt.46), but only when they
+                // describe what happened: "fix the failing test" is a task.
+                matches!(
+                    token.as_str(),
+                    "failing" | "fails" | "mismatch" | "crash" | "crashed" | "crashes"
+                )
+            }))
+}
+
+/// A request to do work ("fix the failing test", "can you debug the crash")
+/// names its subject's failure but is not an observation of one.
+fn review_text_is_task_statement(text: &str) -> bool {
+    let lower = text.trim_start().to_ascii_lowercase();
+    let lower = lower
+        .strip_prefix("user:")
+        .or_else(|| lower.strip_prefix("assistant:"))
+        .unwrap_or(&lower)
+        .trim_start();
+    [
+        "fix ",
+        "please fix",
+        "can you fix",
+        "could you fix",
+        "let's fix",
+        "lets fix",
+        "debug ",
+        "please debug",
+        "can you debug",
+        "investigate ",
+        "please investigate",
+        "look into",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 fn session_arc_resolution_signal(excerpt: &str) -> bool {
@@ -4088,15 +4139,19 @@ fn review_stopword(token: &str) -> bool {
 }
 
 fn review_candidate_kind(spans: &[&StoredEvidenceSpan]) -> String {
-    let joined = spans
+    let projected = spans
         .iter()
-        .map(|span| span.excerpt.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if ["failed", "failure", "panic", "regression"]
+        .map(|span| span.reader_body().into_owned())
+        .collect::<Vec<_>>();
+    let joined = projected.join(" ").to_ascii_lowercase();
+    // Count- and negation-aware: "21 passed, 0 failed" is a success, not a
+    // failure (bd-reality-core-convergence-1azkt.46).
+    if projected
         .iter()
-        .any(|term| joined.contains(term))
+        .any(|text| session_arc::failure_signal(text))
+        || ["panic", "regression"]
+            .iter()
+            .any(|term| joined.contains(term))
     {
         "failure".to_owned()
     } else if ["adr", "decided", "decision", "choose", "chose"]
@@ -4112,25 +4167,209 @@ fn review_candidate_kind(spans: &[&StoredEvidenceSpan]) -> String {
 fn review_candidate_content(
     topic_key: &str,
     candidate_kind: &str,
-    spans: &[&StoredEvidenceSpan],
+    lessons: &ReviewLessons,
 ) -> String {
-    let excerpts = spans
-        .iter()
-        .take(2)
-        .map(|span| compact_excerpt(&span.excerpt))
-        .collect::<Vec<_>>()
-        .join(" / ");
+    let stated = lessons.sentences.join(" / ");
     match candidate_kind {
         "failure" => format!(
-            "When `{topic_key}` work resembles this session, check the prior failure evidence before repeating it: {excerpts}"
+            "When `{topic_key}` work resembles this session, check the prior failure evidence before repeating it: {stated}"
         ),
         "decision" => format!(
-            "For `{topic_key}` work, preserve the evidence-backed decision from this session: {excerpts}"
+            "For `{topic_key}` work, preserve the evidence-backed decision from this session: {stated}"
         ),
         _ => format!(
-            "For `{topic_key}` work, follow the evidence-backed procedure shown in this session: {excerpts}"
+            "For `{topic_key}` work, follow the evidence-backed procedure shown in this session: {stated}"
         ),
     }
+}
+
+/// Intra-session correlation for the design effect. Spans of one session are
+/// not independent observations, so `m` agreeing spans count as
+/// `m / (1 + (m - 1) * rho)` effective observations (at most `1 / rho`).
+const REVIEW_SESSION_DESIGN_EFFECT_RHO: f32 = 0.5;
+const REVIEW_LESSON_MIN_CHARS: usize = 12;
+const REVIEW_LESSON_MAX_CHARS: usize = 240;
+const REVIEW_LESSON_MAX_SENTENCES: usize = 2;
+
+/// Concrete lesson sentences a session states, with the spans that state
+/// them (bd-reality-core-convergence-1azkt.46).
+///
+/// The topic-template proposer used to wrap the first 180 characters of two
+/// raw excerpts in boilerplate, which on real transcripts was JSON envelope
+/// metadata, and scored it `0.45 + 0.08 * spans` regardless of content. Now
+/// it reads the projected message text, keeps only directive sentences (an
+/// imperative or an explicit always/never/must/instead-of rule), and abstains
+/// when the session states none.
+struct ReviewLessons {
+    sentences: Vec<String>,
+    supporting_spans: usize,
+}
+
+impl ReviewLessons {
+    fn extract(spans: &[&StoredEvidenceSpan]) -> Option<Self> {
+        let mut sentences = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut supporting_spans = 0_usize;
+        for span in spans {
+            let text = span.reader_body();
+            let mut supported = false;
+            for sentence in review_lesson_sentences(&text) {
+                supported = true;
+                let key = sentence.to_ascii_lowercase();
+                if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(key) {
+                    sentences.push(sentence);
+                }
+            }
+            if supported {
+                supporting_spans = supporting_spans.saturating_add(1);
+            }
+        }
+        (!sentences.is_empty()).then_some(Self {
+            sentences,
+            supporting_spans,
+        })
+    }
+
+    fn effective_observations(&self) -> f32 {
+        let m = self.supporting_spans.max(1) as f32;
+        m / (1.0 + (m - 1.0) * REVIEW_SESSION_DESIGN_EFFECT_RHO)
+    }
+
+    /// Corroboration, not span count: one session can never exceed 0.6, and
+    /// confidence rises monotonically with agreeing spans toward that bound.
+    fn confidence(&self) -> f32 {
+        let confidence = 0.5 + 0.1 * (self.effective_observations() - 1.0);
+        (confidence.clamp(0.5, 0.6) * 10_000.0).round() / 10_000.0
+    }
+
+    fn confidence_explanation(&self) -> String {
+        format!(
+            "confidence {:.4} from {:.2} effective observation(s) (design effect rho {REVIEW_SESSION_DESIGN_EFFECT_RHO}; one session is capped at 0.6)",
+            self.confidence(),
+            self.effective_observations()
+        )
+    }
+}
+
+/// Directive sentences in projected conversation text, in source order.
+fn review_lesson_sentences(text: &str) -> Vec<String> {
+    let mut lessons = Vec::new();
+    for raw in review_sentences(text) {
+        let sentence = raw
+            .trim()
+            .trim_start_matches(['-', '*', '>', '#', ' ', '\t'])
+            .trim_start_matches(|ch: char| ch.is_ascii_digit())
+            .trim_start_matches([')', '.', ' '])
+            .trim();
+        let sentence = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+        let length = sentence.chars().count();
+        if !(REVIEW_LESSON_MIN_CHARS..=REVIEW_LESSON_MAX_CHARS).contains(&length) {
+            continue;
+        }
+        if review_sentence_is_directive(&sentence) {
+            lessons.push(sentence);
+        }
+    }
+    lessons
+}
+
+/// Split on line breaks and on `.`, `!`, `?` or `;` followed by whitespace or
+/// the end, so paths, versions and commands (`src/main.rs`, `v1.2.3`) stay
+/// whole inside their sentence.
+fn review_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    for line in text.lines() {
+        let mut start = 0;
+        let mut chars = line.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            if matches!(ch, '.' | '!' | '?' | ';')
+                && chars.peek().is_none_or(|(_, next)| next.is_whitespace())
+            {
+                sentences.push(&line[start..index]);
+                start = index + ch.len_utf8();
+            }
+        }
+        if start < line.len() {
+            sentences.push(&line[start..]);
+        }
+    }
+    sentences
+}
+
+fn review_sentence_is_directive(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase().replace('’', "'");
+    // Assistant narration and plans describe what is about to happen, not a
+    // reusable rule: "Let me run the tests", "I'll update the schema".
+    const NARRATION: &[&str] = &[
+        "let me ", "let's ", "i'll ", "i will ", "i'm ", "i am ", "i've ", "i have ", "we'll ",
+        "now ", "next ", "first ", "then ", "ok", "okay", "sure", "great", "thanks", "here ",
+        "this ", "that ", "it ", "there ",
+    ];
+    if NARRATION.iter().any(|prefix| lower.starts_with(prefix)) {
+        return false;
+    }
+    const IMPERATIVE_VERBS: &[&str] = &[
+        "always",
+        "never",
+        "avoid",
+        "prefer",
+        "use",
+        "run",
+        "keep",
+        "check",
+        "verify",
+        "ensure",
+        "make sure",
+        "remember",
+        "don't",
+        "do not",
+        "add",
+        "pin",
+        "set",
+        "pass",
+        "regenerate",
+        "rebuild",
+        "rerun",
+        "re-run",
+        "call",
+        "include",
+        "exclude",
+        "skip",
+        "wrap",
+        "install",
+        "configure",
+        "update",
+        "commit",
+        "write",
+        "read",
+        "test",
+        "validate",
+        "require",
+    ];
+    let starts_imperative = IMPERATIVE_VERBS.iter().any(|verb| {
+        lower
+            .strip_prefix(verb)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ',', ':']))
+    });
+    if starts_imperative {
+        return true;
+    }
+    const RULE_MARKERS: &[&str] = &[
+        " must ",
+        " must not ",
+        " should ",
+        " should not ",
+        " always ",
+        " never ",
+        " make sure ",
+        " remember to ",
+        " instead of ",
+        " don't ",
+        " do not ",
+        " rather than ",
+    ];
+    let padded = format!(" {lower} ");
+    RULE_MARKERS.iter().any(|marker| padded.contains(marker))
 }
 
 fn compact_excerpt(excerpt: &str) -> String {
@@ -4142,10 +4381,6 @@ fn compact_excerpt(excerpt: &str) -> String {
     let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
     truncated.push_str("...");
     truncated
-}
-
-fn review_candidate_confidence(span_count: usize) -> f32 {
-    (0.45_f32 + (span_count.min(6) as f32 * 0.08)).min(0.85)
 }
 
 fn deterministic_curate_id(parts: &[&str]) -> String {
@@ -16623,9 +16858,9 @@ mod tests {
         reflection_request_ledger_source_digest_mismatch, reflection_result_candidate_id,
         reflection_result_candidate_input_from_material,
         reflection_result_replay_gate_from_db_status, reflection_retention_cutoff,
-        review_curation_candidate, review_session_proposals, run_curation_disposition,
-        run_review_workspace, show_curation_candidate, stable_workspace_id,
-        validate_curation_candidate,
+        review_candidate_kind, review_curation_candidate, review_session_proposals,
+        run_curation_disposition, run_review_workspace, session_arc, show_curation_candidate,
+        stable_workspace_id, validate_curation_candidate,
     };
     use crate::core::index::{IndexHealth, IndexStatusOptions, get_index_status};
     use crate::core::search::{
@@ -28750,6 +28985,142 @@ mod tests {
         );
         assert!(bootstrap.confidence >= 0.40);
         assert!(bootstrap.reason.contains("Bootstrap candidate"));
+    }
+
+    /// bd-reality-core-convergence-1azkt.46: on a real Claude Code envelope the
+    /// proposer states the lesson, never the JSON metadata around it, and a
+    /// session that states no lesson yields no topic-template candidate.
+    #[test]
+    fn bootstrap_candidates_state_projected_lessons_and_abstain_without_one() {
+        let session = synthetic_stored_session();
+        let envelope = |text: &str| {
+            serde_json::json!({
+                "parentUuid": "6f1c2b9e-0000-4000-8000-000000000001",
+                "isSidechain": false,
+                "sessionId": "0f2e5c1a-0000-4000-8000-000000000002",
+                "type": "user",
+                "message": {"role": "user", "content": text},
+                "uuid": "a1b2c3d4-0000-4000-8000-000000000003",
+                "timestamp": "2026-10-01T12:00:00.000Z"
+            })
+            .to_string()
+        };
+        let spans = vec![synthetic_span(
+            "span_dd00000000000000000000000000",
+            None,
+            &envelope("Always run cargo fmt --check before cutting a release tag."),
+        )];
+        let candidates = build_bootstrap_session_candidates(
+            "wsp_test00000000000000000000000",
+            &session,
+            &spans,
+            0.0,
+        );
+        let candidate = candidates
+            .first()
+            .expect("a stated lesson yields a candidate");
+        assert!(
+            candidate
+                .proposed_content
+                .contains("Always run cargo fmt --check before cutting a release tag"),
+            "{}",
+            candidate.proposed_content
+        );
+        for envelope_key in ["parentUuid", "isSidechain", "sessionId", "{\""] {
+            assert!(
+                !candidate.proposed_content.contains(envelope_key),
+                "envelope leaked into the proposal: {}",
+                candidate.proposed_content
+            );
+        }
+        assert!(
+            candidate.confidence <= 0.6,
+            "one session is capped at 0.6: {}",
+            candidate.confidence
+        );
+
+        let narration = vec![synthetic_span(
+            "span_ee00000000000000000000000000",
+            None,
+            &envelope("Let me look at the formatting output and see what changed."),
+        )];
+        assert!(
+            build_bootstrap_session_candidates(
+                "wsp_test00000000000000000000000",
+                &session,
+                &narration,
+                0.0,
+            )
+            .is_empty(),
+            "narration with no lesson must abstain"
+        );
+    }
+
+    #[test]
+    fn review_confidence_is_corroboration_bounded_and_monotone() {
+        let session = synthetic_stored_session();
+        let mut previous = 0.0_f32;
+        for count in 1..=6_u32 {
+            let spans = (0..count)
+                .map(|index| {
+                    synthetic_span(
+                        &format!("span_f{index}0000000000000000000000000"),
+                        None,
+                        &format!("Always run cargo fmt --check before release step {index}."),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let candidates = build_bootstrap_session_candidates(
+                "wsp_test00000000000000000000000",
+                &session,
+                &spans,
+                0.0,
+            );
+            let confidence = candidates
+                .first()
+                .map(|candidate| candidate.confidence)
+                .expect("candidate");
+            assert!(confidence <= 0.6, "{count} spans: {confidence}");
+            assert!(
+                confidence >= previous,
+                "{count} spans: {confidence} < {previous}"
+            );
+            previous = confidence;
+        }
+        assert!(previous > 0.5, "corroboration must raise confidence");
+    }
+
+    #[test]
+    fn session_arc_failure_signal_separates_observations_from_task_statements() {
+        for (text, failure) in [
+            ("21 passed, 0 failed", false),
+            ("no failures", false),
+            ("previously failed, now passing", true),
+            ("fix the failing test", false),
+            ("Please fix the crash in the importer", false),
+            (
+                "The golden test keeps failing on CI with a hash mismatch.",
+                true,
+            ),
+            ("cargo build fails with a linker error", true),
+        ] {
+            assert_eq!(
+                session_arc::failure_signal(text),
+                failure,
+                "failure signal for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_candidate_kind_reads_zero_failure_counts_as_success() {
+        let spans = [synthetic_span(
+            "span_gg00000000000000000000000000",
+            None,
+            "Make sure the bridge suite passes: 21 passed, 0 failed.",
+        )];
+        let refs = spans.iter().collect::<Vec<_>>();
+        assert_ne!(review_candidate_kind(&refs), "failure");
     }
 
     #[test]

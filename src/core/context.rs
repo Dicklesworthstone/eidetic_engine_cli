@@ -13660,6 +13660,25 @@ fn collect_direct_evidence_pack_candidates(
     let mut rejected_live_admission = 0_usize;
     let mut filtered_count = 0_usize;
 
+    // Hydrate every evidence hit with one batched read instead of two point
+    // queries per hit (bd-reality-core-convergence-1azkt.64). A failed batch
+    // leaves the map empty and each hit falls back to its own point reads.
+    let hit_ids = search_report
+        .results
+        .iter()
+        .filter_map(|hit| EvidenceId::from_str(&hit.doc_id).ok())
+        .map(|id| id.to_string())
+        .collect::<BTreeSet<_>>();
+    let hit_id_refs = hit_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut hydrated = connection
+        .get_evidence_spans_with_sessions(&hit_id_refs)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(span, session)| (span.id.clone(), (span, session)))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
     for hit in &search_report.results {
         if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {
             continue;
@@ -13668,15 +13687,23 @@ fn collect_direct_evidence_pack_candidates(
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
-        let Ok(Some(span)) = connection.get_evidence_span(&evidence_id.to_string()) else {
-            rejected_live_admission = rejected_live_admission.saturating_add(1);
-            continue;
+        let canonical_id = evidence_id.to_string();
+        let (span, session) = match hydrated.remove(&canonical_id) {
+            Some((span, session)) => (span, session),
+            None => {
+                let Ok(Some(span)) = connection.get_evidence_span(&canonical_id) else {
+                    rejected_live_admission = rejected_live_admission.saturating_add(1);
+                    continue;
+                };
+                let session = connection.get_session(&span.session_id).ok().flatten();
+                (span, session)
+            }
         };
         if !workspace_ids.iter().any(|id| id == &span.workspace_id) {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         }
-        let Ok(Some(session)) = connection.get_session(&span.session_id) else {
+        let Some(session) = session else {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
@@ -13691,7 +13718,12 @@ fn collect_direct_evidence_pack_candidates(
             filtered_count = filtered_count.saturating_add(1);
             continue;
         }
-        let estimated_tokens = estimate_tokens_default(&span.excerpt).max(1);
+        // Pack the projected message body, not the transcript envelope: the
+        // token budget pays for content a reader can use
+        // (bd-reality-core-convergence-1azkt.45). Provenance still names the
+        // exact stored lines.
+        let content = span.reader_text().into_owned();
+        let estimated_tokens = estimate_tokens_default(&content).max(1);
         let Ok(provenance_uri) = ProvenanceUri::from_str(&span.canonical_provenance_uri()) else {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
@@ -13737,7 +13769,7 @@ fn collect_direct_evidence_pack_candidates(
                 start_line: span.start_line,
                 end_line: span.end_line,
                 section: PackSection::Evidence,
-                content: span.excerpt,
+                content,
                 estimated_tokens,
                 relevance,
                 utility,

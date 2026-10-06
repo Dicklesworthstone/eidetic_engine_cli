@@ -11090,8 +11090,10 @@ fn lexical_search_available(_index_dir: &Path) -> bool {
 /// Index-status probe for the search hot path, with process-local TTL caching.
 ///
 /// When `connection` is `Some`, the underlying [`get_index_status_with_connection`]
-/// probe reuses the caller's already-open read connection for its `COUNT(*)`
-/// generation/stat reads instead of opening a fresh file database connection.
+/// probe reuses the caller's already-open read connection for its generation
+/// read and its corpus scan (a bounded evidence-admission scan, not a bare
+/// `COUNT(*)`; inside one pinned snapshot it runs once and is memoized)
+/// instead of opening a fresh file database connection.
 /// On this host a fresh `DbConnection::open_file` is a fixed ~250-300ms cost,
 /// and the search hot path already holds an open read connection, so reusing
 /// it removes a redundant open from the `search::degradationSetup` span. If
@@ -11362,6 +11364,30 @@ async fn reconcile_search_index_within_budget(
     // the publication lease and collects a fresh authoritative source snapshot
     // before it enforces the same corpus ceiling, so pinning a read transaction
     // here adds failure/latency without protecting the publish decision.
+    //
+    // Ask the cheap question first: a store whose body-free row upper bound
+    // already exceeds the ceiling can never be repaired here, so it must not
+    // pay a full validated admission scan to find that out
+    // (bd-reality-core-convergence-1azkt.64).
+    match crate::core::index::index_source_upper_bound_fits(
+        &status_options,
+        u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
+    ) {
+        Ok(Some(false)) => {
+            static LOGGED_BOUND_SKIP: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED_BOUND_SKIP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    target: "ee::search::index_freshness",
+                    corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
+                    "skipped synchronous search-index repair because the corpus upper bound exceeds the interactive read bound"
+                );
+            }
+            return;
+        }
+        Ok(None) => return,
+        Ok(Some(true)) | Err(_) => {}
+    }
     let status = match get_index_status_with_connection(&status_options, None) {
         Ok(status) => status,
         Err(error) => {
@@ -11379,12 +11405,18 @@ async fn reconcile_search_index_within_budget(
         .saturating_add(u64::from(status.db_rule_count))
         .saturating_add(u64::from(status.db_evidence_admitted_count));
     if !search_index_corpus_is_auto_reconcilable(corpus_documents) {
-        tracing::info!(
-            target: "ee::search::index_freshness",
-            corpus_documents,
-            corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
-            "skipped synchronous search-index repair because the complete corpus exceeds the interactive read bound"
-        );
+        // A daemon or long agent session would otherwise repeat this line on
+        // every read; the condition is per-store and stable, so say it once.
+        static LOGGED_SKIP: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_SKIP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!(
+                target: "ee::search::index_freshness",
+                corpus_documents,
+                corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
+                "skipped synchronous search-index repair because the complete corpus exceeds the interactive read bound"
+            );
+        }
         return;
     }
     // A previous persisting pack can request repair even when no usable index
@@ -13747,19 +13779,45 @@ fn live_admitted_evidence_spans_with_connection(
     .map(|workspace| workspace.id) else {
         return BTreeMap::new();
     };
-    evidence_ids
+    let canonical_ids = evidence_ids
         .iter()
-        .filter_map(|doc_id| {
-            let evidence_id = EvidenceId::from_str(doc_id).ok()?;
-            if evidence_id.to_string() != *doc_id {
-                return None;
-            }
-            let span = connection.get_evidence_span(doc_id).ok()??;
-            let session = connection.get_session(&span.session_id).ok()??;
-            span.is_search_admitted_for_session(&workspace_id, &session)
-                .then(|| (doc_id.clone(), span))
+        .filter(|doc_id| {
+            EvidenceId::from_str(doc_id)
+                .ok()
+                .is_some_and(|evidence_id| evidence_id.to_string() == **doc_id)
         })
-        .collect()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    // One batched read per page of hits instead of two point queries per hit
+    // (bd-reality-core-convergence-1azkt.64). A failed batch falls back to the
+    // per-id reads so one unreadable row still hides only itself.
+    match connection.get_evidence_spans_with_sessions(&canonical_ids) {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(span, session)| {
+                let session = session?;
+                (evidence_ids.contains(&span.id)
+                    && span.is_search_admitted_for_session(&workspace_id, &session))
+                .then(|| (span.id.clone(), span))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::evidence",
+                error = %error,
+                "batched evidence hydration failed; falling back to per-hit reads"
+            );
+            canonical_ids
+                .into_iter()
+                .filter_map(|doc_id| {
+                    let span = connection.get_evidence_span(doc_id).ok()??;
+                    let session = connection.get_session(&span.session_id).ok()??;
+                    span.is_search_admitted_for_session(&workspace_id, &session)
+                        .then(|| (doc_id.to_owned(), span))
+                })
+                .collect()
+        }
+    }
 }
 
 fn apply_live_evidence_visibility_to_diag(

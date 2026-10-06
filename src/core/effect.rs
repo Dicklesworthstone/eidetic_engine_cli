@@ -1700,7 +1700,7 @@ impl EffectManifest {
             CommandEffect::read_only_db("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",
-                "Preview reclaimable derived index artifacts without mutation",
+                "Preview reclaimable derived index artifacts without mutation; --apply reclaims retained generations beyond the retention bound under the publication lease",
             ),
             CommandEffect::read_only_db("insights", "Render persisted insight summaries"),
             CommandEffect::read_only("install check", "Inspect install posture"),

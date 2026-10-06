@@ -79,10 +79,13 @@ fn candidate(span: StoredEvidenceSpan) -> Option<(AskCandidate, AskNativeSource)
         entity_revision: span.pack_entity_revision(),
         source_memory_ids,
     };
+    // Answer from the projected message body, not the transcript envelope
+    // (bd-reality-core-convergence-1azkt.45).
+    let content = span.reader_text().into_owned();
     Some((
         AskCandidate {
             memory_id: span.id,
-            content: span.excerpt,
+            content,
             // Evidence has no learned posterior. Use the neutral prior and
             // the existing CassEvidence tilt, not a fabricated human score.
             confidence: 0.5,

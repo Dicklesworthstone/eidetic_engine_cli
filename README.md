@@ -1504,7 +1504,7 @@ for the full densification and resolution loop.
 | Command | Purpose |
 |---|---|
 | `ee index status` / `rebuild` / `reembed` | Manage derived search indexes (Frankensearch owns model selection) |
-| `ee index vacuum` | Preview reclaimable derived search-index artifacts without deleting or rewriting files |
+| `ee index vacuum` | Preview reclaimable derived search-index artifacts (including the retention plan: every publication keeps at most the 2 newest valid retained generations); `--apply` reclaims retained generations beyond that bound under the publication lease and records an audit row |
 
 Index intake never mutates active Frankensearch tiers in place. The previous
 generation remains readable while a complete replacement is built and

@@ -7,7 +7,7 @@ mod clauses;
 #[path = "curate_session_arc_sequence.rs"]
 mod sequence;
 #[path = "curate_session_arc_text.rs"]
-mod text;
+pub(crate) mod text;
 
 pub(super) fn sequence_candidates(
     workspace_id: &str,

@@ -117,7 +117,9 @@ pub(super) fn append_evidence(
             };
             let candidate = AskCandidate {
                 memory_id: span.id.clone(),
-                content: span.excerpt.clone(),
+                // Answer from the projected message body, not the transcript
+                // envelope (bd-reality-core-convergence-1azkt.45).
+                content: span.reader_text().into_owned(),
                 // Imported excerpts have no calibrated memory confidence.
                 // Use a neutral prior without claiming human verification.
                 confidence: 0.5,

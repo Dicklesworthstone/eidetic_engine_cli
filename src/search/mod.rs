@@ -44,7 +44,11 @@ pub(crate) const MEMORY_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.memory_index_proj
 pub(crate) const SESSION_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.session_index_projection.v1";
 pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_projection.v1";
 pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
-pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.evidence_index_projection.v1";
+/// v2 (bd-reality-core-convergence-1azkt.45): imported transcript evidence is
+/// indexed as its projected message text, not its raw JSONL envelope. The bump
+/// changes the corpus revision, so every existing index is reported stale and
+/// rebuilt rather than silently mixing the two projections.
+pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V2: &str = "ee.evidence_index_projection.v2";
 pub const MEMORY_ANCHOR_SCHEMA_METADATA_KEY: &str = "memory_anchor_schema";
 pub const MEMORY_ANCHOR_COUNT_METADATA_KEY: &str = "memory_anchor_count";
 pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
@@ -1096,6 +1100,12 @@ pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> Canoni
         || !matches!(egress.instruction_risk, "none" | "low");
     let safe_excerpt = if withheld {
         "[EVIDENCE_WITHHELD]".to_owned()
+    } else if egress.content == span.excerpt {
+        // Index and show what a reader can use: the message body of a
+        // transcript record, not the envelope keys, ids and escapes around it
+        // (bd-reality-core-convergence-1azkt.45). Provenance, the content hash
+        // and the line locator still name the exact stored source bytes.
+        span.reader_text().into_owned()
     } else {
         egress.content
     };

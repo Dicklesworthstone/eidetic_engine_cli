@@ -38,7 +38,7 @@ use crate::models::{
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
-    EVIDENCE_INDEX_PROJECTION_SCHEMA_V1, EmbedderStack, HashEmbedder, IndexBuilder,
+    EVIDENCE_INDEX_PROJECTION_SCHEMA_V2, EmbedderStack, HashEmbedder, IndexBuilder,
     MEMORY_INDEX_PROJECTION_SCHEMA_V1, RULE_INDEX_PROJECTION_SCHEMA_V1, RuleIndexProjection,
     SESSION_INDEX_PROJECTION_SCHEMA_V1, artifact_to_document, evidence_span_to_document,
     memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
@@ -923,7 +923,7 @@ pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
             ),
             (
                 "import",
-                EVIDENCE_INDEX_PROJECTION_SCHEMA_V1,
+                EVIDENCE_INDEX_PROJECTION_SCHEMA_V2,
                 EVIDENCE_INDEX_ADMISSION_REVISION_V1,
             ),
         ] {
@@ -3138,7 +3138,15 @@ where
                     document_counts,
                     embedder_fingerprint.as_ref(),
                 )?;
-                publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+                publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)?;
+                // Still inside the exclusive generation fence: no reader lease
+                // can be open, so displaced copies beyond the retention bound
+                // are reclaimed here instead of accumulating one full index
+                // copy per write. Reclamation failure is logged and retried by
+                // the next publication; it never fails this committed one
+                // (bd-reality-core-convergence-1azkt.42).
+                let _ = retention_gc::reclaim_after_publish(index_dir);
+                Ok(())
             })
         })
         .await?;
@@ -3873,6 +3881,29 @@ fn collect_workspace_index_source_snapshot_with_limit(
     })
 }
 
+/// Body-free eligibility hint for interactive read repair: `Some(false)` when
+/// even the conservative row upper bound exceeds `max_documents`, so a large
+/// store never pays a full validated admission scan just to learn that it is
+/// too large to repair synchronously (bd-reality-core-convergence-1azkt.64).
+/// `None` when there is no store or workspace to bound. Every repair path
+/// re-enforces the exact ceiling under its publication lease.
+pub(crate) fn index_source_upper_bound_fits(
+    options: &IndexStatusOptions,
+    max_documents: u32,
+) -> Result<Option<bool>, IndexStatusError> {
+    let database_path = options.resolve_database_path();
+    if !database_path.is_file() {
+        return Ok(None);
+    }
+    let db = DbConnection::open_file_read_only(&database_path)?;
+    let Some(workspace_id) = workspace_id_for_index_status(&db, &options.workspace_path)? else {
+        return Ok(None);
+    };
+    workspace_index_source_rows_fit(&db, &workspace_id, max_documents)
+        .map(Some)
+        .map_err(|error| IndexStatusError::Io(std::io::Error::other(error.to_string())))
+}
+
 /// A conservative body-free upper bound, including globally tagged memories
 /// that the canonical collector also includes. Ineligible rows may defer an
 /// automatic repair; they must never let a large corpus through the ceiling.
@@ -3897,6 +3928,16 @@ fn workspace_index_source_rows_fit(
                     SqlValue::Text(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()),
                     SqlValue::Text(crate::models::HOUSE_RULE_MEMORY_SCOPE_TAG.to_owned()),
                 ],
+            )
+        } else if table == "evidence_spans" {
+            // Only search-admission candidates can ever become documents, so
+            // counting them keeps this an upper bound while a store whose
+            // imported history is mostly quarantined is no longer refused the
+            // live fallback by rows that could never be indexed
+            // (bd-reality-core-convergence-1azkt.64).
+            (
+                "SELECT COUNT(*) FROM evidence_spans WHERE workspace_id = ?1 AND producer_kind = 'cass_import' AND search_eligibility = 'admitted'".to_owned(),
+                vec![SqlValue::Text(workspace_id.to_owned())],
             )
         } else {
             (
@@ -5386,6 +5427,9 @@ fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
 
 #[path = "index_retention_names.rs"]
 mod retention_names;
+
+#[path = "index_retention_gc.rs"]
+pub mod retention_gc;
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
     retention_names::sequence(name, retained_prefix)
@@ -8895,7 +8939,11 @@ impl IndexVacuumCandidate {
         serde_json::json!({
             "path": self.path.to_string_lossy(),
             "kind": self.kind.as_str(),
-            "plannedAction": "report_reclaimable_derived_asset",
+            "plannedAction": if self.kind == IndexVacuumCandidateKind::RetainedGeneration {
+                "reclaim_on_apply"
+            } else {
+                "report_reclaimable_derived_asset"
+            },
             "requiresExplicitOperatorAction": true,
             "stats": self.stats.data_json(),
         })
@@ -8983,7 +9031,35 @@ pub struct IndexVacuumReport {
     pub candidates: Vec<IndexVacuumCandidate>,
     pub degraded: Vec<IndexVacuumDegradation>,
     pub lock: IndexVacuumLockReport,
+    /// Retention decision for every retained generation: which copies the
+    /// bound keeps and which `--apply` (or the next publication) reclaims.
+    pub retention: retention_gc::RetentionPlan,
     pub elapsed_ms: f64,
+}
+
+fn retention_entry_json(entry: &retention_gc::RetainedGenerationEntry) -> serde_json::Value {
+    serde_json::json!({
+        "path": entry.path.to_string_lossy(),
+        "generation": entry.generation,
+        "reason": entry.reason.as_str(),
+        "sizeBytes": entry.size_bytes,
+    })
+}
+
+fn retention_plan_json(plan: &retention_gc::RetentionPlan) -> serde_json::Value {
+    let kept = plan.kept().map(retention_entry_json).collect::<Vec<_>>();
+    let reclaimable = plan
+        .reclaimable()
+        .map(retention_entry_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "limit": plan.limit,
+        "keptCount": kept.len(),
+        "reclaimableCount": reclaimable.len(),
+        "reclaimableBytes": plan.reclaimable_bytes(),
+        "kept": kept,
+        "reclaimable": reclaimable,
+    })
 }
 
 impl IndexVacuumReport {
@@ -9065,9 +9141,160 @@ impl IndexVacuumReport {
             "candidates": candidates,
             "degraded": degraded,
             "lock": self.lock.data_json(),
+            "retention": retention_plan_json(&self.retention),
             "elapsedMs": self.elapsed_ms,
         })
     }
+}
+
+/// Result of `ee index vacuum --apply` (bd-reality-core-convergence-1azkt.42).
+#[derive(Clone, Debug)]
+pub struct IndexVacuumApplyReport {
+    pub database_path: PathBuf,
+    pub index_dir: PathBuf,
+    pub retention_limit: usize,
+    pub kept: Vec<retention_gc::RetainedGenerationEntry>,
+    pub reclaimed: Vec<retention_gc::RetainedGenerationEntry>,
+    pub failures: Vec<(PathBuf, String)>,
+    pub audit_id: String,
+    pub elapsed_ms: f64,
+}
+
+impl IndexVacuumApplyReport {
+    #[must_use]
+    pub fn reclaimed_bytes(&self) -> u64 {
+        self.reclaimed
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes))
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!(
+            "Index vacuum: APPLIED\n\n  Index directory: {}\n  Retention limit: {} valid generation(s)\n  Kept: {}\n  Reclaimed: {} ({})\n  Audit: {}\n",
+            self.index_dir.display(),
+            self.retention_limit,
+            self.kept.len(),
+            self.reclaimed.len(),
+            format_bytes(self.reclaimed_bytes()),
+            self.audit_id,
+        );
+        for entry in &self.reclaimed {
+            output.push_str(&format!(
+                "  - reclaimed {} ({}, {})\n",
+                entry.path.display(),
+                entry.reason.as_str(),
+                format_bytes(entry.size_bytes)
+            ));
+        }
+        for (path, error) in &self.failures {
+            output.push_str(&format!("  - FAILED {}: {error}\n", path.display()));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "index_vacuum",
+            "schema": "ee.index.vacuum.v1",
+            "status": if self.failures.is_empty() { "applied" } else { "partial" },
+            "dryRun": false,
+            "previewOnly": false,
+            "mutationAllowed": true,
+            "databasePath": self.database_path.to_string_lossy(),
+            "indexDir": self.index_dir.to_string_lossy(),
+            "retentionLimit": self.retention_limit,
+            "keptCount": self.kept.len(),
+            "reclaimedCount": self.reclaimed.len(),
+            "reclaimedBytes": self.reclaimed_bytes(),
+            "kept": self.kept.iter().map(retention_entry_json).collect::<Vec<_>>(),
+            "reclaimed": self.reclaimed.iter().map(retention_entry_json).collect::<Vec<_>>(),
+            "failures": self.failures.iter().map(|(path, error)| serde_json::json!({
+                "path": path.to_string_lossy(),
+                "error": error,
+            })).collect::<Vec<_>>(),
+            "auditId": self.audit_id,
+            "elapsedMs": self.elapsed_ms,
+        })
+    }
+}
+
+/// Reclaim retained index generations beyond the retention bound under the
+/// same publication lease and exclusive generation fence a publisher uses, and
+/// record one audit row. Idempotent: a second run reclaims nothing.
+pub fn apply_index_vacuum(
+    options: &IndexVacuumOptions,
+) -> Result<IndexVacuumApplyReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        apply_index_vacuum_with_cx(&cx, options).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+pub async fn apply_index_vacuum_with_cx(
+    cx: &asupersync::Cx,
+    options: &IndexVacuumOptions,
+) -> Result<IndexVacuumApplyReport, IndexRebuildError> {
+    index_checkpoint(cx)?;
+    let start = Instant::now();
+    let database_path = options.resolve_database_path();
+    let index_dir = options.resolve_index_dir();
+    if !database_path.is_file() {
+        return Err(IndexRebuildError::Index(format!(
+            "Database not found at {}; run ee init --workspace . first",
+            database_path.display()
+        )));
+    }
+    ensure_index_path_has_no_symlinks(&database_path, "vacuum index")?;
+    ensure_index_path_has_no_symlinks(&index_dir, "vacuum index")?;
+    let db = DbConnection::open_file(&database_path)?;
+    let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+    let owner = IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?;
+    let (plan, outcome, audit_id) = owner
+        .with_generation_fence(&index_dir, || {
+            cx.masked(|| {
+                let plan = retention_gc::plan(&index_dir, retention_gc::RETAINED_GENERATION_LIMIT)?;
+                let outcome = retention_gc::apply(&index_dir, &plan);
+                let audit_id = crate::db::generate_audit_id();
+                let details = serde_json::json!({
+                    "schema": "ee.index.vacuum.audit.v1",
+                    "retentionLimit": plan.limit,
+                    "kept": outcome.kept,
+                    "reclaimed": outcome.reclaimed.len(),
+                    "reclaimedBytes": outcome.reclaimed_bytes(),
+                    "failures": outcome.failures.len(),
+                    "reclaimedGenerations": outcome
+                        .reclaimed
+                        .iter()
+                        .map(|entry| entry.generation)
+                        .collect::<Vec<_>>(),
+                });
+                db.insert_audit(
+                    &audit_id,
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(workspace_id.clone()),
+                        actor: Some("ee index vacuum --apply".to_owned()),
+                        action: crate::db::audit_actions::INDEX_VACUUM_APPLY.to_owned(),
+                        target_type: Some("search_index".to_owned()),
+                        target_id: Some(workspace_id.clone()),
+                        details: Some(details.to_string()),
+                    },
+                )?;
+                Ok((plan, outcome, audit_id))
+            })
+        })
+        .await?;
+    Ok(IndexVacuumApplyReport {
+        database_path,
+        index_dir,
+        retention_limit: plan.limit,
+        kept: plan.kept().cloned().collect(),
+        reclaimed: outcome.reclaimed,
+        failures: outcome.failures,
+        audit_id,
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
 }
 
 fn index_vacuum_degraded_data_json(degraded: &[IndexVacuumDegradation]) -> Vec<serde_json::Value> {
@@ -9518,7 +9745,21 @@ pub fn get_index_vacuum_report(
 
     let before = collect_index_path_stats(&index_dir)?;
     let after = before.clone();
-    let candidates = discover_index_vacuum_candidates(&index_dir)?;
+    let retention = retention_gc::plan(&index_dir, retention_gc::RETAINED_GENERATION_LIMIT)
+        .map_err(|error| IndexStatusError::Io(std::io::Error::other(error.to_string())))?;
+    let kept_paths = retention
+        .kept()
+        .map(|entry| entry.path.clone())
+        .collect::<BTreeSet<_>>();
+    // A retained generation the bound keeps is not reclaimable, so it is not a
+    // vacuum candidate; `retention.kept` reports it with its reason instead.
+    let candidates = discover_index_vacuum_candidates(&index_dir)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.kind != IndexVacuumCandidateKind::RetainedGeneration
+                || !kept_paths.contains(&candidate.path)
+        })
+        .collect::<Vec<_>>();
     let lock = inspect_index_vacuum_lock(&database_path, &options.workspace_path)?;
     let reclaimable_bytes = candidates.iter().fold(0_u64, |total, candidate| {
         total.saturating_add(candidate.stats.size_bytes)
@@ -9548,6 +9789,7 @@ pub fn get_index_vacuum_report(
         candidates,
         degraded,
         lock,
+        retention,
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
 }
@@ -9804,7 +10046,21 @@ fn get_db_stats(
     caller_holds_snapshot: bool,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport, Option<u64>), DbError> {
     let (counts, evidence_admission) = if caller_holds_snapshot {
-        current_index_corpus_counts_in_current_snapshot(db, workspace_id)?
+        // Search, pack and status probe index health more than once inside one
+        // pinned read snapshot (freshness, then model lifecycle). The corpus
+        // cannot change inside that snapshot, so the full admission scan runs
+        // once and later probes reuse it. Any write, commit or new BEGIN on the
+        // connection discards the memo (bd-reality-core-convergence-1azkt.64).
+        let memo_key = format!("ee.index.corpus_counts\0{workspace_id}");
+        if let Some(cached) =
+            db.snapshot_memo_get::<(IndexDocumentCounts, EvidenceAdmissionReport)>(&memo_key)
+        {
+            cached
+        } else {
+            let computed = current_index_corpus_counts_in_current_snapshot(db, workspace_id)?;
+            db.snapshot_memo_put(memo_key, computed.clone());
+            computed
+        }
     } else {
         current_index_corpus_counts(db, workspace_id)?
     };
@@ -21303,6 +21559,266 @@ mod tests {
         )
     }
 
+    fn retained_name(number: u32) -> String {
+        if number == 0 {
+            "index.previous".to_owned()
+        } else {
+            format!("index.previous.{number:03}")
+        }
+    }
+
+    /// bd-reality-core-convergence-1azkt.42: the bound keeps the newest valid
+    /// generations, reclaims everything older or unusable, never touches the
+    /// active generation, staging or rejected quarantine, and is idempotent.
+    #[test]
+    fn retention_gc_keeps_newest_valid_generations_and_reclaims_the_rest() -> TestResult {
+        let root = unique_test_dir("retention-gc-bound");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            20,
+            vec![test_indexable_doc("mem-active", "active generation")],
+        )?;
+        for (number, generation) in [(0_u32, 10_u64), (1, 11), (2, 12), (3, 13)] {
+            let path = root.join(retained_name(number));
+            build_current_test_index(
+                &path,
+                generation,
+                vec![test_indexable_doc(
+                    &format!("mem-{generation}"),
+                    &format!("retained generation {generation}"),
+                )],
+            )?;
+            write_marker(&path, "generation.txt", &generation.to_string())?;
+        }
+        // Unusable: a retained name with no metadata at all.
+        write_marker(&root.join(retained_name(4)), "fragment.bin", "partial")?;
+        // Never candidates: staging and rejected quarantine.
+        write_marker(
+            &root.join(".index.publish-100-000"),
+            "fragment.bin",
+            "staging",
+        )?;
+        write_marker(&root.join(".index.rejected-100-000"), "meta.json", "{}")?;
+
+        let plan = retention_gc::plan(&index_dir, 2).map_err(|error| error.to_string())?;
+        let kept = plan
+            .kept()
+            .map(|entry| entry.generation)
+            .collect::<Vec<_>>();
+        ensure(
+            kept == vec![Some(13), Some(12)],
+            format!("the two newest valid generations must be kept: {kept:?}"),
+        )?;
+        let reclaimable = plan
+            .reclaimable()
+            .map(|entry| (entry.generation, entry.reason))
+            .collect::<Vec<_>>();
+        ensure(
+            reclaimable
+                == vec![
+                    (
+                        Some(11),
+                        retention_gc::RetentionReason::BeyondRetentionLimit,
+                    ),
+                    (
+                        Some(10),
+                        retention_gc::RetentionReason::BeyondRetentionLimit,
+                    ),
+                    (None, retention_gc::RetentionReason::UnusableGeneration),
+                ],
+            format!("older and unusable generations are reclaimable: {reclaimable:?}"),
+        )?;
+        ensure(
+            plan.reclaimable_bytes() > 0,
+            "reclaimable bytes must count the reclaimable copies",
+        )?;
+
+        let outcome = retention_gc::apply(&index_dir, &plan);
+        ensure(
+            outcome.failures.is_empty(),
+            format!("reclamation must succeed: {:?}", outcome.failures),
+        )?;
+        ensure(
+            outcome.reclaimed.len() == 3,
+            "exactly the plan is reclaimed",
+        )?;
+        ensure(
+            read_marker(&root.join(retained_name(3)), "generation.txt")? == "13"
+                && read_marker(&root.join(retained_name(2)), "generation.txt")? == "12",
+            "kept generations must be byte-identical after reclamation",
+        )?;
+        for number in [0_u32, 1, 4] {
+            ensure(
+                !root.join(retained_name(number)).exists(),
+                format!("{} must be reclaimed", retained_name(number)),
+            )?;
+        }
+        ensure(
+            validated_index_generation(&index_dir).ok() == Some(20),
+            "the active generation must remain complete and untouched",
+        )?;
+        ensure(
+            root.join(".index.publish-100-000").is_dir()
+                && root.join(".index.rejected-100-000").is_dir(),
+            "staging and rejected quarantine are never reclaimed by retention",
+        )?;
+        let leftovers = std::fs::read_dir(&root)
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".reclaim-"))
+            .count();
+        ensure(
+            leftovers == 0,
+            "reclamation leaves no renamed-aside leftovers",
+        )?;
+
+        let again = retention_gc::plan(&index_dir, 2).map_err(|error| error.to_string())?;
+        ensure(
+            again.reclaimable().next().is_none() && again.kept().count() == 2,
+            "a second plan is idempotent and reclaims nothing",
+        )?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_gc_skips_an_invalid_newest_copy_and_keeps_valid_older_ones() -> TestResult {
+        let root = unique_test_dir("retention-gc-invalid-newest");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            9,
+            vec![test_indexable_doc("mem-active", "active generation")],
+        )?;
+        build_current_test_index(
+            &root.join(retained_name(0)),
+            5,
+            vec![test_indexable_doc("mem-5", "valid five")],
+        )?;
+        build_current_test_index(
+            &root.join(retained_name(1)),
+            6,
+            vec![test_indexable_doc("mem-6", "valid six")],
+        )?;
+        // Highest watermark, but its tiers are gone: neither search nor
+        // recovery could use it, so it must not displace a valid copy.
+        let damaged = root.join(retained_name(2));
+        build_current_test_index(
+            &damaged,
+            8,
+            vec![test_indexable_doc("mem-8", "damaged eight")],
+        )?;
+        for entry in std::fs::read_dir(&damaged).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.file_name() != INDEX_METADATA_FILE {
+                let path = entry.path();
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+                } else {
+                    std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+
+        let plan = retention_gc::plan(&index_dir, 2).map_err(|error| error.to_string())?;
+        let kept = plan
+            .kept()
+            .map(|entry| entry.generation)
+            .collect::<Vec<_>>();
+        ensure(
+            kept == vec![Some(6), Some(5)],
+            format!("valid older copies are kept over a damaged newer one: {kept:?}"),
+        )?;
+        ensure(
+            plan.reclaimable().any(|entry| {
+                entry.path == damaged
+                    && entry.reason == retention_gc::RetentionReason::UnusableGeneration
+            }),
+            "the damaged copy is reclaimable as unusable",
+        )?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// A store already near the old 1,000-name ceiling recovers: everything
+    /// unusable is reclaimed and the next allocation reuses the base name.
+    #[test]
+    fn retention_gc_reclaims_a_seeded_history_of_999_copies() -> TestResult {
+        let root = unique_test_dir("retention-gc-999");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            3,
+            vec![test_indexable_doc("mem-active", "active generation")],
+        )?;
+        for number in 0..999_u32 {
+            write_marker(&root.join(retained_name(number)), "old.bin", "old copy")?;
+        }
+        let plan = retention_gc::plan(&index_dir, 2).map_err(|error| error.to_string())?;
+        ensure(
+            plan.reclaimable().count() == 999,
+            "every unusable copy is reclaimable",
+        )?;
+        let outcome = retention_gc::apply(&index_dir, &plan);
+        ensure(
+            outcome.failures.is_empty() && outcome.reclaimed.len() == 999,
+            format!("all 999 copies are reclaimed: {:?}", outcome.failures),
+        )?;
+        let next = allocate_retained_index_dir(&index_dir).map_err(|error| error.to_string())?;
+        ensure(
+            next == root.join(retained_name(0)),
+            format!("allocation reuses the freed base name: {}", next.display()),
+        )?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_gc_finishes_an_interrupted_reclaim_and_ignores_symlinks() -> TestResult {
+        let root = unique_test_dir("retention-gc-leftover");
+        let index_dir = root.join("index");
+        build_current_test_index(
+            &index_dir,
+            2,
+            vec![test_indexable_doc("mem-active", "active generation")],
+        )?;
+        write_marker(
+            &root.join(".index.reclaim-7-000"),
+            "old.bin",
+            "half deleted",
+        )?;
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside");
+            write_marker(&outside, "keep.bin", "must survive")?;
+            std::os::unix::fs::symlink(&outside, root.join(retained_name(0)))
+                .map_err(|error| error.to_string())?;
+        }
+        let plan = retention_gc::plan(&index_dir, 2).map_err(|error| error.to_string())?;
+        let reasons = plan
+            .reclaimable()
+            .map(|entry| entry.reason)
+            .collect::<Vec<_>>();
+        ensure(
+            reasons == vec![retention_gc::RetentionReason::InterruptedReclaim],
+            format!("only the leftover is reclaimable, never a symlink: {reasons:?}"),
+        )?;
+        let outcome = retention_gc::apply(&index_dir, &plan);
+        ensure(outcome.failures.is_empty(), "leftover deletion succeeds")?;
+        ensure(
+            !root.join(".index.reclaim-7-000").exists(),
+            "the interrupted reclaim is finished",
+        )?;
+        #[cfg(unix)]
+        ensure(
+            read_marker(&root.join("outside"), "keep.bin")? == "must survive",
+            "a symlinked retained name is never followed or deleted",
+        )?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
     #[test]
     fn recover_interrupted_publish_restores_newest_retained_generation() -> TestResult {
         let root = unique_test_dir("recover-newest-retained");
@@ -22100,6 +22616,7 @@ mod tests {
                 },
             ],
             lock: IndexVacuumLockReport::none(),
+            retention: retention_gc::RetentionPlan::default(),
             elapsed_ms: 0.0,
         };
 

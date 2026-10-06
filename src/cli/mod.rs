@@ -6031,6 +6031,12 @@ pub struct IndexVacuumArgs {
     /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+
+    /// Reclaim retained index generations beyond the retention bound (the
+    /// preview's `retention.reclaimable`) under the publication lease, and
+    /// record an audit row. Without this flag the command only previews.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 /// Subcommands for `ee install`.
@@ -25079,6 +25085,44 @@ where
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
     };
+
+    if args.apply {
+        return match crate::core::index::apply_index_vacuum(&options) {
+            Ok(report) => match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &format!(
+                        "INDEX_VACUUM_APPLY|{}|{}|{}\n",
+                        report.reclaimed.len(),
+                        report.reclaimed_bytes(),
+                        report.failures.len()
+                    ),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "degraded": [],
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
+            },
+            Err(error) => {
+                let domain_error = DomainError::SearchIndex {
+                    message: error.to_string(),
+                    repair: Some("ee index status --workspace . --json".to_string()),
+                };
+                write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
+            }
+        };
+    }
 
     match get_index_vacuum_report(&options) {
         Ok(report) => match cli.renderer() {
