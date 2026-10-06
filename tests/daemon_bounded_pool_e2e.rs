@@ -29,9 +29,12 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::fs;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -48,6 +51,53 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     } else {
         Err(message.into())
     }
+}
+
+/// A daemon socket path that `start_server` will actually publish.
+///
+/// MEASURED on an RCH worker before this existed: `tempfile::tempdir()` put the socket under
+/// the project sync root and `start_server` refused outright --
+///
+///   Refusing to publish daemon socket under insecure parent
+///   /data/rch/eidetic_engine_cli/paired-HASH/.rch-tmp/.tmpEkg6gh: parent mode 0o775 grants
+///   group or other access; expected 0o700 or stricter
+///
+/// The tempdir itself is 0o700, but the ancestor walk (`src/daemon/server.rs` ~:1037) checks
+/// EVERY ancestor, and the worker's sync root is 0o775. The assembled path was ALSO 112 bytes
+/// against a usable 107 on Linux, so both limits were violated; only the mode was reported,
+/// because that check runs first. Fixing one without the other would have moved the error,
+/// not removed it.
+///
+/// `sun_path` is 108 bytes on Linux and 104 on macOS. The SMALLER value is used deliberately
+/// so this guard refuses a few bytes early on the Linux fleet and never wrongly admits a path
+/// on either platform. Do not "correct" it to 108. The 37-byte allowance is `start_server`'s
+/// atomic publication suffix -- it binds `socket_path` plus `format!(".tmp.{}",
+/// uuid.simple())` first, then renames (`src/daemon/server.rs:970`), so a check against the
+/// final path alone passes paths that are then refused.
+fn secure_socket_path(file_name: &str) -> Result<PathBuf, String> {
+    // Short on purpose: a nanosecond stamp would eat a fifth of the usable budget.
+    static NEXT_SOCKET_DIR: AtomicUsize = AtomicUsize::new(0);
+    let dir = Path::new("/tmp").join(format!(
+        "eebp-{}-{}",
+        std::process::id(),
+        NEXT_SOCKET_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).map_err(|error| format!("fixture: create socket dir: {error}"))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("fixture: secure socket dir: {error}"))?;
+    let path = dir.join(file_name);
+    const PUBLISH_SUFFIX_BYTES: usize = 37;
+    const SUN_PATH_BUDGET: usize = 104;
+    let length = path.as_os_str().len();
+    if length + PUBLISH_SUFFIX_BYTES >= SUN_PATH_BUDGET {
+        return Err(format!(
+            "fixture: socket path is {length} bytes and start_server appends \
+             {PUBLISH_SUFFIX_BYTES} for atomic publication, exceeding sun_path \
+             ({SUN_PATH_BUDGET}): {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// What a single probe connection observed from the daemon.
@@ -71,8 +121,7 @@ enum Outcome {
 
 #[test]
 fn daemon_accept_loop_caps_workers_and_rejects_excess_with_overloaded() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
-    let socket_path = temp.path().join("ee-daemon-overload.sock");
+    let socket_path = secure_socket_path("ee-daemon-overload.sock")?;
 
     // The default cap is exactly the value bd-jnyui pins (32); the
     // test deliberately does NOT set EE_DAEMON_MAX_INFLIGHT so it
