@@ -632,6 +632,40 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
     combine_test_results(result, teardown_daemon(&socket_path))
 }
 
+/// Positive control for `daemon_start_emits_daemon_start_failed_on_unbindable_socket`.
+///
+/// That test asserts a FAILURE, and an assertion of failure is satisfied by any cause --
+/// including causes the fixture did not create. It was in fact satisfied by the environment
+/// for as long as it used `tempfile::tempdir()` under a 0o775 worker sync root
+/// (bd-env-satisfied-failure-assertions-0y1e9), and deleting the lines that build its blocker
+/// would not have changed its verdict.
+///
+/// This test is the twin that makes the pair decidable. It uses the SAME secure 0o700 short
+/// root and the SAME `run_daemon_start` path, and differs in exactly one respect: no blocker
+/// file. If this passes and its twin fails, the blocker is the only thing separating them, so
+/// the twin's failure is attributable to its fixture. If BOTH fail, the root itself is
+/// refusing and the twin's red says nothing about blockers -- which is the state this file was
+/// actually in before b767d6d33's sibling fix, and which nothing would have revealed.
+#[test]
+fn daemon_start_succeeds_under_the_secure_root_without_a_blocker() -> TestResult {
+    let socket_path = secure_socket_path("ee-daemon-control.sock")?;
+    let result = (|| {
+        let envelope = run_daemon_start(&socket_path)?;
+        ensure(
+            envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
+            format!(
+                "the secure short root must permit a daemon start, or the unbindable twin's \
+                 failure proves nothing about its blocker; got {envelope}"
+            ),
+        )?;
+        ensure(
+            socket_path.exists(),
+            "a successful start must leave its socket published at the requested path",
+        )
+    })();
+    combine_test_results(result, teardown_daemon(&socket_path))
+}
+
 #[test]
 fn detached_daemon_process_identity_requires_exact_executable_and_socket() {
     let executable = Path::new("/owned build/ee");
