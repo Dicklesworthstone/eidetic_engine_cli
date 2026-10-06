@@ -69,10 +69,33 @@ jobs:
                        open_loops: crate::core::resume::OpenLoops {
                            revisit_decisions_total: 40,
           PATCH
-          git apply --check "$RUNNER_TEMP/resume-initializers.patch"
-          git apply "$RUNNER_TEMP/resume-initializers.patch"
-          git diff --check
-          test "$(git diff --numstat -- src/cli/mod.rs)" = $'3\t0\tsrc/cli/mod.rs'
+          # IDEMPOTENCY GUARD (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # This step applied its patch UNCONDITIONALLY, so it was guaranteed to fail once the
+          # delivery landed: `git apply` refuses a patch already applied. Red since 2026-09-28
+          # by construction.
+          #
+          # The delivery IS integrated: all three
+          # `task_frames: crate::core::resume::ResumeTaskFrames::default(),` lines are present
+          # in src/cli/mod.rs (the patch adds exactly three, and the count matches), and
+          # ResumeTaskFrames exists at src/core/resume_tasks.rs:73.
+          #
+          # The numstat assertion moves INSIDE the guard with the apply. `3 0 src/cli/mod.rs`
+          # is only true immediately after a fresh application; on the already-delivered path
+          # the diff is empty and that assertion would fail for the opposite reason.
+          #
+          # Only the apply needs guarding here. Unlike the sibling lanes, the publish step is
+          # ALREADY idempotent -- it compares the candidate blob sha against the file currently
+          # on main via the API and breaks without committing when they match -- so it needs no
+          # nothing-to-commit guard.
+          if ! grep -Fq 'task_frames: crate::core::resume::ResumeTaskFrames::default(),' src/cli/mod.rs; then
+            git apply --check "$RUNNER_TEMP/resume-initializers.patch"
+            git apply "$RUNNER_TEMP/resume-initializers.patch"
+            git diff --check
+            test "$(git diff --numstat -- src/cli/mod.rs)" = $'3\t0\tsrc/cli/mod.rs'
+          else
+            echo 'resume task-frame initializers already integrated; skipping delivery'
+          fi
       - name: Publish checked source directly to main
         id: publish
         env:
