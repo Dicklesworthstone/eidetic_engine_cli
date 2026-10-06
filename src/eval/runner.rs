@@ -1160,6 +1160,24 @@ fn validate_structural_edges(source: &SourceMemoryFile) -> Result<(), DomainErro
         validate_required_structural_field(&edge.source_id, "source_id")?;
         validate_required_structural_field(&edge.target_id, "target_id")?;
         validate_required_structural_field(&edge.relation, "relation")?;
+        // A NONEMPTY relation is not a VALID one. `validate_required_structural_field`
+        // rejects only an empty string, so until now any spelling passed fixture validation
+        // and was then rejected far downstream by the typed parser during seeding, with the
+        // family aborting at exit 3 before retrieval ran. Every query in such a family is
+        // silently unmeasured rather than failed. Checking membership here turns that into a
+        // validation error that names the file and the permitted spellings (bd-yr7i1).
+        if crate::db::MemoryLinkRelation::parse(&edge.relation).is_none() {
+            let supported = crate::db::MemoryLinkRelation::ALL
+                .iter()
+                .map(|relation| relation.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(fixture_validation_error(format!(
+                "structural edge `{}` -> `{}` declares relation `{}`, which is not a stored \
+                 memory-link relation; supported relations are: {supported}",
+                edge.source_id, edge.target_id, edge.relation
+            )));
+        }
 
         if edge.source_id == edge.target_id {
             return Err(fixture_validation_error(format!(
@@ -3345,6 +3363,66 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    /// bd-yr7i1: fixture validation accepted any NONEMPTY relation, so an unsupported
+    /// spelling reached seeding and aborted the family at exit 3 before retrieval ran --
+    /// leaving every query in that family unmeasured rather than failed.
+    ///
+    /// Both polarities, because a validator that rejects everything would satisfy the
+    /// negative arm alone: the stored spelling must still validate, and the rejection must
+    /// name the offending value and the permitted vocabulary.
+    #[test]
+    fn structural_edge_relation_must_name_a_stored_memory_link_relation() -> TestResult {
+        let fixture = |relation: &str| {
+            format!(
+                r#"{{"schema":"ee.eval.source_memory.v1","fixture_id":"fx.relation.probe",
+                    "memories":[
+                      {{"id":"mem_a","level":"semantic","kind":"fact","content":"a"}},
+                      {{"id":"mem_b","level":"semantic","kind":"fact","content":"b"}}],
+                    "structural_edges":[
+                      {{"source_id":"mem_a","target_id":"mem_b",
+                        "relation":"{relation}","weight":0.5}}]}}"#
+            )
+        };
+        let parse = |relation: &str| -> Result<SourceMemoryFile, String> {
+            serde_json::from_str(&fixture(relation))
+                .map_err(|error| format!("fixture `{relation}` did not deserialize: {error}"))
+        };
+
+        // POSITIVE CONTROL. Every spelling the stored model accepts must validate here, or
+        // this check would red the very fixtures bd-mv2c4 just corrected.
+        for relation in crate::db::MemoryLinkRelation::ALL {
+            let source = parse(relation.as_str())?;
+            validate_structural_edges(&source).map_err(|error| {
+                format!(
+                    "stored relation `{}` must validate, got {error:?}",
+                    relation.as_str()
+                )
+            })?;
+        }
+
+        // NEGATIVE. `cites` is the exact spelling bd-mv2c4 removed from the structural_recall
+        // fixture after it aborted seeding, so it is the witness this gap was found with.
+        for unsupported in ["cites", "incident_supports", "SUPPORTS", "supports "] {
+            let source = parse(unsupported)?;
+            let error = validate_structural_edges(&source)
+                .err()
+                .ok_or_else(|| format!("relation `{unsupported}` must be rejected"))?;
+            let rendered = format!("{error:?}");
+            if !rendered.contains(unsupported) {
+                return Err(format!(
+                    "the rejection must quote the offending relation `{unsupported}`; got {rendered}"
+                ));
+            }
+            if !rendered.contains("supports") {
+                return Err(format!(
+                    "the rejection must enumerate the permitted relations so a fixture author \
+                     can fix it without reading the schema; got {rendered}"
+                ));
+            }
+        }
+        Ok(())
+    }
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {

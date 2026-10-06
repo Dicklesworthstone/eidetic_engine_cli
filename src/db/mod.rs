@@ -30494,6 +30494,27 @@ pub enum MemoryLinkRelation {
 }
 
 impl MemoryLinkRelation {
+    /// Every stored relation, in declaration order.
+    ///
+    /// This is the vocabulary `V007_MEMORY_LINKS`'s SQL allowlist enforces, so callers that
+    /// must REPORT the permitted spellings (fixture validation, operator-facing errors) can
+    /// enumerate it instead of restating it and drifting. Correctness of any CHECK still
+    /// comes from [`Self::parse`]; this constant only exists so a rejection can say what
+    /// would have been accepted.
+    ///
+    /// A new variant must be added here. `all_variants_round_trip_through_parse` fails if an
+    /// entry does not round-trip, and `as_str` is an exhaustive match, so a variant added
+    /// without a spelling cannot compile.
+    pub const ALL: [Self; 7] = [
+        Self::Supports,
+        Self::Contradicts,
+        Self::DerivedFrom,
+        Self::Supersedes,
+        Self::Related,
+        Self::CoTag,
+        Self::CoMention,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -57009,6 +57030,32 @@ UPDATE memories
             "mem_00000000000000000000000012",
             "Graph destination memory",
         )
+    }
+
+    /// `MemoryLinkRelation::ALL` is hand-listed, so it can drift from the enum. `as_str` is an
+    /// exhaustive match and cannot, which makes the round-trip the check: every entry must map
+    /// to a spelling the parser accepts and back to the same variant, and no entry may repeat.
+    ///
+    /// This matters because callers enumerate `ALL` to tell an operator which spellings are
+    /// permitted (eval fixture validation does, for bd-yr7i1). A stale or duplicated entry
+    /// would make that message wrong in the one situation where it is read.
+    #[test]
+    fn all_variants_round_trip_through_parse() {
+        let mut seen = std::collections::HashSet::new();
+        for relation in super::MemoryLinkRelation::ALL {
+            let spelling = relation.as_str();
+            assert_eq!(
+                super::MemoryLinkRelation::parse(spelling),
+                Some(relation),
+                "`{spelling}` must parse back to the variant that produced it"
+            );
+            assert!(
+                seen.insert(spelling),
+                "`{spelling}` appears twice in MemoryLinkRelation::ALL"
+            );
+        }
+        // Negative control: the constant must not be a parser that accepts anything.
+        assert_eq!(super::MemoryLinkRelation::parse("cites"), None);
     }
 
     fn memory_link_input(relation: super::MemoryLinkRelation) -> super::CreateMemoryLinkInput {
