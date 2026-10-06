@@ -20466,8 +20466,30 @@ mod tests {
         std::os::unix::fs::symlink(&outside, linked.join("lexical/escape"))
             .map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&socket_dir).map_err(|error| error.to_string())?;
-        let _listener = std::os::unix::net::UnixListener::bind(socket_dir.join("backend.sock"))
-            .map_err(|error| error.to_string())?;
+        // A FIFO, not a Unix socket (bd-pichh). The socket was incidental here: the
+        // subject is that sync_index_generation refuses a non-regular entry, and it
+        // refuses anything that is neither a directory nor a regular file. But a
+        // socket PATH is bounded by sockaddr_un.sun_path, about 104 bytes, and this
+        // fixture CANONICALIZES a tempdir and then nests `socket/backend.sock`, so
+        // on any long-TMPDIR host -- every RCH worker -- `bind` failed with "path
+        // must be shorter than SUN_LEN" and the `?` aborted before the two `ensure`
+        // checks below ever ran. mkfifo has no path bound.
+        //
+        // std cannot create a FIFO without `unsafe`, which this crate forbids, so
+        // this shells out to POSIX mkfifo. The error text is deliberately distinct
+        // from the assertions: a fixture that cannot be built must never look like
+        // a publication path that failed to refuse.
+        let special = socket_dir.join("backend.special");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&special)
+            .status()
+            .map_err(|error| format!("fixture: mkfifo could not run: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "fixture: mkfifo refused to create {}: {status}",
+                special.display()
+            ));
+        }
         for tree in [&linked, &socket_dir] {
             ensure(
                 sync_index_generation(tree, || Ok(())).is_err(),
