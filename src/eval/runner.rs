@@ -1009,6 +1009,7 @@ pub fn validate_fixture_scenario(
     }
 
     validate_structural_edges(source)?;
+    validate_source_memory_trust_classes(source)?;
     validate_pack_quality_expectations(scenario, source)?;
     validate_ask_quality_expectations(scenario, source)?;
     validate_structural_recall_expectations(scenario, source)?;
@@ -1213,6 +1214,50 @@ fn validate_structural_edges(source: &SourceMemoryFile) -> Result<(), DomainErro
         }
     }
 
+    Ok(())
+}
+
+/// Reject a declared `trust_class` the memories table cannot store.
+///
+/// Same defect class as the structural-edge relation check above, on a different field
+/// (bd-eval-trust-class-vocabulary-gap-e9zcn). bd-mv2c4 hit it directly: once relations were
+/// fixed, seeding went on to report "trust_class `agent_observed` is not a stored TrustClass".
+/// Unvalidated, such a value clears fixture validation and aborts seeding at exit 3, leaving
+/// every query in the family unmeasured rather than failed.
+///
+/// AN EMPTY VALUE IS LEGAL AND MUST STAY SO. `trust_class` is `#[serde(default)]` on
+/// `SourceMemory`, so a fixture that omits it arrives here as `""` and the seeder supplies a
+/// default. Validating `""` would red every fixture that omits the field, which is most of
+/// them.
+fn validate_source_memory_trust_classes(source: &SourceMemoryFile) -> Result<(), DomainError> {
+    let check = |memory: &SourceMemory| -> Result<(), DomainError> {
+        if memory.trust_class.trim().is_empty() {
+            return Ok(());
+        }
+        if memory
+            .trust_class
+            .parse::<crate::models::TrustClass>()
+            .is_err()
+        {
+            let supported = crate::models::TrustClass::ALL
+                .iter()
+                .map(|trust_class| trust_class.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(fixture_validation_error(format!(
+                "source memory `{}` declares trust_class `{}`, which is not a stored \
+                 TrustClass; supported trust classes are: {supported}",
+                memory.id, memory.trust_class
+            )));
+        }
+        Ok(())
+    };
+    for memory in &source.memories {
+        check(memory)?;
+    }
+    if let Some(seed_memory) = &source.seed_memory {
+        check(seed_memory)?;
+    }
     Ok(())
 }
 
@@ -3363,6 +3408,71 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    /// bd-eval-trust-class-vocabulary-gap-e9zcn: the twin of the relation check, on a field
+    /// that is `#[serde(default)]`.
+    ///
+    /// Three arms, because this check has two ways to be wrong and only one of them is
+    /// "accepts a bad value". Rejecting an OMITTED trust_class would red most fixtures in the
+    /// tree, and `FromStr` rejects `""`, so the empty case needs its own arm rather than
+    /// trusting the parser.
+    #[test]
+    fn source_memory_trust_class_must_name_a_stored_trust_class() -> TestResult {
+        let fixture = |trust_class_field: &str| {
+            format!(
+                r#"{{"schema":"ee.eval.source_memory.v1","fixture_id":"fx.trust.probe",
+                    "memories":[{{"id":"mem_a","level":"semantic","kind":"fact",
+                                 "content":"a"{trust_class_field}}}]}}"#
+            )
+        };
+        let parse = |field: &str| -> Result<SourceMemoryFile, String> {
+            serde_json::from_str(&fixture(field))
+                .map_err(|error| format!("fixture `{field}` did not deserialize: {error}"))
+        };
+
+        // ARM 1, POSITIVE CONTROL: every stored spelling validates.
+        for trust_class in crate::models::TrustClass::ALL {
+            let source = parse(&format!(r#","trust_class":"{}""#, trust_class.as_str()))?;
+            validate_source_memory_trust_classes(&source).map_err(|error| {
+                format!(
+                    "stored trust_class `{}` must validate, got {error:?}",
+                    trust_class.as_str()
+                )
+            })?;
+        }
+
+        // ARM 2, THE OMITTED CASE. serde(default) makes this `""`, which `FromStr` REJECTS,
+        // so without the explicit empty check this arm fails and so does most of tests/fixtures.
+        for omitted in ["", r#","trust_class":"""#] {
+            let source = parse(omitted)?;
+            validate_source_memory_trust_classes(&source).map_err(|error| {
+                format!("an omitted or empty trust_class must stay legal, got {error:?}")
+            })?;
+        }
+
+        // ARM 3, NEGATIVE: the two spellings bd-mv2c4 actually hit, plus the three live in
+        // tests/fixtures/eval/metamorphic_evaluation/source_memory.json.
+        for unsupported in [
+            "agent_observed",
+            "agent_inferred",
+            "verified",
+            "untrusted",
+            "observed",
+        ] {
+            let source = parse(&format!(r#","trust_class":"{unsupported}""#))?;
+            let error = validate_source_memory_trust_classes(&source)
+                .err()
+                .ok_or_else(|| format!("trust_class `{unsupported}` must be rejected"))?;
+            let rendered = format!("{error:?}");
+            if !rendered.contains(unsupported) || !rendered.contains("human_explicit") {
+                return Err(format!(
+                    "the rejection must quote `{unsupported}` AND enumerate the permitted \
+                     trust classes; got {rendered}"
+                ));
+            }
+        }
+        Ok(())
+    }
 
     /// bd-yr7i1: fixture validation accepted any NONEMPTY relation, so an unsupported
     /// spelling reached seeding and aborted the family at exit 3 before retrieval ran --

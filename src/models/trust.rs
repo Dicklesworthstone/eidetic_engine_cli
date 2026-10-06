@@ -74,6 +74,27 @@ pub enum TrustClass {
 }
 
 impl TrustClass {
+    /// Every stored trust class, in declaration order.
+    ///
+    /// This is the vocabulary the memories table's CHECK constraint enforces, so callers that
+    /// must REPORT the permitted spellings (eval fixture validation does, for
+    /// bd-eval-trust-class-vocabulary-gap-e9zcn) can enumerate it instead of restating it and
+    /// drifting. Correctness of any check still comes from the `FromStr` impl, which also
+    /// NORMALIZES its input; this constant only exists so a rejection can say what would have
+    /// been accepted.
+    ///
+    /// A new variant must be added here. `all_trust_classes_round_trip_through_from_str` fails
+    /// if an entry does not round-trip, and `as_str` is an exhaustive match, so a variant added
+    /// without a spelling cannot compile.
+    pub const ALL: [Self; 6] = [
+        Self::HumanExplicit,
+        Self::PeerHumanAttested,
+        Self::AgentValidated,
+        Self::AgentAssertion,
+        Self::CassEvidence,
+        Self::LegacyImport,
+    ];
+
     /// Stable lowercase wire form.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -660,6 +681,35 @@ mod tests {
 
     use crate::models::memory::MemoryLevel;
     use crate::models::rule::RuleMaturity;
+
+    /// `TrustClass::ALL` is hand-listed and can drift from the enum; `as_str` is an exhaustive
+    /// match and cannot. The round-trip is therefore the check, and it matters because callers
+    /// enumerate `ALL` to tell a fixture author which spellings are permitted
+    /// (bd-eval-trust-class-vocabulary-gap-e9zcn). A stale or duplicated entry would make that
+    /// message wrong in the one situation where it is read.
+    #[test]
+    fn all_trust_classes_round_trip_through_from_str() {
+        let mut seen = std::collections::HashSet::new();
+        for trust_class in super::TrustClass::ALL {
+            let spelling = trust_class.as_str();
+            assert_eq!(
+                super::TrustClass::from_str(spelling),
+                Ok(trust_class),
+                "`{spelling}` must parse back to the variant that produced it"
+            );
+            assert!(
+                seen.insert(spelling),
+                "`{spelling}` appears twice in TrustClass::ALL"
+            );
+        }
+        // Negative controls: the spellings fixtures actually carry that storage rejects.
+        for rejected in ["agent_observed", "verified", "untrusted", "observed", ""] {
+            assert!(
+                super::TrustClass::from_str(rejected).is_err(),
+                "`{rejected}` must not parse as a stored TrustClass"
+            );
+        }
+    }
 
     use super::{
         AttemptFamilyMultiplicity, AttemptFamilyPromotionPosture, LocalSigningKeyPosture,
