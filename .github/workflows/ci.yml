@@ -467,6 +467,32 @@ jobs:
             # not. Keep these arms and scripts/check-shard-coverage.py's letter
             # map in step: that script fails when a core submodule's first letter
             # is claimed by no arm or by two.
+            #
+            # READ THIS BEFORE RE-BALANCING THESE ARMS. The split is balanced by
+            # COUNT and that is the wrong objective, because test TIME here is not
+            # predicted by count. Measured on RCH workers, same command shape, same
+            # default --test-threads, so the ratio is apples to apples:
+            #
+            #     core::effect                          37 tests    26.71s   0.72 s/test
+            #     core::ask::corpus::memory_admission   16 tests  1794.68s  112.2 s/test
+            #                                                              ----------
+            #                                                              155x
+            #
+            # Matched pair on purpose: core::effect holds 37 tests and ALL of
+            # core::ask holds 35. At the cheap rate the whole core:: population is
+            # roughly 72 min; the admission subtree ALONE is roughly 65 min. So one
+            # subtree costs about as much as everything else combined, and
+            # `core::ask::` sits inside lib-core-a, which inherits all of it.
+            #
+            # This is why the original single `core::` shard completed 204 of 5976
+            # tests in 7200s: its last-reached test was in that module. Dividing the
+            # cheap remainder into more letter slices cannot fix that. The fix is to
+            # isolate the expensive subtree (own lane / own budget) or to stop paying
+            # admission per test -- see bd-reality-core-convergence-1azkt.47 and .64.
+            #
+            # CAVEATS: both arms used DEFAULT --test-threads while these shards force
+            # 1, so the absolute minutes understate a serial run; the 155x ratio is
+            # the robust number. Two modules are not a survey.
             lib-core-a)
               run_test "cargo test --lib core::a core::i" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::a core::i
               ;;
