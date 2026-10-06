@@ -97,8 +97,19 @@ jobs:
           cargo test --locked --lib core::ask:: -- --test-threads=2 > "$RUNNER_TEMP/ask-path-engine.log" 2>&1 || status=$?
           tail -n 260 "$RUNNER_TEMP/ask-path-engine.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-engine.log" || status=1
-          test "$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -eq 6 || status=1
-          test "$(grep -c '^test core::ask::corpus::evidence_tests::.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -eq 10 || status=1
+          # FLOORS, NOT EXACT COUNTS (bd-qz6dh's conclusion, applied here).
+          #
+          # These were `-eq 6` and `-eq 10`. The second one RED on 2026-10-06 while every test
+          # passed: `test result: ok. 415 passed; 0 failed`, and the evidence_tests family had
+          # grown from 10 to 12. So the step failed because someone ADDED two passing tests.
+          #
+          # bd-qz6dh retired exactly this shape with exactly this reasoning -- "an assertion
+          # that reds when someone ADDS a passing test is a tripwire pointed the wrong way".
+          # A floor keeps the protection that matters (the family executed and did not shrink
+          # below its known coverage) and drops the part that punishes growth. Removal below
+          # the floor is still caught.
+          test "$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -ge 6 || status=1
+          test "$(grep -c '^test core::ask::corpus::evidence_tests::.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -ge 10 || status=1
           exit "$status"
       - name: Execute public path, lifecycle, scope, privacy and read-only contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
@@ -107,7 +118,11 @@ jobs:
           cargo test --locked --test contracts ask_lifecycle -- --test-threads=2 > "$RUNNER_TEMP/ask-path-cli.log" 2>&1 || status=$?
           tail -n 200 "$RUNNER_TEMP/ask-path-cli.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-cli.log" || status=1
-          test "$(grep -c '^test .*ask_lifecycle::native::public_path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-cli.log")" -eq 3 || status=1
+          # Floor, not an exact count -- same reasoning as the two in the step above. This one
+          # happens to match today (3), so it is latent rather than red; converting it now
+          # means the next person to add a public path-rules test does not have to diagnose a
+          # green suite reported as a failure.
+          test "$(grep -c '^test .*ask_lifecycle::native::public_path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-cli.log")" -ge 3 || status=1
           exit "$status"
       - name: Commit compiled and tested path-scoped answers directly to main
         run: |
