@@ -87,10 +87,11 @@ pub(super) fn append_evidence(
             {
                 return Ok(());
             }
-            let Some(session) = connection.get_session(&span.session_id)? else {
-                return Ok(());
-            };
-            if !span.is_direct_pack_admitted_for_session(workspace_id, &session) {
+            // The visitor already joined and search-admitted this exact row
+            // and session in the caller's snapshot. Direct pack admission adds
+            // only the explicit pack-eligibility check to that contract. Do not
+            // reload the session or repeat source hashing/screening per span.
+            if span.pack_eligibility != "admitted" {
                 return Ok(());
             }
             let Some(provenance_uri) = public_provenance(&span.canonical_provenance_uri()) else {
@@ -458,3 +459,7 @@ mod provenance_tests {
         assert!(public_text("Cache hit rate is 75% after the release."));
     }
 }
+
+#[cfg(test)]
+#[path = "ask_joined_evidence_read_tests.rs"]
+mod joined_evidence_read_tests;
