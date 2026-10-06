@@ -3221,6 +3221,32 @@ async fn run_context_pack_with_performance_inner(
             outcome = %outcome.data_json(),
             "recorded index rebuild request for lexical source retrieval"
         );
+        // bd-auto-index-rebuild-on-fallback-x35vi WORK item 1, "downgrade the
+        // degradation text when enqueued". The text is the MESSAGE; `repair`
+        // stays the bare runnable command, because repair strings are consumed
+        // as commands (compared by exact equality in src/mesh/team.rs, and
+        // asserted placeholder-free in src/mesh/foreground_cli.rs), so prose
+        // there would break that contract and any command extraction.
+        //
+        // `leaves_request_pending` rather than `was_recorded`: during the
+        // cooldown window nothing is written yet a request IS pending, and that
+        // window is exactly the repeated-pack case the field reports describe.
+        //
+        // The sentence does not claim the rebuild HAS run, and names the bound,
+        // because a corpus over the interactive read bound is not repaired by a
+        // later search (src/core/search.rs skips it) and no steward job is
+        // enqueued yet. Appended, so the substrings existing fixtures pin
+        // survive. Code and severity are untouched: `degraded[]` must still say
+        // THIS response was lexical-only.
+        if outcome.leaves_request_pending()
+            && let Some(entry) = degraded
+                .iter_mut()
+                .find(|entry| entry.code == degraded_code)
+        {
+            entry.message.push_str(
+                " Repair scheduled: an index rebuild is queued, and a later search performs it when the corpus is within the interactive read bound.",
+            );
+        }
     }
 
     // Apply metadata query filters to search results. Tag filters are applied

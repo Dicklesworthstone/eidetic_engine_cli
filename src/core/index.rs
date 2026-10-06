@@ -10169,6 +10169,26 @@ impl IndexRebuildRequestOutcome {
         matches!(self, Self::Recorded { .. })
     }
 
+    /// Whether a pending request is on file after this call, whether or not
+    /// THIS call wrote it.
+    ///
+    /// Distinct from [`Self::was_recorded`], and the distinction is the whole
+    /// point: a `Cooldown` skip is only ever returned when the existing marker
+    /// `is_pending()`, so a repair IS already queued. Reporting progress from
+    /// `was_recorded` alone would call the request absent during the cooldown
+    /// window — precisely the repeated-pack case where the field reports
+    /// complained the degradation never changed.
+    ///
+    /// `Unavailable` is excluded: nothing could be written and nothing was
+    /// already there to find, so no request exists.
+    #[must_use]
+    pub const fn leaves_request_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::Recorded { .. } | Self::Skipped(IndexRebuildRequestSkip::Cooldown { .. })
+        )
+    }
+
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         match self {
@@ -12278,6 +12298,51 @@ mod tests {
             .ok_or_else(|| "request should survive a suppressed repeat".to_owned())?;
         assert_eq!(stored.requested_at, "2026-09-16T04:00:00Z");
         assert_eq!(stored.request_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn cooldown_skip_still_leaves_a_request_pending_x35vi() -> TestResult {
+        // The distinction that makes the pack-side report correct. During the
+        // cooldown window NOTHING is written, so `was_recorded()` is false --
+        // but a pending request is on file, so the pack must still say a repair
+        // is queued. Keying the report on `was_recorded` would make it inert for
+        // every pack after the first, which is the repeated-pack case the field
+        // reports are about.
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let first = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert!(first.was_recorded());
+        assert!(first.leaves_request_pending());
+
+        let repeat = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:05:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        // THE POINT: the two predicates disagree here, and only one of them
+        // describes what an agent reading degraded[] needs to know.
+        assert!(!repeat.was_recorded());
+        assert!(repeat.leaves_request_pending());
+        assert!(pending_index_rebuild_request(workspace.path()).is_some());
+
+        // NEGATIVE CONTROL: an unavailable marker means no request exists, so
+        // the pack must NOT claim a repair is queued. Without this arm the
+        // predicate could be `true` unconditionally and both arms above would
+        // still pass.
+        let unavailable =
+            IndexRebuildRequestOutcome::Skipped(IndexRebuildRequestSkip::Unavailable {
+                reason: "planted".to_owned(),
+            });
+        assert!(!unavailable.was_recorded());
+        assert!(!unavailable.leaves_request_pending());
         Ok(())
     }
 
