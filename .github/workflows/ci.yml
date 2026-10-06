@@ -473,22 +473,31 @@ jobs:
             # predicted by count. Measured on RCH workers, same command shape, same
             # default --test-threads, so the ratio is apples to apples:
             #
-            #     core::effect                          37 tests    26.71s   0.72 s/test
-            #     core::ask::corpus::memory_admission   16 tests  1794.68s  112.2 s/test
-            #                                                              ----------
-            #                                                              155x
+            #     core::effect                          37 tests    26.71s   0.72 s/test    1x
+            #     core::search::unpublished_tests       12 tests   357.23s   29.8 s/test   41x
+            #     core::ask::corpus::memory_admission   16 tests  1794.68s  112.2 s/test  155x
             #
-            # Matched pair on purpose: core::effect holds 37 tests and ALL of
-            # core::ask holds 35. At the cheap rate the whole core:: population is
-            # roughly 72 min; the admission subtree ALONE is roughly 65 min. So one
-            # subtree costs about as much as everything else combined, and
-            # `core::ask::` sits inside lib-core-a, which inherits all of it.
+            # Matched pair on purpose for the extremes: core::effect holds 37 tests
+            # and ALL of core::ask holds 35, so this is not a big/small artifact.
+            #
+            # TWO SHARDS ARE POISONED, not one. Static counts: search 238, index 233,
+            # ask 35. Applying the measured rates:
+            #
+            #     core::search  238 x 29.8s  = ~118 min  -> lib-core-s
+            #     core::ask      35 x 112.2s =  ~65 min  -> lib-core-a
+            #     core::index   233 x ???    = UNMEASURED -> lib-core-a
+            #
+            # core::search ALONE exceeds the 90-minute budget. core::index is the most
+            # valuable next measurement: unmeasured, second-largest, and in the same
+            # already-poisoned shard.
             #
             # This is why the original single `core::` shard completed 204 of 5976
-            # tests in 7200s: its last-reached test was in that module. Dividing the
-            # cheap remainder into more letter slices cannot fix that. The fix is to
-            # isolate the expensive subtree (own lane / own budget) or to stop paying
-            # admission per test -- see bd-reality-core-convergence-1azkt.47 and .64.
+            # tests in 7200s: its last-reached test was in core::ask::corpus. And
+            # RESHARDING CANNOT FIX IT -- no partition of the ~500 expensive tests
+            # fits 90 minutes. The leverage is the shared root cause (store-touching
+            # tests paying admission per test); see bd-reality-core-convergence-1azkt.47
+            # and .64. Until that ships, `core::` cannot complete in 90 min at any
+            # shard count.
             #
             # CAVEATS: both arms used DEFAULT --test-threads while these shards force
             # 1, so the absolute minutes understate a serial run; the 155x ratio is
