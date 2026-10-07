@@ -77,17 +77,65 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # bd-lagsa + bd-aav0v. Zero successes in the last 30 runs. One of the three counts
+          # is stale and the other two are not, so they get different treatments.
+          #
+          #   core::resume::snapshot::tests   pinned 10  actual 10   CORRECT
+          #   core::resume::tests             pinned 22  actual 25   STALE, and resume-coherence
+          #                                                          pins the same wrong 22
+          #   same_instant_...fractionless_head  pinned 1            one named test
+          #
+          # src/core/resume.rs holds 25 `#[test]`, all inside its `mod tests`, so the second
+          # filter matches 25 and an exact 22 is unsatisfiable. The counter was CALIBRATED
+          # first: it reproduces 17, 7 and 11 for the three git_capture filters whose values
+          # are known from git-capture-offline-20260919's passing exact pins. It is NOT
+          # trusted for subtree filters ending in `::`, which it undercounts by not recursing.
+          #
+          # The two module filters become FLOORS OF THEIR OWN REVIEWED VALUES. The count only
+          # proves each floor is satisfiable (10 <= 10, 22 <= 25); it does not become the pin,
+          # which would drift the same way.
+          #
+          # The recency arm stays EXACT because it names ONE test, where a floor of 1 is
+          # strictly weaker: it would silently accept a different test matching after a
+          # rename. That distinction is the whole point of bd-lagsa's rule.
+          #
+          # The assertions were BARE commands inside a function called bare under
+          # `set -euo pipefail`, aborting with no message. This step COMMITS AND PUSHES TO
+          # MAIN below, so the abort is the interlock and is preserved exactly by `return 1`;
+          # it only names its cause now. `prove` is also re-run inside the push-retry loop,
+          # so the attribution prints there too.
           run_group() {
-            local name="$1" filter="$2" count="$3" status=0
+            local name="$1" filter="$2" expected="$3" mode="${4:-floor}" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/resume-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/resume-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/resume-$name.log"
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/resume-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count). Publication is blocked here, by design."
+              return 1
+            fi
+            if test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing. Publication is blocked here, by design."
+              return 1
+            fi
+            if test "$mode" = exact; then
+              if test "$ran" != "$expected"; then
+                echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $expected passing, counted $ran. This filter names ONE test, so any other count means it was renamed, removed, or the filter now matches something else. Publication is blocked here, by design."
+                return 1
+              fi
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- exactly $ran passed"
+              return 0
+            fi
+            if test "$ran" -lt "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- counted $ran passing, required floor $expected. Publication is blocked here, by design."
+              return 1
+            fi
+            echo "ATTRIBUTION: arm '$name' ($filter) ok -- $ran passed, floor $expected"
+            return 0
           }
           prove() {
             run_group snapshot core::resume::snapshot::tests 10
             run_group existing core::resume::tests 22
-            run_group recency same_instant_fractional_created_at_does_not_outrank_fractionless_head 1
+            run_group recency same_instant_fractional_created_at_does_not_outrank_fractionless_head 1 exact
           }
           prove
           paths=(src/core/resume.rs src/core/resume_snapshot.rs src/core/resume_snapshot_tests.rs src/core/context.rs src/db/mod.rs)

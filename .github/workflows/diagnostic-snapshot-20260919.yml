@@ -141,20 +141,83 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-lagsa + bd-aav0v. Four arms shared one flag, and one of the four counts is
+          # stale. `core::search::diagnostic_snapshot::tests` was pinned to exactly 10;
+          # src/core/search_diagnostic_snapshot.rs holds 15 `#[test]`, all inside its `mod
+          # tests` at :179, with no `tests_*` sibling module, so the filter matches 15.
+          # global-authority-20260919 independently pins the same module at 14, which is also
+          # wrong -- and wrong in a PROVABLE DIRECTION even without a count, because its
+          # filter carries a trailing `::` and so matches a SUBSET of this one; a subset
+          # cannot be larger. 10 < 14 was impossible on its face.
+          #
+          # The counter was CALIBRATED before being trusted: it reproduces 17, 7 and 11 for
+          # the three git_capture filters whose values are known from
+          # git-capture-offline-20260919's passing exact pins. It is NOT trusted for subtree
+          # filters ending in `::`, which it undercounts by not recursing into submodules.
+          #
+          # That pin becomes a FLOOR OF ITS REVIEWED VALUE, not of the counted number: the
+          # count's job is to prove 10 <= 15 so the floor is satisfiable, not to become a new
+          # exact pin that drifts the same way.
+          #
+          # `recovery` is LEFT EXACT and is not a bd-lagsa defect: its filter resolves through
+          # #[path] to src/core/index_snapshot_recovery_tests.rs, which holds exactly 8. That
+          # is derivable from source unambiguously, which is when an exact pin is the right
+          # shape. The other two arms were already floors expressed as a regex; they are now
+          # numeric so the observed count can be printed.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" expected="$3" mode="${4:-floor}" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/rules-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/rules-$name.log"
-            if test "$status" -ne 0 || ! grep -Eq "test result: ok\. $expected passed; 0 failed;" "$RUNNER_TEMP/rules-$name.log"; then failed=1; fi
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/rules-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+              failed=1
+            elif test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing"
+              failed=1
+            elif test "$mode" = exact && test "$ran" != "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $expected passing, counted $ran"
+              failed=1
+            elif test "$mode" = floor && test "$ran" -lt "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- counted $ran passing, required floor $expected"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- $ran passed ($mode $expected)"
+            fi
+            return 0
           }
           run_group diagnostic 'core::search::diagnostic_snapshot::tests' 10
-          run_group existing 'core::search::tests::diag_search_' '[1-9][0-9]*'
-          run_group evidence 'core::search::tests::live_evidence_admission_filters' '[1-9][0-9]*'
-          run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8
+          run_group existing 'core::search::tests::diag_search_' 1
+          run_group evidence 'core::search::tests::live_evidence_admission_filters' 1
+          run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8 exact
+          # bd-aav0v: a FIFTH pair of arms in this step, inline rather than through run_group,
+          # which is why it was easy to miss: a tool exit and an exact count, both folded into
+          # the same `failed`.
+          #
+          # The exact 4 is CORRECT and stays. The filter resolves through
+          # tests/concurrent_search_lexical_arm_e2e.rs:25 (`#[path =
+          # "snapshot_index_recovery_e2e.rs"]`) to tests/snapshot_index_recovery_e2e.rs, which
+          # holds exactly 4 `#[test]`. The module is gated `#[cfg(all(unix, feature =
+          # "lexical-bm25"))]` and `lexical-bm25` is in Cargo.toml's DEFAULT features, so it
+          # compiles under this plain `cargo test` on ubuntu. Worth recording, because a
+          # feature-gated module that silently stops compiling would make this arm count 0
+          # rather than fail -- which the "reported nothing" message below now distinguishes.
           status=0
           cargo test --locked --test integration_a_d concurrent_search_lexical_arm_e2e::snapshot_index_recovery -- --test-threads=1 > "$RUNNER_TEMP/rules-pack-recovery.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/rules-pack-recovery.log"
-          if test "$status" -ne 0 || ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/rules-pack-recovery.log"; then failed=1; fi
+          pack_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/rules-pack-recovery.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'pack-recovery e2e' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            failed=1
+          elif test -z "$pack_ran"; then
+            echo "ATTRIBUTION: arm 'pack-recovery e2e' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing, which is what a feature-gated module that stopped compiling looks like"
+            failed=1
+          elif test "$pack_ran" != 4; then
+            echo "ATTRIBUTION: arm 'pack-recovery e2e' FAILED -- expected exactly 4 passing, counted $pack_ran; tests/snapshot_index_recovery_e2e.rs holds 4 #[test], so check whether one was added, removed or feature-gated out"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'pack-recovery e2e' ok -- exactly 4 passed"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
