@@ -45,7 +45,15 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/history-source-sha.log"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # bd-aav0v: a BARE `test` under errexit, so a mismatch aborted with no message. The
+          # failure it guards against is specific -- the checkout is not the commit that
+          # triggered the run, so every verdict below describes a tree nobody asked about.
+          # Exit code and condition unchanged.
+          checked_out_sha=$(git rev-parse HEAD)
+          if test "$checked_out_sha" != "$GITHUB_SHA"; then
+            echo "ATTRIBUTION: provenance guard STOPPED this lane -- the checkout is $checked_out_sha but the run was triggered for $GITHUB_SHA. Nothing below this point would describe the intended commit, so the lane refuses rather than publish a verdict about the wrong tree."
+            exit 1
+          fi
           git diff --exit-code
           tar -czf "$RUNNER_TEMP/history-source.tar.gz" src/core/backup.rs src/core/backup_recovery.rs src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs src/core/backup_cass_recovery.rs
           rustc --version --verbose > "$RUNNER_TEMP/history-toolchain.log"

@@ -50,7 +50,15 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/focus-cass"
           git rev-parse HEAD | tee "$RUNNER_TEMP/focus-cass/source.log"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # bd-aav0v: a BARE `test` under errexit, so a mismatch aborted with no message. The
+          # failure it guards against is specific -- the checkout is not the commit that
+          # triggered the run, so every verdict below describes a tree nobody asked about.
+          # Exit code and condition unchanged.
+          checked_out_sha=$(git rev-parse HEAD)
+          if test "$checked_out_sha" != "$GITHUB_SHA"; then
+            echo "ATTRIBUTION: provenance guard STOPPED this lane -- the checkout is $checked_out_sha but the run was triggered for $GITHUB_SHA. Nothing below this point would describe the intended commit, so the lane refuses rather than publish a verdict about the wrong tree."
+            exit 1
+          fi
           cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/focus-cass/check.log"
       - name: Exercise native CASS, existing ranking and public CLI contracts
         if: ${{ !cancelled() }}

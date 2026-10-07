@@ -47,7 +47,15 @@ jobs:
             rustc --version --verbose
             sha256sum Cargo.lock
           } | tee "$RUNNER_TEMP/doctor-core/source.log"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # bd-aav0v: a BARE `test` under errexit, so a mismatch aborted with no message. The
+          # failure it guards against is specific -- the checkout is not the commit that
+          # triggered the run, so every verdict below describes a tree nobody asked about.
+          # Exit code and condition unchanged.
+          checked_out_sha=$(git rev-parse HEAD)
+          if test "$checked_out_sha" != "$GITHUB_SHA"; then
+            echo "ATTRIBUTION: provenance guard STOPPED this lane -- the checkout is $checked_out_sha but the run was triggered for $GITHUB_SHA. Nothing below this point would describe the intended commit, so the lane refuses rather than publish a verdict about the wrong tree."
+            exit 1
+          fi
           rustfmt --check --edition 2024 --config skip_children=true src/cli/mod.rs src/core/doctor_fixers.rs tests/e2e_doctor_concise_default.rs
           python3 -m unittest discover -s tests/doctor_fixtures -p assertion_contract.py -k GuidanceOnlyContract > "$RUNNER_TEMP/doctor-core/assertions.log" 2>&1
           git diff --exit-code

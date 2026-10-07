@@ -84,7 +84,16 @@ jobs:
             cargo --version
             sha256sum Cargo.lock
           } | tee "$RUNNER_TEMP/core-memory/source.log"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # bd-aav0v: a BARE `test` under errexit, so a mismatch aborted with no message. The
+          # failure it guards against is specific and serious -- the checkout is not the commit
+          # that triggered the run, which makes every verdict below a statement about a tree
+          # nobody asked about. Silent, that is indistinguishable from a test failure.
+          # Exit code and condition unchanged.
+          checked_out_sha=$(git rev-parse HEAD)
+          if test "$checked_out_sha" != "$GITHUB_SHA"; then
+            echo "ATTRIBUTION: provenance guard STOPPED this lane -- the checkout is $checked_out_sha but the run was triggered for $GITHUB_SHA. Nothing below this point would describe the intended commit, so the lane refuses rather than publish a verdict about the wrong tree."
+            exit 1
+          fi
           git diff --exit-code
       - name: Check all Cargo targets
         if: ${{ !cancelled() }}
