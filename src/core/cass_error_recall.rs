@@ -31,6 +31,9 @@ use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair
 use crate::core::error_recall::{CanonicalDiagnostic, from_cargo, from_rustc};
 use crate::db::{DbConnection, Result, StoredEvidenceSpan, StoredSession};
 
+#[path = "cass_error_recall_outcome.rs"]
+mod outcome;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 
@@ -241,7 +244,7 @@ pub(crate) fn session_failure_arcs(
                     }
                     let diagnostics = failure_diagnostics(&output);
                     if diagnostics.is_empty() {
-                        if output.failed() {
+                        if !output.succeeded() {
                             continue;
                         }
                         resolve_pending(
@@ -450,19 +453,13 @@ pub(crate) struct ToolOutput {
 }
 
 impl ToolOutput {
-    /// Any sign the run failed, structured or not. A result that shows none of
-    /// them is the only kind that may verify a fix.
+    /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
-        self.is_error == Some(true)
-            || self.exit_code.is_some_and(|code| code != 0)
-            || exit_code_line(&self.text).is_some_and(|code| code != 0)
-            || bounded(&self.text).lines().any(|line| {
-                let line = line.trim_start();
-                line.starts_with("error:")
-                    || line.starts_with("error[")
-                    || line.starts_with("test result: FAILED")
-                    || line.contains("panicked at")
-            })
+        outcome::failed(self)
+    }
+
+    fn succeeded(&self) -> bool {
+        outcome::succeeded(self)
     }
 }
 
@@ -470,10 +467,15 @@ impl ToolOutput {
 /// `tool_use`/`tool_result` content blocks and Codex
 /// `function_call`/`function_call_output` payloads.
 fn tool_events(excerpt: &str) -> Vec<ToolEvent> {
+    // Reject incomplete windows as a whole; a valid prefix must not turn a
+    // malformed or truncated trailing result into successful repair evidence.
+    if excerpt.len() > 1024 * 1024 {
+        return Vec::new();
+    }
     let mut events = Vec::new();
     for record in serde_json::Deserializer::from_str(excerpt).into_iter::<Value>() {
         let Ok(record) = record else {
-            break;
+            return Vec::new();
         };
         let content = record
             .get("message")
@@ -510,8 +512,10 @@ fn claude_block_event(block: &Value) -> Option<ToolEvent> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             output: ToolOutput {
-                text: block.get("content").map(content_text).unwrap_or_default(),
-                is_error: block.get("is_error").and_then(Value::as_bool),
+                text: content_text(block.get("content")?)?,
+                is_error: block
+                    .get("is_error")
+                    .map(|value| value.as_bool().unwrap_or(true)),
                 exit_code: None,
             },
         }),
@@ -523,49 +527,32 @@ fn codex_payload_event(payload: &Value) -> Option<ToolEvent> {
     let call_id = payload.get("call_id").and_then(Value::as_str);
     match payload.get("type").and_then(Value::as_str)? {
         "function_call" | "local_shell_call" | "custom_tool_call" => {
-            let command = payload
-                .get("arguments")
-                .and_then(Value::as_str)
-                .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
-                .and_then(|arguments| arguments.get("command").and_then(command_text))
-                .or_else(|| {
-                    payload
-                        .get("action")
-                        .and_then(|action| action.get("command"))
-                        .and_then(command_text)
-                });
+            let arguments = match payload.get("arguments") {
+                Some(Value::String(arguments)) => serde_json::from_str::<Value>(arguments).ok(),
+                Some(arguments) => Some(arguments.clone()),
+                None => payload.get("action").cloned(),
+            };
+            let command = arguments.as_ref().and_then(command_argument);
             Some(ToolEvent::Call {
                 id: call_id?.to_owned(),
                 command,
             })
         }
         "function_call_output" | "local_shell_call_output" | "custom_tool_call_output" => {
-            let raw = payload.get("output")?;
-            let (text, exit_code) = match raw.as_str() {
-                Some(text) => match serde_json::from_str::<Value>(text) {
-                    Ok(structured) if structured.is_object() => (
-                        structured
-                            .get("output")
-                            .map(content_text)
-                            .unwrap_or_default(),
-                        structured
-                            .get("metadata")
-                            .and_then(|metadata| metadata.get("exit_code"))
-                            .and_then(Value::as_i64),
-                    ),
-                    _ => (text.to_owned(), None),
-                },
-                None => (content_text(raw), None),
-            };
             Some(ToolEvent::Result {
                 id: call_id.map(str::to_owned),
-                output: ToolOutput {
-                    text,
-                    is_error: None,
-                    exit_code,
-                },
+                output: outcome::codex_output(payload.get("output")?)?,
             })
         }
+        _ => None,
+    }
+}
+
+/// Codex exec_command uses `cmd`; older shell tools use `command`. Multiple
+/// command fields are ambiguous, not a reason to choose one by map order.
+fn command_argument(arguments: &Value) -> Option<String> {
+    match (arguments.get("command"), arguments.get("cmd")) {
+        (Some(command), None) | (None, Some(command)) => command_text(command),
         _ => None,
     }
 }
@@ -592,28 +579,22 @@ fn command_text(value: &Value) -> Option<String> {
     }
 }
 
-fn content_text(value: &Value) -> String {
+fn content_text(value: &Value) -> Option<String> {
     match value {
-        Value::String(text) => text.clone(),
+        Value::String(text) => Some(text.clone()),
         Value::Array(blocks) => blocks
             .iter()
-            .filter_map(|block| {
-                block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| block.as_str())
+            .map(|block| match block {
+                Value::String(text) => Some(text.as_str()),
+                Value::Object(_) if block.get("type").and_then(Value::as_str) == Some("text") => {
+                    block.get("text").and_then(Value::as_str)
+                }
+                _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join("\n")),
+        _ => None,
     }
-}
-
-fn exit_code_line(text: &str) -> Option<i64> {
-    let first = text.lines().find(|line| !line.trim().is_empty())?.trim();
-    first
-        .strip_prefix("Exit code ")
-        .and_then(|code| code.trim().parse().ok())
 }
 
 /// Structured diagnostics in a failing tool result: every distinct rustc
@@ -704,3 +685,7 @@ fn rustc_error_line(line: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 #[path = "cass_error_recall_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_proof_tests.rs"]
+mod proof_tests;
