@@ -29511,6 +29511,48 @@ impl DbConnection {
                     previous_trust_class: None,
                     new_trust_class: None,
                 })?;
+
+            // bd-fdw88: ENQUEUE THE REINDEX. This promotion rewrites `level` from
+            // "working" to "episodic", and `level` is part of the indexed document's
+            // metadata (CanonicalSearchDocument::into_indexable inserts it), so without
+            // a job the indexed copy keeps saying "working" indefinitely and the memory
+            // stays findable under the wrong level filter.
+            //
+            // Every other level transition already does this. update_memory_level
+            // (src/core/memory.rs:10056) enqueues a SingleDocument job INSIDE its
+            // `with_transaction` and only when the audit actually happened; so do
+            // expire_memory, update_memory_tags and revise_memory_with_transaction_hook.
+            // This path wrote the audit and skipped the job -- the one level transition in
+            // the codebase that did not reindex.
+            //
+            // Placed after the `affected == 0` continue and after the audit, so a row that
+            // did not actually transition enqueues nothing. It is inside the caller's
+            // `with_transaction`, which makes the enqueue part of the promotion's
+            // all-or-nothing unit: if this insert fails, the UPDATE and the audit roll back
+            // with it rather than leaving a promoted memory that is never reindexed.
+            //
+            // The id mirrors generate_search_index_job_id (src/core/memory.rs:5410) rather
+            // than calling it, because that helper is private to core and db must not
+            // depend upward on core. The schema requires `id GLOB 'sidx_*' AND
+            // length(id) = 31`, which `sidx_` plus the 26-character Crockford payload of a
+            // fresh id satisfies exactly (src/models/id.rs: ENCODED_LEN = 26).
+            let index_job_id = format!(
+                "sidx_{}",
+                crate::models::MemoryId::now()
+                    .to_string()
+                    .trim_start_matches("mem_")
+            );
+            self.insert_search_index_job(
+                &index_job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_string(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_string()),
+                    document_id: Some(memory.id.clone()),
+                    documents_total: 1,
+                },
+            )?;
+
             promotions.push(WorkflowMemoryPromotion {
                 memory_id: memory.id,
                 audit_id,

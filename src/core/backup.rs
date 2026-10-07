@@ -17,6 +17,13 @@ mod recovery_faults;
 #[cfg(test)]
 #[path = "backup_revision_recovery_tests.rs"]
 mod revision_recovery_tests;
+// bd-fdw88: this file has existed since 2026-09-20 and NOTHING mounted it, so its four
+// whole-store recovery tests had never compiled or run. Sixteen of the seventeen sibling
+// backup_*_tests.rs files are mounted here; this one was missed. Rust does not warn about
+// a source file nothing mounts, which is why it stayed dark.
+#[cfg(test)]
+#[path = "backup_workflow_recovery_tests.rs"]
+mod workflow_recovery_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
