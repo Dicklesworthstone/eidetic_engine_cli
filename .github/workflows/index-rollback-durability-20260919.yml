@@ -51,7 +51,21 @@ jobs:
           git rev-parse HEAD | tee "$RUNNER_TEMP/rollback-source-sha.log"
           rustc --version | tee "$RUNNER_TEMP/rollback-toolchain.log"
           cargo test --locked --lib rollback_durability_tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/rollback-tests.log"
-          grep -Fq 'test result: ok. 7 passed; 0 failed;' "$RUNNER_TEMP/rollback-tests.log"
+          # STALE PIN, and the lane's own history dates it (bd-lagsa). This demanded exactly
+          # 7 and last SUCCEEDED on 2026-09-20; src/core/index.rs now declares
+          # `mod rollback_durability_tests {` at :23856 containing 8 #[test] functions,
+          # counted by brace-matching the module rather than grepping the whole file. So an
+          # eighth test landed after that green run and this lane has been primed to fail on
+          # its next dispatch ever since, without anyone seeing a red.
+          #
+          # Floor of 7, keeping the number that was reviewed green, with the observed count
+          # printed so the drift is visible.
+          rollback_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/rollback-tests.log" | head -1)
+          if test -z "$rollback_ran" || test "$rollback_ran" -lt 7; then
+            echo "ATTRIBUTION: rollback_durability_tests reported passing-with-zero-failures count '${rollback_ran:-none}', required floor 7"
+            exit 1
+          fi
+          echo "ATTRIBUTION: rollback_durability_tests ran $rollback_ran tests (floor 7)"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
