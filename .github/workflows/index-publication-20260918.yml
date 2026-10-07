@@ -86,13 +86,29 @@ jobs:
         run: |
           set -euo pipefail
           number=0
+          # bd-aav0v: a three-iteration loop with two BARE assertions per pass -- six runtime
+          # arms, aborting with no message and no record of WHICH filter failed. The logs are
+          # even named by index rather than by filter, so a reader could not match a red to a
+          # suite. Fail-fast is unchanged; it only names the filter and the cause now.
+          #
+          # The counts here are already FLOORS (a nonzero-count regex), which is right for
+          # three prefix filters whose populations grow. Only the attribution is new, and it
+          # prints the observed count, which a regex floor never did.
           for filter in snapshot_generation_ generation_lease search_generation_cache; do
             log="$RUNNER_TEMP/snapshot-group-$number.log"
             status=0
             cargo test --locked --lib "$filter" -- --nocapture > "$log" 2>&1 || status=$?
             tail -n 180 "$log"
-            test "$status" -eq 0
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log"
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed.*/\1/p' "$log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$filter' (log snapshot-group-$number) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+              exit 1
+            fi
+            if test -z "$ran" || test "$ran" -lt 1; then
+              echo "ATTRIBUTION: arm '$filter' (log snapshot-group-$number) FAILED -- counted '${ran:-none}' passing; the suite reported nothing, which is what a filter matching zero tests looks like"
+              exit 1
+            fi
+            echo "ATTRIBUTION: arm '$filter' (log snapshot-group-$number) ok -- $ran passed, floor 1"
             number=$((number + 1))
           done
       - name: Commit tested snapshot-compatible retrieval directly to main

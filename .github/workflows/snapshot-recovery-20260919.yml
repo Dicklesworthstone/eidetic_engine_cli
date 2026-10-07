@@ -52,8 +52,29 @@ jobs:
           status=0
           cargo test --locked --test integration_a_d concurrent_search_lexical_arm_e2e::snapshot_index_recovery:: -- --test-threads=1 > "$RUNNER_TEMP/snapshot-e2e.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/snapshot-e2e.log"
-          test "$status" -eq 0
-          grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/snapshot-e2e.log"
+          # bd-aav0v: two BARE assertions under errexit -- a tool exit and an exact count --
+          # reported as one silent abort. Fail-fast is unchanged; it just says why now.
+          #
+          # The exact 4 is CORRECT and stays: the filter resolves through
+          # tests/concurrent_search_lexical_arm_e2e.rs:25 (`#[path =
+          # "snapshot_index_recovery_e2e.rs"]`) to a file holding exactly 4 `#[test]`. That
+          # module is `#[cfg(all(unix, feature = "lexical-bm25"))]` and the feature is a Cargo
+          # default, so it compiles here -- and if it ever stops, the "reported nothing" arm
+          # below catches it instead of letting a silent zero look like a pass.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/snapshot-e2e.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'snapshot_index_recovery e2e' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            exit 1
+          fi
+          if test -z "$ran"; then
+            echo "ATTRIBUTION: arm 'snapshot_index_recovery e2e' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing, which is what a feature-gated module that stopped compiling looks like"
+            exit 1
+          fi
+          if test "$ran" != 4; then
+            echo "ATTRIBUTION: arm 'snapshot_index_recovery e2e' FAILED -- expected exactly 4 passing, counted $ran; tests/snapshot_index_recovery_e2e.rs holds 4 #[test], so check whether one was added, removed or feature-gated out"
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'snapshot_index_recovery e2e' ok -- exactly 4 passed"
       - name: Execute real generation and lease regressions
         if: ${{ !cancelled() }}
         run: |

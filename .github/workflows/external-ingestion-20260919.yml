@@ -121,8 +121,23 @@ jobs:
           status=0
           cargo test --locked --test integration_e_f e2e_cass_import_redaction::ingestion_boundaries:: -- --test-threads=1 > "$RUNNER_TEMP/ingestion-e2e.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/ingestion-e2e.log"
-          test "$status" -eq 0
-          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/ingestion-e2e.log"
+          # bd-aav0v: two BARE assertions under errexit -- a tool exit and an exact count --
+          # so a red named neither and produced no message. Fail-fast is preserved; the
+          # exits below are what the bare commands already did, with a reason attached.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/ingestion-e2e.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'ingestion_boundaries e2e' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            exit 1
+          fi
+          if test -z "$ran"; then
+            echo "ATTRIBUTION: arm 'ingestion_boundaries e2e' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing, which is what a filter matching zero tests looks like"
+            exit 1
+          fi
+          if test "$ran" != 2; then
+            echo "ATTRIBUTION: arm 'ingestion_boundaries e2e' FAILED -- expected exactly 2 passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed or filtered out"
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'ingestion_boundaries e2e' ok -- exactly 2 passed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:

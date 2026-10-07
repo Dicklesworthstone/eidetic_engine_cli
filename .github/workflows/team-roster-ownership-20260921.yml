@@ -109,8 +109,25 @@ jobs:
           status=0
           cargo test --locked --lib 'core::memory_scope::tests::roster_ownership_tests::' -- --test-threads=2 > "$RUNNER_TEMP/roster-regressions.log" 2>&1 || status=$?
           tail -n 160 "$RUNNER_TEMP/roster-regressions.log"
-          test "$status" -eq 0
-          grep -Fq 'test result: ok. 5 passed; 0 failed;' "$RUNNER_TEMP/roster-regressions.log"
+          # bd-aav0v: two BARE assertions under errexit -- a tool exit and an exact count --
+          # reported as one silent abort. Fail-fast is unchanged; it just says why now.
+          #
+          # The exact 5 STAYS: bd-lagsa's pin audit resolved this filter against a counted
+          # population and recorded it correct.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/roster-regressions.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'roster_ownership_tests' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            exit 1
+          fi
+          if test -z "$ran"; then
+            echo "ATTRIBUTION: arm 'roster_ownership_tests' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing"
+            exit 1
+          fi
+          if test "$ran" != 5; then
+            echo "ATTRIBUTION: arm 'roster_ownership_tests' FAILED -- expected exactly 5 passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed"
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'roster_ownership_tests' ok -- exactly 5 passed"
       - name: Preserve existing scope behavior
         if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         run: |
@@ -118,8 +135,20 @@ jobs:
           status=0
           cargo test --locked --lib 'core::memory_scope::tests::' -- --test-threads=2 > "$RUNNER_TEMP/roster-all-scope.log" 2>&1 || status=$?
           tail -n 160 "$RUNNER_TEMP/roster-all-scope.log"
-          test "$status" -eq 0
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/roster-all-scope.log"
+          # bd-aav0v: two BARE assertions under errexit. This arm is already a FLOOR (a
+          # nonzero-count regex, correct for a whole-module filter whose population grows),
+          # so only the attribution is new -- and it now prints the observed count, which a
+          # regex floor never did.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/roster-all-scope.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::memory_scope::tests (all scope behavior)' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            exit 1
+          fi
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: arm 'core::memory_scope::tests (all scope behavior)' FAILED -- counted '${ran:-none}' passing with 0 failures; the suite reported nothing, which is what a filter matching zero tests looks like"
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'core::memory_scope::tests (all scope behavior)' ok -- $ran passed, floor 1"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
         with:

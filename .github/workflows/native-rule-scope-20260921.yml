@@ -206,8 +206,25 @@ jobs:
           status=0
           cargo test --locked --lib 'core::search::rule_admission::scope::tests::' -- --test-threads=2 > "$RUNNER_TEMP/native-rule-scope-tests.log" 2>&1 || status=$?
           tail -n 160 "$RUNNER_TEMP/native-rule-scope-tests.log"
-          test "$status" -eq 0
-          grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/native-rule-scope-tests.log"
+          # bd-aav0v: two BARE assertions under errexit -- a tool exit and an exact count --
+          # reported as one silent abort. Fail-fast is unchanged; it just says why now.
+          #
+          # The exact 12 STAYS. bd-lagsa's pin audit resolved this filter against a counted
+          # population and recorded it as correct and deliberately untouched.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/native-rule-scope-tests.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'rule_admission::scope::tests' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+            exit 1
+          fi
+          if test -z "$ran"; then
+            echo "ATTRIBUTION: arm 'rule_admission::scope::tests' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing"
+            exit 1
+          fi
+          if test "$ran" != 12; then
+            echo "ATTRIBUTION: arm 'rule_admission::scope::tests' FAILED -- expected exactly 12 passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed"
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'rule_admission::scope::tests' ok -- exactly 12 passed"
       - name: Execute existing native admission regressions
         run: |
           status=0
