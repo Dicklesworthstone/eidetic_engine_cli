@@ -17,10 +17,15 @@
 //! the full rebuild. Large deltas, accumulated lexical segments and any staging
 //! failure also fall back to the full rebuild, which remains the compaction
 //! step.
+//!
+//! Digest schema v2 binds both tiers to Frankensearch's complete immutable
+//! embedding identities. V1's model-name/dimension strings are insufficient
+//! proof and force a full rebuild once, rather than silently mixing spaces.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use frankensearch::core::traits::IdentityBoundEmbedding;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "lexical-bm25")]
@@ -28,13 +33,15 @@ use crate::search::LexicalWrite;
 
 use super::{
     EmbedderStack, INDEX_METADATA_FILE, IncrementalFallback, IncrementalFallbackReason,
-    IndexRebuildError, LEXICAL_INDEX_SUBDIR, ensure_index_path_has_no_symlinks,
-    incremental_fallback,
+    IndexRebuildError, ensure_index_path_has_no_symlinks, incremental_fallback,
 };
+
+#[cfg(feature = "lexical-bm25")]
+use super::LEXICAL_INDEX_SUBDIR;
 
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
-const DOC_DIGESTS_SCHEMA_V1: &str = "ee.index.doc_digests.v1";
+const DOC_DIGESTS_SCHEMA_V2: &str = "ee.index.doc_digests.v2";
 const DOC_DIGEST_DOMAIN: &[u8] = b"ee.index.doc_digest.v1\0";
 
 /// Above this many changed documents a full rebuild is the simpler and
@@ -54,7 +61,9 @@ const RETIRED_MANIFEST_PREFIX: &str = ".rejected-meta-";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct DocDigests {
     schema: String,
-    embedder: String,
+    // None preserves full-build availability for an embedder that cannot yet
+    // attest its identity, but never authorizes incremental reuse.
+    embedder: Option<String>,
     documents: BTreeMap<String, String>,
 }
 
@@ -71,19 +80,51 @@ impl Delta {
     }
 }
 
-/// Identity of the embedders whose vectors a generation holds. Vectors from a
-/// different model or dimension can never be mixed into one tier.
-pub(super) fn embedder_identity(stack: &EmbedderStack) -> String {
-    let fast = stack.fast();
-    let quality = stack.quality().map_or_else(String::new, |quality| {
-        format!("{}:{}", quality.id(), quality.dimension())
-    });
-    format!(
-        "fast={}:{}:{};quality={quality}",
-        fast.id(),
-        fast.dimension(),
-        fast.is_semantic()
-    )
+/// Complete producer, space, input and output contract of each tier. A model
+/// name and dimension are diagnostics, not vector-space compatibility: two JL
+/// seeds (or two revisions of neural weights) can have both in common.
+///
+/// Delegate canonical fingerprinting and validation to Frankensearch. Missing
+/// or malformed identities never become a shared "unknown" identity.
+pub(super) fn embedder_identity(stack: &EmbedderStack) -> Option<String> {
+    let fast = verified_embedder_identity(stack.fast())?;
+    let quality = match stack.quality() {
+        Some(quality) => verified_embedder_identity(quality)?,
+        None => String::new(),
+    };
+    Some(format!("fast={fast};quality={quality}"))
+}
+
+fn verified_embedder_identity(embedder: &dyn crate::search::Embedder) -> Option<String> {
+    let identity = embedder.identity().ok()?;
+    identity.validate().ok()?;
+    if usize::try_from(identity.space.dimension).ok() != Some(embedder.dimension()) {
+        return None;
+    }
+    Some(identity.fingerprint())
+}
+
+/// Check the values and their producer together before they enter a staged
+/// tier. Even an identity-aware wrapper must not return vectors from a fallback
+/// or a different model while advertising the originally selected producer.
+fn validate_bound_embedding(
+    embedding: &IdentityBoundEmbedding,
+    expected_identity: &str,
+    tier: &str,
+) -> Result<(), IncrementalFallback> {
+    embedding.validate().map_err(|_| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("{tier}-tier embedding output has an invalid identity or dimension"),
+        )
+    })?;
+    if embedding.identity.fingerprint() != expected_identity {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::CorpusRevisionMismatch,
+            format!("{tier}-tier embedding output changed the planned producer identity"),
+        ));
+    }
+    Ok(())
 }
 
 fn update_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -133,7 +174,7 @@ impl DocDigests {
         documents: &[crate::search::IndexableDocument],
     ) -> Self {
         Self {
-            schema: DOC_DIGESTS_SCHEMA_V1.to_owned(),
+            schema: DOC_DIGESTS_SCHEMA_V2.to_owned(),
             embedder: embedder_identity(stack),
             documents: digest_map(documents),
         }
@@ -179,7 +220,7 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             format!("live document digests are malformed: {error}"),
         )
     })?;
-    if digests.schema != DOC_DIGESTS_SCHEMA_V1 {
+    if digests.schema != DOC_DIGESTS_SCHEMA_V2 {
         return Err(incremental_fallback(
             IncrementalFallbackReason::CorpusRevisionMismatch,
             format!("unsupported document digest schema {}", digests.schema),
@@ -196,14 +237,16 @@ pub(super) fn plan(
     documents: &[crate::search::IndexableDocument],
 ) -> Result<Delta, IncrementalFallback> {
     let live = read_digests(live_dir)?;
-    if live.embedder != embedder_identity(stack) {
+    let identity = embedder_identity(stack).ok_or_else(|| {
+        incremental_fallback(
+            IncrementalFallbackReason::CorpusRevisionMismatch,
+            "workspace embedders do not supply complete validated identities",
+        )
+    })?;
+    if live.embedder.as_deref() != Some(identity.as_str()) {
         return Err(incremental_fallback(
             IncrementalFallbackReason::CorpusRevisionMismatch,
-            format!(
-                "live generation was embedded by `{}`, the workspace now uses `{}`",
-                live.embedder,
-                embedder_identity(stack)
-            ),
+            "live generation has no matching complete embedding identity; a full rebuild is required",
         ));
     }
     let mut delta = Delta::default();
@@ -249,6 +292,7 @@ pub(super) fn plan(
     Ok(delta)
 }
 
+#[cfg(feature = "lexical-bm25")]
 fn lexical_segment_count(generation_dir: &Path) -> usize {
     std::fs::read_dir(generation_dir.join(LEXICAL_INDEX_SUBDIR))
         .map(|entries| {
@@ -263,6 +307,11 @@ fn lexical_segment_count(generation_dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+#[cfg(not(feature = "lexical-bm25"))]
+fn lexical_segment_count(_generation_dir: &Path) -> usize {
+    0
 }
 
 /// Copy the live generation's tier files into an empty private staging
@@ -345,6 +394,19 @@ pub(super) async fn apply(
     let tier_error =
         |detail: String| incremental_fallback(IncrementalFallbackReason::TierUnavailable, detail);
 
+    // Resolve both identities before any staging mutation, including removals.
+    let fast_identity = verified_embedder_identity(stack.fast()).ok_or_else(|| {
+        tier_error("fast-tier embedder has no complete validated identity".to_owned())
+    })?;
+    let quality_identity = stack
+        .quality()
+        .map(|quality| {
+            verified_embedder_identity(quality).ok_or_else(|| {
+                tier_error("quality-tier embedder has no complete validated identity".to_owned())
+            })
+        })
+        .transpose()?;
+
     let mut fast = super::open_fast_vector_index(staging_dir)?;
     let mut removed = false;
     for id in &delta.removals {
@@ -358,16 +420,20 @@ pub(super) async fn apply(
     let fast_embedder = stack.fast_arc();
     for document in &delta.upserts {
         let vector = fast_embedder
-            .embed(cx, &document.content)
+            .embed_bound(cx, &document.content)
             .await
             .map_err(|error| tier_error(format!("fast-tier embedding failed: {error}")))?;
-        fast.append(&document.id, &vector)
+        validate_bound_embedding(&vector, &fast_identity, "fast")?;
+        fast.append(&document.id, &vector.values)
             .map_err(|error| tier_error(format!("fast-tier vector upsert failed: {error}")))?;
     }
     super::compact_incremental_vector_index(&mut fast, "fast")?;
     drop(fast);
 
     if let Some(quality_embedder) = stack.quality_arc() {
+        let expected_identity = quality_identity.as_deref().ok_or_else(|| {
+            tier_error("quality-tier embedder appeared after identity validation".to_owned())
+        })?;
         let mut quality = super::open_quality_vector_index(staging_dir)?.ok_or_else(|| {
             tier_error(
                 "quality-tier vector index is absent for a two-tier embedder stack".to_owned(),
@@ -384,10 +450,11 @@ pub(super) async fn apply(
         }
         for document in &delta.upserts {
             let vector = quality_embedder
-                .embed(cx, &document.content)
+                .embed_bound(cx, &document.content)
                 .await
                 .map_err(|error| tier_error(format!("quality-tier embedding failed: {error}")))?;
-            quality.append(&document.id, &vector).map_err(|error| {
+            validate_bound_embedding(&vector, expected_identity, "quality")?;
+            quality.append(&document.id, &vector.values).map_err(|error| {
                 tier_error(format!("quality-tier vector upsert failed: {error}"))
             })?;
         }
@@ -435,6 +502,8 @@ pub(super) fn discard_staging(staging_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::{Embedder as _, HashEmbedder};
+    use std::sync::Arc;
 
     type TestResult = Result<(), String>;
 
@@ -449,7 +518,11 @@ mod tests {
     ) -> Result<tempfile::TempDir, String> {
         let root = tempfile::Builder::new()
             .prefix(&format!("ee-delta-{label}-"))
-            .tempdir()
+            .tempdir_in(
+                std::env::temp_dir()
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?,
+            )
             .map_err(|error| error.to_string())?;
         DocDigests::new(stack, documents)
             .write(root.path())
@@ -540,7 +613,7 @@ mod tests {
         assert_eq!(refusal.reason.as_str(), "delta_over_threshold");
 
         let mut foreign = DocDigests::new(&stack, &live_docs);
-        foreign.embedder = "fast=other-model:256:true;quality=".to_owned();
+        foreign.embedder = Some("fast=other-model:256:true;quality=".to_owned());
         foreign
             .write(live.path())
             .map_err(|error| error.to_string())?;
@@ -551,6 +624,212 @@ mod tests {
             refusal.reason.as_str(),
             crate::models::INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH
         );
+        Ok(())
+    }
+
+    fn jl_stack(seed: u64) -> EmbedderStack {
+        EmbedderStack::from_parts(Arc::new(HashEmbedder::jl_384(seed)), None)
+    }
+
+    #[test]
+    fn equal_model_names_and_dimensions_do_not_authorize_fast_tier_reuse() -> TestResult {
+        let first = jl_stack(11);
+        let changed = jl_stack(29);
+        assert_eq!(first.fast().id(), changed.fast().id());
+        assert_eq!(first.fast().dimension(), changed.fast().dimension());
+        assert_eq!(first.fast().is_semantic(), changed.fast().is_semantic());
+        assert_ne!(
+            HashEmbedder::jl_384(11).embed_sync("persistent memory identity"),
+            HashEmbedder::jl_384(29).embed_sync("persistent memory identity")
+        );
+        assert_ne!(embedder_identity(&first), embedder_identity(&changed));
+
+        let documents = [doc("mem_same", "persistent memory identity")];
+        let live = generation_with_digests("fast-identity", &first, &documents)?;
+        assert_eq!(
+            plan(live.path(), &jl_stack(11), &documents)
+                .map_err(|error| error.detail)?
+                .len(),
+            0,
+            "independently constructed identical producers remain reusable"
+        );
+        let refusal = plan(live.path(), &changed, &documents)
+            .err()
+            .ok_or("same diagnostic id must not hide a changed embedding space")?;
+        assert_eq!(
+            refusal.reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quality_identity_and_tier_presence_are_part_of_reuse_compatibility() -> TestResult {
+        let stack = |quality_seed: Option<u64>| {
+            EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()),
+                quality_seed.map(|seed| {
+                    Arc::new(HashEmbedder::jl_384(seed)) as Arc<dyn crate::search::Embedder>
+                }),
+            )
+        };
+        let documents = [doc("mem_same", "same input to both tiers")];
+        let live = generation_with_digests("quality-identity", &stack(Some(11)), &documents)?;
+        for changed in [stack(Some(29)), stack(None)] {
+            let refusal = plan(live.path(), &changed, &documents)
+                .err()
+                .ok_or("a changed or removed quality tier must force a rebuild")?;
+            assert_eq!(
+                refusal.reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
+        }
+        let fast_only = generation_with_digests("no-quality", &stack(None), &documents)?;
+        assert!(plan(fast_only.path(), &stack(Some(11)), &documents).is_err());
+        Ok(())
+    }
+
+    // Deliberately implements the raw legacy interface only: the default
+    // identity() returns an error rather than synthesizing an identity from id.
+    struct LegacyEmbedder(HashEmbedder);
+
+    impl crate::search::Embedder for LegacyEmbedder {
+        fn embed<'a>(
+            &'a self,
+            cx: &'a asupersync::Cx,
+            text: &'a str,
+        ) -> frankensearch::core::traits::SearchFuture<'a, Vec<f32>> {
+            self.0.embed(cx, text)
+        }
+
+        fn dimension(&self) -> usize {
+            self.0.dimension()
+        }
+
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+
+        fn model_name(&self) -> &str {
+            self.0.model_name()
+        }
+
+        fn is_semantic(&self) -> bool {
+            self.0.is_semantic()
+        }
+
+        fn category(&self) -> frankensearch::core::traits::ModelCategory {
+            self.0.category()
+        }
+    }
+
+    #[test]
+    fn missing_identities_never_match_each_other_or_verified_producers() -> TestResult {
+        let legacy = EmbedderStack::from_parts(
+            Arc::new(LegacyEmbedder(HashEmbedder::default_256())),
+            None,
+        );
+        let verified = super::super::hash_fallback_embedder_stack();
+        assert_eq!(legacy.fast().id(), verified.fast().id());
+        assert_eq!(embedder_identity(&legacy), None);
+        let documents = [doc("mem_same", "identity is not an optional proof")];
+        for source in [&legacy, &verified] {
+            let live = generation_with_digests("missing-identity", source, &documents)?;
+            assert!(plan(live.path(), &legacy, &documents).is_err());
+            if embedder_identity(source).is_none() {
+                assert!(plan(live.path(), &verified, &documents).is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v1_digests_require_a_full_rebuild_before_identity_bound_reuse() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let documents = [doc("mem_same", "unchanged text still needs identity proof")];
+        let live = generation_with_digests("legacy-schema", &stack, &documents)?;
+        let legacy = serde_json::json!({
+            "schema": "ee.index.doc_digests.v1",
+            "embedder": format!(
+                "fast={}:{}:{};quality=",
+                stack.fast().id(),
+                stack.fast().dimension(),
+                stack.fast().is_semantic(),
+            ),
+            "documents": digest_map(&documents),
+        });
+        std::fs::write(live.path().join(DOC_DIGESTS_FILE), legacy.to_string())
+            .map_err(|error| error.to_string())?;
+        let refusal = plan(live.path(), &stack, &documents)
+            .err()
+            .ok_or("v1 metadata cannot establish vector-space compatibility")?;
+        assert_eq!(
+            refusal.reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        DocDigests::new(&stack, &documents)
+            .write(live.path())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            plan(live.path(), &stack, &documents)
+                .map_err(|error| error.detail)?
+                .len(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bound_output_checks_space_producer_and_vector_shape() -> TestResult {
+        let producer = HashEmbedder::jl_384(11);
+        let identity = producer
+            .identity()
+            .map_err(|error| error.to_string())?
+            .clone();
+        let expected = identity.fingerprint();
+        let good = IdentityBoundEmbedding {
+            values: producer.embed_sync("bound output"),
+            identity,
+        };
+        validate_bound_embedding(&good, &expected, "fast").map_err(|error| error.detail)?;
+
+        let other = HashEmbedder::jl_384(29);
+        let foreign = IdentityBoundEmbedding {
+            values: other.embed_sync("bound output"),
+            identity: other.identity().map_err(|error| error.to_string())?.clone(),
+        };
+        assert!(validate_bound_embedding(&foreign, &expected, "fast").is_err());
+
+        let mut producer_changed = good.clone();
+        producer_changed.identity.producer.protocol_revision = "changed-protocol-v2".to_owned();
+        producer_changed
+            .validate()
+            .map_err(|error| error.to_string())?;
+        assert!(validate_bound_embedding(&producer_changed, &expected, "quality").is_err());
+
+        let mut malformed = good.clone();
+        let _ = malformed.values.pop();
+        assert!(validate_bound_embedding(&malformed, &expected, "fast").is_err());
+        let mut malformed_identity = good;
+        malformed_identity.identity.storage.dimension = 0;
+        assert!(validate_bound_embedding(&malformed_identity, &expected, "fast").is_err());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "lexical-bm25"))]
+    #[test]
+    fn vector_only_intake_does_not_depend_on_lexical_segments() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let documents = [doc("mem_same", "vector only")];
+        let live = generation_with_digests("vector-only", &stack, &documents)?;
+        let lexical = live.path().join("lexical");
+        std::fs::create_dir(&lexical).map_err(|error| error.to_string())?;
+        for segment in 0..=MAX_LEXICAL_SEGMENTS {
+            std::fs::write(lexical.join(format!("{segment}.idx")), b"unused")
+                .map_err(|error| error.to_string())?;
+        }
+        assert_eq!(lexical_segment_count(live.path()), 0);
+        assert!(plan(live.path(), &stack, &documents).is_ok());
         Ok(())
     }
 
