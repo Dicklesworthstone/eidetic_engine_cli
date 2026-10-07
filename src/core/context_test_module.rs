@@ -2606,7 +2606,6 @@ mod tests {
             validity_reference_time: None,
             include_tombstoned: false,
             freshness_file_cache: &mut freshness_file_cache,
-            rules: &BTreeMap::new(),
         };
         let hit = SearchHit {
             doc_id: memory_key.clone(),
@@ -2675,52 +2674,39 @@ mod tests {
                 vec![memory_key.clone()],
             )
         };
-        let rules = BTreeMap::from([(rule_id.clone(), rule_projection(rule.clone()))]);
-        let promoted = super::candidate_from_hit_preloaded(
-            super::PreloadedCandidateSource {
-                memories: &memory_batch,
-                tags_map: &tags_map,
-                workspace_path: Path::new("/tmp/ee-hybrid-pack-relevance-test"),
-                bound_workspace_id: None,
-                query: "hybrid recall",
-                validity_reference_time: None,
-                include_tombstoned: false,
-                freshness_file_cache: &mut freshness_file_cache,
-                rules: &rules,
-            },
-            &hit,
-            &memory_key,
-            memory_id,
-            Some(rule_id.clone()),
+        let request = ContextRequest::from_query("hybrid recall").unwrap();
+        let mut rule_hit = hit.clone();
+        rule_hit.doc_id = rule_id.clone();
+        let promoted = super::direct_rule_pack_candidates(
+            vec![(rule_hit.clone(), rule_projection(rule.clone()))],
+            &request,
+            &crate::models::QueryFilters::default(),
+            true,
             &mut degraded,
-            &mut subspans,
-        )
-        .ok_or("promoted rule should convert into a pack candidate")?;
+        );
+        assert_eq!(promoted.len(), 1);
+        let promoted = &promoted[0];
+        assert_eq!(promoted.rule_id, rule_id);
         assert_eq!(promoted.content, "Validate signed release artifacts.");
         assert_eq!(promoted.section, PackSection::ProceduralRules);
+        assert_eq!(promoted.relevance.into_inner(), 1.0);
         assert!((promoted.utility.into_inner() - 0.35).abs() < 1e-6);
         assert!(promoted.why.contains("utility 0.3500"), "{}", promoted.why);
-        assert!(!promoted.why.contains("utility 0.8000"), "{}", promoted.why);
         assert!(promoted.why.contains(&rule_id), "{}", promoted.why);
-
-        for invalid in ["missing", "tombstoned", "invalid_utility"] {
-            let mut unavailable_rules = rules.clone();
-            match invalid {
-                "missing" => {
-                    unavailable_rules.remove(&rule_id);
-                }
-                "tombstoned" => {
-                    let mut retired_rule = rule.clone();
-                    retired_rule.tombstoned_at = Some("2026-05-02T00:00:00Z".to_owned());
-                    unavailable_rules.insert(rule_id.clone(), rule_projection(retired_rule));
-                }
-                _ => {
-                    let mut invalid_rule = rule.clone();
-                    invalid_rule.utility = f32::NAN;
-                    unavailable_rules.insert(rule_id.clone(), rule_projection(invalid_rule));
-                }
-            }
-            let unavailable = super::candidate_from_hit_preloaded(
+        let mut invalid_rule = rule.clone();
+        invalid_rule.utility = f32::NAN;
+        let normalized = super::direct_rule_pack_candidates(
+            vec![(rule_hit, rule_projection(invalid_rule))],
+            &request,
+            &crate::models::QueryFilters::default(),
+            true,
+            &mut degraded,
+        );
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].utility.into_inner(), 0.0);
+        // Even a legitimate live rule may not return through the old alias.
+        assert!(
+            super::candidate_from_hit_preloaded(
                 super::PreloadedCandidateSource {
                     memories: &memory_batch,
                     tags_map: &tags_map,
@@ -2730,31 +2716,16 @@ mod tests {
                     validity_reference_time: None,
                     include_tombstoned: false,
                     freshness_file_cache: &mut freshness_file_cache,
-                    rules: &unavailable_rules,
                 },
                 &hit,
                 &memory_key,
                 memory_id,
-                Some(rule_id.clone()),
+                Some(rule_id),
                 &mut degraded,
                 &mut subspans,
-            );
-            if invalid == "invalid_utility" {
-                let normalized = unavailable.ok_or("non-finite utility normalizes to zero")?;
-                assert_eq!(normalized.content, "Validate signed release artifacts.");
-                assert_eq!(normalized.utility.into_inner(), 0.0);
-                assert!(
-                    normalized.why.contains("utility 0.0000"),
-                    "{}",
-                    normalized.why
-                );
-            } else {
-                assert!(
-                    unavailable.is_none(),
-                    "{invalid} rule must not substitute its source memory"
-                );
-            }
-        }
+            )
+            .is_none()
+        );
         Ok(())
     }
 
@@ -11636,9 +11607,11 @@ pub fn unrelated_context() -> u64 {{
         );
         let request =
             ContextRequest::from_query("prepare release").map_err(|error| error.to_string())?;
-        let mut draft = assemble_draft("prepare release", TokenBudget::default_context(), [
-            local, peer,
-        ])
+        let mut draft = assemble_draft(
+            "prepare release",
+            TokenBudget::default_context(),
+            [local, peer],
+        )
         .map_err(|error| error.to_string())?;
         assert_eq!(draft.items.len(), 2);
 
@@ -11649,8 +11622,16 @@ pub fn unrelated_context() -> u64 {{
             .iter()
             .find(|entry| entry.code == CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE)
             .ok_or("cross-shard exclusion must be reported")?;
-        assert!(notice.message.contains(&peer_id.to_string()), "{}", notice.message);
-        assert!(notice.message.contains("from wsp_peer"), "{}", notice.message);
+        assert!(
+            notice.message.contains(&peer_id.to_string()),
+            "{}",
+            notice.message
+        );
+        assert!(
+            notice.message.contains("from wsp_peer"),
+            "{}",
+            notice.message
+        );
         draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
 
         let mut subspans = PackPersistenceSubspans::default();
@@ -11666,7 +11647,9 @@ pub fn unrelated_context() -> u64 {{
             &mut subspans,
         );
         assert!(
-            unguarded.as_ref().is_err_and(|error| error.contains("missing memory")),
+            unguarded
+                .as_ref()
+                .is_err_and(|error| error.contains("missing memory")),
             "{unguarded:?}"
         );
         persist_pack_record_measured(
@@ -11683,7 +11666,11 @@ pub fn unrelated_context() -> u64 {{
         let history = connection
             .list_pack_records_for_memory(&local_id.to_string(), 10)
             .map_err(|error| error.to_string())?;
-        assert_eq!(history.len(), 1, "the workspace's own item is in the ledger");
+        assert_eq!(
+            history.len(),
+            1,
+            "the workspace's own item is in the ledger"
+        );
         connection.close().map_err(|error| error.to_string())?;
         Ok(())
     }

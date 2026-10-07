@@ -44,6 +44,7 @@ on:
       - tests/model_bundled_embedding_cli_e2e.rs
       - tests/model_lifecycle_readiness_integration.rs
       - tests/daemon_uds_rpc_round_trip.rs
+      - tests/rule_mark_update_e2e.rs
       - tests/fixtures/failure_modes/semantic_dimension_exceeds_budget.json
       - Cargo.toml
       - Cargo.lock
@@ -553,6 +554,8 @@ jobs:
           backup-contract contracts backup_import_roundtrip::
           core-cli e2e_core_workflow core_workflow_init_remember_search_context_why
           learning-cli session_arc_learning_cli public_cli_
+          native-rule-pack integration_n_r rule_mark_update_e2e::sourced_rule_pack_replay_and_item_outcome_preserve_native_identity
+          native-rule-outcome integration_n_r rule_mark_update_e2e::native_rule_outcome_changes_rule_once_without_changing_source_memory
           model-lifecycle integration_g_m model_lifecycle_readiness_integration::
           cass-context integration_n_r no_mocks_e2e::no_mocks_import_cass_fixture_sessions_stores_spans_and_searches
           readonly-context integration_n_r retrieval_index_regression_oracle::sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace

@@ -5844,9 +5844,9 @@ pub struct PackDraftItem {
 }
 
 /// A live-admitted procedural rule selected directly into a pack under its
-/// native `RuleId` (bd-vp087, ADR 0085), because no source memory can carry
-/// it. Like evidence, it is not a `PackDraftItem`: a rule never borrows a
-/// synthetic memory identity.
+/// native `RuleId` (bd-vp087, ADR 0085). Source memories provide provenance;
+/// they do not own the rule's selection or feedback. Like evidence, it is not
+/// a `PackDraftItem`: a rule never borrows a memory identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackRuleItem {
     pub rank: u32,

@@ -3508,7 +3508,7 @@ async fn run_context_pack_with_performance_inner(
         Some(read_connection),
     );
     let global_store_memory_ids = global_store_search_memory_ids(&search_report);
-    let scope_stats = filter_candidates_by_memory_scope(
+    let mut scope_stats = filter_candidates_by_memory_scope(
         read_connection,
         &mut candidates,
         &scope_context,
@@ -3516,6 +3516,17 @@ async fn run_context_pack_with_performance_inner(
         Some(&search_preloaded_memories),
         &global_store_memory_ids,
     );
+    let rule_scope_stats = filter_native_rule_sources_by_scope(
+        read_connection,
+        &mut direct_rule_hits,
+        &scope_context,
+        &mut degraded,
+    );
+    scope_stats.merge(&rule_scope_stats);
+    if scope_context.strict_scope && scope_stats.strict_violations > 0 {
+        candidates.clear();
+        direct_rule_hits.clear();
+    }
     if scope_stats.candidates_excluded_by_scope > 0 {
         candidate_metrics.scope_filtered_candidates = candidate_metrics
             .scope_filtered_candidates
@@ -3619,6 +3630,12 @@ async fn run_context_pack_with_performance_inner(
             reference_time,
             &mut degraded,
         )?);
+        filter_native_rule_sources_by_fresh_sentinels(
+            read_connection,
+            &mut direct_rule_hits,
+            reference_time,
+            &mut degraded,
+        )?;
     }
     control.check()?;
 
@@ -8268,7 +8285,10 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
     // Cached source-memory hydration predating native rule filters and
     // advisory posture must be reassembled under the current admission policy.
-    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v1");
+    // v2 admits sourced rules under RuleId and applies native authority and
+    // section filters. Older persisted packs may carry rule bodies under a
+    // source MemoryId, so they cannot bypass this admission on an L2 hit.
+    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v2");
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
@@ -9781,7 +9801,7 @@ fn candidates_from_search_for_task_paths(
     let mut mesh_blocked_hits = 0usize;
     // Keep the exact live rule projection admitted during ID resolution.
     // A second row lookup could detach the selected body from its checked
-    // revision, tags and scope, even though the source MemoryId stays the same.
+    // revision, tags and scope while its parent passes source admission.
     let mut rules_map: BTreeMap<String, RuleIndexProjection> = BTreeMap::new();
     let mut hit_resolutions: Vec<(
         &crate::core::search::SearchHit,
@@ -9815,9 +9835,8 @@ fn candidates_from_search_for_task_paths(
             Err(_) => {
                 metrics.artifact_link_lookups = metrics.artifact_link_lookups.saturating_add(1);
                 artifact_linked_memory_id(connection, hit, degraded)
-                    // Procedural-rule hits hydrate through their source
-                    // memories the same way artifact hits hydrate through
-                    // their memory links (bd-3h6bz).
+                    // Sourced rules share the existing batched parent
+                    // admission, then enter the native rule lane.
                     .or_else(|| {
                         match rule_linked_memory_id(
                             connection,
@@ -10002,7 +10021,7 @@ fn candidates_from_search_for_task_paths(
                     }
                     // The rule body has its own creation/revision time. Its
                     // source memory still has to satisfy the existing validity
-                    // window, because it remains this v2 item's storage anchor.
+                    // window as a required source admission dependency.
                     let temporal = if let Some(projection) = promoted_rule {
                         let rule = projection.rule();
                         if temporal_record_matches(
@@ -10075,6 +10094,52 @@ fn candidates_from_search_for_task_paths(
                     }
                 }
                 metrics.subspans.filtering += filtering_start.elapsed();
+                if let Some(projection) = promoted_rule {
+                    // The parent remains an admission dependency, never the
+                    // identity or body of the selected rule. Preserve the
+                    // source row/seal/validity filters above, then keep the
+                    // native rule distinct from its independently matched parent
+                    // and from other rules derived from the same source.
+                    if !memories.get(&memory_key).is_some_and(|memory| {
+                        memory.workspace_id == projection.rule().workspace_id
+                            && (include_tombstoned || memory.tombstoned_at.is_none())
+                    }) {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        push_degradation(
+                            degraded,
+                            "context_rule_hit_unhydrated",
+                            ContextResponseSeverity::Low,
+                            format!(
+                                "Rule {} has no eligible source memory in this workspace.",
+                                projection.rule().id
+                            ),
+                            Some("ee index rebuild --json".to_owned()),
+                        );
+                        continue;
+                    }
+                    if let Some(memory) = memories.get(&memory_key) {
+                        // Keep source freshness diagnostics even though the
+                        // rule's own identity and body are selected below.
+                        if provenance_for_memory_cached(
+                            memory,
+                            memory_id,
+                            workspace_path,
+                            bound_workspace_id.as_deref(),
+                            false,
+                            degraded,
+                            &mut freshness_file_cache,
+                        )
+                        .is_none()
+                        {
+                            metrics.skipped_candidates =
+                                metrics.skipped_candidates.saturating_add(1);
+                            continue;
+                        }
+                    }
+                    direct_rules.push((hit.clone(), projection.clone()));
+                    metrics.converted_candidates = metrics.converted_candidates.saturating_add(1);
+                    continue;
+                }
                 let preloaded = PreloadedCandidateSource {
                     memories: &memories,
                     tags_map: &tags_map,
@@ -10084,7 +10149,6 @@ fn candidates_from_search_for_task_paths(
                     validity_reference_time: reference_time,
                     include_tombstoned,
                     freshness_file_cache: &mut freshness_file_cache,
-                    rules: &rules_map,
                 };
                 match candidate_from_hit_preloaded(
                     preloaded,
@@ -10130,6 +10194,21 @@ fn candidates_from_search_for_task_paths(
             }
         }
     }
+    // Sourceless rules resolve in phase 1; sourced rules pass their parent
+    // admission in phase 3. Their native selection order must still be the
+    // original search order before result caps, pagination and token spending.
+    let hit_order: BTreeMap<&str, usize> = search_report
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| (hit.doc_id.as_str(), index))
+        .collect();
+    direct_rules.sort_by_key(|(hit, _)| {
+        hit_order
+            .get(hit.doc_id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
     (candidates, metrics)
 }
 
@@ -13117,10 +13196,6 @@ struct PreloadedCandidateSource<'a> {
     validity_reference_time: Option<DateTime<Utc>>,
     include_tombstoned: bool,
     freshness_file_cache: &'a mut crate::core::memory::EvidenceFreshnessFileCache,
-    /// Promoted procedural rules referenced by rule-artifact hits, batched
-    /// alongside memories so a rule hit hydrates its own body into the pack
-    /// candidate instead of collapsing into its source memory (bd-3h6bz).
-    rules: &'a BTreeMap<String, RuleIndexProjection>,
 }
 
 struct FocusCandidateSource<'a> {
@@ -13145,6 +13220,14 @@ fn candidate_from_hit_preloaded(
     degraded: &mut Vec<ContextResponseDegradation>,
     subspans: &mut CandidateResolutionSubspans,
 ) -> Option<PackCandidate> {
+    // Rules must finish through native admission/selection. A future caller
+    // cannot resurrect source-memory aliasing through this memory helper.
+    if artifact_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("rule_"))
+    {
+        return None;
+    }
     let memory = match source.memories.get(memory_key) {
         Some(memory) if memory.tombstoned_at.is_none() => memory,
         Some(memory) if source.include_tombstoned => memory,
@@ -13172,76 +13255,26 @@ fn candidate_from_hit_preloaded(
         subspans.candidate_construction += construction_start.elapsed();
         return None;
     };
-    // A rule hit must hydrate that live rule. Its source memory remains the
-    // identity/provenance anchor, but cannot inherit a missing or retired
-    // rule's retrieval score by silently substituting its own body.
-    let promoted_rule = match artifact_id
-        .as_deref()
-        .filter(|artifact| artifact.starts_with("rule_"))
-    {
-        Some(artifact) => {
-            let Some(rule) = source
-                .rules
-                .get(artifact)
-                .map(RuleIndexProjection::rule)
-                .filter(|rule| rule.tombstoned_at.is_none())
-            else {
-                subspans.candidate_construction += construction_start.elapsed();
-                return None;
-            };
-            Some(rule)
-        }
-        None => None,
-    };
-    // Unknown native trust is a denial, never a promotion to a verified class.
-    let promoted_rule_trust = promoted_rule
-        .map(|rule| TrustClass::from_str(&rule.trust_class))
-        .transpose()
-        .ok()?;
-    let Some(utility) = unit_score(promoted_rule.map_or(memory.utility, |rule| rule.utility))
-    else {
+    let Some(utility) = unit_score(memory.utility) else {
         subspans.candidate_construction += construction_start.elapsed();
         return None;
     };
-    let content = match promoted_rule {
-        Some(rule) => rule.content.clone(),
-        None => memory.content.clone(),
-    };
-    let applicability = artifact_id
-        .as_deref()
-        .and_then(|id| source.rules.get(id))
-        .and_then(task_paths::scope_explanation);
-    let applicability_tokens = applicability.as_deref().map_or(0, estimate_tokens_default);
-    let mut why = candidate_selection_why(
+    let content = memory.content.clone();
+    let why = candidate_selection_why(
         source.query,
         hit.source.as_str(),
         relevance.into_inner(),
         utility.into_inner(),
         artifact_id.as_deref(),
     );
-    if let Some(applicability) = applicability {
-        why.push(' ');
-        why.push_str(&applicability);
-    }
-    let mut candidate_provenances = vec![provenance];
-    if let Some(rule) = promoted_rule {
-        if let Ok(entry) = PackProvenance::new(
-            candidate_provenances[0].uri.clone(),
-            format!("Promoted procedural rule {}", rule.id),
-        ) {
-            candidate_provenances.push(entry);
-        }
-    }
     let candidate = match PackCandidate::new(PackCandidateInput {
         memory_id,
-        section: promoted_rule
-            .map(|_| PackSection::ProceduralRules)
-            .unwrap_or_else(|| section_for_memory(memory)),
-        estimated_tokens: estimate_tokens_default(&content).saturating_add(applicability_tokens),
+        section: section_for_memory(memory),
+        estimated_tokens: estimate_tokens_default(&content),
         content,
         relevance,
         utility,
-        provenance: candidate_provenances,
+        provenance: vec![provenance],
         why,
     }) {
         Ok(candidate) => candidate,
@@ -13251,10 +13284,7 @@ fn candidate_from_hit_preloaded(
         }
     };
 
-    let trust = promoted_rule_trust.map_or_else(
-        || trust_signal_for_memory(memory, memory_id, degraded),
-        |class| PackTrustSignal::new(class, Some("procedural_rule".to_owned())),
-    );
+    let trust = trust_signal_for_memory(memory, memory_id, degraded);
     let candidate = candidate
         .with_source_signals(evidence_freshness, origin)
         .with_diversity_key(diversity_key_for_memory(memory, &tags))
@@ -13677,19 +13707,13 @@ fn artifact_linked_memory_id(
 /// hit can hydrate into the pack's `procedural_rules` section (bd-3h6bz).
 ///
 /// Rules are indexed as first-class `source=rule` documents, but the pack
-/// candidate model is memory-centric, so a rule hit hydrates through its
-/// `rule_source_memories` linkage — mirroring how artifact hits hydrate
-/// through their memory links. The source-memory pick is deterministic
-/// (lexicographically smallest id). The rule id rides along as the linked
-/// document so the candidate's `why` names the applied rule. A matched rule
-/// with no hydratable source memory degrades honestly instead of being
-/// silently dropped: the rule stays retrievable via `ee search`.
-/// How an admitted rule hit enters a pack.
+/// Source eligibility is checked against the same deterministic parent used
+/// by earlier packs. Every admitted rule is then selected under its own ID;
+/// lineage never substitutes a memory identity for a rule body.
 enum RuleHitResolution {
-    /// Hydrates through one of its source memories (the original v2 path).
+    /// Check this parent through the existing source admission pipeline.
     Linked(MemoryId, RuleIndexProjection),
-    /// No source memory can carry it: it enters under its own `RuleId`
-    /// (bd-vp087, ADR 0085).
+    /// No parent dependency; the rule enters its native lane immediately.
     Direct(RuleIndexProjection),
 }
 
@@ -13899,8 +13923,112 @@ fn rule_linked_memory_id(
     }
 }
 
-/// Build pack items for admitted rules that no source memory can carry
-/// (bd-vp087). Admission already ran in `rule_linked_memory_id`; this applies
+fn filter_native_rule_sources_by_scope(
+    connection: &DbConnection,
+    hits: &mut Vec<(SearchHit, RuleIndexProjection)>,
+    context: &MemoryScopeContext,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> MemoryScopeStats {
+    let mut stats = context.stats();
+    hits.retain(|(_, projection)| {
+        let source = projection.source_memory_ids().first();
+        let visible = match context.scope {
+            MemoryScope::Workspace | MemoryScope::Swarm => true,
+            MemoryScope::Verified => matches!(
+                TrustClass::from_str(&projection.rule().trust_class),
+                Ok(TrustClass::HumanExplicit
+                    | TrustClass::PeerHumanAttested
+                    | TrustClass::AgentValidated)
+            ),
+            MemoryScope::Global if source.is_none() => {
+                projection.rule().scope == "global"
+                    || crate::models::memory_tags_include_global_scope(projection.tags())
+            }
+            MemoryScope::Global | MemoryScope::SelfOnly | MemoryScope::Team => {
+                source.is_some_and(|id| {
+                    connection
+                        .get_memory(id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|memory| {
+                            let tags = if context.scope == MemoryScope::Global {
+                                match connection.get_memory_tags_batch(&[id.as_str()]) {
+                                    Ok(mut tags) => tags.remove(id).unwrap_or_default(),
+                                    Err(_) => return false,
+                                }
+                            } else {
+                                Vec::new()
+                            };
+                            memory.workspace_id == projection.rule().workspace_id
+                                && context.memory_in_scope_with_tags(&memory, &tags)
+                        })
+                })
+            }
+        };
+        stats.record_candidate_id(visible, source.map(String::as_str));
+        visible
+    });
+    if stats.candidates_excluded_by_scope > 0 {
+        push_degradation(
+            degraded,
+            "scope_excluded_evidence",
+            ContextResponseSeverity::Low,
+            format!(
+                "Memory scope `{}` excluded {} procedural rules or their required sources.",
+                context.scope.as_str(),
+                stats.candidates_excluded_by_scope
+            ),
+            Some("Use --memory-scope swarm to inspect all eligible guidance.".to_owned()),
+        );
+    }
+    if context.strict_scope && stats.strict_violations > 0 {
+        hits.clear();
+    }
+    stats
+}
+
+fn filter_native_rule_sources_by_fresh_sentinels(
+    connection: &DbConnection,
+    hits: &mut Vec<(SearchHit, RuleIndexProjection)>,
+    reference_time: DateTime<Utc>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<(), ContextPackError> {
+    let mut retained = Vec::new();
+    let mut excluded = 0_usize;
+    for hit in std::mem::take(hits) {
+        let blocked = if let Some(source) = hit.1.source_memory_ids().first() {
+            matches!(
+                sentinel_candidate_freshness(connection, source, reference_time)?,
+                SentinelCandidateFreshness::Blocked(_)
+            )
+        } else {
+            false
+        };
+        if blocked {
+            excluded = excluded.saturating_add(1);
+        } else {
+            retained.push(hit);
+        }
+    }
+    *hits = retained;
+    if excluded > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Medium,
+            format!(
+                "{excluded} procedural rules excluded because their required source sentinel was not fresh and passing."
+            ),
+            Some(
+                "Run ee sentinel check --workspace . --json before rebuilding the pack.".to_owned(),
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Build native pack items for every admitted procedural rule.
+/// Admission already ran in `rule_linked_memory_id`; this applies
 /// the request's query filters and shapes each rule as advisory guidance
 /// under its own `RuleId`, in search order.
 fn direct_rule_pack_candidates(
@@ -13910,9 +14038,13 @@ fn direct_rule_pack_candidates(
     output_redaction_enabled: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<crate::pack::PackRuleItem> {
+    if !request.sections.is_empty() && !request.sections.contains(&PackSection::ProceduralRules) {
+        return Vec::new();
+    }
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     let mut filtered_count = 0_usize;
+    let mut authority_codes = BTreeSet::new();
     for (hit, projection) in hits {
         let rule = projection.rule();
         if !seen.insert(rule.id.clone()) {
@@ -13926,7 +14058,15 @@ fn direct_rule_pack_candidates(
             crate::pack::PackTrustPosture::Advisory.as_str(),
         ) || !filters.matches_tags(projection.tags())
             || !temporal_record_matches(&rule.created_at, &rule.updated_at, &filters.temporal)
+            || !redaction_allow_categories(&rule.content, &filters.redaction)
         {
+            filtered_count = filtered_count.saturating_add(1);
+            continue;
+        }
+        let authority = crate::policy::detect_instruction_like_content(&rule.content);
+        let codes = authority.authority_signal_codes();
+        if !codes.is_empty() {
+            authority_codes.extend(codes);
             filtered_count = filtered_count.saturating_add(1);
             continue;
         }
@@ -13942,12 +14082,23 @@ fn direct_rule_pack_candidates(
         let Ok(provenance) = PackProvenance::new(
             provenance_uri,
             format!(
-                "Procedural rule {} ({} maturity, {} scope) with no source memory",
+                "Procedural rule {} ({} maturity, {} scope)",
                 rule.id, rule.maturity, rule.scope
             ),
         ) else {
             continue;
         };
+        let mut provenance = vec![provenance];
+        for source in projection.source_memory_ids() {
+            if let Ok(uri) = ProvenanceUri::from_str(&format!("ee://memory/{source}"))
+                && let Ok(entry) = PackProvenance::new(
+                    uri,
+                    format!("Source memory {source} for procedural rule {}", rule.id),
+                )
+            {
+                provenance.push(entry);
+            }
+        }
         let (content, _redactions) = if output_redaction_enabled {
             crate::pack::redact_pack_item_content(rule.content.clone())
         } else {
@@ -13979,10 +14130,22 @@ fn direct_rule_pack_candidates(
             estimated_tokens,
             relevance,
             utility,
-            provenance: vec![provenance],
+            provenance,
             why,
             trust: PackTrustSignal::new(trust_class, Some("procedural_rule".to_owned())),
         });
+    }
+    if !authority_codes.is_empty() {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Medium,
+            format!(
+                "Procedural rules excluded by instruction-authority policy ({}).",
+                authority_codes.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            Some("Inspect the excluded rules before revising stored guidance.".to_owned()),
+        );
     }
     if filtered_count > 0 {
         push_degradation(

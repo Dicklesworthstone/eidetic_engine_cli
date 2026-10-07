@@ -288,6 +288,27 @@ admission posture.
 5. Run public no-mock acceptance from native creation/import through index,
    search, pack, persistence, replay, diff, why, and outcome grading.
 
+### Sourced-rule identity slice (2026-10-07)
+
+The existing native rule path now also carries rules with source memories.
+Two rules with the same source remain independently selectable, and a source
+memory can be selected alongside either rule. Source eligibility checks still
+apply, including workspace ownership, lifecycle, validity, sealing, and native
+rule review holds. Rule content, trust, tags, revision, and feedback identity
+come from the rule; source links remain provenance. The pack-cache admission
+policy version changes so persisted packs using source-memory aliases are
+reassembled through native admission.
+
+This slice uses the existing `PackRuleItem`, `pack_rule_items`, native replay,
+and rule-outcome paths. It does not complete the coordinated v3 migration or
+the entity-generic selection and omission work described above. The existing
+native lane spends the shared result and token budgets after memory selection;
+it preserves retrieval order among rules, but does not provide cross-kind
+relevance ranking. The public
+regression in `tests/rule_mark_update_e2e.rs` exercises shared-source rules,
+an independent source-memory hit, persistence, replay, pack-rank feedback,
+retry idempotence, and unchanged source and sibling rules.
+
 ## Verification
 
 Required proof includes:

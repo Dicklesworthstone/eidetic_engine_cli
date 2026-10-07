@@ -6,6 +6,7 @@
 
 use ee::db::DbConnection;
 use serde_json::{Value as JsonValue, json};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,6 +68,7 @@ fn ee_binary_path() -> Result<PathBuf, String> {
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
     Command::new(ee_binary_path()?)
         .current_dir(workspace)
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_EMBED_DOWNLOAD_ENABLED", "false")
         .args(args)
         .output()
@@ -1026,6 +1028,350 @@ fn native_rule_outcome_changes_rule_once_without_changing_source_memory() -> Tes
             .count()
             == 1,
         "only the first outcome writes a native rule learning audit",
+    )?;
+    connection.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn sourced_rule_pack_replay_and_item_outcome_preserve_native_identity() -> TestResult {
+    let run_dir = unique_run_dir()?;
+    let workspace = run_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let events_path = run_dir.join("native-pack-events.jsonl");
+    let run_json = |step: &str, tail: &[&str]| -> Result<JsonValue, String> {
+        let mut args = workspace_args(&workspace);
+        args.extend(tail.iter().map(|arg| (*arg).to_owned()));
+        let output = run_step(&workspace, &events_path, step, args)?;
+        parse_stdout_json(&output, step)
+    };
+
+    run_json("init", &["init"])?;
+    run_json(
+        "disable_global_recall",
+        &["config", "set", "memory.include_global", "false"],
+    )?;
+    run_json(
+        "disable_global_participation",
+        &["config", "set", "memory.participate", "false"],
+    )?;
+    let source_content = "The release deployment uses blue and green instances and checks their health before switching traffic.";
+    let remembered = run_json(
+        "remember_source",
+        &[
+            "remember",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            source_content,
+        ],
+    )?;
+    let memory_id = remembered["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember response missing memory_id".to_owned())?;
+    let bodies = [
+        "Before release deployment, verify package signatures against the trusted signing key.",
+        "During release deployment, preserve the previous database snapshot until the health check passes.",
+        "After release deployment, record the rollout version in the operations log.",
+    ];
+    let mut rule_ids = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        let mut args = vec![
+            "rule",
+            "add",
+            "--maturity",
+            "candidate",
+            "--scope",
+            "workspace",
+            "--confidence",
+            "0.5",
+        ];
+        if index < 2 {
+            args.extend(["--source-memory", memory_id]);
+        }
+        args.push(body);
+        let added = run_json(&format!("add_rule_{index}"), &args)?;
+        rule_ids.push(
+            added["data"]["ruleId"]
+                .as_str()
+                .ok_or_else(|| "rule add response missing ruleId".to_owned())?
+                .to_owned(),
+        );
+    }
+    run_json("index_rebuild", &["index", "rebuild"])?;
+    let packed = run_json(
+        "pack_distinct_entities",
+        &[
+            "pack",
+            "release deployment",
+            "--candidate-pool",
+            "32",
+            "--max-tokens",
+            "8000",
+            "--source-mode",
+            "lexical_only",
+            "--relevance-floor",
+            "0",
+            "--no-lod",
+            "--no-baseline-write",
+        ],
+    )?;
+    let pack = &packed["data"]["pack"];
+    let pack_hash = pack["hash"]
+        .as_str()
+        .ok_or_else(|| "pack response missing hash".to_owned())?;
+    let items = pack["items"]
+        .as_array()
+        .ok_or_else(|| "pack response missing items".to_owned())?;
+    ensure(
+        items.len() == 4
+            && items
+                .iter()
+                .filter_map(|item| item["rank"].as_u64())
+                .collect::<BTreeSet<_>>()
+                == BTreeSet::from([1, 2, 3, 4]),
+        format!(
+            "source memory and all three rules must remain distinct, uniquely ranked entities: {packed}"
+        ),
+    )?;
+    let memory_items: Vec<_> = items
+        .iter()
+        .filter(|item| item["memoryId"] == memory_id)
+        .collect();
+    ensure(
+        memory_items.len() == 1 && memory_items[0]["content"] == source_content,
+        "the independently retrieved memory retains its own content and identity",
+    )?;
+    for (index, rule_id) in rule_ids.iter().enumerate() {
+        let matching: Vec<_> = items
+            .iter()
+            .filter(|item| item["ruleId"] == *rule_id)
+            .collect();
+        ensure(
+            matching.len() == 1,
+            format!("rule {rule_id} must be selected exactly once"),
+        )?;
+        let item = matching[0];
+        ensure(
+            item["entityKind"] == "rule"
+                && item.get("memoryId").is_none()
+                && item["content"] == bodies[index]
+                && item["section"] == "procedural_rules"
+                && item["trust"]["posture"] == "advisory"
+                && item["entityRevision"]
+                    .as_str()
+                    .is_some_and(ee::db::is_canonical_blake3_hash),
+            format!(
+                "rule {rule_id} must carry its own body, revision, and advisory identity: {item}"
+            ),
+        )?;
+        let provenance = item["provenance"]
+            .as_array()
+            .ok_or_else(|| format!("rule {rule_id} omitted provenance"))?;
+        ensure(
+            provenance
+                .iter()
+                .any(|entry| entry["uri"] == format!("ee://rule/{rule_id}"))
+                && (index == 2
+                    || provenance
+                        .iter()
+                        .any(|entry| entry["uri"] == format!("ee://memory/{memory_id}"))),
+            format!(
+                "rule {rule_id} keeps native provenance and its source attribution: {provenance:?}"
+            ),
+        )?;
+    }
+
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection =
+        DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+    let source_before = connection
+        .get_memory(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source missing after packing".to_owned())?;
+    let rules_before = rule_ids
+        .iter()
+        .map(|rule_id| {
+            connection
+                .get_procedural_rule(rule_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("rule {rule_id} missing after packing"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let pack_ids = connection
+        .list_pack_record_ids_by_hash_for_workspace(&source_before.workspace_id, pack_hash, 8)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        pack_ids.len() == 1,
+        "the emitted hash addresses one persisted pack",
+    )?;
+    let pack_id = &pack_ids[0];
+    let stored_rules = connection
+        .get_pack_rule_items(pack_id)
+        .map_err(|error| error.to_string())?;
+    let stored_memories = connection
+        .get_pack_items(pack_id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        stored_rules.len() == 3
+            && stored_memories.len() == 1
+            && stored_memories[0].memory_id == memory_id,
+        "persistence stores native rule foreign keys separately from the source memory",
+    )?;
+    for stored in &stored_rules {
+        let item = items
+            .iter()
+            .find(|item| item["ruleId"] == stored.rule_id)
+            .ok_or_else(|| format!("persisted rule {} was not emitted", stored.rule_id))?;
+        ensure(
+            item["rank"].as_u64() == Some(u64::from(stored.rank))
+                && item["entityRevision"] == stored.entity_revision
+                && item["why"] == stored.why,
+            "persisted native selection agrees with emitted rank, revision, and explanation",
+        )?;
+        let provenance: JsonValue =
+            serde_json::from_str(&stored.provenance_json).map_err(|error| error.to_string())?;
+        let emitted_provenance: Vec<_> = item["provenance"]
+            .as_array()
+            .ok_or_else(|| "selected rule omitted provenance".to_owned())?
+            .iter()
+            .map(|entry| json!({"uri": entry["uri"], "note": entry["note"]}))
+            .collect();
+        ensure(
+            provenance["entries"] == json!(emitted_provenance),
+            "persisted native provenance matches the emitted attribution",
+        )?;
+    }
+    connection.close().map_err(|error| error.to_string())?;
+
+    let replay = run_json("replay_native_pack", &["pack", "replay", pack_id])?;
+    ensure(
+        replay["data"]["replay"]["status"] == "available",
+        "native pack replay passes ledger verification",
+    )?;
+    let replay_items = replay["data"]["replay"]["selectedItems"]
+        .as_array()
+        .ok_or_else(|| "replay omitted selected items".to_owned())?;
+    ensure(
+        replay_items.len() == 4,
+        "replay retains every selected entity",
+    )?;
+    for item in items.iter().filter(|item| item["entityKind"] == "rule") {
+        let replay_item = replay_items
+            .iter()
+            .find(|entry| entry["entityId"] == item["ruleId"])
+            .ok_or_else(|| format!("replay lost native rule: {item}"))?;
+        ensure(
+            replay_item["entityKind"] == "rule"
+                && replay_item.get("memoryId").is_none()
+                && replay_item["rank"] == item["rank"]
+                && replay_item["entityRevision"] == item["entityRevision"],
+            "public replay preserves rule identity, rank, and selected revision",
+        )?;
+    }
+
+    let selected = items
+        .iter()
+        .find(|item| item["ruleId"] == rule_ids[0])
+        .ok_or_else(|| "first sourced rule missing from pack".to_owned())?;
+    let rank = selected["rank"]
+        .as_u64()
+        .ok_or_else(|| "selected rule missing rank".to_owned())?
+        .to_string();
+    let event_id = "fb_00000000000000000000000721";
+    let outcome_args = [
+        "outcome",
+        "--pack",
+        pack_hash,
+        "--item",
+        &rank,
+        "--signal",
+        "helpful",
+        "--event-id",
+        event_id,
+    ];
+    let outcome = run_json("grade_first_sourced_rule", &outcome_args)?;
+    ensure(
+        outcome["data"]["status"] == "recorded"
+            && outcome["data"]["target"]
+                == json!({"type":"rule", "id":rule_ids[0], "workspaceId":source_before.workspace_id, "verified":true}),
+        "pack-item grading resolves the selected native rule without a target-type override",
+    )?;
+    let retry = run_json("retry_sourced_rule_grade", &outcome_args)?;
+    ensure(
+        retry["data"]["status"] == "already_recorded"
+            && retry["data"]["target"] == outcome["data"]["target"],
+        "retry preserves the same native target and does not apply feedback twice",
+    )?;
+    let learned_why = run_json("why_graded_rule", &["why", &rule_ids[0]])?;
+    ensure(
+        learned_why["data"]["entity"]["kind"] == "rule"
+            && learned_why["data"]["entity"]["id"] == rule_ids[0]
+            && learned_why["data"]["entity"]["details"]["feedback"]["positiveCount"] == 1,
+        "why reports exactly one observation on the selected rule",
+    )?;
+    let replay_after = run_json("replay_after_rule_learning", &["pack", "replay", pack_id])?;
+    ensure(
+        replay_after["data"]["replay"] == replay["data"]["replay"],
+        "learning changes current rule scores without rewriting the recorded pack selection",
+    )?;
+
+    let connection =
+        DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+    ensure(
+        connection
+            .list_memories(&source_before.workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            == vec![source_before],
+        "rule grading preserves the source memory exactly and creates no synthetic memories",
+    )?;
+    for (index, before) in rules_before.iter().enumerate() {
+        let after = connection
+            .get_procedural_rule(&before.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("rule {} missing after grading", before.id))?;
+        let events = connection
+            .list_feedback_events_for_target("rule", &before.id)
+            .map_err(|error| error.to_string())?;
+        if index == 0 {
+            ensure(
+                after.positive_feedback_count == before.positive_feedback_count + 1
+                    && after.negative_feedback_count == before.negative_feedback_count
+                    && after.confidence > before.confidence
+                    && after.utility > before.utility
+                    && after.content == before.content
+                    && after.maturity == before.maturity
+                    && events.len() == 1
+                    && events[0].id == event_id
+                    && events[0].applied_at.is_some(),
+                "only the chosen rule gains one durable helpful observation",
+            )?;
+            let evidence: JsonValue =
+                serde_json::from_str(events[0].evidence_json.as_deref().ok_or_else(|| {
+                    "pack-item feedback omitted recorded selection evidence".to_owned()
+                })?)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                evidence["packId"] == pack_hash
+                    && evidence["entityKind"] == "rule"
+                    && evidence["entityId"] == before.id
+                    && evidence["itemRank"] == selected["rank"]
+                    && evidence["entityRevision"] == selected["entityRevision"],
+                "feedback records the exact selected rule revision and pack rank",
+            )?;
+        } else {
+            ensure(
+                after == *before && events.is_empty(),
+                "sibling rules sharing the source and the sourceless rule remain unchanged",
+            )?;
+        }
+    }
+    ensure(
+        connection
+            .list_feedback_events_for_target("memory", memory_id)
+            .map_err(|error| error.to_string())?
+            .is_empty(),
+        "the source memory receives no rule feedback",
     )?;
     connection.close().map_err(|error| error.to_string())
 }
