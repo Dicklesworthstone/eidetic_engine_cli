@@ -166,10 +166,32 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           failed=0
-          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/rules-clippy.log" 2>&1 || failed=1
-          cargo fmt --check > "$RUNNER_TEMP/rules-format.log" 2>&1 || failed=1
+          # bd-aav0v: an all-targets deny-level lint and a WHOLE-TREE `cargo fmt --check`
+          # under one flag. The format arm's scope is the entire repository, not this
+          # lane's sources, so it can redden from an edit nothing here touched -- which
+          # is exactly the attribution a reader needs and never got. This step runs
+          # under `!cancelled()`, so it reports even though an earlier step dies.
+          clippy_exit=0
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/rules-clippy.log" 2>&1 || clippy_exit=$?
+          fmt_exit=0
+          cargo fmt --check > "$RUNNER_TEMP/rules-format.log" 2>&1 || fmt_exit=$?
           tail -n 80 "$RUNNER_TEMP/rules-clippy.log"
           tail -n 80 "$RUNNER_TEMP/rules-format.log"
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --all-targets -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/rules-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/rules-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --all-targets -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo fmt --check (WHOLE TREE, not just this lane's sources)' FAILED -- exit $fmt_exit; first files named:"
+            grep -m5 -E '^Diff in ' "$RUNNER_TEMP/rules-format.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo fmt --check (whole tree)' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

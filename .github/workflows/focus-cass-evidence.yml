@@ -57,15 +57,36 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-aav0v: a two-iteration loop with two recorders per pass -- four runtime
+          # arms reported as one flag. The loop also erased WHICH target failed: a red
+          # here could be the unit suite or the CLI e2e, the tool dying or the result
+          # line missing, and the step distinguished none of the four.
           for target in unit cli; do
             log="$RUNNER_TEMP/focus-cass/$target.log"
+            status=0
             if test "$target" = unit; then
-              timeout 12m cargo test --locked --lib core::focus_suggest:: -- --test-threads=2 > "$log" 2>&1 || failed=1
+              timeout 12m cargo test --locked --lib core::focus_suggest:: -- --test-threads=2 > "$log" 2>&1 || status=$?
             else
-              timeout 12m cargo test --locked --test integration_e_f focus_suggest_phase2_e2e:: -- --test-threads=1 > "$log" 2>&1 || failed=1
+              timeout 12m cargo test --locked --test integration_e_f focus_suggest_phase2_e2e:: -- --test-threads=1 > "$log" 2>&1 || status=$?
             fi
             tail -n 100 "$log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+            # Separate the two kinds. Nonzero status is the tool failing or being
+            # killed -- and `timeout` reports 124, which is a twelve-minute hang, not
+            # an assertion. Status 0 with no result line is a suite that reported
+            # nothing, which is what a filter matching zero tests looks like.
+            if test "$status" -ne 0; then
+              if test "$status" -eq 124; then
+                echo "ATTRIBUTION: arm '$target tests' FAILED -- exit 124: 'timeout 12m' KILLED it; no assertion was reached"
+              else
+                echo "ATTRIBUTION: arm '$target tests' FAILED -- exit $status (tool failure or a failing assertion)"
+              fi
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: arm '$target result line' FAILED -- exit 0 but no 'ok. N passed; 0 failed; 0 ignored' line; the suite reported nothing"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$target' ok -- $(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$log" | head -1) tests passed"
+            fi
           done
           exit "$failed"
       - name: Check strict library lint and focus formatting
@@ -73,10 +94,30 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/focus-cass/clippy.log" 2>&1 || failed=1
-          rustfmt --edition 2024 --check --config skip_children=true src/core/focus_suggest.rs src/core/focus_suggest_cass.rs > "$RUNNER_TEMP/focus-cass/fmt.log" 2>&1 || failed=1
+          # bd-aav0v: THIS IS THE STEP THAT IS CURRENTLY RED on this lane (last three
+          # runs: failure, failure, failure), and it ran a lint and a two-file format
+          # check under one flag, so the standing red does not say which of the two it
+          # is. A deny-level Clippy finding and a reflow need different work.
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/focus-cass/clippy.log" 2>&1 || clippy_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --check --config skip_children=true src/core/focus_suggest.rs src/core/focus_suggest_cass.rs > "$RUNNER_TEMP/focus-cass/fmt.log" 2>&1 || fmt_exit=$?
           tail -n 100 "$RUNNER_TEMP/focus-cass/clippy.log"
           tail -n 100 "$RUNNER_TEMP/focus-cass/fmt.log"
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/focus-cass/clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/focus-cass/clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on focus_suggest.rs and focus_suggest_cass.rs' FAILED -- exit $fmt_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on focus_suggest.rs and focus_suggest_cass.rs' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

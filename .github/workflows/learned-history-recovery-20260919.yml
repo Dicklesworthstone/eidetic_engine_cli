@@ -101,10 +101,46 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           failed=0
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/history-clippy.log" 2>&1 || failed=1
+          # bd-aav0v: a production lint and a GLOBBED format check under one flag. The
+          # glob is the trap worth attributing: two of the three patterns are wildcards,
+          # and bash leaves an unmatched pattern as a literal, so rustfmt is handed a
+          # path that does not exist and fails -- which is a RENAMED OR DELETED source,
+          # not a reflow, and reads identically under a shared flag. So print the
+          # expansion and say which of the two it was.
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/history-clippy.log" 2>&1 || clippy_exit=$?
           tail -n 100 "$RUNNER_TEMP/history-clippy.log"
-          rustfmt --check --edition 2024 --config skip_children=true src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs src/core/backup_cass_recovery.rs > "$RUNNER_TEMP/history-format.log" 2>&1 || failed=1
+          fmt_sources=(src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs src/core/backup_cass_recovery.rs)
+          echo "ATTRIBUTION: format arm scope -- ${#fmt_sources[@]} path(s): ${fmt_sources[*]}"
+          unexpanded=0
+          for candidate in "${fmt_sources[@]}"; do
+            if test ! -f "$candidate"; then
+              echo "ATTRIBUTION: format arm scope PROBLEM -- '$candidate' does not exist (an unmatched glob or a renamed source, NOT a formatting defect)"
+              unexpanded=1
+            fi
+          done
+          fmt_exit=0
+          rustfmt --check --edition 2024 --config skip_children=true "${fmt_sources[@]}" > "$RUNNER_TEMP/history-format.log" 2>&1 || fmt_exit=$?
           cat "$RUNNER_TEMP/history-format.log"
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/history-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/history-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            if test "$unexpanded" -ne 0; then
+              echo "ATTRIBUTION: arm 'rustfmt --check on the backup recovery sources' FAILED -- exit $fmt_exit, and a scoped path above is MISSING; fix the glob or the step, not the formatting"
+            else
+              echo "ATTRIBUTION: arm 'rustfmt --check on the backup recovery sources' FAILED -- exit $fmt_exit; every scoped path exists, so this is a real reflow:"
+              grep -m5 -E '^Diff in ' "$RUNNER_TEMP/history-format.log" || true
+            fi
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on the backup recovery sources' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
