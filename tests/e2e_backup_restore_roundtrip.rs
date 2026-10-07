@@ -662,7 +662,34 @@ fn collect_json_differences(
     }
 }
 
+/// Degradation codes, in order, for the error context below. They are EXCLUDED from the
+/// comparison on purpose and reported anyway, because they name which retrieval path each
+/// store took -- which is what explains the fields that do differ (bd-bka39).
+fn degradation_codes(value: &JsonValue) -> String {
+    let Some(entries) = value
+        .pointer("/data/degraded")
+        .and_then(JsonValue::as_array)
+    else {
+        return "<none>".to_owned();
+    };
+    if entries.is_empty() {
+        return "<empty>".to_owned();
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("code")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("<no code>")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn ensure_context_json_bytes_equal(
+    actual_raw: &JsonValue,
+    expected_raw: &JsonValue,
     actual_stdout: &[u8],
     expected_stdout: &[u8],
     ctx: &str,
@@ -699,12 +726,16 @@ fn ensure_context_json_bytes_equal(
     }
     Err(format!(
         "{ctx}: expected {} bytes blake3:{}, got {} bytes blake3:{}; first JSON differences \
-         (canonical forms, excluding store-local fields): {}",
+         (canonical forms, excluding store-local fields): {}; CONTEXT, not compared -- \
+         degradation codes expected [{}] vs got [{}], which name the retrieval path each store \
+         took and so explain the compared fields that differ",
         expected_stdout.len(),
         blake3::hash(expected_stdout).to_hex(),
         actual_stdout.len(),
         blake3::hash(actual_stdout).to_hex(),
         diffs.join(" | "),
+        degradation_codes(expected_raw),
+        degradation_codes(actual_raw),
     ))
 }
 
@@ -2258,6 +2289,8 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     ])?;
     let restored_context_stdout = canonical_context_stdout(restored_context.clone())?;
     ensure_context_json_bytes_equal(
+        &restored_context,
+        &source_context,
         &restored_context_stdout,
         &source_context_stdout,
         "restored canonical context selection matches source context byte-for-byte",
