@@ -319,6 +319,36 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.graph_fnx_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-graph-metric-fnx-routing.py
 
+      # bd-rvrj2 / bd-gpik0. HOSTED MIRROR of
+      # tests/ee_spawn_isolation_contract.rs, which is the authority but is
+      # reachable from no hosted lane: scripts/verify.sh runs the whole
+      # integration_e_f target so it DOES execute there, but every hosted lane
+      # that touches that target passes a filter, and a filter excludes
+      # ee_spawns_do_not_add_unisolated_sites. Running the Rust contract here
+      # would mean compiling integration_e_f -- minutes of build for a check that
+      # reads text files -- and the predicate is pure static analysis, so it ports.
+      #
+      # It earns its place: the same predicate caught a real regression on this
+      # tree on 2026-10-07 (a new un-isolated spawn in
+      # tests/support/import_cass_effect_declaration.rs, repaired at 18133e4f3),
+      # found only because the contract was replicated by hand. 272 un-isolated
+      # spawns are already baselined; the ratchet is what stops 273.
+      #
+      # DRIFT is the cost and is not fully mitigated: edit the Rust classifier and
+      # this mirror does not follow. The self-test uses the SAME planted fixtures
+      # as the contract's classifier_controls_both_directions, so a divergence
+      # surfaces as this gate failing while the Rust test passes -- the safe
+      # direction. RETIRE the mirror when the contract gains a hosted lane or the
+      # baseline reaches zero.
+      - name: ee spawn isolation ratchet --self-test
+        id: spawn_isolation_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-ee-spawn-isolation.py --self-test
+
+      - name: ee spawn isolation ratchet
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.spawn_isolation_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-ee-spawn-isolation.py
+
       # bd-479c6. ci.yml's `core::` shard was split six ways by submodule first
       # letter, because it carried 50% of the lib suite and measurably could not
       # finish inside its own 90m budget. A letter-keyed split has exactly one
