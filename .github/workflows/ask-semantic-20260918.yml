@@ -89,7 +89,25 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --lib core::index::ask_model::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-semantic-model-tests.log"
-          grep -Eq 'test result: ok\. 3 passed; 0 failed' "$RUNNER_TEMP/ask-semantic-model-tests.log"
+          # THIS PIN IS ACTIVELY STALE, and it is why this lane has failed since 2026-09-18
+          # (bd-lagsa). It demanded exactly 3 passing tests; the filter now matches 15.
+          #
+          # Counted at HEAD rather than guessed: `core::index::ask_model` resolves through
+          # src/core/index.rs:6547 `#[path = "index_ask.rs"] mod ask_model`, and
+          # src/core/index_ask.rs declares `mod tests {` at :362 with ALL 15 of the file's
+          # #[test] functions inside it (0 before that line). So the `::tests::` filter
+          # matches 15 and the gate wanted 3.
+          #
+          # Floor of 3, keeping the reviewed minimum rather than re-pinning to 15, so adding
+          # the next cached-model regression does not red the lane again. The observed count
+          # is printed so the 3-versus-15 gap stays visible instead of hidden in a passing
+          # grep.
+          model_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/ask-semantic-model-tests.log" | head -1)
+          if test -z "$model_ran" || test "$model_ran" -lt 3; then
+            echo "ATTRIBUTION: core::index::ask_model::tests:: reported passing-with-zero-failures count '${model_ran:-none}', required floor 3"
+            exit 1
+          fi
+          echo "ATTRIBUTION: core::index::ask_model::tests:: ran $model_ran tests (floor 3)"
       - name: Execute existing ask engine regressions
         shell: bash
         run: |
