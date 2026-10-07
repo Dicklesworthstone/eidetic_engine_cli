@@ -56,8 +56,23 @@ def main() -> None:
         assert source, saved
         sources.append(source)
         flags = ['--scope-pattern', pattern] if pattern else []
-        execute('rule', 'add', body, '--scope', scope, *flags, '--maturity', 'validated',
-                '--source-memory', source, '--confidence', '0.95', '--utility', '0.9')
+        added = execute('rule', 'add', body, '--scope', scope, *flags, '--maturity', 'validated',
+                        '--source-memory', source, '--confidence', '0.95', '--utility', '0.9')
+        # DIAGNOSTIC, not an assertion (bd-scoped-pack-selection-red-9-days-gli6r).
+        #
+        # When an assertion below fails it dumps the pack, whose degraded[] and skipped[] name
+        # rule and memory IDs and nothing else. With three rules in play there is then no way to
+        # tell WHICH guidance a rejected id belongs to, so a reader cannot distinguish "the
+        # directory rule was wrongly excluded" from "the file_pattern rule was correctly excluded
+        # and the directory rule never became a candidate". Those have opposite causes and the
+        # ambiguity is what left this lane undiagnosed for nine days.
+        #
+        # Deliberately prints and never asserts: a missing id must not convert a diagnosable
+        # failure into a different failure.
+        marker = body.split()[1].rstrip(':')
+        rule_id = added.get('ruleId') or added.get('rule_id') if isinstance(added, dict) else None
+        print(f'IDENTITY: marker={marker} scope={scope} pattern={pattern} '
+              f'rule={rule_id} memory={source}', flush=True)
     execute('index', 'rebuild')
     query = 'outboxpathcanary'
     flags = ['--source-mode', 'lexical_only', '--strict-source-mode', '--speed', 'instant',
