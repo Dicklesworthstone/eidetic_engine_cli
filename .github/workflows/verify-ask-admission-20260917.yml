@@ -93,10 +93,33 @@ jobs:
           exit "$status"
       - name: Execute all ask engine and real-store regressions
         run: |
-          status=0
-          cargo test --locked --lib core::ask:: -- --test-threads=2 > "$RUNNER_TEMP/ask-path-engine.log" 2>&1 || status=$?
+          failed=0
+          cargo_exit=0
+          cargo test --locked --lib core::ask:: -- --test-threads=2 > "$RUNNER_TEMP/ask-path-engine.log" 2>&1 || cargo_exit=$?
           tail -n 260 "$RUNNER_TEMP/ask-path-engine.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-engine.log" || status=1
+          # bd-aav0v: ONE VARIABLE CANNOT CARRY TWO KINDS OF VALUE. `status` previously took
+          # both cargo's exit code (`|| status=$?`) and a literal 1 from each assertion
+          # (`|| status=1`). Two consequences, and the second is the dangerous one: a reader
+          # who saw status=1 could not tell a tool failure from an assertion miss, and because
+          # every arm wrote the SAME variable, only the LAST failing arm's value survived -- a
+          # cargo exit 101 followed by a grep miss was reported as 1, losing the 101.
+          #
+          # Each arm now reports itself by name on BOTH paths and accumulates into `failed`,
+          # while cargo's real exit keeps its own variable. The "ok" lines matter as much as
+          # the failures: an arm that is silently skipped is now visibly absent from the
+          # output rather than indistinguishable from one that passed.
+          if test "$cargo_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::' FAILED -- cargo exit $cargo_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::' ok -- cargo exit 0"
+          fi
+          if grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-engine.log"; then
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' ok"
+          else
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' FAILED -- no matching line in the log"
+            failed=1
+          fi
           # FLOORS, NOT EXACT COUNTS (bd-qz6dh's conclusion, applied here).
           #
           # These were `-eq 6` and `-eq 10`. The second one RED on 2026-10-06 while every test
@@ -108,22 +131,54 @@ jobs:
           # A floor keeps the protection that matters (the family executed and did not shrink
           # below its known coverage) and drops the part that punishes growth. Removal below
           # the floor is still caught.
-          test "$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -ge 6 || status=1
-          test "$(grep -c '^test core::ask::corpus::evidence_tests::.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -ge 10 || status=1
-          exit "$status"
+          path_rules=$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")
+          if test "$path_rules" -ge 6; then
+            echo "ATTRIBUTION: arm 'native_tests::path_rules_' ok -- $path_rules passing lines, floor 6"
+          else
+            echo "ATTRIBUTION: arm 'native_tests::path_rules_' FAILED -- $path_rules passing lines, floor 6"
+            failed=1
+          fi
+          evidence_tests=$(grep -c '^test core::ask::corpus::evidence_tests::.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")
+          if test "$evidence_tests" -ge 10; then
+            echo "ATTRIBUTION: arm 'corpus::evidence_tests' ok -- $evidence_tests passing lines, floor 10"
+          else
+            echo "ATTRIBUTION: arm 'corpus::evidence_tests' FAILED -- $evidence_tests passing lines, floor 10"
+            failed=1
+          fi
+          exit "$failed"
       - name: Execute public path, lifecycle, scope, privacy and read-only contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle -- --test-threads=2 > "$RUNNER_TEMP/ask-path-cli.log" 2>&1 || status=$?
+          failed=0
+          cargo_exit=0
+          cargo test --locked --test contracts ask_lifecycle -- --test-threads=2 > "$RUNNER_TEMP/ask-path-cli.log" 2>&1 || cargo_exit=$?
           tail -n 200 "$RUNNER_TEMP/ask-path-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-cli.log" || status=1
+          # bd-aav0v, same split as the step above: cargo's exit and the assertion verdicts
+          # were sharing one variable, so the last failing arm overwrote the others.
+          if test "$cargo_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo test --test contracts ask_lifecycle' FAILED -- cargo exit $cargo_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo test --test contracts ask_lifecycle' ok -- cargo exit 0"
+          fi
+          if grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-cli.log"; then
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' ok"
+          else
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' FAILED -- no matching line in the log"
+            failed=1
+          fi
           # Floor, not an exact count -- same reasoning as the two in the step above. This one
           # happens to match today (3), so it is latent rather than red; converting it now
           # means the next person to add a public path-rules test does not have to diagnose a
           # green suite reported as a failure.
-          test "$(grep -c '^test .*ask_lifecycle::native::public_path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-cli.log")" -ge 3 || status=1
-          exit "$status"
+          public_path_rules=$(grep -c '^test .*ask_lifecycle::native::public_path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-cli.log")
+          if test "$public_path_rules" -ge 3; then
+            echo "ATTRIBUTION: arm 'ask_lifecycle::native::public_path_rules_' ok -- $public_path_rules passing lines, floor 3"
+          else
+            echo "ATTRIBUTION: arm 'ask_lifecycle::native::public_path_rules_' FAILED -- $public_path_rules passing lines, floor 3"
+            failed=1
+          fi
+          exit "$failed"
       - name: Commit compiled and tested path-scoped answers directly to main
         run: |
           set -euo pipefail
