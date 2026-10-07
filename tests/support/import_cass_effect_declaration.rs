@@ -161,6 +161,24 @@ impl CassWorkspace {
     }
 
     fn run(&self, args: &[&str]) -> Result<JsonValue, String> {
+        // bd-rvrj2 / bd-gpik0: this spawn IS data-dir isolated -- `new` puts
+        // ("HOME", <base>/home) into `self.envs` and the loop below applies it --
+        // but tests/ee_spawn_isolation_contract.rs classifies a spawn by its
+        // ENCLOSING FN BODY, and that marker lives in a SIBLING METHOD, so the
+        // ratchet cannot see it and reported this file as a new un-isolated site.
+        //
+        // The repair is to make the invariant explicit rather than to add a
+        // baseline row: that list is shrink-only and means "known un-isolated",
+        // so recording isolated code in it would weaken what a row asserts. This
+        // check earns its place independently of the classifier -- it fails if a
+        // later edit to `new` or `install_stub` drops HOME, which is exactly the
+        // host-dependence bd-rvrj2 exists to prevent and which nothing else here
+        // would catch.
+        assert!(
+            self.envs.iter().any(|(key, _)| *key == "HOME"),
+            "CassWorkspace must spawn ee with an isolated HOME; found keys {:?}",
+            self.envs.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
         let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
         command
             .arg("--workspace")
