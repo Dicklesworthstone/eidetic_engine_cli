@@ -133,6 +133,42 @@ fn storage_error(_: impl std::fmt::Display) -> DomainError {
     recovery_error("Could not reconcile the unpublished restore with its durable inventory")
 }
 
+/// The creator records the database schema here even when graph capture is
+/// disabled. The caller must authenticate the manifest before admission.
+/// Missing legacy metadata grants no omission allowance; a supplied version
+/// must name a compiled migration, not a guessed past or future schema.
+fn source_schema_version(manifest: &Value) -> Result<Option<u32>, DomainError> {
+    let Some(value) = manifest
+        .pointer("/graphCache/schemaVersion")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let version = value
+        .as_u64()
+        .and_then(|version| u32::try_from(version).ok())
+        .filter(|version| {
+            crate::db::MIGRATIONS
+                .iter()
+                .any(|migration| migration.version() == *version)
+        })
+        .ok_or_else(|| recovery_error("Backup declares an unsupported source database schema"))?;
+    Ok(Some(version))
+}
+
+/// Only a reviewed, newly created EMPTY table can be absent from an older
+/// complete recovery point. This is not a generic "missing means zero" rule:
+/// tables populated by migration/backfill, renamed tables and unknown source
+/// versions require their own typed recovery contract. Keep the obligation in
+/// the destination map so migration or rebuild cannot silently add rows.
+fn absent_from_source_schema(table: &str, source_version: Option<u32>) -> bool {
+    match table {
+        "pack_rule_items" => source_version
+            .is_some_and(|version| version < crate::db::V128_PACK_RULE_ITEMS.version()),
+        _ => false,
+    }
+}
+
 /// Source row counts accepted only after the caller authenticates the manifest.
 /// A missing or explicitly partial inventory is not a complete recovery point.
 pub(super) struct RestoreInventory {
@@ -168,6 +204,7 @@ impl RestoreInventory {
                 "Backup does not declare a complete, supported durable recovery inventory",
             ));
         }
+        let source_version = source_schema_version(manifest)?;
         let rows = inventory
             .get("tables")
             .and_then(Value::as_array)
@@ -197,11 +234,15 @@ impl RestoreInventory {
 
         let mut expected = BTreeMap::new();
         for &(name, _, _) in REQUIRED_TABLES {
-            let row = by_table.get(name).ok_or_else(|| {
-                recovery_error(format!(
+            let Some(row) = by_table.get(name) else {
+                if absent_from_source_schema(name, source_version) {
+                    expected.insert(name, 0);
+                    continue;
+                }
+                return Err(recovery_error(format!(
                     "Backup recovery inventory is missing required table {name}"
-                ))
-            })?;
+                )));
+            };
             let count = row.get("rowCount").and_then(Value::as_u64).ok_or_else(|| {
                 recovery_error(format!("Backup recovery count is invalid for {name}"))
             })?;
@@ -431,6 +472,125 @@ mod tests {
             row_mut(&mut value, table)["rowCount"] = json!(db.count_table_rows(table).unwrap());
         }
         value
+    }
+
+    fn omit_table(value: &mut Value, table: &str) {
+        value["recoveryInventory"]["tables"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|row| row["table"] != table);
+    }
+
+    fn before_native_rules(value: &mut Value) {
+        value["graphCache"] = json!({
+            "included": false,
+            "schemaVersion": crate::db::V128_PACK_RULE_ITEMS.version() - 1,
+        });
+    }
+
+    #[test]
+    fn older_complete_backup_keeps_an_empty_native_rule_restore_obligation() {
+        let mut value = manifest();
+        before_native_rules(&mut value);
+        omit_table(&mut value, "pack_rule_items");
+        let original = value.clone();
+        let plan = RestoreInventory::from_manifest(&value).unwrap();
+        assert_eq!(plan.expected.get("pack_rule_items"), Some(&0));
+        assert_eq!(plan.expected.len() + 1, REQUIRED_TABLES.len());
+        assert_eq!(value, original, "authenticated archive bytes are not rewritten");
+    }
+
+    #[test]
+    fn schema_upgrade_cannot_excuse_any_other_missing_durable_family() {
+        for &(table, _, _) in REQUIRED_TABLES {
+            if table == "pack_rule_items" {
+                continue;
+            }
+            let mut value = manifest();
+            before_native_rules(&mut value);
+            omit_table(&mut value, "pack_rule_items");
+            omit_table(&mut value, table);
+            assert!(RestoreInventory::from_manifest(&value).is_err(), "{table}");
+        }
+    }
+
+    #[test]
+    fn current_schema_and_unknown_versions_cannot_erase_native_rule_inventory() {
+        let current = crate::db::MIGRATIONS.last().unwrap().version();
+        for version in [
+            json!(null),
+            json!(0),
+            json!(-1),
+            json!(127.5),
+            json!("127"),
+            json!(true),
+            json!(crate::db::V128_PACK_RULE_ITEMS.version()),
+            json!(current),
+            json!(u64::from(current) + 1),
+            json!(u64::MAX),
+        ] {
+            let mut value = manifest();
+            value["graphCache"] = json!({"schemaVersion": version});
+            omit_table(&mut value, "pack_rule_items");
+            assert!(RestoreInventory::from_manifest(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn supplied_schema_metadata_must_be_supported_even_with_complete_inventory() {
+        let current = crate::db::MIGRATIONS.last().unwrap().version();
+        for version in [json!(0), json!(u64::from(current) + 1), json!("private-canary")] {
+            let mut value = manifest();
+            value["graphCache"] = json!({"schemaVersion": version});
+            let error = RestoreInventory::from_manifest(&value).err().unwrap();
+            assert!(!error.message().contains("private-canary"));
+        }
+        assert!(RestoreInventory::from_manifest(&manifest()).is_ok());
+        let mut value = manifest();
+        value["graphCache"] = json!({"schemaVersion": null});
+        assert!(RestoreInventory::from_manifest(&value).is_ok());
+    }
+
+    #[test]
+    fn explicit_native_rule_counts_and_partial_rows_always_take_precedence() {
+        let mut value = manifest();
+        before_native_rules(&mut value);
+        row_mut(&mut value, "pack_rule_items")["rowCount"] = json!(3);
+        let plan = RestoreInventory::from_manifest(&value).unwrap();
+        assert_eq!(plan.expected.get("pack_rule_items"), Some(&3));
+        for field in ["schemaCovered", "snapshotCovered"] {
+            let mut partial = value.clone();
+            row_mut(&mut partial, "pack_rule_items")[field] = json!(false);
+            assert!(RestoreInventory::from_manifest(&partial).is_err());
+        }
+        row_mut(&mut value, "pack_rule_items")["rowCount"] = Value::Null;
+        assert!(RestoreInventory::from_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn older_inventory_reconciles_with_real_current_schema_without_losing_memory() {
+        let (_root, db, _path, workspace) = fixture();
+        seed_memory(&db, &workspace, 1);
+        let before = db.list_memories(&workspace, None, true).unwrap();
+        let mut value = manifest_for_database(&db);
+        before_native_rules(&mut value);
+        omit_table(&mut value, "pack_rule_items");
+        let plan = RestoreInventory::from_manifest(&value).unwrap();
+        plan.verify_connection(&db).unwrap();
+        assert_eq!(db.count_table_rows("pack_rule_items").unwrap(), 0);
+        assert_eq!(before, db.list_memories(&workspace, None, true).unwrap());
+        // An explicit captured row must still be restored, never discarded
+        // because the older schema normally lacked this table.
+        let mut explicit = manifest_for_database(&db);
+        before_native_rules(&mut explicit);
+        row_mut(&mut explicit, "pack_rule_items")["rowCount"] = json!(1);
+        let error = RestoreInventory::from_manifest(&explicit)
+            .unwrap()
+            .verify_connection(&db)
+            .unwrap_err();
+        assert!(error.message().contains("pack_rule_items"));
+        db.begin_read_snapshot().unwrap();
+        db.rollback_read_snapshot().unwrap();
     }
 
     #[test]
