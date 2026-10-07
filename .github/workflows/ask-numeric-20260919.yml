@@ -63,31 +63,87 @@ jobs:
       - name: Execute assignment classifiers in the real ask module
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
-          status=0
-          cargo test --locked --lib core::ask::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-classifier.log" 2>&1 || status=$?
+          failed=0
+          cargo_exit=0
+          cargo test --locked --lib core::ask::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-classifier.log" 2>&1 || cargo_exit=$?
           tail -n 180 "$RUNNER_TEMP/numeric-classifier.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/numeric-classifier.log" || status=1
-          grep -q 'calendar_and_clock_literals_validate_boundaries_without_locale_guessing ... ok' "$RUNNER_TEMP/numeric-classifier.log" || status=1
-          grep -q 'public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap ... ok' "$RUNNER_TEMP/numeric-classifier.log" || status=1
-          exit "$status"
+          # bd-aav0v: ONE VARIABLE CANNOT CARRY TWO KINDS OF VALUE. `status` took both
+          # cargo's exit code and a literal 1 from each of three greps, so a reader could
+          # not tell a tool failure from an assertion miss -- and since every arm wrote the
+          # same variable, only the LAST failing arm survived. A cargo exit 101 followed by
+          # a grep miss was reported as 1, losing the 101, and the step named no arm.
+          #
+          # cargo's exit now keeps its own variable and each arm reports itself on BOTH
+          # paths. The "ok" lines matter too: an arm that is silently skipped becomes
+          # visibly absent rather than indistinguishable from one that passed.
+          assert_log() {
+            if grep -Eq "$2" "$1"; then
+              echo "ATTRIBUTION: arm '$3' ok"
+            else
+              echo "ATTRIBUTION: arm '$3' FAILED -- no line matching the expected pattern"
+              failed=1
+            fi
+          }
+          if test "$cargo_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::numeric::' FAILED -- cargo exit $cargo_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::numeric::' ok -- cargo exit 0"
+          fi
+          assert_log "$RUNNER_TEMP/numeric-classifier.log" 'test result: ok\. [1-9][0-9]* passed; 0 failed' 'summary line: >=1 passed, 0 failed'
+          assert_log "$RUNNER_TEMP/numeric-classifier.log" 'calendar_and_clock_literals_validate_boundaries_without_locale_guessing ... ok' 'calendar_and_clock_literals_validate_boundaries_without_locale_guessing'
+          assert_log "$RUNNER_TEMP/numeric-classifier.log" 'public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap ... ok' 'public_ask_retains_a_conflicting_setting_beyond_the_candidate_cap'
+          exit "$failed"
       - name: Execute real CLI numeric contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || status=$?
+          failed=0
+          cargo_exit=0
+          cargo test --locked --test contracts ask_lifecycle::numeric:: -- --nocapture > "$RUNNER_TEMP/numeric-cli.log" 2>&1 || cargo_exit=$?
           tail -n 180 "$RUNNER_TEMP/numeric-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log" || status=1
-          exit "$status"
+          # bd-aav0v, same split as the step above: cargo's exit and the summary assertion
+          # were sharing one variable.
+          if test "$cargo_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo test --test contracts ask_lifecycle::numeric::' FAILED -- cargo exit $cargo_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo test --test contracts ask_lifecycle::numeric::' ok -- cargo exit 0"
+          fi
+          if grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/numeric-cli.log"; then
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' ok"
+          else
+            echo "ATTRIBUTION: arm 'summary line: >=1 passed, 0 failed' FAILED -- no matching line"
+            failed=1
+          fi
+          exit "$failed"
       - name: Execute complete ask engine regressions
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
-          status=0
-          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/numeric-engine.log" 2>&1 || status=$?
+          failed=0
+          cargo_exit=0
+          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/numeric-engine.log" 2>&1 || cargo_exit=$?
           tail -n 260 "$RUNNER_TEMP/numeric-engine.log"
-          grep -q 'numeric_answer_tests::numeric_assignments_are_disclosed_not_confidently_combined ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
-          grep -q 'numeric_answer_tests::polarity_tests::compatible_negation_cannot_steal_the_numeric_opposition_slot ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
-          grep -q 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap ... ok' "$RUNNER_TEMP/numeric-engine.log" || status=1
-          exit "$status"
+          # bd-aav0v, same split. Note this step has NO summary-line assertion, by design:
+          # its three named tests ARE the vacuity guard, because a run that executed nothing
+          # cannot produce any of them. That remains true arm-by-arm.
+          assert_log() {
+            if grep -Eq "$2" "$1"; then
+              echo "ATTRIBUTION: arm '$3' ok"
+            else
+              echo "ATTRIBUTION: arm '$3' FAILED -- no line matching the expected pattern"
+              failed=1
+            fi
+          }
+          if test "$cargo_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::' FAILED -- cargo exit $cargo_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo test --lib core::ask::' ok -- cargo exit 0"
+          fi
+          assert_log "$RUNNER_TEMP/numeric-engine.log" 'numeric_answer_tests::numeric_assignments_are_disclosed_not_confidently_combined ... ok' 'numeric_assignments_are_disclosed_not_confidently_combined'
+          assert_log "$RUNNER_TEMP/numeric-engine.log" 'numeric_answer_tests::polarity_tests::compatible_negation_cannot_steal_the_numeric_opposition_slot ... ok' 'compatible_negation_cannot_steal_the_numeric_opposition_slot'
+          assert_log "$RUNNER_TEMP/numeric-engine.log" 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap ... ok' 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap'
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
