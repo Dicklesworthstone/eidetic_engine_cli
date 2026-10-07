@@ -117,7 +117,26 @@ jobs:
           cargo test --locked --test search_conformal_e2e -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-cli.log" || failed=1
           grep -Fq 'test result: ok. 3 passed; 0 failed;' "$RUNNER_TEMP/diag-cli.log" || failed=1
           cargo test --locked --test integration_g_m 'global_store_e2e::' -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/diag-global-cli.log" || failed=1
-          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/diag-global-cli.log" || failed=1
+          # STALE PIN, attributable to a specific commit (bd-lagsa). This demanded exactly 6.
+          # The filter 'global_store_e2e::' resolves through
+          # tests/suites/integration_g_m.rs:15, `#[path = "../global_store_e2e.rs"] mod
+          # global_store_e2e`, and that file now holds 7 #[test] functions.
+          #
+          # Dated precisely: this lane last succeeded 2026-09-20 with 6, and d499d2765 on
+          # 2026-09-25 ("fix(pack): persist packs that select user-global memories", GH #57)
+          # added exactly one #[test] to that file -- 6 before the commit, 7 after. The author
+          # did nothing wrong and had no way to know a workflow counted them, which is this
+          # bead's whole point.
+          #
+          # Floor of 6, keeping the number that was reviewed green, with the observed count
+          # printed.
+          global_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/diag-global-cli.log" | head -1)
+          if test -z "$global_ran" || test "$global_ran" -lt 6; then
+            echo "ATTRIBUTION: global_store_e2e:: reported passing-with-zero-failures count '${global_ran:-none}', required floor 6"
+            failed=1
+          else
+            echo "ATTRIBUTION: global_store_e2e:: ran $global_ran tests (floor 6)"
+          fi
           exit "$failed"
       - name: Production Clippy and changed-source format
         if: ${{ !cancelled() }}
