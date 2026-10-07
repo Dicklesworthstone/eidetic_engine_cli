@@ -78,6 +78,13 @@ jobs:
           run_group lexical core::search::prefetch::tests 8
           run_group lifecycle daemon::server::cass_prefetch_worker::tests 6
           cargo test --locked --lib core::cass_prefetch:: -- --test-threads=2 > "$RUNNER_TEMP/prefetch-worker-history.log" 2>&1
+          # VACUITY FLOOR (bd-lagsa). This was the only cargo invocation in the step with no
+          # assertion of any kind: the two run_group calls above it carry floors and the
+          # envelope run below it is grepped, so this sweep of the whole coordinator was the
+          # single gap. A failing test aborts the step, so the risk is a re-path emptying the
+          # filter -- zero passed, zero failed, exit 0 -- immediately before this step
+          # commits and pushes.
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-worker-history.log"
           cargo test --locked --lib daemon::server::tests::cass_prefetch -- --test-threads=2 > "$RUNNER_TEMP/prefetch-worker-envelope.log" 2>&1
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-worker-envelope.log"
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/prefetch-worker-clippy.log" 2>&1

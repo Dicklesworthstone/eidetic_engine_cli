@@ -67,6 +67,13 @@ jobs:
           grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-residency.log"
           cargo test --locked --lib core::cass_prefetch:: -- --test-threads=2 > "$RUNNER_TEMP/prefetch-all.log" 2>&1
           tail -n 100 "$RUNNER_TEMP/prefetch-all.log"
+          # VACUITY FLOOR (bd-lagsa). This sweep of the whole coordinator was written to a
+          # log, tailed, and never asserted, while the narrower residency filter directly
+          # above it is pinned at exactly 8. A failing test still aborts the step, so this
+          # is not about failures -- it is about a re-path making the filter match zero
+          # tests, which libtest reports as zero passed and zero failed with exit 0. This
+          # step then goes on to commit and push.
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-all.log"
           cargo test --locked --lib daemon::server::tests::cass_prefetch -- --test-threads=2 > "$RUNNER_TEMP/prefetch-daemon.log" 2>&1
           tail -n 100 "$RUNNER_TEMP/prefetch-daemon.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-daemon.log"
