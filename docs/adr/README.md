@@ -4,6 +4,30 @@ ADRs capture project decisions that should not be re-litigated during normal
 implementation work. New major subsystems should add an ADR before code lands,
 including rejected alternatives and verification hooks.
 
+## Renumbering map
+
+Two ADR numbers were each assigned to two different documents, which made a
+citation of either number unable to select the document it meant. The number
+stayed with whichever document claimed it first; the later document moved to
+the next free number. Read this table by **title**, not by number: the old
+number alone is exactly the ambiguity being corrected.
+
+| Document (by title) | Old number | Current number |
+| --- | --- | --- |
+| Evidence Harvester — passive, audited outcome attribution | 0055 | 0055 (kept; claimed first, `dae1c9e4f`) |
+| Daemon SocketBroker lifecycle boundary | 0055 | **0090** |
+| Session Budget Ledger | 0073 | 0073 (kept; claimed first, `29e65b8e7`) |
+| Swarm Repair Plan Contract | 0073 | **0089** |
+
+A citation of "ADR 0055" or "ADR 0073" written before 2026-10-07 may mean
+either document of its pair and must be resolved by subject. Citations inside
+this repository were reclassified by subject and updated when they meant a
+renumbered document. Links to the **old filenames** are not preserved: external
+or private references to `0055-daemon-socketbroker-lifecycle-boundary.md` or
+`0073-swarm-repair-plan-contract.md` will not resolve on `main`, and their full
+population cannot be enumerated from this checkout. Git history still resolves
+them at the revisions where they existed.
+
 ## Index
 
 - [ADR 0001: CLI-First Memory Substrate](0001-cli-first-memory-substrate.md)
@@ -60,7 +84,7 @@ including rejected alternatives and verification hooks.
 - [ADR 0052: Daemon round-trip benchmark baseline](0052-daemon-round-trip-benchmark.md)
 - [ADR 0053: Daemon Panic Supervision Boundary](0053-daemon-panic-supervision.md)
 - [ADR 0054: Daemon Protocol Version Negotiation](0054-daemon-protocol-version-negotiation.md)
-- [ADR 0055: Daemon SocketBroker lifecycle boundary](0055-daemon-socketbroker-lifecycle-boundary.md)
+- [ADR 0055: Evidence Harvester — passive, audited outcome attribution](0055-evidence-harvester-passive-outcome-attribution.md)
 - [ADR 0056: Code-anchoring substrate (Surface Memory Map + Code-Coupled Freshness)](0056-code-anchoring-substrate-and-freshness.md)
 - [ADR 0057: Error Fingerprint Recall](0057-error-fingerprint-recall.md)
 - [ADR 0058: Contradiction operationalization (detect → audited resolution + pack guard)](0058-contradiction-operationalization.md)
@@ -95,3 +119,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0087: Canonical Deterministic Response and Pack-Hash Contract](0087-canonical-deterministic-response-contract.md)
 - [ADR 0088: `degraded[].repair` is prose; actionability is a separate, declared field](0088-degraded-repair-actionability.md)
 - [ADR 0089: Swarm Repair Plan Contract](0089-swarm-repair-plan-contract.md)
+- [ADR 0090: Daemon SocketBroker lifecycle boundary](0090-daemon-socketbroker-lifecycle-boundary.md)

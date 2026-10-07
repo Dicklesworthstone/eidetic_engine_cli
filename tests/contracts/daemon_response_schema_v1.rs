@@ -1235,7 +1235,7 @@ fn daemon_response_schema_rejects_neither_result_nor_error() -> TestResult {
 
 /// bd-2yg7d / bd-1dzhz: the daemon schema descriptions are the machine-facing
 /// contract for where clients should expect the socket. The production
-/// resolver (`default_daemon_socket_path`, ADR 0055) never defaults to a bare
+/// resolver (`default_daemon_socket_path`, ADR 0090) never defaults to a bare
 /// shared socket directly under /tmp — that shape was the bd-3j0td
 /// cross-tenant attack surface — so no daemon schema may describe it as a
 /// default. The forbidden-substring arm is the planted regression trap: it
@@ -1263,7 +1263,7 @@ fn daemon_schema_descriptions_document_per_uid_socket_default() -> TestResult {
             return Err(format!(
                 "{schema_path} still documents the forbidden bare shared socket default \
                  {forbidden_bare_default}; the resolver publishes per-UID paths only \
-                 (bd-3j0td, bd-10ex7, ADR 0055)"
+                 (bd-3j0td, bd-10ex7, ADR 0090)"
             ));
         }
         if !text.contains(required_per_uid_fallback) {

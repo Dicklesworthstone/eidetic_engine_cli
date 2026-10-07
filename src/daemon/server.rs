@@ -11418,14 +11418,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // bd-2yg7d.3: adversarial SocketBroker lifecycle fixtures (ADR 0055).
+    // bd-2yg7d.3: adversarial SocketBroker lifecycle fixtures (ADR 0090).
     // These pin the broker's fail-closed publish/cleanup invariants
     // directly at the SocketBroker API so a refactor cannot silently
     // reopen a prior P0/P1 class without a named test failing.
     // ------------------------------------------------------------------
 
     /// Sample the canonical socket path in a tight loop until `stop`
-    /// flips, recording every observation that violates the ADR 0055
+    /// flips, recording every observation that violates the ADR 0090
     /// publish invariant: once the canonical path exists it must be a
     /// socket with mode 0o600. The chmod runs on the temp path BEFORE
     /// the atomic `rename(2)`, so correct code can never expose an
@@ -11519,7 +11519,7 @@ mod tests {
                     assert!(
                         Instant::now() < deadline,
                         "the published listener must receive the connection made against the \
-                         canonical socket path (ADR 0055: the atomic rename must publish THIS \
+                         canonical socket path (ADR 0090: the atomic rename must publish THIS \
                          listener, not leave a different socket at the canonical name)",
                     );
                     thread::yield_now();
@@ -11529,7 +11529,7 @@ mod tests {
         }
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never publish in a shared parent). The
+    /// bd-2yg7d.3 (ADR 0090: never publish in a shared parent). The
     /// broker must refuse every parent mode that grants group or other
     /// access — including a /tmp-style 0o1777 sticky directory — and
     /// the refusal must fire BEFORE the lock file or temp socket is
@@ -11547,7 +11547,7 @@ mod tests {
             let broker = SocketBroker::new(parent.join("ee-daemon.sock"));
             let error = broker.publish_listener().expect_err(
                 "SocketBroker must refuse to publish into a group/other-accessible parent \
-                 (ADR 0055 invariant: never publish in a shared parent)",
+                 (ADR 0090 invariant: never publish in a shared parent)",
             );
             match error {
                 DaemonStartError::InsecureSocketParent { path, reason } => {
@@ -11562,7 +11562,7 @@ mod tests {
                     );
                 }
                 other => panic!(
-                    "parent mode 0o{mode:o} must be refused as InsecureSocketParent (ADR 0055: \
+                    "parent mode 0o{mode:o} must be refused as InsecureSocketParent (ADR 0090: \
                      never publish in a shared parent); got {other:?}"
                 ),
             }
@@ -11614,7 +11614,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never overwrite a non-socket path). A
+    /// bd-2yg7d.3 (ADR 0090: never overwrite a non-socket path). A
     /// regular file or directory squatting the canonical socket path
     /// must be refused as `SocketPathOccupied` and left untouched —
     /// publish must never repossess a path the operator pointed at
@@ -11630,7 +11630,7 @@ mod tests {
             let error = SocketBroker::new(socket_path.clone())
                 .publish_listener()
                 .expect_err(
-                    "a regular file at the canonical path must refuse publish (ADR 0055: never \
+                    "a regular file at the canonical path must refuse publish (ADR 0090: never \
                      overwrite a non-socket path)",
                 );
             match error {
@@ -11639,7 +11639,7 @@ mod tests {
                     "regular-file refusal must name the canonical path",
                 ),
                 other => panic!(
-                    "a regular file at the canonical path must be SocketPathOccupied (ADR 0055: \
+                    "a regular file at the canonical path must be SocketPathOccupied (ADR 0090: \
                      never overwrite a non-socket path); got {other:?}"
                 ),
             }
@@ -11659,7 +11659,7 @@ mod tests {
             let error = SocketBroker::new(socket_path.clone())
                 .publish_listener()
                 .expect_err(
-                    "a directory at the canonical path must refuse publish (ADR 0055: never \
+                    "a directory at the canonical path must refuse publish (ADR 0090: never \
                      overwrite a non-socket path)",
                 );
             match error {
@@ -11668,7 +11668,7 @@ mod tests {
                     "directory refusal must name the canonical path",
                 ),
                 other => panic!(
-                    "a directory at the canonical path must be SocketPathOccupied (ADR 0055: \
+                    "a directory at the canonical path must be SocketPathOccupied (ADR 0090: \
                      never overwrite a non-socket path); got {other:?}"
                 ),
             }
@@ -11679,7 +11679,7 @@ mod tests {
         }
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never overwrite a non-socket path). The
+    /// bd-2yg7d.3 (ADR 0090: never overwrite a non-socket path). The
     /// occupancy check must classify the canonical path with
     /// `symlink_metadata` — the link itself, never its target — so a
     /// planted symlink cannot launder a "this is my stale socket"
@@ -11696,7 +11696,7 @@ mod tests {
             .publish_listener()
             .expect_err(
                 "a symlink at the canonical path must refuse publish without following it \
-                 (ADR 0055: never overwrite a non-socket path)",
+                 (ADR 0090: never overwrite a non-socket path)",
             );
         assert!(
             matches!(error, DaemonStartError::SocketPathOccupied { .. }),
@@ -11717,7 +11717,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: stale socket replacement is temp-bind +
+    /// bd-2yg7d.3 (ADR 0090: stale socket replacement is temp-bind +
     /// atomic rename). Publishing over a dead socket left by a crashed
     /// daemon must succeed, must route the canonical path to the NEW
     /// listener, must consume the temp-bind artifact, and — because the
@@ -11748,7 +11748,7 @@ mod tests {
         let broker = SocketBroker::new(socket_path.clone());
         let (listener, _publish_lock) = broker.publish_listener().expect(
             "publish over a dead stale socket must succeed via temp-bind + atomic rename \
-             (ADR 0055 stale replacement)",
+             (ADR 0090 stale replacement)",
         );
         let after_publish = observed_samples.load(Ordering::Acquire);
         wait_for_canonical_path_watcher_sample(&observed_samples, after_publish);
@@ -11762,7 +11762,7 @@ mod tests {
         assert!(
             violations.is_empty(),
             "stale replacement must be atomic: no sample may show the canonical path missing, \
-             non-socket, or insecure (ADR 0055 temp-bind + rename); observed {violations:?}",
+             non-socket, or insecure (ADR 0090 temp-bind + rename); observed {violations:?}",
         );
 
         // The canonical path must now route to the fresh listener; the
@@ -11780,7 +11780,7 @@ mod tests {
         assert_eq!(
             metadata.permissions().mode() & 0o777,
             0o600,
-            "replaced socket must be mode 0o600 (chmod-on-temp survives the rename; ADR 0055)",
+            "replaced socket must be mode 0o600 (chmod-on-temp survives the rename; ADR 0090)",
         );
 
         let residue: Vec<String> = fs::read_dir(temp.path())
@@ -11797,11 +11797,11 @@ mod tests {
         assert!(
             residue.is_empty(),
             "the temp-bind artifact must be consumed by the atomic rename, leaving no residue \
-             next to the canonical socket (ADR 0055); found {residue:?}",
+             next to the canonical socket (ADR 0090); found {residue:?}",
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: chmod-before-publish). On a fresh path the
+    /// bd-2yg7d.3 (ADR 0090: chmod-before-publish). On a fresh path the
     /// socket must already carry mode 0o600 by the time the canonical
     /// name exists at all: `UnixListener::bind` honours the umask
     /// (typically yielding 0o755), so a refactor that renamed first and
@@ -11839,7 +11839,7 @@ mod tests {
             metadata.permissions().mode() & 0o777,
             0o600,
             "the socket must receive mode 0o600 BEFORE it becomes connectable at the canonical \
-             path (ADR 0055 chmod-before-publish; bd-3j0td)",
+             path (ADR 0090 chmod-before-publish; bd-3j0td)",
         );
         let _client = UnixStream::connect(&socket_path)
             .expect("published socket must be connectable by the owning uid");
@@ -11854,12 +11854,12 @@ mod tests {
         assert!(
             violations.is_empty(),
             "during fresh publish the canonical path may only ever be observed absent or as a \
-             0o600 socket — the chmod must precede the atomic rename (ADR 0055 \
+             0o600 socket — the chmod must precede the atomic rename (ADR 0090 \
              chmod-before-publish); observed {violations:?}",
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: temp-bind + atomic rename mechanism). The
+    /// bd-2yg7d.3 (ADR 0090: temp-bind + atomic rename mechanism). The
     /// per-attempt temp path must live in the SAME parent directory as
     /// the canonical socket (same-directory `rename(2)` is what makes
     /// the publish atomic — a cross-directory temp could land on a
@@ -11879,14 +11879,14 @@ mod tests {
         assert_ne!(
             first, second,
             "temp bind paths must be unique per attempt so concurrent publishes never collide \
-             and each rename is a clean atomic publish (ADR 0055)",
+             and each rename is a clean atomic publish (ADR 0090)",
         );
         for tmp_path in [&first, &second] {
             assert_eq!(
                 tmp_path.parent(),
                 socket_path.parent(),
                 "temp bind path must stay inside the validated private parent of the canonical \
-                 socket so the rename(2) publish is same-directory atomic (ADR 0055)",
+                 socket so the rename(2) publish is same-directory atomic (ADR 0090)",
             );
             let name = tmp_path
                 .file_name()
@@ -11928,7 +11928,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: publish-lock path properties). The publish
+    /// bd-2yg7d.3 (ADR 0090: publish-lock path properties). The publish
     /// lock must be derived as `<socket>.start.lock` inside the same
     /// validated-private parent — a lock outside the 0o700 boundary
     /// could be squatted or flocked by another uid to wedge or race
@@ -11947,7 +11947,7 @@ mod tests {
             lock_path.parent(),
             socket_path.parent(),
             "publish lock must live inside the same validated private parent as the canonical \
-             socket (ADR 0055 publish-lock properties)",
+             socket (ADR 0090 publish-lock properties)",
         );
         assert_eq!(
             lock_path.file_name().and_then(|name| name.to_str()),
@@ -11969,7 +11969,7 @@ mod tests {
             mode & 0o077,
             0,
             "publish lock mode 0o{mode:o} must grant no group/other access (created 0o600; \
-             ADR 0055 publish-lock properties)",
+             ADR 0090 publish-lock properties)",
         );
         assert_eq!(
             metadata.uid(),
@@ -11979,7 +11979,7 @@ mod tests {
         drop(publish_lock);
     }
 
-    /// bd-2yg7d.3 (ADR 0055: publish-lock path properties). The lock
+    /// bd-2yg7d.3 (ADR 0090: publish-lock path properties). The lock
     /// file opens with `O_NOFOLLOW`: a symlink planted at the derived
     /// lock path must abort the publish (no socket appears) and must
     /// not open, create, or truncate whatever the link points at.
@@ -11995,7 +11995,7 @@ mod tests {
             .expect("plant symlink at the publish-lock path");
 
         let error = broker.publish_listener().expect_err(
-            "a symlinked publish-lock path must abort the publish (O_NOFOLLOW; ADR 0055 \
+            "a symlinked publish-lock path must abort the publish (O_NOFOLLOW; ADR 0090 \
              publish-lock properties)",
         );
         assert!(
@@ -12014,7 +12014,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never delete a non-socket during cleanup).
+    /// bd-2yg7d.3 (ADR 0090: never delete a non-socket during cleanup).
     /// A directory at the daemon socket path must be refused by
     /// `remove_owned_socket_file` and left on disk, exactly like the
     /// regular-file case pinned above.
@@ -12027,7 +12027,7 @@ mod tests {
         let error = SocketBroker::new(path.clone())
             .remove_owned_socket_file()
             .expect_err(
-                "cleanup must refuse a directory at the socket path (ADR 0055: never delete a \
+                "cleanup must refuse a directory at the socket path (ADR 0090: never delete a \
                  non-socket during cleanup)",
             );
         assert_eq!(
@@ -12041,7 +12041,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never delete a non-socket during cleanup).
+    /// bd-2yg7d.3 (ADR 0090: never delete a non-socket during cleanup).
     /// Cleanup classifies via `symlink_metadata`: a symlink pointing at
     /// a REAL socket is still a symlink, and removing it — or worse,
     /// following it — would let a planted link turn shutdown into an
@@ -12060,7 +12060,7 @@ mod tests {
         let error = SocketBroker::new(link.clone())
             .remove_owned_socket_file()
             .expect_err(
-                "cleanup must refuse a symlink even when it points at a real socket (ADR 0055: \
+                "cleanup must refuse a symlink even when it points at a real socket (ADR 0090: \
                  never delete a non-socket during cleanup)",
             );
         assert_eq!(
@@ -12084,7 +12084,7 @@ mod tests {
         );
     }
 
-    /// bd-2yg7d.3 (ADR 0055: never delete an other-owned file during
+    /// bd-2yg7d.3 (ADR 0090: never delete an other-owned file during
     /// cleanup). Creating a socket owned by a foreign uid requires
     /// euid 0, so this pin only exercises on a root runner (e.g. a
     /// container CI job) and skips gracefully elsewhere — mirroring how
@@ -12111,7 +12111,7 @@ mod tests {
         let error = SocketBroker::new(socket_path.clone())
             .remove_owned_socket_file()
             .expect_err(
-                "cleanup must refuse a socket owned by another uid (ADR 0055: never delete an \
+                "cleanup must refuse a socket owned by another uid (ADR 0090: never delete an \
                  other-owned file during cleanup)",
             );
         assert_eq!(

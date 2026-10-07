@@ -1,4 +1,11 @@
-# ADR 0055: Daemon SocketBroker lifecycle boundary
+# ADR 0090: Daemon SocketBroker lifecycle boundary
+
+> Renumbered from ADR 0055 on 2026-10-07. The number 0055 was assigned twice;
+> `0055-evidence-harvester-passive-outcome-attribution.md` claimed it first
+> (`dae1c9e4f`, 2026-06-07) and keeps it, so this document moved to the next
+> free number. Citations of "ADR 0055" that mean the daemon socket lifecycle
+> were updated in the same commit; citations that mean the Evidence Harvester
+> were left at 0055. See the renumbering map in `README.md`.
 
 Status: Accepted
 Date: 2026-06-09
