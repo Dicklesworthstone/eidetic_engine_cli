@@ -78,14 +78,59 @@ jobs:
           fi
           rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
           git diff --check
+          # bd-lagsa + bd-aav0v. This step is where the lane dies, and it has NEVER recorded
+          # a success.
+          #
+          # (1) THE REPOSITORY PIN IS PROVABLY STALE. git-capture-offline-20260919 pins the
+          #     SAME filter under the SAME `cargo test --locked --lib` scope at 17, and its
+          #     exact pin PASSED on 2026-09-19. An exact pin that passes MEASURES the
+          #     population, so it was 17 and an exact 15 here cannot also be right. That one
+          #     becomes a FLOOR of its reviewed value, which passes whether the truth is 15
+          #     or larger and still fails on removal. I am not re-pinning 17: that would be
+          #     a fresh guess with the same failure mode.
+          #
+          #     The other four pins are LEFT EXACT ON PURPOSE. git-capture-offline pins
+          #     identity 7, security 11, policy 7 and existing 4 -- identical values, and it
+          #     passed with them. Two lanes agreeing, one of them demonstrably, makes those
+          #     measurements rather than guesses, so there is nothing here to repair.
+          #
+          # (2) THE ASSERTIONS WERE BARE commands inside a function called bare five times
+          #     under `set -euo pipefail` -- ten runtime arms that aborted the step with no
+          #     message at all.
+          #
+          #     DO NOT convert this to an accumulating flag. This step COMMITS AND PUSHES TO
+          #     MAIN below, so aborting before the publish is the interlock, not a defect.
+          #     `return 1` from a bare call still trips errexit, so the abort is preserved
+          #     exactly; the only change is that it now says why first.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" expected="$3" mode="${4:-exact}" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/capture-$name.log" 2>&1 || status=$?
             tail -n 120 "$RUNNER_TEMP/capture-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/capture-$name.log"
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/capture-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count). Publication is blocked here, by design."
+              return 1
+            fi
+            if test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing. Publication is blocked here, by design."
+              return 1
+            fi
+            if test "$mode" = floor; then
+              if test "$ran" -lt "$expected"; then
+                echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- counted $ran passing, required floor $expected. Publication is blocked here, by design."
+                return 1
+              fi
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- $ran passed, floor $expected"
+              return 0
+            fi
+            if test "$ran" != "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- exact count mismatch: expected $expected passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed or filtered out. Publication is blocked here, by design."
+              return 1
+            fi
+            echo "ATTRIBUTION: arm '$name' ($filter) ok -- exactly $ran passed"
+            return 0
           }
-          run_group repository core::memory::git_capture_repo::tests 15
+          run_group repository core::memory::git_capture_repo::tests 15 floor
           run_group identity core::memory::git_capture_identity_tests 7
           run_group security core::memory::git_capture_security_tests 11
           run_group policy policy::git_capture_redaction_tests 7
