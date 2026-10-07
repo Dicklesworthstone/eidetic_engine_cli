@@ -59,10 +59,43 @@ jobs:
           echo "d492cf5e93300f435e8c71cecc1f965e7a8ad539d095ba2680c8f8ddf8da48e1  $patch" | sha256sum --check
           git rev-parse HEAD > "$RUNNER_TEMP/session-arc-base.log"
           if ! grep -Fq 'pub(super) fn explicit_message_candidates(' src/core/curate_session_arc.rs; then
-            test "$(git rev-parse HEAD:src/core/curate.rs)" = 0476b9ff4091d9e9bcf2a21d7adc0ef578173358
-            test "$(git rev-parse HEAD:src/core/curate_session_arc.rs)" = dcbf66e05689a69b40747badb20ccb9b75518a89
-            test "$(git rev-parse HEAD:src/core/curate_session_arc_tests.rs)" = 59dbd7ff6aa57ea996ecd577991bbcb22b76b570
-            test "$(git rev-parse HEAD:tests/session_arc_learning_cli.rs)" = de7811224a2a91f9a49895eae755d70120509398
+            # bd-aav0v: these four blob pins were BARE `test` commands under `set -euo
+            # pipefail`, and this step is where the lane dies. Its log ends at the sha256sum
+            # line above -- "imported-messages.patch: OK" -- then `##[error]Process completed
+            # with exit code 1`. The only thing a reader is told is that a CHECKSUM PASSED,
+            # which reads like success.
+            #
+            # The guard above is working correctly: `explicit_message_candidates(` is absent
+            # from src/core/curate_session_arc.rs, so this delivery genuinely has NOT landed
+            # and the pinned block is entered on purpose. What goes unreported is that all
+            # four pins have since drifted. Measured 2026-10-07:
+            #
+            #   src/core/curate.rs                    0476b9ff -> fc7ee3cb
+            #   src/core/curate_session_arc.rs        dcbf66e0 -> ec408a81
+            #   src/core/curate_session_arc_tests.rs  59dbd7ff -> 0ffaee95
+            #   tests/session_arc_learning_cli.rs     de781122 -> 28f5c86b
+            #
+            # EXIT CODE AND CONDITIONS UNCHANGED: still exit 1 on exactly these four
+            # equalities, still on the first mismatch. The pins are deliberately NOT
+            # refreshed -- re-pinning to today's blobs resets the clock, and whether this
+            # delivery is still the right patch for a tree that has moved this far is a
+            # judgement for its owner.
+            # No heredoc here on purpose: inside a YAML block scalar every line is indented,
+            # and a quoted heredoc delimiter only terminates at column 0, so `<<'PINS'` would
+            # read to EOF and fail.
+            for pin in \
+              'src/core/curate.rs|0476b9ff4091d9e9bcf2a21d7adc0ef578173358' \
+              'src/core/curate_session_arc.rs|dcbf66e05689a69b40747badb20ccb9b75518a89' \
+              'src/core/curate_session_arc_tests.rs|59dbd7ff6aa57ea996ecd577991bbcb22b76b570' \
+              'tests/session_arc_learning_cli.rs|de7811224a2a91f9a49895eae755d70120509398'; do
+              pinned_path=${pin%%|*}
+              pinned_blob=${pin##*|}
+              actual_blob=$(git rev-parse "HEAD:$pinned_path")
+              if test "$actual_blob" != "$pinned_blob"; then
+                echo "ATTRIBUTION: blob pin for '$pinned_path' STOPPED this lane -- expected $pinned_blob, found $actual_blob. The file changed since this delivery was reviewed, so its patch is no longer known to apply to this exact tree. A refusal, not a regression: nothing was modified. The feature IS still undelivered (explicit_message_candidates is absent), so the patch is still wanted -- against refreshed preimages."
+                exit 1
+              fi
+            done
             git apply --check --whitespace=error-all "$patch"
             git apply --include=tests/session_arc_learning_cli.rs "$patch"
             status=0
