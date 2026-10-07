@@ -114,6 +114,20 @@ jobs:
           status=0
           timeout 15m cargo test --locked --lib core::search::tests:: -- --test-threads=2 > "$RUNNER_TEMP/snapshot-search-module.log" 2>&1 || status=$?
           tail -n 230 "$RUNNER_TEMP/snapshot-search-module.log"
+          # VACUITY FLOOR (bd-lagsa). `status` already carries cargo's own exit, so a
+          # FAILING test was always caught here. What was not caught is a run that
+          # executed NOTHING: if `core::search::tests::` is ever renamed or re-pathed,
+          # the filter matches zero tests, libtest reports zero passed and zero failed,
+          # cargo exits 0, and this step passes having verified none of the module it is
+          # named for. A floor of 1 is the whole fix; no exact count is implied and none
+          # is wanted, because this module is expected to grow.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/snapshot-search-module.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::search::tests:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            status=1
+          else
+            echo "ATTRIBUTION: core::search::tests:: ran $ran tests"
+          fi
           exit "$status"
       - name: Execute complete index regression module
         if: ${{ !cancelled() }}
@@ -121,6 +135,14 @@ jobs:
           status=0
           timeout 15m cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/snapshot-index-module.log" 2>&1 || status=$?
           tail -n 230 "$RUNNER_TEMP/snapshot-index-module.log"
+          # VACUITY FLOOR (bd-lagsa) -- same reasoning as the search module step above.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/snapshot-index-module.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::index::tests:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            status=1
+          else
+            echo "ATTRIBUTION: core::index::tests:: ran $ran tests"
+          fi
           exit "$status"
       - name: Preserve exact source and logs
         if: ${{ !cancelled() }}
