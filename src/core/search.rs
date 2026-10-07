@@ -7971,6 +7971,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             options,
             reconcile_timeout,
             false,
+            prepared_fast_embedder.as_ref().map(|embedder| {
+                crate::search::EmbedderStack::from_parts(Arc::clone(embedder), None)
+            }),
         )
         .await;
     }
@@ -9585,8 +9588,12 @@ async fn run_search_inner_with_performance(
         || crate::config::workspace_output_redaction_enabled(&options.workspace_path),
         |state| state.output_redaction_enabled,
     );
-    let (mut degraded, index_freshness) =
-        search_degradations_with_connection(options, &index_dir, read_connection);
+    let (mut degraded, index_freshness) = search_degradations_with_connection(
+        options,
+        &index_dir,
+        read_connection,
+        fast_embedder_override.as_deref(),
+    );
     let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
     push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);
     if !output_redaction_enabled {
@@ -10308,31 +10315,57 @@ async fn run_diag_search_in_snapshot(
     }
     #[cfg(unix)]
     let index_dir = match source_generation {
-        Some(generation) => generation_lease
-            .index_for_snapshot(cx, &index_dir, generation)
-            .map_err(map_index_generation_error)?,
+        Some(generation) => match fast_embedder_override.as_deref() {
+            Some(embedder) => generation_lease.index_for_snapshot_with_identity(
+                cx,
+                &index_dir,
+                generation,
+                Some((
+                    embedder.id(),
+                    u32::try_from(embedder.dimension())
+                        .map_err(|error| SearchError::Index(error.to_string()))?,
+                )),
+            ),
+            None => generation_lease.index_for_snapshot(cx, &index_dir, generation),
+        }
+        .map_err(map_index_generation_error)?,
         None => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
-        && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir)
+        && let Err(reason) = match fast_embedder_override.as_deref() {
+            Some(embedder) => {
+                crate::core::index::validate_index_corpus_compatibility_with_embedder(
+                    &index_dir, embedder,
+                )
+            }
+            None => crate::core::index::validate_index_corpus_compatibility(&index_dir),
+        }
     {
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
-    let (mut degraded, mut index_freshness) =
-        search_degradations_with_connection(options, &index_dir, read_connection);
+    let (mut degraded, mut index_freshness) = search_degradations_with_connection(
+        options,
+        &index_dir,
+        read_connection,
+        fast_embedder_override.as_deref(),
+    );
     // Ordinary search only needs an explicit freshness object when degraded.
     // Diagnostics must also identify the healthy generation actually selected,
     // including a retained generation serving an older source snapshot. Read
     // the selected directory while its lease is held, never the live pointer.
     if source_generation.is_some() && index_freshness.is_none() {
-        let status =
-            cached_index_status_for_search(options, &index_dir, read_connection).map_err(|_| {
-                SearchError::Index(
-                    "Diagnostic index generation could not be verified; results withheld"
-                        .to_owned(),
-                )
-            })?;
+        let status = cached_index_status_for_search(
+            options,
+            &index_dir,
+            read_connection,
+            fast_embedder_override.as_deref(),
+        )
+        .map_err(|_| {
+            SearchError::Index(
+                "Diagnostic index generation could not be verified; results withheld".to_owned(),
+            )
+        })?;
         let (Some(db_generation), Some(index_generation)) =
             (status.db_generation, status.index_generation)
         else {
@@ -10565,7 +10598,7 @@ fn search_degradations(
     options: &SearchOptions,
     index_dir: &Path,
 ) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
-    search_degradations_with_connection(options, index_dir, None)
+    search_degradations_with_connection(options, index_dir, None, None)
 }
 
 /// Connection-reusing variant of [`search_degradations`].
@@ -10578,8 +10611,11 @@ fn search_degradations_with_connection(
     options: &SearchOptions,
     index_dir: &Path,
     connection: Option<&DbConnection>,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
-    let Ok(index_status) = cached_index_status_for_search(options, index_dir, connection) else {
+    let Ok(index_status) =
+        cached_index_status_for_search(options, index_dir, connection, fast_embedder)
+    else {
         return (vec![SearchDegradation::index_status_probe_failed()], None);
     };
 
@@ -11122,6 +11158,7 @@ fn cached_index_status_for_search(
     options: &SearchOptions,
     index_dir: &Path,
     connection: Option<&DbConnection>,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
     let status_options = IndexStatusOptions {
         workspace_path: options.workspace_path.clone(),
@@ -11134,7 +11171,16 @@ fn cached_index_status_for_search(
     // cache entry was populated, and never let this request repopulate the
     // cache with an observation older than a concurrent writer's invalidation.
     if let Some(connection) = connection {
-        match get_index_status_in_current_snapshot(&status_options, connection) {
+        let status = match fast_embedder {
+            Some(embedder) => crate::core::index::get_index_status_with_embedder(
+                &status_options,
+                Some(connection),
+                true,
+                embedder,
+            ),
+            None => get_index_status_in_current_snapshot(&status_options, connection),
+        };
+        match status {
             Ok(status) => return Ok(status),
             Err(error) => {
                 tracing::warn!(
@@ -11144,6 +11190,18 @@ fn cached_index_status_for_search(
                 );
             }
         }
+    }
+
+    // The shared cache describes the process-default expectation. A supplied
+    // embedder must neither consume nor replace an observation for another
+    // embedding space, even when both reads address the same index directory.
+    if let Some(embedder) = fast_embedder {
+        return crate::core::index::get_index_status_with_embedder(
+            &status_options,
+            None,
+            false,
+            embedder,
+        );
     }
 
     let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
@@ -11328,6 +11386,27 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
         options,
         search_index_auto_reconcile_timeout(),
         allow_requested_repair,
+        None,
+    )
+    .await;
+}
+
+/// Exercise the same bounded reconciliation with a fixture-owned producer.
+/// The stack travels into the child task instead of changing workspace or
+/// process-wide embedder discovery for concurrent readers.
+#[cfg(test)]
+pub(crate) async fn reconcile_search_index_before_read_with_cx_and_stack(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    allow_requested_repair: bool,
+    stack: crate::search::EmbedderStack,
+) {
+    reconcile_search_index_before_read_with_cx_and_timeout(
+        cx,
+        options,
+        search_index_auto_reconcile_timeout(),
+        allow_requested_repair,
+        Some(stack),
     )
     .await;
 }
@@ -11337,12 +11416,18 @@ async fn reconcile_search_index_before_read_with_cx_and_timeout(
     options: &SearchOptions,
     reconcile_timeout: Duration,
     allow_requested_repair: bool,
+    stack_override: Option<crate::search::EmbedderStack>,
 ) {
     let child_scope = cx.scope_with_budget(cx.budget_for_timeout(reconcile_timeout));
     let owned_options = options.clone();
     let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
-        reconcile_search_index_within_budget(&child_cx, &owned_options, allow_requested_repair)
-            .await;
+        reconcile_search_index_within_budget(
+            &child_cx,
+            &owned_options,
+            allow_requested_repair,
+            stack_override,
+        )
+        .await;
     }) {
         Ok(task) => task,
         Err(error) => {
@@ -11367,6 +11452,7 @@ async fn reconcile_search_index_within_budget(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     allow_requested_repair: bool,
+    stack_override: Option<crate::search::EmbedderStack>,
 ) {
     if cx.checkpoint().is_err() {
         return;
@@ -11406,7 +11492,16 @@ async fn reconcile_search_index_within_budget(
         Ok(None) => return,
         Ok(Some(true)) | Err(_) => {}
     }
-    let status = match get_index_status_with_connection(&status_options, None) {
+    let status = match stack_override.as_ref() {
+        Some(stack) => crate::core::index::get_index_status_with_embedder(
+            &status_options,
+            None,
+            false,
+            stack.fast(),
+        ),
+        None => get_index_status_with_connection(&status_options, None),
+    };
+    let status = match status {
         Ok(status) => status,
         Err(error) => {
             tracing::warn!(
@@ -11451,13 +11546,27 @@ async fn reconcile_search_index_within_budget(
             index_dir: Some(index_dir.clone()),
             dry_run: false,
         };
-        match crate::core::index::repair_requested_index_with_cx_bounded(
-            cx,
-            &repair_options,
-            u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
-        )
-        .await
-        {
+        let limit = u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX);
+        let repair = match stack_override {
+            Some(stack) => {
+                crate::core::index::repair_requested_index_with_cx_bounded_and_stack(
+                    cx,
+                    &repair_options,
+                    limit,
+                    Some(stack),
+                )
+                .await
+            }
+            None => {
+                crate::core::index::repair_requested_index_with_cx_bounded(
+                    cx,
+                    &repair_options,
+                    limit,
+                )
+                .await
+            }
+        };
+        match repair {
             Ok(true) => {
                 invalidate_cached_index_status_for_search(options, &index_dir);
                 return;
@@ -12612,16 +12721,16 @@ async fn global_store_frankensearch_hits(
             return Vec::new();
         }
     };
-    let index_status = match cached_index_status_for_search(&global_options, &paths.index_dir, None)
-    {
-        Ok(status) => status,
-        Err(error) => {
-            degraded.push(SearchDegradation::global_index_unavailable(&format!(
-                "index status probe failed: {error}"
-            )));
-            return Vec::new();
-        }
-    };
+    let index_status =
+        match cached_index_status_for_search(&global_options, &paths.index_dir, None, None) {
+            Ok(status) => status,
+            Err(error) => {
+                degraded.push(SearchDegradation::global_index_unavailable(&format!(
+                    "index status probe failed: {error}"
+                )));
+                return Vec::new();
+            }
+        };
     if index_status.health != IndexHealth::Ready {
         let reason = match index_status.health {
             IndexHealth::Stale => format!(

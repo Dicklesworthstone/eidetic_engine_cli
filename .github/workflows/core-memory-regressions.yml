@@ -91,6 +91,25 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
+      - name: Exercise requested index repair and backend identity serially
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
+            tail -n 100 "$log"
+            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              failed=1
+            fi
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+          done <<'CASES'
+          index-repair-serial core::index::tests::requested_index_repair_
+          index-backend-identity core::index::remote_embedding_space_tests::
+          CASES
+          exit "$failed"
       - name: Exercise producer integrity and standalone semantic scoring
         if: ${{ !cancelled() }}
         run: |

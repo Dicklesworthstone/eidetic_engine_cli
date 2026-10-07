@@ -9821,14 +9821,14 @@ impl From<std::io::Error> for IndexStatusError {
 pub fn get_index_status(
     options: &IndexStatusOptions,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, None, false)
+    get_index_status_with_connection_mode(options, None, false, None)
 }
 
 pub(crate) fn get_index_status_with_connection(
     options: &IndexStatusOptions,
     connection: Option<&DbConnection>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, connection, false)
+    get_index_status_with_connection_mode(options, connection, false, None)
 }
 
 /// Inspect index status while reusing a database connection whose caller
@@ -9842,13 +9842,28 @@ pub(crate) fn get_index_status_in_current_snapshot(
     options: &IndexStatusOptions,
     connection: &DbConnection,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, Some(connection), true)
+    get_index_status_with_connection_mode(options, Some(connection), true, None)
+}
+
+pub(crate) fn get_index_status_with_embedder(
+    options: &IndexStatusOptions,
+    connection: Option<&DbConnection>,
+    caller_holds_snapshot: bool,
+    fast_embedder: &dyn crate::search::Embedder,
+) -> Result<IndexStatusReport, IndexStatusError> {
+    get_index_status_with_connection_mode(
+        options,
+        connection,
+        caller_holds_snapshot,
+        Some(fast_embedder),
+    )
 }
 
 fn get_index_status_with_connection_mode(
     options: &IndexStatusOptions,
     connection: Option<&DbConnection>,
     caller_holds_snapshot: bool,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
     let start = Instant::now();
     let database_path = options.resolve_database_path();
@@ -9896,7 +9911,7 @@ fn get_index_status_with_connection_mode(
     let evidence_totals = EvidenceAdmissionTotals::from_report(&evidence_admission);
 
     // Read index metadata if available.
-    let metadata_status = read_index_metadata(&index_dir);
+    let metadata_status = read_index_metadata_with_embedder(&index_dir, fast_embedder);
     let last_check_error = metadata_status
         .corruption_error
         .clone()
@@ -10351,12 +10366,32 @@ struct IndexMetadataStatus {
     corruption_error: Option<String>,
 }
 
+#[cfg(test)]
 fn read_index_metadata(index_dir: &Path) -> IndexMetadataStatus {
+    read_index_metadata_with_embedder(index_dir, None)
+}
+
+fn read_index_metadata_with_embedder(
+    index_dir: &Path,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
+) -> IndexMetadataStatus {
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
     match parse_index_metadata(index_dir) {
         Ok(Some(metadata)) => {
-            let compatibility_error =
-                index_metadata_compatibility_error(&meta_path, &metadata).or_else(|| {
+            let compatibility_error = match fast_embedder {
+                Some(embedder) => u32::try_from(embedder.dimension()).map_or_else(
+                    |error| Some(error.to_string()),
+                    |dimension| {
+                        index_metadata_compatibility_error_with_identity(
+                            &meta_path,
+                            &metadata,
+                            Some((embedder.id(), dimension)),
+                        )
+                    },
+                ),
+                None => index_metadata_compatibility_error(&meta_path, &metadata),
+            }
+            .or_else(|| {
                     let document_count = metadata.document_count?;
                     let expect_quality_tier = metadata
                         .tier_document_counts
@@ -10858,7 +10893,7 @@ pub(crate) async fn repair_requested_index_with_cx_bounded(
     repair_requested_index_with_cx_bounded_and_stack(cx, options, max_documents, None).await
 }
 
-async fn repair_requested_index_with_cx_bounded_and_stack(
+pub(crate) async fn repair_requested_index_with_cx_bounded_and_stack(
     cx: &asupersync::Cx,
     options: &IndexRebuildOptions,
     max_documents: u32,
@@ -12241,12 +12276,11 @@ mod tests {
         }
 
         #[cfg(feature = "lexical-bm25")]
-        fn retrieve(&self) -> Result<Vec<String>, String> {
+        fn retrieve(&self) -> Result<crate::core::search::SearchReport, String> {
             crate::core::search::run_search_with_embedder(
                 &self.search_options(),
                 self.stack.borrow().fast_arc(),
             )
-            .map(|report| report.results.into_iter().map(|hit| hit.doc_id).collect())
             .map_err(|error| error.to_string())
         }
 
@@ -12405,14 +12439,26 @@ mod tests {
 
         #[cfg(feature = "lexical-bm25")]
         {
-            let results = fixture.retrieve().map_err(|error| {
+            let report = fixture.retrieve().map_err(|error| {
                 format!(
                     "{error}; repaired corpus compatibility: {:?}",
                     fixture.validate(&index)
                 )
             })?;
-            assert_eq!(results.len(), 1);
-            assert_eq!(results[0], format!("mem_{:026}", 1));
+            assert_eq!(report.results.len(), 1);
+            assert_eq!(report.results[0].doc_id, format!("mem_{:026}", 1));
+            assert!(
+                report
+                    .index_freshness
+                    .as_ref()
+                    .is_none_or(|status| !status.stale)
+            );
+            assert!(report.degraded.iter().all(|entry| {
+                !matches!(
+                    entry.code.as_str(),
+                    "index_stale" | "search_index_stale" | "search_live_snapshot_lexical"
+                )
+            }));
         }
         let before = index_regular_file_snapshot(&index)?;
         assert!(!fixture.repair(64)?);
@@ -12427,7 +12473,13 @@ mod tests {
         assert!(fixture.repair(64)?);
         let index = fixture.options.resolve_index_dir();
         fixture.validate(&index)?;
+        #[cfg(feature = "lexical-bm25")]
+        assert_eq!(
+            fixture.retrieve()?.results[0].doc_id,
+            format!("mem_{:026}", 1)
+        );
         let before = index_regular_file_snapshot(&index)?;
+        // Equal dimensions deliberately isolate the backend identity guard.
         let mismatch = Arc::new(TestSemanticEmbedder::new("other-repair-backend", 256));
         let error = validated_index_generation_with_identity(&index, Some((mismatch.id(), 256)))
             .expect_err("equal dimensions must not admit a different embedding backend");
@@ -12435,12 +12487,31 @@ mod tests {
         assert!(error.contains("other-repair-backend"), "{error}");
         assert!(error.contains("vectors from different embedding backends cannot be mixed"));
         #[cfg(feature = "lexical-bm25")]
-        assert!(
-            crate::core::search::run_search_with_embedder(&fixture.search_options(), mismatch)
-                .is_err()
-        );
+        {
+            let error =
+                crate::core::search::run_search_with_embedder(&fixture.search_options(), mismatch)
+                    .expect_err(
+                        "retrieval must reject a different backend for the same generation",
+                    );
+            assert!(matches!(
+                &error,
+                crate::core::search::SearchError::Index(_)
+                    | crate::core::search::SearchError::IndexIncompatible(_)
+            ));
+            let reason = error.to_string();
+            assert!(
+                reason.contains("No complete index generation")
+                    || reason.contains("vectors from different embedding backends cannot be mixed"),
+                "unexpected mismatch failure: {reason}"
+            );
+        }
         assert_eq!(index_regular_file_snapshot(&index)?, before);
         fixture.validate(&index)?;
+        #[cfg(feature = "lexical-bm25")]
+        assert_eq!(
+            fixture.retrieve()?.results[0].doc_id,
+            format!("mem_{:026}", 1)
+        );
         assert!(!fixture.repair(64)?);
         Ok(())
     }
@@ -12465,6 +12536,7 @@ mod tests {
         let hook_result = Arc::new(Mutex::new(None));
         let hook_output = Arc::clone(&hook_result);
         let options = &fixture.options;
+        let stack = fixture.stack.borrow().clone();
         let repaired = crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
             install_before_index_publish_hook(move |_| {
                 let result = (|| -> Result<(), DbError> {
@@ -12484,7 +12556,7 @@ mod tests {
                     *slot = Some(result.map_err(|error| error.to_string()));
                 }
             });
-            repair_requested_index_with_cx_bounded(&cx, options, 64).await
+            repair_requested_index_with_cx_bounded_and_stack(&cx, options, 64, Some(stack)).await
         })
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
@@ -12509,7 +12581,6 @@ mod tests {
     #[test]
     fn requested_index_repair_publishes_empty_generation_after_last_tombstone() -> TestResult {
         let fixture = RequestedIndexRepairFixture::new()?;
-        let _guard = install_test_hash_workspace_embedder(&fixture.workspace_id);
         fixture.request("2026-09-22T00:00:00Z")?;
         assert!(fixture.repair(64)?);
         assert!(
@@ -12524,10 +12595,11 @@ mod tests {
         ))?;
         fixture.request("2026-09-22T00:15:00Z")?;
         let options = fixture.search_options();
+        let stack = fixture.stack.borrow().clone();
         crate::core::search::with_test_search_timeouts(Duration::from_secs(120), || {
             crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
-                crate::core::search::reconcile_search_index_before_read_with_cx(
-                    &cx, &options, true,
+                crate::core::search::reconcile_search_index_before_read_with_cx_and_stack(
+                    &cx, &options, true, stack,
                 )
                 .await;
             })
@@ -12551,8 +12623,7 @@ mod tests {
         );
         #[cfg(feature = "lexical-bm25")]
         {
-            let report = crate::core::search::run_search(&fixture.search_options())
-                .map_err(|error| error.to_string())?;
+            let report = fixture.retrieve()?;
             assert!(report.results.is_empty());
         }
         assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
@@ -12565,6 +12636,7 @@ mod tests {
         fixture.request("2026-09-22T00:00:00Z")?;
         assert!(fixture.repair(64)?);
         let index = fixture.options.resolve_index_dir();
+        fixture.validate(&index)?;
         std::fs::write(index.join(VECTOR_INDEX_FAST_FILE), b"truncated tier")
             .map_err(|error| error.to_string())?;
         assert!(fixture.validate(&index).is_err());
@@ -12595,9 +12667,12 @@ mod tests {
         assert!(!fixture.repair(64)?);
         fixture.options.dry_run = false;
         let options = fixture.search_options();
+        let stack = fixture.stack.borrow().clone();
         crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
-            crate::core::search::reconcile_search_index_before_read_with_cx(&cx, &options, false)
-                .await;
+            crate::core::search::reconcile_search_index_before_read_with_cx_and_stack(
+                &cx, &options, false, stack,
+            )
+            .await;
         })
         .map_err(|error| error.to_string())?;
         assert!(!fixture.options.resolve_index_dir().exists());
@@ -12618,14 +12693,6 @@ mod tests {
     #[test]
     fn requested_index_repair_consumes_orphaned_index_on_pack_reconciliation() -> TestResult {
         let fixture = RequestedIndexRepairFixture::new()?;
-        // This test exercises the production workspace-selection entry point.
-        // Other repair fixtures pass their stack directly and never install it.
-        let _guard = install_test_hash_workspace_embedder(&fixture.workspace_id);
-        TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .map_err(|error| error.to_string())?
-            .insert(fixture.workspace_id.clone(), fixture.stack.borrow().clone());
         let index = fixture.options.resolve_index_dir();
         std::fs::create_dir(&index).map_err(|error| error.to_string())?;
         std::fs::write(index.join("orphaned-tier"), b"incomplete generation")
@@ -12644,10 +12711,11 @@ mod tests {
         assert_eq!(status.index_generation, None);
         assert_eq!(status.last_check_error, None);
         let options = fixture.search_options();
+        let stack = fixture.stack.borrow().clone();
         crate::core::search::with_test_search_timeouts(Duration::from_secs(120), || {
             crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
-                crate::core::search::reconcile_search_index_before_read_with_cx(
-                    &cx, &options, true,
+                crate::core::search::reconcile_search_index_before_read_with_cx_and_stack(
+                    &cx, &options, true, stack,
                 )
                 .await;
             })
