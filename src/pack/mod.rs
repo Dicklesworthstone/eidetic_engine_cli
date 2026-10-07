@@ -493,10 +493,16 @@ impl Default for PackLodBudgetShares {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
     pub include_anti_pattern_first: bool,
+    /// Caller override applied to every candidate before pack selection.
+    ///
+    /// Values must be finite and in `0.0..=1.0`; the boundary is inclusive.
+    /// `None` preserves the historical 0.05 floor for coverage fill and
+    /// anti-pattern reservation without adding a floor to ordinary selection.
+    pub relevance_floor: Option<f32>,
     pub output_redaction_enabled: bool,
     pub redaction_level: RedactionLevel,
     /// Budget shares for level-of-detail pack rendering.
@@ -521,11 +527,44 @@ impl Default for PackAssemblyOptions {
         Self {
             include_coverage_fill: true,
             include_anti_pattern_first: true,
+            relevance_floor: None,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Minimal,
             lod_budget_shares: Some(PackLodBudgetShares::default()),
             arena_mode: ArenaMode::Disabled,
         }
+    }
+}
+
+impl PackAssemblyOptions {
+    pub(crate) fn validate_relevance_floor(self) -> Result<(), PackValidationError> {
+        if self
+            .relevance_floor
+            .is_some_and(|floor| !floor.is_finite() || !(0.0..=1.0).contains(&floor))
+        {
+            return Err(PackValidationError::InvalidRelevanceFloor);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn effective_relevance_floor(self) -> f32 {
+        self.relevance_floor
+            .unwrap_or(DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR)
+    }
+
+    pub(crate) fn relevance_floor_omission(
+        self,
+        candidate: &PackCandidate,
+    ) -> Option<PackOmission> {
+        let floor = self.relevance_floor?;
+        (candidate.relevance.into_inner() < floor).then(|| {
+            PackOmission::from_candidate_at(
+                candidate,
+                PackOmissionReason::BelowRelevanceFloor,
+                PackRejectionStage::CandidateFilter,
+                None,
+            )
+        })
     }
 }
 
@@ -2926,6 +2965,7 @@ pub fn explain_why_not_selected(
     input: WhyNotSelectedInput,
 ) -> Result<WhyNotSelectedReport, PackValidationError> {
     let task = trim_required(input.task, PackValidationError::EmptyQuery)?;
+    input.options.validate_relevance_floor()?;
     let target = input.target;
     let target_memory_id = target.memory_id;
     let target_present = input
@@ -2974,7 +3014,14 @@ pub fn explain_why_not_selected(
         .map(|last| round_metric(scores.target_composite - last));
     let freshness_penalty = why_not_freshness_penalty(&target);
     let trust_penalty = why_not_trust_penalty(&target);
-    let filters = why_not_filters(target_present, selected, omission, &exclusions, &degraded);
+    let filters = why_not_filters(
+        target_present,
+        selected,
+        omission,
+        &exclusions,
+        &degraded,
+        input.options,
+    );
     let exclusion_reports = exclusions
         .into_iter()
         .map(why_not_exclusion_report)
@@ -3386,6 +3433,7 @@ fn why_not_filters(
     omission: Option<&PackOmission>,
     exclusions: &[WhyNotSelectionExclusion],
     degraded: &[WhyNotSelectionDegradation],
+    options: PackAssemblyOptions,
 ) -> Vec<WhyNotSelectionFilterReport> {
     let mut filters = vec![WhyNotSelectionFilterReport {
         stage: "retrieval".to_string(),
@@ -3419,7 +3467,20 @@ fn why_not_filters(
             stage: omission.rejected_at.as_str().to_string(),
             code: omission.reason.as_str().to_string(),
             passed: false,
-            detail: format!("target memory was omitted at {}", omission.rejected_at),
+            detail: if omission.reason == PackOmissionReason::BelowRelevanceFloor {
+                format!(
+                    "target relevance {:.4} is below effective relevance floor {:.4} ({})",
+                    omission.relevance.into_inner(),
+                    options.effective_relevance_floor(),
+                    if options.relevance_floor.is_some() {
+                        "caller override"
+                    } else {
+                        "default coverage fill"
+                    },
+                )
+            } else {
+                format!("target memory was omitted at {}", omission.rejected_at)
+            },
         });
     } else if target_present && selected {
         filters.push(WhyNotSelectionFilterReport {
@@ -6443,6 +6504,7 @@ fn assemble_draft_with_profile_and_options_seeded_inner(
     determinism: &Deterministic<Seed>,
     mut workspace: Option<&mut PackArenaWorkspace>,
 ) -> Result<PackDraft, PackValidationError> {
+    options.validate_relevance_floor()?;
     // bd-1prrl.7.3: open the arena scope before assembly so the
     // RAII guard's drop runs before the returned `PackDraft` is
     // observed by callers. Workspace reuse requires an explicit
@@ -6462,7 +6524,18 @@ fn assemble_draft_with_profile_and_options_seeded_inner(
         (options.arena_mode == ArenaMode::WorkspaceReuse).then(|| arena.generation_key())
     });
     let _arena_scope = ArenaScope::new(options.arena_mode, reuse_generation);
-    match profile {
+    // Filter before either selector builds its similarity universe or reserves
+    // an anti-pattern. Keep omissions for the original candidate-count audit.
+    let mut relevance_floor_omissions = Vec::new();
+    let candidates = candidates.into_iter().filter_map(|candidate| {
+        if let Some(omission) = options.relevance_floor_omission(&candidate) {
+            relevance_floor_omissions.push(omission);
+            None
+        } else {
+            Some(candidate)
+        }
+    });
+    let mut draft = match profile {
         ContextPackProfile::Submodular => {
             tracing::info!(
                 target: "ee::pack::submodular",
@@ -6511,7 +6584,17 @@ fn assemble_draft_with_profile_and_options_seeded_inner(
                 _ => assemble_mmr_draft(profile, query, budget, candidates, options, determinism),
             }
         }
+    }?;
+    if !relevance_floor_omissions.is_empty() {
+        draft.selection_audit.candidate_count = draft
+            .selection_audit
+            .candidate_count
+            .saturating_add(relevance_floor_omissions.len());
+        draft.omitted.extend(relevance_floor_omissions);
+        draft.omitted.sort_by(compare_omissions_for_output);
+        draft.selection_audit.omitted_count = draft.omitted.len();
     }
+    Ok(draft)
 }
 
 #[derive(Debug)]
@@ -6616,6 +6699,7 @@ fn assemble_mmr_draft(
     if options.include_anti_pattern_first
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
             &candidates,
+            options.effective_relevance_floor(),
             &scratch.max_selected_similarities,
             used_tokens,
             budget,
@@ -6822,7 +6906,7 @@ fn assemble_mmr_draft(
                 ));
                 continue;
             }
-            if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
+            if selection.candidate.relevance.into_inner() < options.effective_relevance_floor() {
                 scratch.draft.omitted.push(PackOmission::from_candidate_at(
                     &selection.candidate,
                     PackOmissionReason::BelowRelevanceFloor,
@@ -7033,6 +7117,7 @@ fn assemble_mmr_draft_reusing_workspace(
     if options.include_anti_pattern_first
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
             &candidates,
+            options.effective_relevance_floor(),
             &scratch.max_selected_similarities,
             used_tokens,
             budget,
@@ -7233,7 +7318,7 @@ fn assemble_mmr_draft_reusing_workspace(
                 ));
                 continue;
             }
-            if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
+            if selection.candidate.relevance.into_inner() < options.effective_relevance_floor() {
                 scratch.draft.omitted.push(PackOmission::from_candidate_at(
                     &selection.candidate,
                     PackOmissionReason::BelowRelevanceFloor,
@@ -7427,6 +7512,7 @@ fn assemble_facility_location_draft(
     if options.include_anti_pattern_first
         && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
             &candidates,
+            options.effective_relevance_floor(),
             &active,
             &current_coverages,
             &similarity_cache,
@@ -7727,6 +7813,7 @@ fn assemble_facility_location_draft_reusing_workspace(
     if options.include_anti_pattern_first
         && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
             &candidates,
+            options.effective_relevance_floor(),
             &active,
             &current_coverages,
             &similarity_cache,
@@ -8028,6 +8115,7 @@ const fn selection_phase_contributes_to_objective(
 
 fn anti_pattern_first_mmr_candidate_index(
     candidates: &[MmrCandidate],
+    relevance_floor: f32,
     max_selected_similarities: &[f32],
     used_tokens: u32,
     budget: TokenBudget,
@@ -8038,7 +8126,7 @@ fn anti_pattern_first_mmr_candidate_index(
     debug_assert_eq!(candidates.len(), max_selected_similarities.len());
     let mut best: Option<usize> = None;
     for (candidate_index, selection) in candidates.iter().enumerate() {
-        if !is_anti_pattern_first_candidate(&selection.candidate) {
+        if !is_anti_pattern_first_candidate(&selection.candidate, relevance_floor) {
             continue;
         }
         if strict_mmr_marginal_gain_from_similarity(
@@ -8076,6 +8164,7 @@ fn anti_pattern_first_mmr_candidate_index(
 
 fn anti_pattern_first_facility_candidate_index(
     candidates: &[FacilityCandidateProfile],
+    relevance_floor: f32,
     active: &[bool],
     current_coverages: &[f32],
     similarity_cache: &FacilitySimilarityCache,
@@ -8093,7 +8182,7 @@ fn anti_pattern_first_facility_candidate_index(
         let Some(candidate) = profile.candidate.as_ref() else {
             continue;
         };
-        if !is_anti_pattern_first_candidate(candidate) {
+        if !is_anti_pattern_first_candidate(candidate, relevance_floor) {
             continue;
         }
         if facility_marginal_gain_cached(
@@ -8133,9 +8222,9 @@ fn anti_pattern_first_facility_candidate_index(
     best
 }
 
-fn is_anti_pattern_first_candidate(candidate: &PackCandidate) -> bool {
+fn is_anti_pattern_first_candidate(candidate: &PackCandidate, relevance_floor: f32) -> bool {
     candidate.section == PackSection::Failures
-        && candidate.relevance.into_inner() >= DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR
+        && candidate.relevance.into_inner() >= relevance_floor
 }
 
 fn mark_anti_pattern_first_candidate(mut candidate: PackCandidate) -> PackCandidate {
@@ -9194,6 +9283,7 @@ pub enum PackValidationError {
     ZeroTokenBudget,
     ZeroCandidatePool,
     ZeroMaxResults,
+    InvalidRelevanceFloor,
     EmptyCandidateContent {
         memory_id: MemoryId,
     },
@@ -9229,6 +9319,9 @@ impl fmt::Display for PackValidationError {
                 formatter.write_str("context candidate pool must be non-zero")
             }
             Self::ZeroMaxResults => formatter.write_str("context max results must be non-zero"),
+            Self::InvalidRelevanceFloor => {
+                formatter.write_str("pack relevance floor must be finite and in 0.0..=1.0")
+            }
             Self::EmptyCandidateContent { memory_id } => {
                 write!(formatter, "pack candidate `{memory_id}` has empty content")
             }
@@ -14554,6 +14647,201 @@ mod tests {
     }
 
     #[test]
+    fn caller_relevance_floor_filters_every_selector_before_reservation() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        let determinism = Deterministic::from_seed(64);
+        for profile in [ContextPackProfile::Balanced, ContextPackProfile::Submodular] {
+            for arena_mode in [
+                super::ArenaMode::Disabled,
+                super::ArenaMode::RequestScoped,
+                super::ArenaMode::WorkspaceReuse,
+            ] {
+                let mut workspace = arena_workspace();
+                for floor in [0.5, 1.0] {
+                    for include_anti_pattern_first in [false, true] {
+                        let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                            profile,
+                            "prepare release",
+                            budget,
+                            vec![
+                                candidate(1, 0.3, 1.0, 10)?,
+                                candidate_in_section(
+                                    2,
+                                    PackSection::Failures,
+                                    0.3,
+                                    1.0,
+                                    10,
+                                    "Avoid unrelated database migrations.",
+                                )?,
+                                candidate_in_section(
+                                    3,
+                                    PackSection::Failures,
+                                    floor,
+                                    1.0,
+                                    10,
+                                    "Never deploy before verification succeeds.",
+                                )?,
+                            ],
+                            PackAssemblyOptions {
+                                relevance_floor: Some(floor),
+                                include_coverage_fill: false,
+                                include_anti_pattern_first,
+                                arena_mode,
+                                ..classic_pack_options()
+                            },
+                            &determinism,
+                            &mut workspace,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        assert_eq!(draft.items.len(), 1);
+                        assert_eq!(draft.items[0].memory_id, memory_id(3));
+                        assert_eq!(
+                            draft.items[0].selected_in == PackSelectionPhase::AntiPatternFirst,
+                            include_anti_pattern_first,
+                        );
+                        assert_eq!(draft.used_tokens, 10);
+                        assert_eq!(draft.selection_audit.candidate_count, 3);
+                        assert_eq!(draft.selection_audit.selected_count, 1);
+                        assert_eq!(draft.selection_audit.omitted_count, 2);
+                        assert_eq!(draft.omitted.len(), 2);
+                        assert!(draft.omitted.iter().all(|omission| {
+                            omission.reason == PackOmissionReason::BelowRelevanceFloor
+                                && omission.rejected_at == PackRejectionStage::CandidateFilter
+                                && omission.relevance.into_inner() < floor
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_zero_floor_admits_coverage_fill_with_default_control() -> TestResult {
+        let budget = TokenBudget::new(100).map_err(|error| error.to_string())?;
+        for arena_mode in [
+            super::ArenaMode::Disabled,
+            super::ArenaMode::RequestScoped,
+            super::ArenaMode::WorkspaceReuse,
+        ] {
+            let mut workspace = arena_workspace();
+            for relevance_floor in [None, Some(0.0)] {
+                let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                    ContextPackProfile::Balanced,
+                    "prepare release",
+                    budget,
+                    vec![
+                        candidate_with_content(1, 1.0, 0.5, 10, "Run release verification.")?,
+                        candidate_with_content(2, 0.0, 0.5, 10, "Run release verification.")?,
+                    ],
+                    PackAssemblyOptions {
+                        relevance_floor,
+                        arena_mode,
+                        ..classic_pack_options()
+                    },
+                    &Deterministic::from_seed(64),
+                    &mut workspace,
+                )
+                .map_err(|error| error.to_string())?;
+                if relevance_floor.is_some() {
+                    assert_eq!(draft.items.len(), 2);
+                    assert!(draft.omitted.is_empty());
+                    assert!(draft.items.iter().any(|item| {
+                        item.memory_id == memory_id(2)
+                            && item.selected_in == PackSelectionPhase::CoverageFill
+                    }));
+                } else {
+                    assert_eq!(draft.items.len(), 1);
+                    assert_eq!(draft.omitted.len(), 1);
+                    assert_eq!(draft.omitted[0].memory_id, memory_id(2));
+                    assert_eq!(
+                        draft.omitted[0].reason,
+                        PackOmissionReason::BelowRelevanceFloor,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_lower_floor_admits_anti_pattern_reservation() -> TestResult {
+        let budget = TokenBudget::new(100).map_err(|error| error.to_string())?;
+        for profile in [ContextPackProfile::Balanced, ContextPackProfile::Submodular] {
+            let draft = assemble_draft_with_profile_and_options(
+                profile,
+                "prepare release",
+                budget,
+                vec![candidate_in_section(
+                    1,
+                    PackSection::Failures,
+                    0.04,
+                    1.0,
+                    10,
+                    "Never deploy before verification succeeds.",
+                )?],
+                PackAssemblyOptions {
+                    relevance_floor: Some(0.04),
+                    ..classic_pack_options()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(draft.items.len(), 1);
+            assert_eq!(draft.items[0].selected_in, PackSelectionPhase::AntiPatternFirst);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_relevance_floor_rejects_invalid_values_for_empty_pools() -> TestResult {
+        let budget = TokenBudget::new(100).map_err(|error| error.to_string())?;
+        for floor in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for profile in [ContextPackProfile::Balanced, ContextPackProfile::Submodular] {
+                let result = assemble_draft_with_profile_and_options(
+                    profile,
+                    "prepare release",
+                    budget,
+                    Vec::<PackCandidate>::new(),
+                    PackAssemblyOptions {
+                        relevance_floor: Some(floor),
+                        ..classic_pack_options()
+                    },
+                );
+                assert!(matches!(result, Err(PackValidationError::InvalidRelevanceFloor)));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_not_selected_names_caller_relevance_floor() -> TestResult {
+        let target = candidate(1, 0.3, 1.0, 10)?;
+        let report = super::explain_why_not_selected(
+            super::WhyNotSelectedInput::new(
+                "prepare release",
+                target.clone(),
+                TokenBudget::new(100).map_err(|error| error.to_string())?,
+                ContextPackProfile::Balanced,
+                vec![target],
+            )
+            .with_options(PackAssemblyOptions {
+                relevance_floor: Some(0.5),
+                ..classic_pack_options()
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.primary_reason, "omitted_by_score_floor");
+        assert!(report.filters_applied.iter().any(|filter| {
+            filter.code == "below_relevance_floor"
+                && !filter.passed
+                && filter.detail.contains("0.3000")
+                && filter.detail.contains("0.5000")
+                && filter.detail.contains("caller override")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn mmr_does_not_drop_unrelated_memories_sharing_diversity_key() -> TestResult {
         // Bug: eidetic_engine_cli-6cjh
         // Two unrelated memories with the same diversity_key but different content
@@ -14972,8 +15260,13 @@ mod tests {
             report
                 .filters_applied
                 .iter()
-                .any(|filter| filter.code == "below_relevance_floor" && !filter.passed),
-            "score-floor filter should be recorded",
+                .any(|filter| {
+                    filter.code == "below_relevance_floor"
+                        && !filter.passed
+                        && filter.detail.contains("0.0500")
+                        && filter.detail.contains("default coverage fill")
+                }),
+            "score-floor filter should name the effective default floor",
         )
     }
 

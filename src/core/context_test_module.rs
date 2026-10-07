@@ -3882,8 +3882,10 @@ pub fn unrelated_context() -> u64 {{
                 &search,
                 &request,
                 &filters,
+                None,
                 &mut degraded,
-            );
+            )
+            .expect("valid fixture relevance floor");
             assert_eq!(evidence_candidates.len(), expected_indices.len(), "{name}");
             let mut page_evidence = evidence_candidates.clone();
             let page_info = apply_pagination(
@@ -3967,8 +3969,10 @@ pub fn unrelated_context() -> u64 {{
                 &search,
                 &limited,
                 &Default::default(),
+                None,
                 &mut degraded,
-            );
+            )
+            .expect("valid fixture relevance floor");
             super::append_direct_evidence_pack_items(
                 evidence_candidates,
                 &limited,
@@ -4033,8 +4037,10 @@ pub fn unrelated_context() -> u64 {{
                             search,
                             &limited,
                             &Default::default(),
+                            None,
                             &mut degraded,
-                        );
+                        )
+                        .expect("valid fixture relevance floor");
                         assert_eq!(evidence.len(), 2, "duplicate search hits count once");
                         let info = apply_pagination(
                             &mut candidates,
@@ -4118,8 +4124,10 @@ pub fn unrelated_context() -> u64 {{
                         search,
                         &limited,
                         &Default::default(),
+                        None,
                         &mut degraded,
-                    );
+                    )
+                    .expect("valid fixture relevance floor");
                     let info = apply_pagination(
                         &mut candidates,
                         &mut evidence,
@@ -4151,8 +4159,10 @@ pub fn unrelated_context() -> u64 {{
             search,
             request,
             &Default::default(),
+            None,
             &mut degraded,
-        );
+        )
+        .expect("valid fixture relevance floor");
         let budget = TokenBudget::new(all_evidence[1].item.estimated_tokens)
             .map_err(|error| error.to_string())?;
         assert!(all_evidence[0].item.estimated_tokens > budget.max_tokens());
@@ -4245,8 +4255,10 @@ pub fn unrelated_context() -> u64 {{
             search,
             request,
             &Default::default(),
+            None,
             &mut degraded,
-        );
+        )
+        .expect("valid fixture relevance floor");
         assert_eq!(all_evidence.len(), 2);
         assert_eq!(
             all_evidence[1].linked_memory_id.as_deref(),
@@ -11171,6 +11183,41 @@ pub fn unrelated_context() -> u64 {{
             "final response must carry the hash for the final degraded set"
         );
         Ok(())
+    }
+
+    #[test]
+    fn pack_l2_feature_flags_distinguish_default_and_explicit_relevance_floors() {
+        let mut options = context_options_with_coordination_snapshot(PathBuf::from(
+            "/tmp/ee-relevance-floor-snapshot.json",
+        ));
+        let runtime_profile = test_runtime_profile();
+        let search_report = ppr_search_report(Vec::new());
+        let feature_hash = |options: &super::ContextPackOptions| {
+            super::context_pack_l2_feature_flags_hash(
+                options,
+                &options.filters,
+                &runtime_profile,
+                true,
+                &search_report,
+            )
+        };
+
+        let default_floor = feature_hash(&options);
+        assert_eq!(default_floor, feature_hash(&options));
+        options.relevance_floor = Some(0.0);
+        let explicit_zero = feature_hash(&options);
+        assert_ne!(
+            default_floor, explicit_zero,
+            "default coverage filtering and explicit zero must not share cached packs",
+        );
+        options.relevance_floor = Some(0.5);
+        let explicit_positive = feature_hash(&options);
+        assert_ne!(default_floor, explicit_positive);
+        assert_ne!(
+            explicit_zero, explicit_positive,
+            "the cache key must bind the floor value as well as its presence",
+        );
+        assert_eq!(explicit_positive, feature_hash(&options));
     }
 
     #[test]

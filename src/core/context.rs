@@ -1753,6 +1753,7 @@ pub(crate) fn admit_recent_context_memories(
             redaction_level: options.redaction_level,
             include_coverage_fill: options.output_options.include_coverage_fill,
             include_anti_pattern_first: true,
+            relevance_floor: options.relevance_floor,
             output_redaction_enabled,
             lod_budget_shares: if options.no_lod {
                 None
@@ -2761,6 +2762,10 @@ pub fn explain_why_not(
         .collect();
     let input =
         WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
+            .with_options(crate::pack::PackAssemblyOptions {
+                relevance_floor: options.relevance_floor,
+                ..crate::pack::PackAssemblyOptions::default()
+            })
             .with_degraded(why_not_degraded)
             .with_exclusions(why_not_exclusions);
     explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
@@ -3678,6 +3683,31 @@ async fn run_context_pack_with_performance_inner(
     let scoring_ordering_start = Instant::now();
     sort_context_candidates(&mut candidates);
 
+    let mut evidence_candidates = collect_direct_evidence_pack_candidates(
+        read_connection,
+        &options.workspace_path,
+        &search_report,
+        &request,
+        &effective_filters,
+        options.relevance_floor,
+        &mut degraded,
+    )?;
+    let mut rule_candidates = direct_rule_pack_candidates(
+        direct_rule_hits,
+        &request,
+        &effective_filters,
+        output_redaction_enabled,
+        &mut degraded,
+    );
+    // Every fan-in has joined and final ranking scores are known. Reject
+    // below-floor items before they can consume a result slot or page offset.
+    policy_omissions.extend(filter_context_pack_candidates_by_relevance_floor(
+        &mut candidates,
+        &mut rule_candidates,
+        &mut evidence_candidates,
+        options.relevance_floor,
+        &mut degraded,
+    )?);
     if let Some(max_results) = request.max_results {
         let max_results = max_results as usize;
         if candidates.len() > max_results {
@@ -3701,21 +3731,6 @@ async fn run_context_pack_with_performance_inner(
         }
     }
 
-    let mut evidence_candidates = collect_direct_evidence_pack_candidates(
-        read_connection,
-        &options.workspace_path,
-        &search_report,
-        &request,
-        &effective_filters,
-        &mut degraded,
-    );
-    let mut rule_candidates = direct_rule_pack_candidates(
-        direct_rule_hits,
-        &request,
-        &effective_filters,
-        output_redaction_enabled,
-        &mut degraded,
-    );
     let pagination_info = apply_pagination_with_rules(
         &mut candidates,
         &mut rule_candidates,
@@ -3806,6 +3821,7 @@ async fn run_context_pack_with_performance_inner(
             redaction_level: options.redaction_level,
             include_coverage_fill: options.output_options.include_coverage_fill,
             include_anti_pattern_first: true,
+            relevance_floor: options.relevance_floor,
             output_redaction_enabled,
             // bd-1n0np.5.2: apply the [pack.lod_*] tier-ratio config override when
             // all three basis points are configured (and fit u16); otherwise keep
@@ -3846,6 +3862,23 @@ async fn run_context_pack_with_performance_inner(
         draft.selection_audit.omitted_count = draft.omitted.len();
         draft.hash = None;
     }
+    let below_relevance_floor_count = draft
+        .omitted
+        .iter()
+        .filter(|omission| omission.reason == PackOmissionReason::BelowRelevanceFloor)
+        .count();
+    if options.relevance_floor.is_none() && below_relevance_floor_count > 0 {
+        push_degradation(
+            &mut degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{below_relevance_floor_count} memory candidates omitted by default coverage-fill relevance floor {:.4} (below_relevance_floor).",
+                crate::pack::DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR,
+            ),
+            None,
+        );
+    }
     let candidate_token_costs_min = draft
         .selection_audit
         .steps
@@ -3860,7 +3893,10 @@ async fn run_context_pack_with_performance_inner(
         .min();
     push_pack_budget_too_small_degradation(
         &mut degraded,
-        draft.selection_audit.candidate_count,
+        draft
+            .selection_audit
+            .candidate_count
+            .saturating_sub(below_relevance_floor_count),
         draft.selected_item_count(),
         draft.used_tokens,
         draft.budget.max_tokens(),
@@ -8154,6 +8190,8 @@ fn context_pack_l2_feature_flags_hash(
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
+    // Cached packs from before caller floors reached assembly must be rebuilt.
+    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
     if options.pagination.is_some() {
         // Cached pages from the memory-only offset policy can repeat native
         // evidence and claim an empty population. Recompute those pages.
@@ -8203,14 +8241,12 @@ fn context_pack_l2_feature_flags_hash(
         "requested_candidate_pool",
         format!("{:?}", options.candidate_pool).as_bytes(),
     );
-    hash_labeled_bytes(
+    // An omitted floor retains the default coverage heuristic; explicit zero
+    // disables that floor, so the two requests must not reuse the same pack.
+    hash_labeled_optional_u64(
         &mut hasher,
         "relevance_floor",
-        &options
-            .relevance_floor
-            .unwrap_or(0.0)
-            .to_bits()
-            .to_le_bytes(),
+        options.relevance_floor.map(|floor| u64::from(floor.to_bits())),
     );
     hash_labeled_bytes(
         &mut hasher,
@@ -13945,6 +13981,56 @@ struct DirectEvidencePackCandidate {
     source: String,
 }
 
+/// Enforce the caller's floor after every candidate source and score adjustment.
+fn filter_context_pack_candidates_by_relevance_floor(
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    relevance_floor: Option<f32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<Vec<PackOmission>, ContextPackError> {
+    let options = crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    };
+    options
+        .validate_relevance_floor()
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let Some(floor) = relevance_floor else {
+        return Ok(Vec::new());
+    };
+
+    let mut omitted = Vec::new();
+    candidates.retain(|candidate| {
+        if let Some(omission) = options.relevance_floor_omission(candidate) {
+            omitted.push(omission);
+            false
+        } else {
+            true
+        }
+    });
+    omitted.sort_by_key(|omission| omission.memory_id);
+    let rule_count = rule_candidates.len();
+    rule_candidates.retain(|item| item.relevance.into_inner() >= floor);
+    let rule_count = rule_count.saturating_sub(rule_candidates.len());
+    let evidence_count = evidence_candidates.len();
+    evidence_candidates.retain(|candidate| candidate.item.relevance.into_inner() >= floor);
+    let evidence_count = evidence_count.saturating_sub(evidence_candidates.len());
+    if !omitted.is_empty() || rule_count > 0 || evidence_count > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} memory, {rule_count} procedural rule, and {evidence_count} imported evidence candidates excluded by caller relevance floor {floor:.4} (below_relevance_floor).",
+                omitted.len(),
+            ),
+            None,
+        );
+    }
+    Ok(omitted)
+}
+
 /// Admit and deduplicate native evidence before pagination, without spending
 /// the page's token budget or assigning a selected rank. Pages can therefore
 /// reach every eligible hit, including hits that did not fit an earlier page.
@@ -13954,10 +14040,17 @@ fn collect_direct_evidence_pack_candidates(
     search_report: &crate::core::search::SearchReport,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
+    relevance_floor: Option<f32>,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Vec<DirectEvidencePackCandidate> {
+) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
+    crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    }
+    .validate_relevance_floor()
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     if !request.sections.is_empty() && !request.sections.contains(&PackSection::Evidence) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
@@ -14035,6 +14128,16 @@ fn collect_direct_evidence_pack_candidates(
         };
         candidates.push(candidate);
     }
+    // Preference and error-class collapse discard alternatives. Apply the
+    // caller's final-score floor first so a weak directly matched card cannot
+    // hide an eligible source turn that would bring the card at a higher score.
+    let _ = filter_context_pack_candidates_by_relevance_floor(
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut candidates,
+        relevance_floor,
+        degraded,
+    )?;
     let candidates = prefer_incident_cards(
         connection,
         &workspace_ids,
@@ -14062,7 +14165,7 @@ fn collect_direct_evidence_pack_candidates(
             None,
         );
     }
-    candidates
+    Ok(candidates)
 }
 
 /// One admitted evidence row as a pack candidate. `matched_through` names the
@@ -14961,6 +15064,206 @@ fn push_consensus_conflict_degradations(
                 "Promote the higher-trust memory only after reviewing its provenance.".to_string(),
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod relevance_floor_tests {
+    use super::*;
+
+    struct CandidateSet {
+        memories: Vec<PackCandidate>,
+        rules: Vec<crate::pack::PackRuleItem>,
+        evidence: Vec<DirectEvidencePackCandidate>,
+    }
+
+    fn candidate_set(scores: &[f32]) -> CandidateSet {
+        let provenance = PackProvenance::new(
+            ProvenanceUri::from_str("file://AGENTS.md#L1").expect("fixture URI"),
+            "fixture evidence",
+        )
+        .expect("fixture provenance");
+        let mut candidates = CandidateSet {
+            memories: Vec::new(),
+            rules: Vec::new(),
+            evidence: Vec::new(),
+        };
+        for (index, score) in scores.iter().copied().enumerate() {
+            let relevance = UnitScore::parse(score).expect("fixture relevance");
+            candidates.memories.push(
+                PackCandidate::new(PackCandidateInput {
+                    memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(index as u128 + 1)),
+                    section: PackSection::Evidence,
+                    content: format!("memory candidate {index}"),
+                    estimated_tokens: 10,
+                    relevance,
+                    utility: UnitScore::one(),
+                    provenance: vec![provenance.clone()],
+                    why: "fixture retrieval".to_owned(),
+                })
+                .expect("fixture memory"),
+            );
+            candidates.rules.push(crate::pack::PackRuleItem {
+                rank: 0,
+                rule_id: format!("rule_{index}"),
+                entity_revision: "fixture".to_owned(),
+                section: PackSection::ProceduralRules,
+                content: format!("rule candidate {index}"),
+                estimated_tokens: 10,
+                relevance,
+                utility: UnitScore::one(),
+                provenance: vec![provenance.clone()],
+                why: "fixture retrieval".to_owned(),
+                trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+            });
+            candidates.evidence.push(DirectEvidencePackCandidate {
+                linked_memory_id: None,
+                incident_card: index < 2,
+                source: "lexical".to_owned(),
+                item: PackEvidenceItem {
+                    rank: 0,
+                    evidence_id: format!("ev_{index}"),
+                    entity_revision: "fixture".to_owned(),
+                    session_id: "fixture-session".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    section: PackSection::Evidence,
+                    content: format!("evidence candidate {index}"),
+                    estimated_tokens: 10,
+                    relevance,
+                    utility: UnitScore::one(),
+                    provenance: vec![provenance.clone()],
+                    why: "fixture retrieval".to_owned(),
+                    trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+                },
+            });
+        }
+        candidates
+    }
+
+    #[test]
+    fn caller_floor_filters_native_fan_in_before_pagination_and_append() {
+        let mut candidates = candidate_set(&[0.3, 0.5, 0.8]);
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_relevance_floor(
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            Some(0.5),
+            &mut degraded,
+        )
+        .expect("valid floor");
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(omitted[0].reason, PackOmissionReason::BelowRelevanceFloor);
+        assert_eq!(omitted[0].rejected_at, PackRejectionStage::CandidateFilter);
+        assert_eq!(candidates.memories.len(), 2);
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.memories[0].relevance.into_inner(), 0.5);
+        assert_eq!(candidates.rules[0].relevance.into_inner(), 0.5);
+        assert_eq!(candidates.evidence[0].item.relevance.into_inner(), 0.5);
+        assert!(
+            candidates.evidence[0].incident_card,
+            "the floor must admit an incident card exactly at the boundary",
+        );
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results"
+                && entry.message.contains("caller relevance floor 0.5000")
+                && entry.message.contains(
+                    "1 memory, 1 procedural rule, and 1 imported evidence",
+                )
+        }));
+
+        let page = apply_pagination_with_rules(
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            &Some(ContextPagination {
+                offset: 2,
+                limit: 4,
+                query_hash: "relevance-floor".to_owned(),
+            }),
+            Some(6),
+            &mut degraded,
+        );
+        assert_eq!(page.total, 6);
+        assert_eq!(page.page_size, 4);
+        assert!(!page.has_more);
+        assert!(candidates.memories.is_empty());
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+
+        let mut request_input = ContextRequestInput::for_query("prepare release");
+        request_input.max_tokens = Some(1_000);
+        request_input.max_results = Some(4);
+        let request = ContextRequest::new(request_input).expect("fixture request");
+        let mut draft = crate::pack::assemble_draft_with_profile_and_options(
+            request.profile,
+            request.query.clone(),
+            request.budget,
+            candidates.memories,
+            crate::pack::PackAssemblyOptions {
+                relevance_floor: Some(0.5),
+                ..crate::pack::PackAssemblyOptions::default()
+            },
+        )
+        .expect("empty memory page");
+        append_direct_rule_pack_items(candidates.rules, &request, &mut draft, &mut degraded);
+        append_direct_evidence_pack_items(candidates.evidence, &request, &mut draft, &mut degraded);
+        assert_eq!(draft.selected_item_count(), 4);
+        assert_eq!(draft.rule_items.len(), 2);
+        assert_eq!(draft.evidence_items.len(), 2);
+        assert_eq!(draft.used_tokens, 40);
+        assert!(draft.rule_items.iter().all(|item| item.relevance.into_inner() >= 0.5));
+        assert!(
+            draft
+                .evidence_items
+                .iter()
+                .all(|item| item.relevance.into_inner() >= 0.5)
+        );
+    }
+
+    #[test]
+    fn caller_zero_floor_and_no_override_preserve_zero_score_fan_in() {
+        for relevance_floor in [None, Some(0.0)] {
+            let mut candidates = candidate_set(&[0.0]);
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_relevance_floor(
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                relevance_floor,
+                &mut degraded,
+            )
+            .expect("zero floor is valid");
+            assert!(omitted.is_empty());
+            assert!(degraded.is_empty());
+            assert_eq!(candidates.memories.len(), 1);
+            assert_eq!(candidates.rules.len(), 1);
+            assert_eq!(candidates.evidence.len(), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_caller_floor_does_not_partially_filter_fan_in() {
+        for floor in [-0.1, f32::NAN] {
+            let mut candidates = candidate_set(&[0.5]);
+            let mut degraded = Vec::new();
+            assert!(
+                filter_context_pack_candidates_by_relevance_floor(
+                    &mut candidates.memories,
+                    &mut candidates.rules,
+                    &mut candidates.evidence,
+                    Some(floor),
+                    &mut degraded,
+                )
+                .is_err()
+            );
+            assert!(degraded.is_empty());
+            assert_eq!(candidates.memories.len(), 1);
+            assert_eq!(candidates.rules.len(), 1);
+            assert_eq!(candidates.evidence.len(), 1);
+        }
     }
 }
 

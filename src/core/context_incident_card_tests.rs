@@ -247,3 +247,109 @@ fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
     assert_eq!(direct[0].item.evidence_id, first_card);
     assert_eq!(direct[0].item.relevance.into_inner(), 0.5);
 }
+
+#[test]
+fn caller_floor_preserves_a_strong_turn_hidden_by_a_weak_matched_card() {
+    let fixture = Fixture::new();
+    let (turn_id, card_id) = fixture.incident(
+        0x59_0201,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    let hits = [(turn_id.as_str(), 0.9_f32), (card_id.as_str(), 0.5)]
+        .into_iter()
+        .map(|(id, final_relevance)| SearchHit {
+            doc_id: id.to_owned(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(json!({
+                "_ee_quality_scoring": {
+                    "schema": crate::search::scoring::SEARCH_SCORING_POLICY_V1,
+                    "rankingBound": 2.0,
+                    "components": { "finalScore": final_relevance * 2.0 }
+                }
+            })),
+            explanation: None,
+        })
+        .collect::<Vec<_>>();
+    // Search admission uses engine relevance; the final pack projection can
+    // differ after quality scoring, so its earlier floor cannot prevent this.
+    assert!(hits.iter().all(|hit| {
+        crate::core::search::search_hit_meets_relevance_floor(hit, Some(0.7))
+    }));
+    assert_eq!(hits[0].ranking_relevance_score(), 0.9);
+    assert_eq!(hits[1].ranking_relevance_score(), 0.5);
+    let mut search = SearchReport {
+        index_freshness: None,
+        status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
+        query: "widget serialize".to_owned(),
+        requested_limit: 2,
+        results: hits,
+        elapsed_ms: 0.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            crate::core::profile::OperatingProfile::Workstation,
+            "test_fixture",
+        ),
+        rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
+        relevance_floor_applied: Some(0.0),
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::LexicalOnly,
+        source_mode_applied: SearchSourceMode::LexicalOnly,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+    };
+    let request = ContextRequest::new(ContextRequestInput::for_query("widget serialize")).unwrap();
+
+    for (floor, expected_relevance) in [(None, 0.5), (Some(0.7), 0.9)] {
+        search.relevance_floor_applied = Some(floor.unwrap_or(0.0));
+        let mut degraded = Vec::new();
+        let mut candidates = collect_direct_evidence_pack_candidates(
+            &fixture.db,
+            Path::new("/tmp/incident-card-pack"),
+            &search,
+            &request,
+            &crate::models::QueryFilters::default(),
+            floor,
+            &mut degraded,
+        )
+        .unwrap();
+        let _ = filter_context_pack_candidates_by_relevance_floor(
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut candidates,
+            floor,
+            &mut degraded,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].item.evidence_id, card_id);
+        assert_eq!(candidates[0].item.relevance.into_inner(), expected_relevance);
+        assert!(candidates[0].incident_card);
+        assert_eq!(
+            candidates[0].item.why.contains(&format!("through its source turn {turn_id}")),
+            floor.is_some(),
+        );
+        if floor.is_some() {
+            assert!(degraded.iter().any(|entry| {
+                entry.code == "context_filtered_results"
+                    && entry.message.contains("1 imported evidence")
+                    && entry.message.contains("caller relevance floor 0.7000")
+            }));
+        } else {
+            assert!(degraded.is_empty());
+        }
+    }
+}
