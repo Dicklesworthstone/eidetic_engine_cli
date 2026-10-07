@@ -524,11 +524,34 @@ jobs:
           set -euo pipefail
           cargo test --locked --lib atomic_learning_tests -- --test-threads=1 > "$RUNNER_TEMP/outcome-atomic-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-atomic-tests.log"; exit 1; }
           tail -n 100 "$RUNNER_TEMP/outcome-atomic-tests.log"
+          # VACUITY FLOOR (bd-lagsa). The `|| { tail; exit 1; }` above already catches a
+          # FAILING test, so this is not about failures. It is about a run that executed
+          # nothing: `atomic_learning_tests` is a bare SUBSTRING, not a module path, so
+          # renaming those test functions silently empties the filter -- libtest then
+          # reports zero passed and zero failed, cargo exits 0, and this step passes
+          # having run no tests at all. Floor of 1, not an exact count: the suite is
+          # expected to grow and pinning it would red on progress.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/outcome-atomic-tests.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: filter 'atomic_learning_tests' produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: filter 'atomic_learning_tests' ran $ran tests"
       - name: Run the existing outcome suite and check production Clippy
         run: |
           set -euo pipefail
           cargo test --locked --lib core::outcome:: -- --test-threads=1 > "$RUNNER_TEMP/outcome-all-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-all-tests.log"; exit 1; }
           tail -n 100 "$RUNNER_TEMP/outcome-all-tests.log"
+          # VACUITY FLOOR (bd-lagsa) -- same reasoning as the step above. This filter is a
+          # real module path rather than a substring, so it is the less fragile of the
+          # two, but a re-path still empties it silently and this step is the lane's only
+          # coverage of the existing outcome suite.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/outcome-all-tests.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::outcome:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: core::outcome:: ran $ran tests"
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/outcome-atomic-clippy.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/outcome-atomic-clippy.log"; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
