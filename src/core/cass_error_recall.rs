@@ -151,8 +151,8 @@ pub(crate) struct FailureArc {
 pub(crate) struct Resolution {
     pub proof_id: String,
     pub proof_family: CommandFamily,
-    /// Admitted assistant turns between the failure and its proof, newest
-    /// first.
+    /// Admitted repair explanations between the failure and the verifying
+    /// call, newest first. Messages after that call are not verified by it.
     pub repair_ids: Vec<String>,
 }
 
@@ -210,6 +210,7 @@ pub(crate) fn session_failure_arcs(
     // Tool-call id -> (command family, index of the call span).
     let mut calls: std::collections::HashMap<String, (CommandFamily, usize)> =
         std::collections::HashMap::new();
+    let mut seen_calls = BTreeSet::new();
     let mut pending: Vec<PendingFailure> = Vec::new();
     let mut arcs = Vec::new();
 
@@ -224,20 +225,30 @@ pub(crate) fn session_failure_arcs(
         for event in events {
             match event {
                 ToolEvent::Call { id, command } => {
-                    if let Some(family) = command.as_deref().and_then(CommandFamily::parse) {
+                    // A reused id cannot replace a still-pending invocation or
+                    // reopen one whose result was already consumed. Refuse the
+                    // ambiguous association rather than choosing the last call.
+                    if id.is_empty() || !seen_calls.insert(id.clone()) {
+                        calls.remove(&id);
+                        continue;
+                    }
+                    if span.is_class_a_derivation_readable(workspace_id, session)
+                        && let Some(family) = command.as_deref().and_then(CommandFamily::parse)
+                    {
                         calls.insert(id, (family, index));
                     }
                 }
                 ToolEvent::Result { id, output } => {
                     let Some((family, call_index)) =
-                        id.as_deref().and_then(|id| calls.get(id)).cloned()
+                        id.as_deref().and_then(|id| calls.remove(id))
                     else {
                         continue;
                     };
                     // Both halves feed the derivation: the command decides the
                     // family, the output decides the outcome. Neither may be a
                     // class-B (instruction-risk) record.
-                    if !span.is_class_a_derivation_readable(workspace_id, session)
+                    if call_index >= index
+                        || !span.is_class_a_derivation_readable(workspace_id, session)
                         || !spans[call_index].is_class_a_derivation_readable(workspace_id, session)
                     {
                         continue;
@@ -251,6 +262,7 @@ pub(crate) fn session_failure_arcs(
                             &mut pending,
                             &mut arcs,
                             &family,
+                            call_index,
                             index,
                             span,
                             spans,
@@ -287,6 +299,7 @@ fn resolve_pending(
     pending: &mut Vec<PendingFailure>,
     arcs: &mut Vec<FailureArc>,
     family: &CommandFamily,
+    success_call_index: usize,
     success_index: usize,
     success: &StoredEvidenceSpan,
     spans: &[StoredEvidenceSpan],
@@ -299,37 +312,33 @@ fn resolve_pending(
             still_pending.push(failure);
             continue;
         }
-        let turns = spans[failure.index + 1..success_index]
+        let Some(range) = repair_span_range(failure.index, success_call_index, success_index) else {
+            still_pending.push(failure);
+            continue;
+        };
+        let Some(turns) = spans.get(range) else {
+            still_pending.push(failure);
+            continue;
+        };
+        // Only explanations observed before the verifying command started can
+        // be credited to that run. Narration is not a helpful repair, and a
+        // message written while the command was running is not verified by it.
+        // A successful retry may still record proof without a repair or card.
+        let repair_ids = turns
             .iter()
             .rev()
             .filter(|span| {
                 span.span_kind == "message"
                     && span.role.as_deref() == Some("assistant")
                     && span.is_derivation_admitted_for_session(workspace_id, session)
-            })
-            .collect::<Vec<_>>();
-        // Prefer turns that explain the fix over narration ("Let me look at
-        // that."), which recall would otherwise surface as a "prior fix". With
-        // no explanatory turn, the latest one still anchors the link.
-        let explanatory = turns
-            .iter()
-            .filter(|span| {
-                crate::core::incident_card::explains_a_fix(
-                    &span.reader_body(),
-                    failure.symptom.as_deref(),
-                )
+                    && crate::core::incident_card::explains_a_fix(
+                        &span.reader_body(),
+                        failure.symptom.as_deref(),
+                    )
             })
             .take(MAX_REPAIR_TURNS)
             .map(|span| span.id.clone())
             .collect::<Vec<_>>();
-        let repair_ids = if explanatory.is_empty() {
-            turns
-                .first()
-                .map(|span| vec![span.id.clone()])
-                .unwrap_or_default()
-        } else {
-            explanatory
-        };
         arcs.push(failure.into_arc(Some(Resolution {
             proof_id: success.id.clone(),
             proof_family: family.clone(),
@@ -337,6 +346,19 @@ fn resolve_pending(
         })));
     }
     *pending = still_pending;
+}
+
+/// A result delivered later is not necessarily a command run later. Require
+/// failure -> verifying call -> result in distinct source spans. Equal-index
+/// events inside a bundled result cannot invent an intervening repair, and
+/// cannot produce the reversed slice that previously panicked during import.
+fn repair_span_range(
+    failure_index: usize,
+    call_index: usize,
+    result_index: usize,
+) -> Option<std::ops::Range<usize>> {
+    (failure_index < call_index && call_index < result_index)
+        .then(|| failure_index + 1..call_index)
 }
 
 /// A command reduced to the part that decides whether a later run verifies an

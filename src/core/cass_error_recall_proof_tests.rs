@@ -261,3 +261,192 @@ fn unknown_or_incomplete_codex_results_cannot_persist_helpful_links() {
             .is_empty()
     );
 }
+
+fn failure(db: &DbConnection, session: &str, line: u32, id: &str) -> String {
+    result(
+        db,
+        session,
+        line,
+        id,
+        json!({
+            "output":"error[E0308]: mismatched types", "metadata":{"exit_code":101}
+        }),
+    )
+}
+
+fn success(db: &DbConnection, session: &str, line: u32, id: &str) -> String {
+    result(
+        db,
+        session,
+        line,
+        id,
+        json!({"output":"Finished dev profile", "metadata":{"exit_code":0}}),
+    )
+}
+
+#[test]
+fn repair_intervals_require_failure_then_call_then_result() {
+    for failure in 0..8 {
+        for call in 0..8 {
+            for result in 0..8 {
+                let range = repair_span_range(failure, call, result);
+                assert_eq!(range.is_some(), failure < call && call < result);
+                if let Some(range) = range {
+                    assert_eq!(range, failure + 1..call);
+                    assert!(!range.contains(&call));
+                    assert!(!range.contains(&result));
+                }
+            }
+        }
+    }
+    assert_eq!(repair_span_range(usize::MAX, 0, usize::MAX), None);
+    assert_eq!(
+        repair_span_range(usize::MAX - 2, usize::MAX - 1, usize::MAX),
+        Some(usize::MAX - 1..usize::MAX - 1)
+    );
+}
+
+#[test]
+fn a_result_from_a_command_started_before_the_failure_is_not_a_retry() {
+    let db = store();
+    let session = session(&db, 0x60_1200);
+    call(&db, &session, 1, "failed");
+    call(&db, &session, 2, "already-running");
+    failure(&db, &session, 3, "failed");
+    let fix = repair(&db, &session, 4);
+    let stale = success(&db, &session, 5, "already-running");
+    let report = record_session_error_recall(&db, WS, &session).expect("derive");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.repair_links_recorded, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+
+    call(&db, &session, 6, "actual-retry");
+    let proof = success(&db, &session, 7, "actual-retry");
+    let report = record_session_error_recall(&db, WS, &session).expect("derive retry");
+    assert_eq!(report.resolved_failures, 1);
+    let recall = crate::core::error_diagnosis::error_recall_report(
+        &db,
+        WS,
+        &from_rustc(Some("E0308"), "mismatched types"),
+    )
+    .expect("recall");
+    assert!(recall.helpful_repairs.contains(&fix));
+    assert_eq!(recall.proof_links, vec![proof]);
+    assert!(!recall.proof_links.contains(&stale));
+}
+
+#[test]
+fn replayed_results_cannot_reopen_a_consumed_call_or_duplicate_a_failure() {
+    let db = store();
+    let session = session(&db, 0x60_1201);
+    call(&db, &session, 1, "a");
+    failure(&db, &session, 2, "a");
+    repair(&db, &session, 3);
+    success(&db, &session, 4, "a");
+    failure(&db, &session, 5, "a");
+    let report = record_session_error_recall(&db, WS, &session).expect("derive");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+    assert!(
+        db.list_error_repair_links(WS, "rustc:E0308")
+            .expect("links")
+            .is_empty()
+    );
+
+    call(&db, &session, 6, "b");
+    success(&db, &session, 7, "b");
+    let report = record_session_error_recall(&db, WS, &session).expect("real retry");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+}
+
+#[test]
+fn messages_after_launch_and_pure_narration_are_never_helpful_repairs() {
+    let db = store();
+    for late in [false, true] {
+        let session = session(&db, 0x60_1210 + u128::from(late));
+        call(&db, &session, 1, "a");
+        failure(&db, &session, 2, "a");
+        if late {
+            call(&db, &session, 3, "b");
+            repair(&db, &session, 4);
+        } else {
+            span(
+                &db,
+                &session,
+                3,
+                "message",
+                "assistant",
+                json!({"type":"assistant", "message":{
+                    "role":"assistant", "content":"Let me look into it."
+                }}),
+            );
+            call(&db, &session, 4, "b");
+        }
+        success(&db, &session, 5, "b");
+        let report = record_session_error_recall(&db, WS, &session).expect("derive");
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    let recall = crate::core::error_diagnosis::error_recall_report(
+        &db,
+        WS,
+        &from_rustc(Some("E0308"), "mismatched types"),
+    )
+    .expect("recall");
+    assert!(recall.helpful_repairs.is_empty(), "{recall:?}");
+    assert_eq!(recall.proof_links.len(), 2);
+}
+
+#[test]
+fn bundled_failure_and_success_results_do_not_panic_or_invent_a_repair() {
+    let db = store();
+    let session = session(&db, 0x60_1220);
+    call(&db, &session, 1, "a");
+    call(&db, &session, 2, "b");
+    span(
+        &db,
+        &session,
+        3,
+        "tool_result",
+        "user",
+        json!({"type":"user", "message":{"role":"user", "content":[
+            {"type":"tool_result", "tool_use_id":"a", "is_error":true,
+             "content":"error[E0308]: mismatched types"},
+            {"type":"tool_result", "tool_use_id":"b", "is_error":false,
+             "content":"Finished dev profile"}
+        ]}}),
+    );
+    let report = record_session_error_recall(&db, WS, &session).expect("bundled results");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+    repair(&db, &session, 4);
+    call(&db, &session, 5, "c");
+    success(&db, &session, 6, "c");
+    let report = record_session_error_recall(&db, WS, &session).expect("ordered retry");
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+}
+
+#[test]
+fn duplicate_call_ids_are_ambiguous_but_do_not_block_unrelated_valid_arcs() {
+    let db = store();
+    let session = session(&db, 0x60_1221);
+    call(&db, &session, 1, "duplicate");
+    call(&db, &session, 2, "duplicate");
+    failure(&db, &session, 3, "duplicate");
+    call(&db, &session, 4, "valid-failure");
+    failure(&db, &session, 5, "valid-failure");
+    repair(&db, &session, 6);
+    call(&db, &session, 7, "valid-retry");
+    success(&db, &session, 8, "valid-retry");
+    let report = record_session_error_recall(&db, WS, &session).expect("derive");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+}

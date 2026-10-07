@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - src/cass/**
+      - src/core/cass_error_recall*.rs
+      - src/core/incident_card*.rs
       - src/core/backup*.rs
       - src/core/ask*.rs
       - src/core/resume*.rs
@@ -309,6 +311,7 @@ jobs:
           done <<'CASES'
           cass-activity cass::import::tests::since_
           cass-refresh cass::import::refresh::
+          cass-error-recall core::cass_error_recall::
           session-arc-text core::curate::session_arc::
           session-arc-learning core::curate::tests::session_arc_tests::
           backup-revisions core::backup::revision_recovery_tests::
