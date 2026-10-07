@@ -55,12 +55,46 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          while read -r expected filter; do
+          # bd-aav0v + bd-lagsa.
+          #
+          # (1) FOUR CASES, EIGHT ARMS, ONE FLAG. The loop ran four filters and each
+          #     iteration collapsed a tool failure (`status -ne 0`) and a failed count
+          #     assertion into the same `failed=1`, so a red step named neither the case
+          #     nor which of the two had happened. Each case now reports itself on both
+          #     paths with the two causes separated.
+          #
+          # (2) ONE OF THE FOUR COUNTS IS STALE. Counted at HEAD by resolving each
+          #     filter to its declaring module and counting #[test]:
+          #
+          #       seal_admission_tests     pinned 6   actual 7   <-- DRIFTED
+          #       source_authority_tests   pinned 14  actual 14
+          #       rule_lineage_tests       pinned 8   actual 8
+          #       seal_authority_tests     pinned 10  actual 10
+          #
+          #     Three of four matching is what makes the fourth trustworthy: the method
+          #     agrees with the file everywhere it is not claiming drift. This lane's
+          #     most recent run was a success, so the seventh test landed after it and
+          #     the next run would have failed because someone ADDED a passing test.
+          #
+          #     Converted to FLOORS at the reviewed values rather than re-pinned to 7.
+          #     A floor keeps what an exact count is for -- silent deletion is still
+          #     refused -- without reddening on growth, and the observed count prints on
+          #     both paths so real drift stays visible instead of hiding in a grep.
+          while read -r floor filter; do
             log="$RUNNER_TEMP/live-seals/${filter//:/_}.log"
             status=0
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$log"; then failed=1; fi
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$filter' FAILED -- cargo exit $status (tool failure, not an assertion)"
+              failed=1
+            elif test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: case '$filter' FAILED -- passing-with-zero-failures count '${ran:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$filter' ok -- $ran tests ran, floor $floor"
+            fi
           done <<'CASES'
           6 core::memory_lifecycle::seal_admission_tests::
           14 core::ask::corpus::source_authority_tests::
@@ -73,10 +107,29 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/live-seals"
           failed=0
-          cargo check --locked --all-targets > "$RUNNER_TEMP/live-seals/check.log" 2>&1 || failed=1
-          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/live-seals/clippy.log" 2>&1 || failed=1
-          cargo fmt --all --check > "$RUNNER_TEMP/live-seals/fmt.log" 2>&1 || failed=1
+          # bd-aav0v: three arms of different kinds shared one flag. The step is named
+          # "Record ... verdicts" (plural) and then recorded exactly one.
+          check_exit=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/live-seals/check.log" 2>&1 || check_exit=$?
+          clippy_exit=0
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/live-seals/clippy.log" 2>&1 || clippy_exit=$?
+          fmt_exit=0
+          cargo fmt --all --check > "$RUNNER_TEMP/live-seals/fmt.log" 2>&1 || fmt_exit=$?
           for log in check clippy fmt; do tail -n 60 "$RUNNER_TEMP/live-seals/$log.log"; done
+          for arm in "check:$check_exit:cargo check --all-targets" \
+                     "clippy:$clippy_exit:cargo clippy --all-targets -D warnings" \
+                     "fmt:$fmt_exit:cargo fmt --all --check"; do
+            name=${arm%%:*}
+            rest=${arm#*:}
+            code=${rest%%:*}
+            label=${rest#*:}
+            if test "$code" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- $label exited $code"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ok -- $label"
+            fi
+          done
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
