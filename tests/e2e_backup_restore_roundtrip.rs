@@ -687,6 +687,36 @@ fn degradation_codes(value: &JsonValue) -> String {
         .join(",")
 }
 
+/// The projected corpus size the live-snapshot lexical path reports, for the error context
+/// below (bd-bka39). Both stores take that path, so identical scoring over a DIFFERENT number
+/// of documents is the remaining candidate for the small relevance delta: lexical scoring
+/// depends on corpus statistics. Reported, never compared.
+fn snapshot_corpus_size(value: &JsonValue) -> String {
+    let Some(entries) = value
+        .pointer("/data/degraded")
+        .and_then(JsonValue::as_array)
+    else {
+        return "<no degraded array>".to_owned();
+    };
+    for entry in entries {
+        if entry.get("code").and_then(JsonValue::as_str) != Some("search_live_snapshot_lexical") {
+            continue;
+        }
+        let Some(message) = entry.get("message").and_then(JsonValue::as_str) else {
+            return "<entry has no message>".to_owned();
+        };
+        // "...the complete current source snapshot (3 documents) with in-memory..."
+        return match message
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(" documents)"))
+        {
+            Some((count, _)) => count.to_owned(),
+            None => "<count not in message>".to_owned(),
+        };
+    }
+    "<path not taken>".to_owned()
+}
+
 fn ensure_context_json_bytes_equal(
     actual_raw: &JsonValue,
     expected_raw: &JsonValue,
@@ -728,7 +758,9 @@ fn ensure_context_json_bytes_equal(
         "{ctx}: expected {} bytes blake3:{}, got {} bytes blake3:{}; first JSON differences \
          (canonical forms, excluding store-local fields): {}; CONTEXT, not compared -- \
          degradation codes expected [{}] vs got [{}], which name the retrieval path each store \
-         took and so explain the compared fields that differ",
+         took and so explain the compared fields that differ; live-snapshot corpus size expected \
+         {} documents vs got {} (identical scoring over a different corpus moves relevance, \
+         because lexical scoring depends on corpus statistics)",
         expected_stdout.len(),
         blake3::hash(expected_stdout).to_hex(),
         actual_stdout.len(),
@@ -736,6 +768,8 @@ fn ensure_context_json_bytes_equal(
         diffs.join(" | "),
         degradation_codes(expected_raw),
         degradation_codes(actual_raw),
+        snapshot_corpus_size(expected_raw),
+        snapshot_corpus_size(actual_raw),
     ))
 }
 
