@@ -82,6 +82,10 @@ fn span(
 }
 
 fn call(db: &DbConnection, session: &str, line: u32, id: &str) {
+    scoped_call(db, session, line, id, json!({"cmd":"cargo check"}));
+}
+
+fn scoped_call(db: &DbConnection, session: &str, line: u32, id: &str, arguments: Value) {
     span(
         db,
         session,
@@ -90,7 +94,7 @@ fn call(db: &DbConnection, session: &str, line: u32, id: &str) {
         "assistant",
         json!({"type":"response_item", "payload":{
             "type":"function_call", "name":"exec_command", "call_id":id,
-            "arguments":json!({"cmd":"cargo check"}).to_string()
+            "arguments":arguments.to_string()
         }}),
     );
 }
@@ -132,13 +136,17 @@ fn modern_codex_commands_and_execution_wrappers_decode_without_losing_status() {
                 "type":"function_call", "name":"exec_command", "call_id":"a",
                 "arguments":arguments
             }));
-            assert_eq!(
-                event,
-                Some(ToolEvent::Call {
-                    id: "a".to_owned(),
-                    command: Some("cargo check".to_owned()),
-                })
-            );
+            let Some(ToolEvent::Call {
+                id,
+                command,
+                context,
+            }) = event
+            else {
+                panic!("expected a bound command")
+            };
+            assert_eq!(id, "a");
+            assert_eq!(command.as_deref(), Some("cargo check"));
+            assert!(context.is_some());
         }
     }
     assert!(command_argument(&json!({"cmd":"cargo check", "command":"cargo test"})).is_none());
@@ -456,4 +464,192 @@ fn duplicate_call_ids_are_ambiguous_but_do_not_block_unrelated_valid_arcs() {
     assert_eq!(report.failures_seen, 1);
     assert_eq!(report.resolved_failures, 1);
     assert_eq!(report.incident_cards_recorded, 1);
+}
+
+fn invocation(tool: &str, arguments: &Value) -> CommandFamily {
+    let command = command_argument(arguments).expect("command");
+    let mut family = CommandFamily::parse(&command).expect("family");
+    family.bind_context(call_context(tool, arguments).as_deref());
+    family
+}
+
+#[test]
+fn matching_labels_do_not_hide_different_packages_targets_features_or_filters() {
+    let base = "cargo +nightly test -p alpha --test storage --features json round_trip -- --exact";
+    let failed = invocation("exec_command", &json!({"cmd":base}));
+    assert!(failed.verifies(&failed));
+    for other in [
+        "cargo +nightly test -p beta --test storage --features json round_trip -- --exact",
+        "cargo +nightly test -p alpha --test network --features json round_trip -- --exact",
+        "cargo +nightly test -p alpha --test storage --features yaml round_trip -- --exact",
+        "cargo +nightly test -p alpha --test storage --features json unrelated -- --exact",
+        "cargo +stable test -p alpha --test storage --features json round_trip -- --exact",
+        "cargo +nightly test -p alpha --test storage --features json round_trip -- --exact --ignored",
+        "cargo +nightly test -p alpha --test storage --features json round_trip --release -- --exact",
+        "cargo +nightly test -p alpha --lib --features json round_trip -- --exact",
+        "cargo +nightly build -p alpha --features json",
+        "cargo +nightly check -p alpha --features json",
+    ] {
+        let retry = invocation("exec_command", &json!({"cmd":other}));
+        assert!(!retry.verifies(&failed), "{other}");
+        assert!(!failed.verifies(&retry), "{other}");
+    }
+}
+
+#[test]
+fn invocation_context_keeps_directory_environment_tool_and_argv_boundaries() {
+    let arguments = json!({"cmd":"cargo check", "workdir":"/repo/a", "env":{"RUSTFLAGS":"-Dwarnings"}});
+    let failed = invocation("exec_command", &arguments);
+    for other in [
+        json!({"cmd":"cargo check", "workdir":"/repo/b", "env":{"RUSTFLAGS":"-Dwarnings"}}),
+        json!({"cmd":"cargo check", "workdir":"/repo/a", "env":{"RUSTFLAGS":""}}),
+        json!({"cmd":"cargo check", "workdir":"/repo/a"}),
+        json!({"cmd":"cargo check", "workdir":"/repo/a", "env":{"RUSTFLAGS":"-Dwarnings"}, "login":false}),
+    ] {
+        assert!(!invocation("exec_command", &other).verifies(&failed));
+    }
+    assert!(!invocation("different_tool", &arguments).verifies(&failed));
+    let one = json!({"command":["cargo", "test", "first second"]});
+    let two = json!({"command":["cargo", "test", "first", "second"]});
+    assert_eq!(command_argument(&one), command_argument(&two));
+    assert!(
+        !invocation("exec_command", &one).verifies(&invocation("exec_command", &two))
+    );
+    let debug = format!("{failed:?}");
+    assert!(!debug.contains("/repo/a"));
+    assert!(!debug.contains("RUSTFLAGS"));
+}
+
+#[test]
+fn observational_controls_do_not_change_a_valid_retry_scope() {
+    let first = json!({"cmd":"cargo check", "workdir":"/repo"});
+    let later = json!({
+        "workdir":"/repo", "cmd":"cargo check", "description":"Verify the repair",
+        "yield_time_ms":1000, "max_output_tokens":4000, "timeout_ms":60000
+    });
+    assert!(
+        invocation("exec_command", &later).verifies(&invocation("exec_command", &first))
+    );
+    let with_cd = invocation("Bash", &json!({"command":"cd /repo && cargo check"}));
+    assert_eq!(with_cd.to_string(), "cargo check");
+    assert!(with_cd.verifies(&with_cd));
+    assert!(!with_cd.verifies(&invocation(
+        "Bash",
+        &json!({"command":"cd /other && cargo check"})
+    )));
+}
+
+#[test]
+fn ambiguous_shell_status_and_missing_bindings_never_authorize_proof() {
+    for command in [
+        "cargo build 2>&1 | tail -20",
+        "cargo test || true",
+        "cargo check; true",
+        "cargo check && cargo test",
+        "cargo test &",
+        "cargo test $FILTER",
+        "cargo test `cat filter`",
+        "cd - && cargo test",
+        "cd ~/repo && cargo test",
+        "cargo test\ncargo check",
+        "cargo test --help",
+        "cargo test --no-run",
+        "cargo test -- --list",
+    ] {
+        let family = invocation("Bash", &json!({"command":command}));
+        assert!(!family.verifies(&family), "{command}");
+    }
+    let mut unbound = CommandFamily::parse("cargo test").expect("label");
+    unbound.bind_context(None);
+    assert!(!unbound.verifies(&unbound));
+}
+
+#[test]
+fn different_command_scopes_preserve_failure_without_recording_false_repairs() {
+    let db = store();
+    let initial = json!({"cmd":"cargo check -p alpha --lib", "workdir":"/repo/a"});
+    for (offset, unrelated) in [
+        json!({"cmd":"cargo check -p beta --lib", "workdir":"/repo/a"}),
+        json!({"cmd":"cargo check -p alpha --lib", "workdir":"/repo/b"}),
+        json!({"cmd":"cargo check -p alpha --bin worker", "workdir":"/repo/a"}),
+        json!({"cmd":"cargo check -p alpha --lib --no-default-features", "workdir":"/repo/a"}),
+        json!({"cmd":"cargo test -p alpha --lib", "workdir":"/repo/a"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = session(&db, 0x60_1300 + offset as u128);
+        scoped_call(&db, &session, 1, "failed", initial.clone());
+        failure(&db, &session, 2, "failed");
+        let fix = repair(&db, &session, 3);
+        scoped_call(&db, &session, 4, "unrelated", unrelated);
+        let wrong_proof = success(&db, &session, 5, "unrelated");
+        let report = record_session_error_recall(&db, WS, &session).expect("derive");
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+
+        scoped_call(&db, &session, 6, "retry", initial.clone());
+        let proof = success(&db, &session, 7, "retry");
+        let report = record_session_error_recall(&db, WS, &session).expect("exact retry");
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let recall = crate::core::error_diagnosis::error_recall_report(
+            &db,
+            WS,
+            &from_rustc(Some("E0308"), "mismatched types"),
+        )
+        .expect("recall");
+        assert!(recall.helpful_repairs.contains(&fix));
+        assert!(recall.proof_links.contains(&proof));
+        assert!(!recall.proof_links.contains(&wrong_proof));
+    }
+}
+
+#[test]
+fn a_compile_only_success_cannot_resolve_a_runtime_test_failure() {
+    let db = store();
+    let session = session(&db, 0x60_1310);
+    let command = json!({"cmd":"cargo test --test storage round_trip"});
+    scoped_call(&db, &session, 1, "a", command.clone());
+    result(
+        &db,
+        &session,
+        2,
+        "a",
+        json!({
+            "output":"test round_trip ... FAILED\ntest result: FAILED. 0 passed; 1 failed",
+            "metadata":{"exit_code":101}
+        }),
+    );
+    repair(&db, &session, 3);
+    scoped_call(
+        &db,
+        &session,
+        4,
+        "b",
+        json!({"cmd":"cargo test --test storage round_trip --no-run"}),
+    );
+    success(&db, &session, 5, "b");
+    let report = record_session_error_recall(&db, WS, &session).expect("compile only");
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 0);
+    scoped_call(&db, &session, 6, "c", command);
+    result(
+        &db,
+        &session,
+        7,
+        "c",
+        json!({
+            "output":"test round_trip ... ok\ntest result: ok. 1 passed; 0 failed",
+            "metadata":{"exit_code":0}
+        }),
+    );
+    assert_eq!(
+        record_session_error_recall(&db, WS, &session)
+            .expect("actual run")
+            .resolved_failures,
+        1
+    );
 }

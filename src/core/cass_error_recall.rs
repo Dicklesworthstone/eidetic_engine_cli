@@ -6,8 +6,8 @@
 //! `ee diagnose-error --record` populated that store, while every imported
 //! session carried real tool failures and the fixes that followed them. This
 //! derivation reads one imported session in transcript order, pairs each
-//! failing tool result with the first later success of the same command
-//! family, and records:
+//! failing tool result with a later completed retry of the same invocation
+//! and execution context, and records:
 //!
 //! - the failure's fingerprint (key and masked signatures only, never the raw
 //!   log), for every structured failure;
@@ -183,7 +183,6 @@ struct PendingFailure {
     attempt_id: String,
     family: CommandFamily,
     symptom: Option<String>,
-    compile_error: bool,
     diagnostics: Vec<CanonicalDiagnostic>,
 }
 
@@ -224,7 +223,11 @@ pub(crate) fn session_failure_arcs(
         };
         for event in events {
             match event {
-                ToolEvent::Call { id, command } => {
+                ToolEvent::Call {
+                    id,
+                    command,
+                    context,
+                } => {
                     // A reused id cannot replace a still-pending invocation or
                     // reopen one whose result was already consumed. Refuse the
                     // ambiguous association rather than choosing the last call.
@@ -233,8 +236,9 @@ pub(crate) fn session_failure_arcs(
                         continue;
                     }
                     if span.is_class_a_derivation_readable(workspace_id, session)
-                        && let Some(family) = command.as_deref().and_then(CommandFamily::parse)
+                        && let Some(mut family) = command.as_deref().and_then(CommandFamily::parse)
                     {
+                        family.bind_context(context.as_deref());
                         calls.insert(id, (family, index));
                     }
                 }
@@ -278,9 +282,6 @@ pub(crate) fn session_failure_arcs(
                         failure_id: span.id.clone(),
                         attempt_id: spans[call_index].id.clone(),
                         symptom: symptom_line(&output),
-                        compile_error: diagnostics
-                            .iter()
-                            .any(|diagnostic| diagnostic.canonical_code.is_some()),
                         family,
                         diagnostics,
                     });
@@ -307,7 +308,7 @@ fn resolve_pending(
 ) {
     let mut still_pending = Vec::with_capacity(pending.len());
     for failure in pending.drain(..) {
-        if !family.verifies(&failure.family, failure.compile_error) {
+        if !family.verifies(&failure.family) {
             still_pending.push(failure);
             continue;
         }
@@ -360,12 +361,13 @@ fn repair_span_range(
     (failure_index < call_index && call_index < result_index).then(|| failure_index + 1..call_index)
 }
 
-/// A command reduced to the part that decides whether a later run verifies an
-/// earlier failure: the program and its subcommand.
+/// A readable command label plus a private invocation binding. The label is
+/// for incident-card presentation only; it never establishes proof coverage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommandFamily {
     program: String,
     subcommand: Option<String>,
+    verification_scope: Option<String>,
 }
 
 impl std::fmt::Display for CommandFamily {
@@ -420,26 +422,101 @@ impl CommandFamily {
         Some(Self {
             program,
             subcommand,
+            verification_scope: proof_command(command)
+                .map(|command| blake3::hash(command.as_bytes()).to_hex().to_string()),
         })
     }
 
-    /// Whether a success of `self` verifies a failure of `failed`. A compile
-    /// error is fixed by any later successful cargo build of the code; any
-    /// other failure needs the same program and subcommand to pass.
-    fn verifies(&self, failed: &Self, compile_error: bool) -> bool {
-        if self.program != failed.program {
-            return false;
-        }
-        if compile_error && self.program == "cargo" {
-            return self.subcommand.as_deref().is_some_and(|subcommand| {
-                matches!(
-                    subcommand,
-                    "build" | "check" | "test" | "clippy" | "run" | "nextest" | "b" | "c" | "t"
-                )
-            });
-        }
-        self.subcommand == failed.subcommand
+    fn bind_context(&mut self, context: Option<&str>) {
+        self.verification_scope = self.verification_scope.as_deref().zip(context).map(
+            |(command, context)| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"ee.cass.repair_invocation.v1\0");
+                for field in [command, context] {
+                    hasher.update(&(field.len() as u64).to_le_bytes());
+                    hasher.update(field.as_bytes());
+                }
+                hasher.finalize().to_hex().to_string()
+            },
+        );
     }
+
+    /// Require an exact invocation and context. Even a rustc error may be in
+    /// a bin, integration test, feature, package or target that a different
+    /// successful cargo command never compiled. Do not infer set inclusion
+    /// from a family name, nor equate two missing bindings.
+    fn verifies(&self, failed: &Self) -> bool {
+        self.program == failed.program
+            && self.subcommand == failed.subcommand
+            && self
+                .verification_scope
+                .as_ref()
+                .is_some_and(|scope| failed.verification_scope.as_ref() == Some(scope))
+    }
+}
+
+/// Deliberately not a shell parser. Only a literal command, optionally behind
+/// literal `cd ... &&` prefixes, can be a whole-process success proof. A
+/// pipeline's exit may belong to `tail`, and shell lists, substitutions and
+/// dynamic paths cannot be certified by a single tool-level status. Such
+/// commands still contribute failure fingerprints, but not repair proofs.
+/// Keep all argument bytes: package, target, features, filters, toolchain,
+/// profile and environment assignments must not collapse to a family label.
+fn proof_command(command: &str) -> Option<&str> {
+    if command.chars().any(|ch| {
+        ch.is_control()
+            || matches!(
+                ch,
+                '|' | ';' | '$' | '`' | '<' | '>' | '(' | ')' | '{' | '}' | '#' | '~' | '\\'
+            )
+    }) {
+        return None;
+    }
+    let command = command.trim();
+    let mut segments = command.split("&&").peekable();
+    while let Some(segment) = segments.next() {
+        let words = segment.split_whitespace().collect::<Vec<_>>();
+        if words.is_empty() || segment.contains('&') {
+            return None;
+        }
+        if segments.peek().is_some() {
+            let path = match words.as_slice() {
+                ["cd", path] | ["cd", "--", path] => *path,
+                _ => return None,
+            };
+            if path.starts_with('-') || path.contains(['*', '?', '[', ']', '\'', '"']) {
+                return None;
+            }
+        } else if words.iter().any(|word| {
+            matches!(
+                *word,
+                "--help" | "-h" | "--version" | "-V" | "--list" | "--dry-run" | "--no-run"
+            )
+        }) {
+            return None;
+        }
+    }
+    (!command.is_empty()).then_some(command)
+}
+
+/// Bind the tool and its argument structure, including cwd/workdir, env,
+/// shell, login mode and unknown future options. Only observational controls
+/// are excluded. In particular, argv boundaries are preserved even though the
+/// readable command label joins argv with spaces. Hashes, not paths or env
+/// values, travel with an arc. Map-order differences are conservative misses.
+fn call_context(tool: &str, arguments: &Value) -> Option<String> {
+    let fields = arguments.as_object()?;
+    let selected = fields
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "description" | "yield_time_ms" | "max_output_tokens" | "timeout_ms" | "timeout"
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let encoded = serde_json::to_vec(&(tool, selected)).ok()?;
+    Some(blake3::hash(&encoded).to_hex().to_string())
 }
 
 fn program_name(token: &str) -> &str {
@@ -459,6 +536,7 @@ enum ToolEvent {
     Call {
         id: String,
         command: Option<String>,
+        context: Option<String>,
     },
     Result {
         id: Option<String>,
@@ -526,6 +604,12 @@ fn claude_block_event(block: &Value) -> Option<ToolEvent> {
                 .get("input")
                 .and_then(|input| input.get("command"))
                 .and_then(command_text),
+            context: block.get("input").and_then(|input| {
+                call_context(
+                    block.get("name").and_then(Value::as_str).unwrap_or("tool_use"),
+                    input,
+                )
+            }),
         }),
         "tool_result" => Some(ToolEvent::Result {
             id: block
@@ -557,6 +641,15 @@ fn codex_payload_event(payload: &Value) -> Option<ToolEvent> {
             Some(ToolEvent::Call {
                 id: call_id?.to_owned(),
                 command,
+                context: arguments.as_ref().and_then(|arguments| {
+                    call_context(
+                        payload
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("local_shell_call"),
+                        arguments,
+                    )
+                }),
             })
         }
         "function_call_output" | "local_shell_call_output" | "custom_tool_call_output" => {

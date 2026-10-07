@@ -196,7 +196,7 @@ fn diagnostics_are_rustc_codes_or_failing_tests_never_bare_exits() {
 fn a_fixed_compile_error_links_its_repair_turn_and_verifying_run() {
     let connection = store();
     let session_id = session(&connection, 0x60_0001);
-    bash_call(&connection, &session_id, 1, "toolu_1", "cargo build");
+    bash_call(&connection, &session_id, 1, "toolu_1", "cargo test --lib");
     let failure = bash_result(
         &connection,
         &session_id,
@@ -368,7 +368,7 @@ fn a_resolved_arc_becomes_one_bounded_admitted_incident_card() {
         &session_id,
         1,
         "toolu_1",
-        "cd /repo && cargo build 2>&1 | tail",
+        "cargo test --lib",
     );
     let failure = bash_result(
         &connection,
@@ -408,7 +408,7 @@ fn a_resolved_arc_becomes_one_bounded_admitted_incident_card() {
     assert_eq!(card.role, None);
     let text = card.excerpt.as_str();
     assert!(
-        text.starts_with("Incident card (derived by ee from lines 1-5): `cargo build` failed, then passed after a fix."),
+        text.starts_with("Incident card (derived by ee from lines 1-5): `cargo test` failed, then passed after a fix."),
         "{text}"
     );
     assert!(
