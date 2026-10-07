@@ -72,7 +72,26 @@ jobs:
           cargo test --locked --lib cass::import::ingestion::tests -- --test-threads=2 > "$RUNNER_TEMP/ingestion-cass-unit.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/ingestion-cass-unit.log"
           test "$status" -eq 0
-          grep -Fq 'test result: ok. 6 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/ingestion-cass-unit.log"
+          # ACTIVELY STALE PIN (bd-lagsa). It demanded exactly 6; the filter now matches 16,
+          # so this step fails on every run -- and it sits immediately before this step's own
+          # commit and push, so the delivery can never land while it is wrong.
+          #
+          # Counted at HEAD rather than guessed: `cass::import::ingestion` resolves through
+          # src/cass/import.rs:1561, `#[path = "ingestion.rs"] mod ingestion`, and
+          # src/cass/ingestion.rs declares `mod tests {` at :282 with all 16 of the file's
+          # #[test] functions inside it and none before that line.
+          #
+          # Floor of 6, keeping the reviewed minimum rather than re-pinning to 16, and the
+          # observed count prints so the gap stays visible. Note the commit message below
+          # still says "Six real parser/storage/projection tests passed" -- that sentence
+          # describes what was reviewed in 2026-09-19 and is left alone; it is provenance,
+          # not an assertion.
+          ingestion_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$RUNNER_TEMP/ingestion-cass-unit.log" | head -1)
+          if test -z "$ingestion_ran" || test "$ingestion_ran" -lt 6; then
+            echo "ATTRIBUTION: cass::import::ingestion::tests reported passing-with-zero-failures count '${ingestion_ran:-none}', required floor 6"
+            exit 1
+          fi
+          echo "ATTRIBUTION: cass::import::ingestion::tests ran $ingestion_ran tests (floor 6)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
