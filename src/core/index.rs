@@ -7207,6 +7207,11 @@ fn workspace_registry_embedder_selection(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<Option<WorkspaceRegistryEmbedderSelection>, DbError> {
+    // An explicit remote backend must reach the remote default resolver even
+    // when a local registry entry is usable or would force a hash fallback.
+    if configured_embed_backend() == EmbedBackendSelection::Remote {
+        return Ok(None);
+    }
     registered_model2vec_resolution(db, workspace_id)
         .map(workspace_registry_selection_from_resolution)
 }
@@ -14094,6 +14099,160 @@ mod tests {
             "the machine-default resolver's selected stack must remain intact",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn explicit_remote_backend_outranks_rejected_workspace_registration() -> TestResult {
+        // Exercise both production selection paths with cold process caches.
+        // Child-only environment configuration cannot affect parallel tests.
+        const CHILD_WORKSPACE: &str = "EIDETIC_TEST_REMOTE_PRECEDENCE_WORKSPACE";
+        const CHILD_SENTINEL: &str = "workspace backend precedence child completed";
+        if let Some(workspace) = std::env::var_os(CHILD_WORKSPACE) {
+            let workspace = PathBuf::from(workspace);
+            let database = workspace.join("models.db");
+            ensure(
+                configured_embedder_model_root().is_none()
+                    && ACTIVE_REMOTE_EMBEDDER.get().is_none()
+                    && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
+                "isolated child must start without a configured model root or resolved defaults",
+            )?;
+            let connection = DbConnection::open_file_read_only(&database)
+                .map_err(|error| error.to_string())?;
+            let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+            let RegisteredModel2VecResolution::Rejected(rejected) =
+                registered_model2vec_resolution(&connection, &workspace_id)
+                    .map_err(|error| error.to_string())?
+            else {
+                return Err("fixture must contain a rejected local registration".to_owned());
+            };
+            ensure(
+                rejected.source == EmbedModelSource::RegistryRejected
+                    && rejected.registry_rejection.as_ref().is_some_and(|rejection| {
+                        rejection.reason == EmbedRegistryRejectionReason::StatusNotAvailable
+                    }),
+                "fixture must reach the local registry rejection without loading weights",
+            )?;
+            let (stack, _) = workspace_embedder_stack(&connection, &workspace_id)
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let preparation =
+                crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                    prepare_search_embedder_for_workspace(&cx, &workspace, &database).await
+                })
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            ensure(
+                stack.fast().id() == preparation.fast_embedder.id()
+                    && stack.fast().dimension() == preparation.fast_embedder.dimension()
+                    && stack.fast().is_ready()
+                    && preparation.fast_embedder.is_ready(),
+                "workspace indexing and search preparation must select the same ready identity",
+            )?;
+            match configured_embed_backend() {
+                EmbedBackendSelection::Remote => {
+                    ensure(
+                        stack.fast().id() == "remote-api:workspace-precedence-fixture"
+                            && stack.fast().dimension() == 256
+                            && stack.fast().is_semantic()
+                            && preparation.fast_embedder.is_semantic(),
+                        "explicit remote selection must outrank the rejected local registration",
+                    )?;
+                    ensure(
+                        preparation.backend == EmbedBackend::RemoteApi
+                            && preparation.model_resolution == EmbedModelResolution::remote_ready(),
+                        "search preparation must report the configured remote source and backend",
+                    )?;
+                }
+                EmbedBackendSelection::Local => {
+                    ensure(
+                        stack.fast().id() == HashEmbedder::default_256().id()
+                            && !stack.fast().is_semantic()
+                            && !preparation.fast_embedder.is_semantic()
+                            && preparation.backend == EmbedBackend::HashFallback
+                            && preparation.model_resolution == rejected,
+                        "local selection must retain its exact registry rejection and hash fallback",
+                    )?;
+                    ensure(
+                        ACTIVE_REMOTE_EMBEDDER.get().is_none()
+                            && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
+                        "a rejected local registration must not invoke the machine default",
+                    )?;
+                }
+            }
+            println!("{CHILD_SENTINEL}");
+            return Ok(());
+        }
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join("models.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace backend precedence".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut input = bundled_embedding_declaration_input(&workspace_id);
+        input.metadata.tokenizer = None;
+        connection
+            .insert_embedding_metadata_record(&crate::testing::mdl("remoteprecedence"), &input)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let endpoint = format!(
+            "http://{}/v1",
+            listener.local_addr().map_err(|error| error.to_string())?
+        );
+        let data_root = workspace.join("empty-model-data");
+        for backend in ["local", "remote"] {
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .args([
+                "--exact",
+                "core::index::tests::explicit_remote_backend_outranks_rejected_workspace_registration",
+                "--nocapture",
+            ])
+            .env(CHILD_WORKSPACE, &workspace)
+            .env("EE_EMBED_BACKEND", backend)
+            .env("EE_EMBED_REMOTE_URL", &endpoint)
+            .env("EE_EMBED_REMOTE_MODEL", "workspace-precedence-fixture")
+            .env("EE_EMBED_REMOTE_DIMENSION", "256")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("XDG_DATA_HOME", &data_root)
+            .env("LOCALAPPDATA", &data_root)
+            .env_remove("EE_EMBED_MODEL_DIR")
+            .env_remove("EE_EMBED_REMOTE_API_KEY")
+            .output()
+            .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            ensure(
+                output.status.success()
+                    && stdout.contains(CHILD_SENTINEL)
+                    && stdout.contains("1 passed"),
+                format!(
+                    "isolated {backend} selection failed or never ran:\n{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+        ensure(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "known-dimension selection must not contact the remote embedding endpoint",
+        )
     }
 
     #[test]
