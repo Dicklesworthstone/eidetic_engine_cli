@@ -169,6 +169,18 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --features mcp --lib mcp::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-existing.log"
+          # VACUITY FLOOR (bd-lagsa). A failing test already fails this step through
+          # `pipefail`; a run that executes nothing does not. This filter is behind
+          # `--features mcp`, which makes the empty case MORE likely rather than less: if
+          # the feature stops gating `mcp::tests::` into the build, the filter matches zero
+          # tests, libtest reports zero passed and zero failed, cargo exits 0, and the lane
+          # publishes MCP changes having verified none of them. Floor of 1.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/mcp-ask-existing.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: mcp::tests:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: mcp::tests:: ran $ran tests"
       - name: Commit verified MCP integration directly to main
         shell: bash
         run: |

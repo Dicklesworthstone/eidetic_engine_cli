@@ -150,6 +150,19 @@ jobs:
           target/debug/ee --json eval report fx.release_failure.v1 > "$RUNNER_TEMP/eval-diagnostics-report.json" 2> "$RUNNER_TEMP/eval-diagnostics-report-stderr.log" || failed=1
           cargo test --locked --test eval_report_e2e -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1 || failed=1
           tail -n 120 "$RUNNER_TEMP/eval-diagnostics-golden.log"
+          # VACUITY FLOOR (bd-lagsa). `|| failed=1` carries cargo's exit, so a FAILING test
+          # was always caught. What was not caught is a run that executed nothing -- and
+          # this invocation names an entire TEST TARGET (`--test eval_report_e2e`) rather
+          # than a filter, so the way it empties is different: if that target is renamed or
+          # removed from Cargo.toml's autotests discovery, cargo can succeed while running
+          # no tests from it. Floor of 1 distinguishes the two.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/eval-diagnostics-golden.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: test target eval_report_e2e produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            failed=1
+          else
+            echo "ATTRIBUTION: test target eval_report_e2e ran $ran tests"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}

@@ -213,6 +213,22 @@ jobs:
           status=0
           cargo test --locked --lib 'core::search::rule_admission::' -- --test-threads=2 > "$RUNNER_TEMP/native-rule-scope-existing.log" 2>&1 || status=$?
           tail -n 160 "$RUNNER_TEMP/native-rule-scope-existing.log"
+          # VACUITY FLOOR (bd-lagsa). `status` carries cargo's exit, so a FAILING test was
+          # always caught. What was not caught is a run that executed nothing. Note the
+          # asymmetry this removes: the step above pins this module's `scope::tests::`
+          # subtree at exactly 12, while THIS step -- the broader sweep of all of
+          # `core::search::rule_admission::`, which necessarily includes those 12 -- checked
+          # nothing at all. The narrower filter was guarded and the wider one was not.
+          #
+          # Floor of 1 rather than a count, because this is the superset filter and is
+          # expected to grow; the exact pin one step up is already the brittle half.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/native-rule-scope-existing.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::search::rule_admission:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            status=1
+          else
+            echo "ATTRIBUTION: core::search::rule_admission:: ran $ran tests"
+          fi
           exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
