@@ -17,9 +17,8 @@ const MAX_BATCH_INPUT_BYTES: usize = 256 * 1024;
 const MAX_BATCH_VECTOR_BYTES: usize = 1024 * 1024;
 
 pub(super) fn checkpoint(cx: &asupersync::Cx, tier: &str) -> Result<(), IncrementalFallback> {
-    cx.checkpoint().map_err(|error| {
-        tier_error(format!("{tier}-tier delta interrupted: {error}"))
-    })
+    cx.checkpoint()
+        .map_err(|error| tier_error(format!("{tier}-tier delta interrupted: {error}")))
 }
 
 fn tier_error(detail: String) -> IncrementalFallback {
@@ -74,13 +73,20 @@ pub(super) async fn upsert(
     expected_identity: &str,
     tier: &str,
 ) -> Result<(), IncrementalFallback> {
-    embed_batches_with(cx, embedder, documents, expected_identity, tier, |entries| {
-        // Frankensearch validates all values before writing this one atomic
-        // WAL batch. Do not replace this with append() inside a document loop.
-        index.append_batch(&entries).map_err(|error| {
-            tier_error(format!("{tier}-tier vector batch upsert failed: {error}"))
-        })
-    })
+    embed_batches_with(
+        cx,
+        embedder,
+        documents,
+        expected_identity,
+        tier,
+        |entries| {
+            // Frankensearch validates all values before writing this one atomic
+            // WAL batch. Do not replace this with append() inside a document loop.
+            index.append_batch(&entries).map_err(|error| {
+                tier_error(format!("{tier}-tier vector batch upsert failed: {error}"))
+            })
+        },
+    )
     .await
 }
 
@@ -96,17 +102,25 @@ async fn embed_batches_with(
         checkpoint(cx, tier)?;
         let count = batch_len(documents, embedder.dimension());
         let (batch, remainder) = documents.split_at(count);
-        let texts: Vec<_> = batch.iter().map(|document| document.content.as_str()).collect();
-        let vectors = embedder.embed_batch_bound(cx, &texts).await.map_err(|error| {
-            tier_error(format!("{tier}-tier batch embedding failed: {error}"))
-        })?;
+        let texts: Vec<_> = batch
+            .iter()
+            .map(|document| document.content.as_str())
+            .collect();
+        let vectors = embedder
+            .embed_batch_bound(cx, &texts)
+            .await
+            .map_err(|error| {
+                tier_error(format!("{tier}-tier batch embedding failed: {error}"))
+            })?;
         // Cancellation during inference must be seen before a WAL write even
         // when a custom embedder returns Ok without checking its caller Cx.
         checkpoint(cx, tier)?;
         validate_batch(&vectors, batch.len(), expected_identity, tier)?;
-        let entries = batch.iter().zip(vectors).map(|(document, vector)| {
-            (document.id.clone(), vector.values)
-        }).collect();
+        let entries = batch
+            .iter()
+            .zip(vectors)
+            .map(|(document, vector)| (document.id.clone(), vector.values))
+            .collect();
         write(entries)?;
         documents = remainder;
     }
@@ -116,9 +130,9 @@ async fn embed_batches_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::HashEmbedder;
     use frankensearch::core::generation::EmbeddingIdentityBundleV1;
     use frankensearch::core::traits::{ModelCategory, SearchFuture};
-    use crate::search::HashEmbedder;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -133,21 +147,31 @@ mod tests {
 
     impl ObservedHash {
         fn new() -> Self {
-            Self { inner: HashEmbedder::default_256(), sizes: Mutex::new(Vec::new()) }
+            Self {
+                inner: HashEmbedder::default_256(),
+                sizes: Mutex::new(Vec::new()),
+            }
         }
     }
 
     impl Embedder for ObservedHash {
         fn embed<'a>(
-            &'a self, cx: &'a asupersync::Cx, text: &'a str,
+            &'a self,
+            cx: &'a asupersync::Cx,
+            text: &'a str,
         ) -> SearchFuture<'a, Vec<f32>> {
             self.inner.embed(cx, text)
         }
 
         fn embed_batch<'a>(
-            &'a self, cx: &'a asupersync::Cx, texts: &'a [&'a str],
+            &'a self,
+            cx: &'a asupersync::Cx,
+            texts: &'a [&'a str],
         ) -> SearchFuture<'a, Vec<Vec<f32>>> {
-            self.sizes.lock().expect("batch observations").push(texts.len());
+            self.sizes
+                .lock()
+                .expect("batch observations")
+                .push(texts.len());
             self.inner.embed_batch(cx, texts)
         }
 
@@ -155,17 +179,36 @@ mod tests {
             self.inner.identity()
         }
 
-        fn dimension(&self) -> usize { self.inner.dimension() }
-        fn id(&self) -> &str { self.inner.id() }
-        fn model_name(&self) -> &str { self.inner.model_name() }
-        fn is_semantic(&self) -> bool { self.inner.is_semantic() }
-        fn category(&self) -> ModelCategory { self.inner.category() }
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+
+        fn model_name(&self) -> &str {
+            self.inner.model_name()
+        }
+
+        fn is_semantic(&self) -> bool {
+            self.inner.is_semantic()
+        }
+
+        fn category(&self) -> ModelCategory {
+            self.inner.category()
+        }
     }
 
     fn documents(count: usize) -> Vec<IndexableDocument> {
-        (0..count).map(|index| {
-            IndexableDocument::new(format!("mem_batch_{index:03}"), format!("lesson number {index}"))
-        }).collect()
+        (0..count)
+            .map(|index| {
+                IndexableDocument::new(
+                    format!("mem_batch_{index:03}"),
+                    format!("lesson number {index}"),
+                )
+            })
+            .collect()
     }
 
     #[test]

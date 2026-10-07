@@ -252,37 +252,8 @@ pub(super) fn plan(
             "live generation has no matching complete embedding identity; a full rebuild is required",
         ));
     }
-    let mut delta = Delta::default();
-    let mut current = std::collections::BTreeSet::new();
-    for document in documents {
-        current.insert(document.id.as_str());
-        if live.documents.get(&document.id) != Some(&document_digest(document)) {
-            delta.upserts.push(document.clone());
-        }
-    }
-    delta.removals = live
-        .documents
-        .keys()
-        .filter(|id| !current.contains(id.as_str()))
-        .cloned()
-        .collect();
-    let limit = MAX_DELTA_DOCUMENTS.min(
-        documents
-            .len()
-            .max(live.documents.len())
-            .saturating_mul(MAX_DELTA_PERCENT)
-            / 100,
-    );
-    if delta.len() > limit.max(1) {
-        return Err(incremental_fallback(
-            IncrementalFallbackReason::DeltaOverThreshold,
-            format!(
-                "{} changed documents exceed the delta bound {}",
-                delta.len(),
-                limit.max(1)
-            ),
-        ));
-    }
+    // Compaction is already owed: do not hash or clone the source corpus just
+    // to arrive at the same full-build decision after computing its delta.
     let segments = lexical_segment_count(live_dir);
     if segments > MAX_LEXICAL_SEGMENTS {
         return Err(incremental_fallback(
@@ -292,7 +263,55 @@ pub(super) fn plan(
             ),
         ));
     }
-    Ok(delta)
+    diff_documents(&live.documents, documents, document_digest)
+}
+
+/// Decide eligibility before taking ownership of any changed document body.
+/// A rejected full-corpus rewrite used to clone the whole corpus first, even
+/// though at most 256 changes can be applied incrementally. Keep only bounded
+/// borrowed upserts, and stop as soon as the shared upsert/removal budget is
+/// exhausted. The source snapshot and live digest map remain caller-owned.
+fn diff_documents(
+    live: &BTreeMap<String, String>,
+    documents: &[crate::search::IndexableDocument],
+    mut digest: impl FnMut(&crate::search::IndexableDocument) -> String,
+) -> Result<Delta, IncrementalFallback> {
+    let limit = MAX_DELTA_DOCUMENTS
+        .min(documents.len().max(live.len()).saturating_mul(MAX_DELTA_PERCENT) / 100)
+        .max(1);
+    let over_limit = || {
+        incremental_fallback(
+            IncrementalFallbackReason::DeltaOverThreshold,
+            format!("more than {limit} changed documents; a full rebuild is required"),
+        )
+    };
+    let mut current = std::collections::BTreeSet::new();
+    let mut upserts = Vec::new();
+    for document in documents {
+        if !current.insert(document.id.as_str()) {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+                "source snapshot contains duplicate document identities",
+            ));
+        }
+        if live.get(&document.id) != Some(&digest(document)) {
+            if upserts.len() == limit {
+                return Err(over_limit());
+            }
+            upserts.push(document);
+        }
+    }
+    let mut removals = Vec::new();
+    for id in live.keys().filter(|id| !current.contains(id.as_str())) {
+        if upserts.len() + removals.len() == limit {
+            return Err(over_limit());
+        }
+        removals.push(id.clone());
+    }
+    Ok(Delta {
+        upserts: upserts.into_iter().cloned().collect(),
+        removals,
+    })
 }
 
 #[cfg(feature = "lexical-bm25")]
@@ -595,6 +614,122 @@ mod tests {
         let unchanged = plan(live.path(), &stack, &live_docs).map_err(|error| error.detail)?;
         assert_eq!(unchanged.len(), 0, "an unchanged corpus is an empty delta");
         Ok(())
+    }
+
+    #[test]
+    fn a_large_rewrite_stops_hashing_after_the_first_over_budget_change() {
+        let documents: Vec<_> = (0..2000)
+            .map(|index| doc(&format!("mem_{index:04}"), "original body"))
+            .collect();
+        let live = digest_map(&documents);
+        let changed: Vec<_> = documents.iter().map(|document| doc(&document.id, "changed body")).collect();
+        let mut hashed = 0;
+        let error = diff_documents(&live, &changed, |document| {
+            hashed += 1;
+            document_digest(document)
+        }).expect_err("large rewrites must not stage an incremental generation");
+        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        assert_eq!(hashed, MAX_DELTA_DOCUMENTS + 1);
+        assert!(hashed < changed.len());
+    }
+
+    #[test]
+    fn upserts_and_removals_share_the_exact_inclusive_delta_bound() -> TestResult {
+        let original: Vec<_> = (0..1024)
+            .map(|index| doc(&format!("mem_{index:04}"), "original body"))
+            .collect();
+        let live = digest_map(&original);
+        let mut changed = original[..896].to_vec();
+        for document in &mut changed[..128] {
+            document.content = "changed body".to_owned();
+        }
+        let delta = diff_documents(&live, &changed, document_digest).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 128);
+        assert_eq!(delta.removals.len(), 128);
+        assert_eq!(delta.len(), MAX_DELTA_DOCUMENTS);
+        changed[128].content = "one change too many".to_owned();
+        assert_eq!(
+            diff_documents(&live, &changed, document_digest).expect_err("shared budget").reason,
+            IncrementalFallbackReason::DeltaOverThreshold,
+        );
+        let deleted = diff_documents(&live, &original[..768], document_digest)
+            .map_err(|error| error.detail)?;
+        assert_eq!(deleted.removals.len(), MAX_DELTA_DOCUMENTS);
+        assert!(deleted.upserts.is_empty());
+        assert!(diff_documents(&live, &original[..767], document_digest).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_diff_matches_full_reference_across_insert_update_delete_combinations() {
+        let original: Vec<_> = (0..8)
+            .map(|index| doc(&format!("mem_{index}"), "original body"))
+            .collect();
+        let live = digest_map(&original);
+        let mut accepted = 0;
+        let mut refused = 0;
+        for removed_mask in 0_u8..16 {
+            for changed_mask in 0_u8..16 {
+                let mut current: Vec<_> = original.iter().enumerate()
+                    .filter(|(index, _)| *index >= 4 || removed_mask & (1_u8 << *index) == 0)
+                    .map(|(index, document)| {
+                        let mut document = document.clone();
+                        if index < 4 && changed_mask & (1_u8 << index) != 0 {
+                            document.content = "updated body".to_owned();
+                        }
+                        document
+                    }).collect();
+                if removed_mask & 1 != 0 {
+                    current.push(doc("mem_new", "newly inserted body"));
+                }
+                let expected_upserts: Vec<_> = current.iter()
+                    .filter(|document| live.get(&document.id) != Some(&document_digest(document)))
+                    .map(|document| (document.id.clone(), document.content.clone()))
+                    .collect();
+                let expected_removals: Vec<_> = live.keys()
+                    .filter(|id| !current.iter().any(|document| &document.id == *id))
+                    .cloned().collect();
+                match diff_documents(&live, &current, document_digest) {
+                    Ok(delta) => {
+                        accepted += 1;
+                        assert!(expected_upserts.len() + expected_removals.len() <= 2);
+                        assert_eq!(delta.upserts.iter().map(|document| {
+                            (document.id.clone(), document.content.clone())
+                        }).collect::<Vec<_>>(), expected_upserts);
+                        assert_eq!(delta.removals, expected_removals);
+                    }
+                    Err(error) => {
+                        refused += 1;
+                        assert!(expected_upserts.len() + expected_removals.len() > 2);
+                        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && refused > 0);
+    }
+
+    #[test]
+    fn empty_and_single_document_deltas_keep_the_minimum_one_change_budget() -> TestResult {
+        let empty = BTreeMap::new();
+        assert_eq!(diff_documents(&empty, &[], document_digest).map_err(|error| error.detail)?.len(), 0);
+        let single = [doc("mem_one", "one document")];
+        let inserted = diff_documents(&empty, &single, document_digest).map_err(|error| error.detail)?;
+        assert_eq!(inserted.upserts.len(), 1);
+        let deleted = diff_documents(&digest_map(&single), &[], document_digest).map_err(|error| error.detail)?;
+        assert_eq!(deleted.removals, vec!["mem_one"]);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_source_identities_never_become_a_partial_delta() {
+        let first = doc("mem_same", "first body");
+        let live = digest_map(std::slice::from_ref(&first));
+        for second in [first.clone(), doc("mem_same", "another body")] {
+            let error = diff_documents(&live, &[first.clone(), second], document_digest)
+                .expect_err("ambiguous source snapshot");
+            assert_eq!(error.reason, IncrementalFallbackReason::CorpusRevisionMismatch);
+        }
     }
 
     #[test]
