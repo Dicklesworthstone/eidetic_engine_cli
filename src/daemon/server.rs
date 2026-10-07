@@ -4419,6 +4419,7 @@ impl std::fmt::Debug for DaemonWriteRouter {
 /// `confidence`/`workflow_id`/`auto_link`/`propose_candidates` fields a faithful
 /// `ee remember` needs, so we carry the whole owned params object instead.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DaemonWriteParams {
     workspace_path: PathBuf,
     content: String,
@@ -4428,6 +4429,12 @@ struct DaemonWriteParams {
     confidence: f32,
     source: Option<String>,
     workflow_id: Option<String>,
+    #[serde(default)]
+    valid_from: Option<String>,
+    #[serde(default)]
+    valid_to: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
     auto_link: bool,
     propose_candidates: bool,
 }
@@ -4437,11 +4444,45 @@ impl DaemonWriteParams {
         let object = value
             .as_object()
             .ok_or_else(|| "`params` must be a JSON object for ee.daemon.write".to_string())?;
+        const FIELDS: &[&str] = &[
+            "workspacePath",
+            "workspace_path",
+            "workspace",
+            "content",
+            "level",
+            "kind",
+            "tags",
+            "confidence",
+            "source",
+            "workflow",
+            "workflowId",
+            "workflow_id",
+            "validFrom",
+            "valid_from",
+            "validTo",
+            "valid_to",
+            "dryRun",
+            "dry_run",
+            "autoLink",
+            "auto_link",
+            "proposeCandidates",
+            "propose_candidates",
+        ];
+        if let Some(field) = object
+            .keys()
+            .find(|field| !FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!("unknown ee.daemon.write field `{field}`"));
+        }
+        let confidence = match object.get("confidence") {
+            None => 0.8,
+            Some(value) => value
+                .as_f64()
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                .ok_or_else(|| "field `confidence` must be a number between 0 and 1".to_owned())?,
+        };
         #[allow(clippy::cast_possible_truncation)]
-        let confidence = object
-            .get("confidence")
-            .and_then(serde_json::Value::as_f64)
-            .map_or(0.8_f32, |value| value as f32);
+        let confidence = confidence as f32;
         Ok(Self {
             workspace_path: required_path_any(
                 object,
@@ -4455,6 +4496,9 @@ impl DaemonWriteParams {
             confidence,
             source: optional_string_any(object, &["source"])?,
             workflow_id: optional_string_any(object, &["workflow", "workflowId", "workflow_id"])?,
+            valid_from: optional_string_any(object, &["validFrom", "valid_from"])?,
+            valid_to: optional_string_any(object, &["validTo", "valid_to"])?,
+            dry_run: optional_bool_any(object, &["dryRun", "dry_run"])?.unwrap_or(false),
             auto_link: optional_bool_any(object, &["autoLink", "auto_link"])?.unwrap_or(true),
             propose_candidates: optional_bool_any(
                 object,
@@ -4476,9 +4520,9 @@ impl DaemonWriteParams {
             confidence: self.confidence,
             source: self.source.as_deref(),
             allow_secret_mention: false,
-            valid_from: None,
-            valid_to: None,
-            dry_run: false,
+            valid_from: self.valid_from.as_deref(),
+            valid_to: self.valid_to.as_deref(),
+            dry_run: self.dry_run,
             auto_link: self.auto_link,
             propose_candidates: self.propose_candidates,
         }
@@ -4501,7 +4545,15 @@ impl DaemonWriteParams {
     /// Reconstruct from a `WriteOperation::Custom` payload inside the actor's
     /// `process_batch`. Errors map to a domain write failure for that op.
     fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
-        serde_json::from_value(payload.clone()).map_err(|error| error.to_string())
+        let params: Self =
+            serde_json::from_value(payload.clone()).map_err(|error| error.to_string())?;
+        if params.dry_run {
+            return Err("dry-run previews must not enter the durable write-owner actor".to_owned());
+        }
+        if !params.confidence.is_finite() || !(0.0..=1.0).contains(&params.confidence) {
+            return Err("field `confidence` must be a number between 0 and 1".to_owned());
+        }
+        Ok(params)
     }
 }
 
@@ -4605,6 +4657,9 @@ fn dispatch_write(
     if let Some(response) = daemon_write_response_admission_error(request) {
         return response;
     }
+    if params.dry_run {
+        return dispatch_write_preview(request, &params);
+    }
     // When the long-lived write-owner actor is hosted (bound workspace), route
     // the write through it so it can coalesce with siblings (Inc 2 wires the
     // path; real batching is Inc 3). Otherwise fall through to the in-process
@@ -4617,6 +4672,46 @@ fn dispatch_write(
         payload: params.to_payload(),
     };
     daemon_write_response(request, execute_write_operation(&operation))
+}
+
+/// Preview through the canonical validation path without submitting an actor
+/// operation, opening a writable store, or claiming a committed memory/job.
+fn dispatch_write_preview(request: &DaemonRequest, params: &DaemonWriteParams) -> DaemonResponse {
+    let result =
+        crate::core::memory::remember_memory(&params.options()).and_then(|report| {
+            let remember = serde_json::from_str::<serde_json::Value>(&report.json_output())
+                .map_err(|error| crate::models::DomainError::Storage {
+                    message: format!("Could not encode remember preview: {error}"),
+                    repair: None,
+                })?;
+            Ok(serde_json::json!({
+                "schema": "ee.daemon.write.v1",
+                "success": true,
+                "workspaceId": report.workspace_id,
+                "workspacePath": report.workspace_path,
+                "persisted": false,
+                "dryRun": true,
+                "indexStatus": report.index_status,
+                "reportStatus": "complete",
+                "remember": remember,
+                "degraded": [],
+            }))
+        });
+    let result = result.unwrap_or_else(|error| {
+        serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "persisted": false,
+            "dryRun": true,
+            "error": { "code": error.code(), "message": error.message() },
+        })
+    });
+    DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    )
 }
 
 /// Route a parsed write through the long-lived write-owner actor and block the
@@ -9427,6 +9522,20 @@ mod tests {
         );
         // options() borrows the owned strings without panicking.
         assert_eq!(params.options().content, "remember this");
+        assert!(!params.options().dry_run);
+        assert!(params.options().valid_from.is_none());
+        assert!(params.options().valid_to.is_none());
+        let mut legacy_payload = params.to_payload();
+        for field in ["dry_run", "valid_from", "valid_to"] {
+            legacy_payload
+                .as_object_mut()
+                .expect("payload")
+                .remove(field);
+        }
+        assert_eq!(
+            DaemonWriteParams::from_payload(&legacy_payload).expect("legacy actor payload"),
+            params
+        );
     }
 
     #[test]
@@ -9456,7 +9565,7 @@ mod tests {
 
     #[test]
     fn daemon_write_params_nullable_strings_round_trip_through_rpc_and_actor() {
-        for present in 0_u8..8 {
+        for present in 0_u8..32 {
             let expected = DaemonWriteParams {
                 workspace_path: PathBuf::from("/tmp/daemon-write-roundtrip"),
                 content: "Preserve every optional write string.".to_owned(),
@@ -9466,6 +9575,9 @@ mod tests {
                 confidence: 0.5,
                 source: (present & 2 != 0).then(|| "manual://roundtrip".to_owned()),
                 workflow_id: (present & 4 != 0).then(|| "workflow-roundtrip".to_owned()),
+                valid_from: (present & 8 != 0).then(|| "2020-01-01T00:00:00Z".to_owned()),
+                valid_to: (present & 16 != 0).then(|| "2120-01-01T00:00:00Z".to_owned()),
+                dry_run: false,
                 auto_link: false,
                 propose_candidates: false,
             };
@@ -9475,6 +9587,8 @@ mod tests {
                 ("tags", expected.tags.as_deref()),
                 ("source", expected.source.as_deref()),
                 ("workflow_id", expected.workflow_id.as_deref()),
+                ("valid_from", expected.valid_from.as_deref()),
+                ("valid_to", expected.valid_to.as_deref()),
             ] {
                 assert_eq!(
                     payload.get(field),
@@ -9523,6 +9637,10 @@ mod tests {
             "workflow",
             "workflowId",
             "workflow_id",
+            "validFrom",
+            "valid_from",
+            "validTo",
+            "valid_to",
         ] {
             let mut value = base.clone();
             value[field] = serde_json::Value::Null;
@@ -9604,6 +9722,10 @@ mod tests {
             ("workflow", Some("workflowId")),
             ("workflowId", Some("workflow_id")),
             ("workflow_id", None),
+            ("validFrom", Some("valid_from")),
+            ("valid_from", None),
+            ("validTo", Some("valid_to")),
+            ("valid_to", None),
         ] {
             for invalid in [
                 serde_json::json!(false),
@@ -9649,6 +9771,90 @@ mod tests {
                 .is_none(),
             "invalid optional strings must not create any store or source-write artifacts"
         );
+    }
+
+    #[test]
+    fn daemon_write_controls_preserve_first_present_alias_semantics() {
+        let mut value = serde_json::json!({
+            "workspacePath": "/tmp/daemon-write-controls",
+            "content": "Preview an explicitly bounded memory.",
+            "validFrom": "2020-01-01T00:00:00Z",
+            "valid_from": 42,
+            "validTo": "2120-01-01T00:00:00Z",
+            "valid_to": false,
+            "dryRun": true,
+            "dry_run": "ignored later alias",
+        });
+        let params = DaemonWriteParams::from_value(&value).expect("first aliases win");
+        assert_eq!(params.options().valid_from, Some("2020-01-01T00:00:00Z"));
+        assert_eq!(params.options().valid_to, Some("2120-01-01T00:00:00Z"));
+        assert!(params.options().dry_run);
+        value["validFrom"] = serde_json::Value::Null;
+        value["validTo"] = serde_json::Value::Null;
+        value["dryRun"] = serde_json::json!(false);
+        let params = DaemonWriteParams::from_value(&value).expect("null is first-present absence");
+        assert!(params.options().valid_from.is_none());
+        assert!(params.options().valid_to.is_none());
+        assert!(!params.options().dry_run);
+        assert_eq!(
+            DaemonWriteParams::from_payload(&params.to_payload()).expect("actor roundtrip"),
+            params
+        );
+    }
+
+    #[test]
+    fn daemon_write_rejects_unknown_controls_and_malformed_confidence_before_routing() {
+        let fixture = DaemonRememberReportFixture::new();
+        let mut invalid_fields = vec![
+            ("idempotencyKey", serde_json::json!("must-not-be-ignored")),
+            ("allowSecretMention", serde_json::json!(true)),
+            ("dry_run_typo", serde_json::json!(true)),
+        ];
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!("0.2"),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(-0.01),
+            serde_json::json!(1.0000000001),
+            serde_json::json!(1e100),
+        ] {
+            invalid_fields.push(("confidence", invalid));
+        }
+        for field in ["dryRun", "dry_run"] {
+            for invalid in [
+                serde_json::Value::Null,
+                serde_json::json!("true"),
+                serde_json::json!(1),
+            ] {
+                invalid_fields.push((field, invalid));
+            }
+        }
+        let database_before = fs::read(&fixture.database_path).expect("database before rejection");
+        for (field, invalid) in invalid_fields {
+            let mut params = fixture
+                .params("Invalid controls must never write a memory.")
+                .to_payload();
+            params[field] = invalid;
+            let mut request = DaemonRequest::new(
+                "req-invalid-write-control",
+                TEST_AGENT_ID,
+                METHOD_WRITE,
+                params,
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let response = dispatch_write(&request, None);
+            let error = response.error.expect("reject before routing");
+            assert_eq!(error.code, DAEMON_WRITE_PARAMS_INVALID_CODE, "{field}");
+            assert!(error.message.contains(field), "{}", error.message);
+            assert!(response.result.is_none());
+        }
+        assert_eq!(
+            fs::read(&fixture.database_path).expect("unchanged database"),
+            database_before
+        );
+        fixture.assert_no_source_write();
     }
 
     #[test]
@@ -9837,6 +10043,9 @@ mod tests {
                     confidence: 0.8,
                     source: Some("manual://daemon-invalid-remember-batch".to_string()),
                     workflow_id: None,
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
                     auto_link: false,
                     propose_candidates: false,
                 })
@@ -9881,6 +10090,9 @@ mod tests {
                 confidence: 0.8,
                 source: Some("manual://daemon-storeless-remember-batch".to_string()),
                 workflow_id: None,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
                 auto_link: false,
                 propose_candidates: false,
             })
@@ -9936,6 +10148,9 @@ mod tests {
                 confidence: 0.8,
                 source: Some("manual://daemon-remember-batch".to_string()),
                 workflow_id: None,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
                 auto_link: false,
                 propose_candidates: false,
             })
@@ -10116,6 +10331,9 @@ mod tests {
                 confidence: 0.73,
                 source: Some("manual://daemon-report".to_owned()),
                 workflow_id: None,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
                 auto_link: false,
                 propose_candidates: false,
             }
@@ -10126,6 +10344,34 @@ mod tests {
                 operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
                 payload: self.params(content).to_payload(),
             }
+        }
+
+        fn assert_no_source_write(&self) {
+            let connection = crate::db::DbConnection::open_file_read_only(&self.database_path)
+                .expect("inspect untouched source");
+            assert!(
+                connection
+                    .list_memories(&self.workspace_id, None, false)
+                    .expect("memories")
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_audit_entries(Some(&self.workspace_id), None)
+                    .expect("audit")
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&self.workspace_id, None)
+                    .expect("jobs")
+                    .is_empty()
+            );
+            assert!(!self.workspace_path.join(".ee/audit.jsonl").exists());
+            assert!(!self.workspace_path.join(".ee/index").exists());
+            assert!(!crate::core::write_owner::workspace_write_replay_required(
+                &self.workspace_path
+            ));
         }
 
         fn assert_committed(&self, response: &serde_json::Value, content: &str) {
@@ -10162,6 +10408,152 @@ mod tests {
                 "reporting must never repeat the committed source write"
             );
         }
+    }
+
+    #[test]
+    fn daemon_remember_preview_bypasses_unavailable_actor_without_creating_store() {
+        use crate::core::write_owner::{DEFAULT_CHANNEL_CAPACITY, WriteOwner};
+        let workspace = private_tempdir();
+        let (owner, handle) = WriteOwner::new(DEFAULT_CHANNEL_CAPACITY);
+        drop(owner);
+        let router = DaemonWriteRouter {
+            runtime: Arc::new(crate::core::build_cli_runtime().expect("runtime")),
+            handle,
+        };
+        for dry_run_key in ["dryRun", "dry_run"] {
+            let mut params = serde_json::json!({
+                "workspacePath": workspace.path(),
+                "content": "Preview validates without an initialized store or a live writer.",
+                "validFrom": "2020-01-01T02:00:00+02:00",
+                "validTo": "2120-01-01T00:00:00Z",
+            });
+            params[dry_run_key] = serde_json::json!(true);
+            let mut request =
+                DaemonRequest::new("req-preview-no-store", TEST_AGENT_ID, METHOD_WRITE, params);
+            request.workspace_id = Some(workspace.path().display().to_string());
+            let response = dispatch_write(&request, Some(&router));
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.expect("preview result");
+            assert_eq!(result["success"], true);
+            assert_eq!(result["persisted"], false);
+            assert_eq!(result["dryRun"], true);
+            assert_eq!(result["indexStatus"], "dry_run_not_queued");
+            assert!(result.get("entityId").is_none());
+            assert!(result.get("indexJobId").is_none());
+            assert_eq!(result["remember"]["data"]["persisted"], false);
+            assert!(result["remember"]["data"]["index_job_id"].is_null());
+            assert_eq!(
+                result["remember"]["data"]["valid_from"],
+                "2020-01-01T00:00:00Z"
+            );
+            assert_eq!(
+                result["remember"]["data"]["valid_to"],
+                "2120-01-01T00:00:00Z"
+            );
+        }
+        assert!(
+            fs::read_dir(workspace.path())
+                .expect("untouched workspace")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn daemon_remember_preview_and_invalid_validity_leave_initialized_source_unchanged() {
+        let fixture = DaemonRememberReportFixture::new();
+        let database_before = fs::read(&fixture.database_path).expect("source before preview");
+        let store_entries = || {
+            fs::read_dir(fixture.workspace_path.join(".ee"))
+                .expect("store entries")
+                .map(|entry| entry.expect("store entry").file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let entries_before = store_entries();
+        for (dry_run, valid_from, valid_to, success) in [
+            (true, "2020-01-01T00:00:00Z", "2120-01-01T00:00:00Z", true),
+            (true, "not a timestamp", "2120-01-01T00:00:00Z", false),
+            (false, "not a timestamp", "2120-01-01T00:00:00Z", false),
+            (false, "2120-01-01T00:00:00Z", "2020-01-01T00:00:00Z", false),
+        ] {
+            let mut params = fixture.params("Validate before mutating the source database.");
+            params.dry_run = dry_run;
+            params.valid_from = Some(valid_from.to_owned());
+            params.valid_to = Some(valid_to.to_owned());
+            let mut request = DaemonRequest::new(
+                "req-preview-validity",
+                TEST_AGENT_ID,
+                METHOD_WRITE,
+                params.to_payload(),
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let response = dispatch_write(&request, None);
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.expect("canonical validation result");
+            assert_eq!(result["success"], success, "{result}");
+            assert!(result.get("entityId").is_none());
+            assert!(result.get("indexJobId").is_none());
+            if dry_run {
+                assert_eq!(result["persisted"], false);
+                assert_eq!(result["dryRun"], true);
+            }
+        }
+        assert_eq!(
+            fs::read(&fixture.database_path).expect("source after preview"),
+            database_before
+        );
+        assert_eq!(store_entries(), entries_before);
+        fixture.assert_no_source_write();
+    }
+
+    #[test]
+    fn daemon_remember_actor_rejects_preview_payload_before_opening_database() {
+        let workspace = private_tempdir();
+        let params = DaemonWriteParams::from_value(&serde_json::json!({
+            "workspacePath": workspace.path(), "content": "Never queue previews.", "dryRun": true,
+        }))
+        .expect("valid wire preview");
+        let operation = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: params.to_payload(),
+        };
+        let error = execute_daemon_txn_batch(&[operation]).expect_err("reject actor preview");
+        assert!(error.message().contains("dry-run previews"), "{error}");
+        assert!(
+            fs::read_dir(workspace.path())
+                .expect("untouched workspace")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn daemon_remember_commits_requested_validity_through_actor_payload() {
+        let fixture = DaemonRememberReportFixture::new();
+        let content = "Keep the author's exact applicability window in durable storage.";
+        let mut value = fixture.params(content).to_payload();
+        value["validFrom"] = serde_json::json!("2020-01-01T02:00:00.123456789+02:00");
+        value["validTo"] = serde_json::json!("2120-01-01T00:00:00.987654321Z");
+        let mut request =
+            DaemonRequest::new("req-committed-validity", TEST_AGENT_ID, METHOD_WRITE, value);
+        request.workspace_id = Some(fixture.workspace_path.display().to_string());
+        let response = dispatch_write(&request, None);
+        assert!(response.error.is_none(), "{response:?}");
+        let result = response.result.expect("committed write");
+        fixture.assert_committed(&result, content);
+        assert_eq!(result["reportStatus"], "complete");
+        let from = "2020-01-01T00:00:00.123456789Z";
+        let to = "2120-01-01T00:00:00.987654321Z";
+        assert_eq!(result["remember"]["data"]["valid_from"], from);
+        assert_eq!(result["remember"]["data"]["valid_to"], to);
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect durable validity");
+        let stored = connection
+            .get_memory(result["entityId"].as_str().expect("memory ID"))
+            .expect("memory query")
+            .expect("stored memory");
+        assert_eq!(stored.valid_from.as_deref(), Some(from));
+        assert_eq!(stored.valid_to.as_deref(), Some(to));
     }
 
     #[test]

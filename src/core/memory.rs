@@ -47,7 +47,8 @@ use crate::db::{
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
     CreateSessionInput, DbConnection, DbOperation, EvidenceProducerKind, MemoryContentSimHash,
     MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    StoredMemoryLink, StoredRememberIdempotencyKey, audit_actions, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
@@ -1386,6 +1387,38 @@ fn remember_memory_inner_with_store(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
+    match remember_memory_outcome_inner_with_store(
+        options,
+        id_source,
+        audit_lane,
+        defer_index_processing,
+        store_override,
+        typed_field_assignments,
+        attempt_family,
+        None,
+    )? {
+        RememberOutcome::Created(report) => Ok(*report),
+        _ => Err(DomainError::Storage {
+            message: "Unkeyed remember unexpectedly returned a replay outcome".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        }),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit store and write identity stay local to this request"
+)]
+fn remember_memory_outcome_inner_with_store(
+    options: &RememberMemoryOptions<'_>,
+    id_source: &mut RememberIdSource<'_>,
+    audit_lane: Option<&AuditLaneHandle>,
+    defer_index_processing: bool,
+    store_override: Option<&RememberStoreOverride>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+    idempotency: Option<RememberIdempotencyRequest<'_>>,
+) -> Result<RememberOutcome, DomainError> {
     let mut prepared = prepare_remember_memory_with_store(
         options,
         id_source.next_memory_id(),
@@ -1396,7 +1429,7 @@ fn remember_memory_inner_with_store(
     if options.dry_run {
         let typed_fields =
             remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
-        return Ok(RememberMemoryReport {
+        return Ok(RememberOutcome::Created(Box::new(RememberMemoryReport {
             version: env!("CARGO_PKG_VERSION"),
             memory_id: prepared.memory_id,
             workspace_id: prepared.workspace_id,
@@ -1436,7 +1469,7 @@ fn remember_memory_inner_with_store(
             curation_candidate_status: "dry_run_not_evaluated".to_owned(),
             curation_candidate_degradations: Vec::new(),
             near_duplicates: Vec::new(),
-        });
+        })));
     }
 
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
@@ -1552,7 +1585,7 @@ fn remember_memory_inner_with_store(
         .as_ref()
         .map(|_| generate_memory_link_id());
     let mut write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
-    crate::core::write_owner::run_one_shot_write_intake(
+    let primary_outcome = crate::core::write_owner::run_one_shot_write_intake(
         &prepared.workspace_path,
         &write_operation,
         || {
@@ -1570,9 +1603,24 @@ fn remember_memory_inner_with_store(
                 &index_input,
                 policy_bypass.as_ref(),
                 audit_lane,
+                idempotency,
             )
         },
     )?;
+
+    if let RememberPrimaryWriteOutcome::AlreadyRecorded(existing) = primary_outcome {
+        // No source mutation occurred. In particular, do not retry the audit
+        // file append or derive links/index work for the unused candidate ID.
+        write_replay_guard.mark_clean()?;
+        return remember_idempotency_replay_outcome(
+            existing,
+            idempotency.ok_or_else(|| {
+                remember_usage_error("replay identity was not prepared".to_owned())
+            })?,
+            &prepared.database_path,
+            options.dry_run,
+        );
+    }
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
 
@@ -1825,7 +1873,7 @@ fn remember_memory_inner_with_store(
             error = %error,
         );
     }
-    Ok(report)
+    Ok(RememberOutcome::Created(Box::new(report)))
 }
 
 /// Close a workflow and promote eligible working memories to episodic.
@@ -4699,6 +4747,7 @@ pub(crate) fn record_prepared_remember_txn_write_in_txn(
         &write.index_input,
         write.finish.policy_bypass.as_ref(),
         None,
+        None,
     )
 }
 
@@ -4720,6 +4769,7 @@ fn record_remembered_memory_in_txn(
     index_input: &CreateSearchIndexJobInput,
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
+    idempotency: Option<RememberIdempotencyRequest<'_>>,
 ) -> crate::db::Result<()> {
     match embed_dedup_decision.content_simhash {
         Some(content_simhash) => connection.insert_memory_with_content_simhash(
@@ -4764,7 +4814,28 @@ fn record_remembered_memory_in_txn(
             policy_bypass,
         )?;
     }
-    connection.insert_search_index_job(index_job_id, index_input)
+    connection.insert_search_index_job(index_job_id, index_input)?;
+    if let Some(idempotency) = idempotency {
+        connection.insert_remember_idempotency_key(&CreateRememberIdempotencyKeyInput {
+            workspace_id: memory_input.workspace_id.clone(),
+            idempotency_key: idempotency.key.to_owned(),
+            content_hash: idempotency.request_hash.to_owned(),
+            memory_id: memory_id.to_owned(),
+        })?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RememberIdempotencyRequest<'a> {
+    key: &'a str,
+    request_hash: &'a str,
+}
+
+#[derive(Debug)]
+enum RememberPrimaryWriteOutcome {
+    Created,
+    AlreadyRecorded(StoredRememberIdempotencyKey),
 }
 
 #[allow(
@@ -4785,9 +4856,19 @@ fn store_remembered_memory_with_retry(
     index_input: &CreateSearchIndexJobInput,
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
-) -> Result<(), DomainError> {
+    idempotency: Option<RememberIdempotencyRequest<'_>>,
+) -> Result<RememberPrimaryWriteOutcome, DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
+            // The first lookup in the public wrapper is an optimization only.
+            // This check shares the database writer fence with source mutation,
+            // so concurrent processes cannot both create for the same key.
+            if let Some(idempotency) = idempotency
+                && let Some(existing) = connection
+                    .get_remember_idempotency_key(&memory_input.workspace_id, idempotency.key)?
+            {
+                return Ok(RememberPrimaryWriteOutcome::AlreadyRecorded(existing));
+            }
             record_remembered_memory_in_txn(
                 connection,
                 memory_id,
@@ -4802,9 +4883,14 @@ fn store_remembered_memory_with_retry(
                 index_input,
                 policy_bypass,
                 audit_lane,
-            )
+                idempotency,
+            )?;
+            Ok(RememberPrimaryWriteOutcome::Created)
         }) {
-            Ok(()) => {
+            Ok(RememberPrimaryWriteOutcome::AlreadyRecorded(existing)) => {
+                return Ok(RememberPrimaryWriteOutcome::AlreadyRecorded(existing));
+            }
+            Ok(RememberPrimaryWriteOutcome::Created) => {
                 if let Some(audit_lane) = audit_lane {
                     emit_remember_audit_events(
                         connection,
@@ -4820,7 +4906,7 @@ fn store_remembered_memory_with_retry(
                         repair: Some("ee doctor".to_owned()),
                     })?;
                 }
-                return Ok(());
+                return Ok(RememberPrimaryWriteOutcome::Created);
             }
             Err(error) if remember_write_contention_is_retryable(&error) => {
                 if let Err(rollback_error) = connection.rollback() {
@@ -4832,7 +4918,24 @@ fn store_remembered_memory_with_retry(
                     );
                 }
                 if memory_exists_after_commit_ambiguity(connection, memory_id)? {
-                    return Ok(());
+                    if let Some(idempotency) = idempotency {
+                        let committed_key = connection
+                            .get_remember_idempotency_key(&memory_input.workspace_id, idempotency.key)
+                            .map_err(|error| DomainError::Storage {
+                                message: format!("Failed to verify remember identity after write contention: {error}"),
+                                repair: Some("ee doctor --json".to_owned()),
+                            })?;
+                        if !committed_key.is_some_and(|key| {
+                            key.memory_id == memory_id
+                                && key.content_hash == idempotency.request_hash
+                        }) {
+                            return Err(DomainError::Storage {
+                                message: "Remember source exists without its matching committed idempotency key".to_owned(),
+                                repair: Some("ee doctor --json".to_owned()),
+                            });
+                        }
+                    }
+                    return Ok(RememberPrimaryWriteOutcome::Created);
                 }
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
                     remember_retry_sleep(remember_write_retry_delay(attempt), "store memory")?;
@@ -7512,7 +7615,22 @@ fn remember_reinforce_storage_error(
 fn apply_remember_reinforce(
     connection: &DbConnection,
     context: &RememberReinforceContext<'_>,
-) -> Result<RememberReinforceReport, DomainError> {
+) -> Result<RememberOutcome, DomainError> {
+    if context.dry_run {
+        return apply_remember_reinforce_under_fence(connection, context);
+    }
+    // The posterior and session reads must belong to the same writer fence as
+    // their updates, including when different keys reinforce the same memory.
+    connection.with_write_owner_fence(
+        |error| remember_reinforce_storage_error(error, context.target_memory_id),
+        || apply_remember_reinforce_under_fence(connection, context),
+    )
+}
+
+fn apply_remember_reinforce_under_fence(
+    connection: &DbConnection,
+    context: &RememberReinforceContext<'_>,
+) -> Result<RememberOutcome, DomainError> {
     let existing = connection
         .get_memory(context.target_memory_id)
         .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?
@@ -7545,7 +7663,7 @@ fn apply_remember_reinforce(
         .collect::<Vec<_>>();
 
     if context.dry_run {
-        return Ok(RememberReinforceReport {
+        return Ok(RememberOutcome::Reinforced(RememberReinforceReport {
             version: env!("CARGO_PKG_VERSION"),
             workspace_id: context.workspace_id.to_owned(),
             workspace_path: context.workspace_path.to_path_buf(),
@@ -7562,7 +7680,7 @@ fn apply_remember_reinforce(
             audit_id: None,
             source_uris,
             last_reinforced_at: None,
-        });
+        }));
     }
 
     let reinforced_at = Utc::now().to_rfc3339();
@@ -7630,8 +7748,14 @@ fn apply_remember_reinforce(
         details: Some(audit_details),
     };
 
-    connection
+    let replay = connection
         .with_transaction(|| {
+            if let Some(key) = context.idempotency_key
+                && let Some(existing) =
+                    connection.get_remember_idempotency_key(context.workspace_id, key)?
+            {
+                return Ok(Some(existing));
+            }
             if !session_exists {
                 connection.insert_session(
                     &session_id,
@@ -7680,11 +7804,26 @@ fn apply_remember_reinforce(
                     memory_id: context.target_memory_id.to_owned(),
                 })?;
             }
-            Ok(())
+            Ok(None)
         })
         .map_err(|error| remember_reinforce_storage_error(error, context.target_memory_id))?;
 
-    Ok(RememberReinforceReport {
+    if let Some(existing) = replay {
+        let key = context.idempotency_key.ok_or_else(|| {
+            remember_usage_error("reinforce replay identity was not prepared".to_owned())
+        })?;
+        return remember_idempotency_replay_outcome(
+            existing,
+            RememberIdempotencyRequest {
+                key,
+                request_hash: context.content_hash,
+            },
+            context.database_path,
+            context.dry_run,
+        );
+    }
+
+    Ok(RememberOutcome::Reinforced(RememberReinforceReport {
         version: env!("CARGO_PKG_VERSION"),
         workspace_id: context.workspace_id.to_owned(),
         workspace_path: context.workspace_path.to_path_buf(),
@@ -7701,30 +7840,28 @@ fn apply_remember_reinforce(
         audit_id: Some(audit_id),
         source_uris,
         last_reinforced_at: Some(reinforced_at),
-    })
+    }))
 }
 
-fn record_remember_idempotency_key(
-    report: &RememberMemoryReport,
-    idempotency_key: &str,
-    request_hash: &str,
-) -> Result<(), DomainError> {
-    let connection = open_remember_database_with_retry(&report.database_path)?;
-    connection
-        .insert_remember_idempotency_key(&CreateRememberIdempotencyKeyInput {
-            workspace_id: report.workspace_id.clone(),
-            idempotency_key: idempotency_key.to_owned(),
-            content_hash: request_hash.to_owned(),
-            memory_id: report.memory_id.to_string(),
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!(
-                "Memory {} was stored, but recording idempotency key `{idempotency_key}` failed: {error}",
-                report.memory_id
-            ),
-            repair: Some("ee doctor --json".to_owned()),
-        })
-        .map(|_| ())
+fn remember_idempotency_replay_outcome(
+    existing: StoredRememberIdempotencyKey,
+    request: RememberIdempotencyRequest<'_>,
+    database_path: &Path,
+    dry_run: bool,
+) -> Result<RememberOutcome, DomainError> {
+    if existing.content_hash != request.request_hash {
+        return Err(remember_idempotency_conflict_error(request.key));
+    }
+    Ok(RememberOutcome::AlreadyRecorded(
+        RememberAlreadyRecordedReport {
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: existing.workspace_id,
+            database_path: database_path.to_path_buf(),
+            memory_id: existing.memory_id,
+            idempotency_key: existing.idempotency_key,
+            dry_run,
+        },
+    ))
 }
 
 /// `remember_memory` layered with the bd-1pi9m.4 write controls:
@@ -7851,7 +7988,7 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
                 if let Some(neighbor) = neighbor
                     && remember_reinforce_should_apply(neighbor.similarity, threshold)
                 {
-                    let report = apply_remember_reinforce(
+                    return apply_remember_reinforce(
                         &connection,
                         &RememberReinforceContext {
                             workspace_id: &workspace_id,
@@ -7866,29 +8003,36 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
                             idempotency_key: idempotency_key.as_deref(),
                             dry_run: options.dry_run,
                         },
-                    )?;
-                    return Ok(RememberOutcome::Reinforced(report));
+                    );
                 }
                 // Below threshold (or no neighbor): fall through to create.
             }
         }
     }
 
-    let report = remember_memory_with_index_mode(
+    if idempotency_key.is_none() {
+        return remember_memory_with_index_mode(
+            options,
+            controls.defer_index_processing,
+            typed_field_assignments,
+            attempt_family,
+        )
+        .map(|report| RememberOutcome::Created(Box::new(report)));
+    }
+    let mut id_source = RememberIdSource::Ambient;
+    remember_memory_outcome_inner_with_store(
         options,
+        &mut id_source,
+        None,
         controls.defer_index_processing,
+        None,
         typed_field_assignments,
         attempt_family,
-    )?;
-    if let Some(key) = idempotency_key.as_deref()
-        && !options.dry_run
-    {
-        let request_hash = idempotency_request_hash.as_deref().ok_or_else(|| {
-            remember_usage_error("idempotency request hash was not prepared".to_owned())
-        })?;
-        record_remember_idempotency_key(&report, key, request_hash)?;
-    }
-    Ok(RememberOutcome::Created(Box::new(report)))
+        idempotency_key
+            .as_deref()
+            .zip(idempotency_request_hash.as_deref())
+            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+    )
 }
 
 /// Store one memory in the separate user-global store used by `ee remember --global`.
@@ -7920,6 +8064,15 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
 
     let paths = super::global_store::default_global_store_paths_from_env()
         .map_err(remember_global_store_error)?;
+    remember_global_memory_with_controls_at_paths(options, controls, typed_field_assignments, paths)
+}
+
+fn remember_global_memory_with_controls_at_paths(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    paths: super::global_store::GlobalStorePaths,
+) -> Result<RememberOutcome, DomainError> {
     let workspace_id = if options.dry_run {
         super::global_store::global_workspace_id(&paths)
     } else {
@@ -8000,7 +8153,7 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
     }
 
     let mut id_source = RememberIdSource::Ambient;
-    let report = remember_memory_inner_with_store(
+    remember_memory_outcome_inner_with_store(
         &global_options,
         &mut id_source,
         None,
@@ -8008,16 +8161,11 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
         Some(&store_override),
         typed_field_assignments,
         None,
-    )?;
-    if let Some(key) = idempotency_key.as_deref()
-        && !global_options.dry_run
-    {
-        let request_hash = idempotency_request_hash.as_deref().ok_or_else(|| {
-            remember_usage_error("idempotency request hash was not prepared".to_owned())
-        })?;
-        record_remember_idempotency_key(&report, key, request_hash)?;
-    }
-    Ok(RememberOutcome::Created(Box::new(report)))
+        idempotency_key
+            .as_deref()
+            .zip(idempotency_request_hash.as_deref())
+            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+    )
 }
 
 fn remember_tags_with_global_scope(tags: Option<&str>) -> String {
@@ -14082,6 +14230,7 @@ mod tests {
             &index_input,
             None,
             Some(&handle),
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -14337,6 +14486,7 @@ mod tests {
             Some("link_embeddedupnew0000000000000"),
             "{}",
             &index_input,
+            None,
             None,
             None,
         )
@@ -21196,6 +21346,657 @@ mod tests {
             ),
             other => Err(format!("expected idempotency conflict, got {other:?}")),
         }
+    }
+
+    fn assert_single_keyed_remember(
+        connection: &DbConnection,
+        workspace_id: &str,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<String, String> {
+        let memories = connection
+            .list_memories(workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(memories.len(), 1, "one source memory")?;
+        let memory_id = memories[0].id.clone();
+        let audit = connection
+            .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audit.len(), 1, "one create audit")?;
+        ensure(
+            audit[0].target_id.as_deref(),
+            Some(memory_id.as_str()),
+            "audit owns original memory",
+        )?;
+        let jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(jobs.len(), 1, "one index job")?;
+        ensure(
+            jobs[0].document_id.as_deref(),
+            Some(memory_id.as_str()),
+            "job owns original memory",
+        )?;
+        let recorded = connection
+            .get_remember_idempotency_key(workspace_id, key)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "committed key missing".to_owned())?;
+        ensure(
+            recorded.memory_id.as_str(),
+            memory_id.as_str(),
+            "key owns original memory",
+        )?;
+        ensure(
+            recorded.content_hash.as_str(),
+            request_hash,
+            "key retains request hash",
+        )?;
+        let keys = connection
+            .query("SELECT idempotency_key FROM remember_idempotency_keys", &[])
+            .map_err(|error| error.to_string())?;
+        ensure(keys.len(), 1, "one idempotency key")?;
+        Ok(memory_id)
+    }
+
+    #[test]
+    fn remember_idempotency_survives_audit_file_failure_in_local_and_global_stores() -> TestResult {
+        for global in [false, true] {
+            let temp = upgrade_test_workspace()?;
+            let paths = super::super::global_store::GlobalStorePaths::from_data_root(
+                &temp.path().join("user-data"),
+            );
+            let database = if global {
+                paths.database_path.clone()
+            } else {
+                temp.path().join(".ee/ee.db")
+            };
+            let audit_path = database
+                .parent()
+                .ok_or_else(|| "database parent missing".to_owned())?
+                .join("audit.jsonl");
+            fs::create_dir_all(
+                audit_path
+                    .parent()
+                    .ok_or_else(|| "audit parent missing".to_owned())?,
+            )
+            .map_err(|error| error.to_string())?;
+            if audit_path.is_file() {
+                fs::remove_file(&audit_path).map_err(|error| error.to_string())?;
+            }
+            fs::create_dir(&audit_path).map_err(|error| error.to_string())?;
+            let content = "A committed keyed memory survives an audit stream failure.";
+            let controls = RememberWriteControls {
+                idempotency_key: Some("audit-failure-key"),
+                defer_index_processing: true,
+                ..RememberWriteControls::default()
+            };
+            let options = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+            let write = || {
+                if global {
+                    remember_global_memory_with_controls_at_paths(
+                        &options,
+                        &controls,
+                        &[],
+                        paths.clone(),
+                    )
+                } else {
+                    remember_memory_with_controls(&options, &controls)
+                }
+            };
+            let failure =
+                write().expect_err("audit directory must reject append after primary commit");
+            ensure(
+                failure.message().contains("failed to append audit JSONL"),
+                true,
+                "real post-commit audit failure",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let workspace_id = connection
+                .list_workspaces()
+                .map_err(|error| error.to_string())?
+                .first()
+                .ok_or_else(|| "workspace missing".to_owned())?
+                .id
+                .clone();
+            let memory_id = assert_single_keyed_remember(
+                &connection,
+                &workspace_id,
+                "audit-failure-key",
+                &remember_content_hash(content),
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+            // Leave audit.jsonl as a directory: replay must not attempt postwork.
+            for _ in 0..2 {
+                match write().map_err(|error| error.message())? {
+                    RememberOutcome::AlreadyRecorded(report) => ensure(
+                        report.memory_id,
+                        memory_id.clone(),
+                        "retry returns committed memory",
+                    )?,
+                    other => {
+                        return Err(format!(
+                            "expected replay after audit failure, got {other:?}"
+                        ));
+                    }
+                }
+            }
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert_single_keyed_remember(
+                &connection,
+                &workspace_id,
+                "audit-failure-key",
+                &remember_content_hash(content),
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_idempotency_source_and_key_failures_roll_back_together() -> TestResult {
+        for fail_key in [false, true] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            let workspace_id = setup_remember_test_workspace(&connection)?;
+            let memory_id = "mem_00000000000000000000002300";
+            let audit_id = generate_audit_id();
+            let index_job_id = generate_search_index_job_id();
+            let input = remember_test_memory_input(&workspace_id, "Atomic remember rollback.");
+            let index_input = CreateSearchIndexJobInput {
+                workspace_id: if fail_key {
+                    workspace_id.clone()
+                } else {
+                    "missing-workspace".to_owned()
+                },
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(memory_id.to_owned()),
+                documents_total: 1,
+            };
+            let result = store_remembered_memory_with_retry(
+                &connection,
+                memory_id,
+                &audit_id,
+                &index_job_id,
+                &input,
+                None,
+                None,
+                &RememberEmbedDedupDecision::disabled(),
+                None,
+                "{}",
+                &index_input,
+                None,
+                None,
+                Some(RememberIdempotencyRequest {
+                    key: "rollback-key",
+                    request_hash: if fail_key { "" } else { "blake3:rollback" },
+                }),
+            );
+            ensure(
+                result.is_err(),
+                true,
+                "source or key constraint rejects transaction",
+            )?;
+            ensure(
+                connection
+                    .get_memory(memory_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+                true,
+                "memory rolled back",
+            )?;
+            ensure(
+                connection
+                    .get_audit(&audit_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+                true,
+                "audit rolled back",
+            )?;
+            ensure(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                0,
+                "job rolled back",
+            )?;
+            ensure(
+                connection
+                    .get_remember_idempotency_key(&workspace_id, "rollback-key")
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+                true,
+                "key rolled back",
+            )?;
+            // A paired successful write changes only the deliberately invalid
+            // job workspace/key hash. This prevents an unrelated malformed ID
+            // or fixture constraint from making the rollback assertions pass.
+            let valid_index_input = CreateSearchIndexJobInput {
+                workspace_id: workspace_id.clone(),
+                ..index_input
+            };
+            let outcome = store_remembered_memory_with_retry(
+                &connection,
+                memory_id,
+                &audit_id,
+                &index_job_id,
+                &input,
+                None,
+                None,
+                &RememberEmbedDedupDecision::disabled(),
+                None,
+                "{}",
+                &valid_index_input,
+                None,
+                None,
+                Some(RememberIdempotencyRequest {
+                    key: "rollback-key",
+                    request_hash: "blake3:rollback",
+                }),
+            )
+            .map_err(|error| error.message())?;
+            ensure(
+                matches!(outcome, RememberPrimaryWriteOutcome::Created),
+                true,
+                "valid control commits source and key",
+            )?;
+            assert_single_keyed_remember(
+                &connection,
+                &workspace_id,
+                "rollback-key",
+                "blake3:rollback",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_idempotency_concurrent_creates_use_one_committed_identity() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let content = "Concurrent retries share one source transaction and identity.";
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let workspace = temp.path().to_path_buf();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let options = upgrade_remember_options(&workspace, content, 0.8, None, false);
+                let request_hash =
+                    remember_request_hash(&options, &[], None).map_err(|error| error.message())?;
+                barrier.wait();
+                // Both requests have already passed the optional public lookup.
+                // Exercise the authoritative source path even if one writer wins
+                // before the other obtains its workspace lock.
+                remember_memory_outcome_inner_with_store(
+                    &options,
+                    &mut RememberIdSource::Ambient,
+                    None,
+                    true,
+                    None,
+                    &[],
+                    None,
+                    Some(RememberIdempotencyRequest {
+                        key: "concurrent-key",
+                        request_hash: &request_hash,
+                    }),
+                )
+                .map_err(|error| error.message())
+            }));
+        }
+        let mut created = 0;
+        let mut replayed = 0;
+        let mut ids = BTreeSet::new();
+        for worker in workers {
+            match worker
+                .join()
+                .map_err(|_| "remember worker panicked".to_owned())??
+            {
+                RememberOutcome::Created(report) => {
+                    created += 1;
+                    ids.insert(report.memory_id.to_string());
+                }
+                RememberOutcome::AlreadyRecorded(report) => {
+                    replayed += 1;
+                    ids.insert(report.memory_id);
+                }
+                other => return Err(format!("unexpected concurrent result: {other:?}")),
+            }
+        }
+        ensure(
+            (created, replayed, ids.len()),
+            (1, 1, 1),
+            "one creation and one replay",
+        )?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?[0]
+            .id
+            .clone();
+        assert_single_keyed_remember(
+            &connection,
+            &workspace_id,
+            "concurrent-key",
+            &remember_content_hash(content),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        // Bypass the optimization again, now with a conflicting payload. The
+        // transaction's lookup must preserve the public conflict code.
+        let options = upgrade_remember_options(
+            temp.path(),
+            "Changed request under the winning key.",
+            0.8,
+            None,
+            false,
+        );
+        let changed_hash =
+            remember_request_hash(&options, &[], None).map_err(|error| error.message())?;
+        let error = remember_memory_outcome_inner_with_store(
+            &options,
+            &mut RememberIdSource::Ambient,
+            None,
+            true,
+            None,
+            &[],
+            None,
+            Some(RememberIdempotencyRequest {
+                key: "concurrent-key",
+                request_hash: &changed_hash,
+            }),
+        )
+        .expect_err("changed payload must conflict inside source fence");
+        ensure(
+            error.code(),
+            REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+            "fenced conflict classification",
+        )?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        assert_single_keyed_remember(
+            &connection,
+            &workspace_id,
+            "concurrent-key",
+            &remember_content_hash(content),
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_idempotency_dry_run_never_claims_a_key() -> TestResult {
+        let controls = RememberWriteControls {
+            idempotency_key: Some("preview-key"),
+            defer_index_processing: true,
+            ..RememberWriteControls::default()
+        };
+        let uninitialized = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let initialized = upgrade_test_workspace()?;
+        for workspace in [uninitialized.path(), initialized.path()] {
+            let options = upgrade_remember_options(
+                workspace,
+                "Preview does not reserve a retry key.",
+                0.8,
+                None,
+                true,
+            );
+            let report = upgrade_created_report(
+                remember_memory_with_controls(&options, &controls)
+                    .map_err(|error| error.message())?,
+                "keyed preview",
+            )?;
+            ensure(
+                (report.dry_run, report.persisted),
+                (true, false),
+                "preview response",
+            )?;
+            if report.database_path.exists() {
+                let connection = DbConnection::open_file(&report.database_path)
+                    .map_err(|error| error.to_string())?;
+                ensure(
+                    connection
+                        .get_remember_idempotency_key(&report.workspace_id, "preview-key")
+                        .map_err(|error| error.to_string())?
+                        .is_none(),
+                    true,
+                    "preview writes no key",
+                )?;
+                ensure(
+                    connection
+                        .list_memories(&report.workspace_id, None, true)
+                        .map_err(|error| error.to_string())?
+                        .len(),
+                    0,
+                    "preview writes no memory",
+                )?;
+            }
+        }
+        ensure(
+            uninitialized.path().join(".ee").exists(),
+            false,
+            "preview leaves uninitialized workspace untouched",
+        )
+    }
+
+    #[test]
+    fn remember_idempotency_audit_failure_preserves_typed_family_request_identity() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let audit_path = temp.path().join(".ee/audit.jsonl");
+        if audit_path.is_file() {
+            fs::remove_file(&audit_path).map_err(|error| error.to_string())?;
+        }
+        fs::create_dir(&audit_path).map_err(|error| error.to_string())?;
+        let mut options = upgrade_remember_options(
+            temp.path(),
+            "Select the measured candidate.",
+            0.8,
+            None,
+            false,
+        );
+        options.kind = "decision";
+        let fields = vec!["chosen=durable transaction".to_owned()];
+        let family = RememberAttemptFamily {
+            family_id: "atomic-key-candidates",
+            declared_size: Some(2),
+            attempt_index: Some(1),
+            disposition: Some("selected"),
+        };
+        let controls = RememberWriteControls {
+            idempotency_key: Some("typed-family-key"),
+            defer_index_processing: true,
+            ..RememberWriteControls::default()
+        };
+        let error = remember_memory_with_controls_typed_fields_and_family(
+            &options,
+            &controls,
+            &fields,
+            Some(&family),
+        )
+        .expect_err("audit file append must fail after committing typed family source");
+        ensure(
+            error.message().contains("failed to append audit JSONL"),
+            true,
+            "typed family primary transaction committed",
+        )?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?[0]
+            .id
+            .clone();
+        let hash = remember_request_hash(&options, &fields, Some(&family))
+            .map_err(|error| error.message())?;
+        let original_id =
+            assert_single_keyed_remember(&connection, &workspace_id, "typed-family-key", &hash)?;
+        let typed_fields = connection
+            .get_memory_typed_fields_json(&original_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "committed typed sidecar missing".to_owned())?;
+        let typed_fields: serde_json::Value =
+            serde_json::from_str(&typed_fields).map_err(|error| error.to_string())?;
+        ensure(
+            typed_fields["fields"]["chosen"].as_str(),
+            Some("durable transaction"),
+            "typed sidecar committed with key",
+        )?;
+        ensure(
+            connection
+                .get_memory_attempt_family(&original_id)
+                .map_err(|error| error.to_string())?,
+            Some(validate_remember_attempt_family(&family).map_err(|error| error.message())?),
+            "attempt-family sidecar committed with key",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        match remember_memory_with_controls_typed_fields_and_family(
+            &options,
+            &controls,
+            &fields,
+            Some(&family),
+        )
+        .map_err(|error| error.message())?
+        {
+            RememberOutcome::AlreadyRecorded(report) => ensure(
+                report.memory_id,
+                original_id,
+                "typed family retry keeps original identity",
+            )?,
+            other => return Err(format!("expected typed family replay, got {other:?}")),
+        }
+        let changed_family = RememberAttemptFamily {
+            attempt_index: Some(2),
+            ..family
+        };
+        for (fields, family) in [
+            (vec!["chosen=changed candidate".to_owned()], family),
+            (fields, changed_family),
+        ] {
+            let error = remember_memory_with_controls_typed_fields_and_family(
+                &options,
+                &controls,
+                &fields,
+                Some(&family),
+            )
+            .expect_err("typed or family drift must conflict");
+            ensure(
+                error.code(),
+                REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+                "typed or family mismatch code",
+            )?;
+        }
+        let connection = open_upgrade_test_db(temp.path())?;
+        assert_single_keyed_remember(&connection, &workspace_id, "typed-family-key", &hash)?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_reinforce_concurrent_keyed_replay_adds_evidence_once() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let content = "Keyed corroboration contributes one observation.";
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &RememberWriteControls {
+                    defer_index_processing: true,
+                    ..RememberWriteControls::default()
+                },
+            )
+            .map_err(|error| error.message())?,
+            "reinforcement target",
+        )?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let workspace = temp.path().to_path_buf();
+            let database = created.database_path.clone();
+            let workspace_id = created.workspace_id.clone();
+            let memory_id = created.memory_id.to_string();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let connection =
+                    DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+                let hash = remember_content_hash(content);
+                barrier.wait();
+                apply_remember_reinforce(
+                    &connection,
+                    &RememberReinforceContext {
+                        workspace_id: &workspace_id,
+                        workspace_path: &workspace,
+                        database_path: &database,
+                        target_memory_id: &memory_id,
+                        similarity: 1.0,
+                        threshold: 0.5,
+                        canonical_content: content,
+                        content_hash: &hash,
+                        source: None,
+                        idempotency_key: Some("corroboration-key"),
+                        dry_run: false,
+                    },
+                )
+                .map_err(|error| error.message())
+            }));
+        }
+        let mut reinforced = 0;
+        let mut replayed = 0;
+        for worker in workers {
+            match worker
+                .join()
+                .map_err(|_| "reinforce worker panicked".to_owned())??
+            {
+                RememberOutcome::Reinforced(report) => {
+                    reinforced += 1;
+                    ensure(
+                        report.memory_id,
+                        created.memory_id.to_string(),
+                        "reinforce targets original",
+                    )?;
+                }
+                RememberOutcome::AlreadyRecorded(report) => {
+                    replayed += 1;
+                    ensure(
+                        report.memory_id,
+                        created.memory_id.to_string(),
+                        "reinforce replay targets original",
+                    )?;
+                }
+                other => return Err(format!("unexpected reinforce result: {other:?}")),
+            }
+        }
+        ensure(
+            (reinforced, replayed),
+            (1, 1),
+            "one reinforcement and one replay",
+        )?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        ensure(
+            connection
+                .list_evidence_spans_for_memory(&created.memory_id.to_string())
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "one corroborating evidence span",
+        )?;
+        ensure(
+            connection
+                .list_audit_by_action(audit_actions::MEMORY_REINFORCE, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "one reinforcement audit",
+        )?;
+        ensure(
+            connection
+                .get_memory_bayes_posterior(&created.memory_id.to_string())
+                .map_err(|error| error.to_string())?,
+            Some((1.5, 0.5)),
+            "keyed replay contributes no second helpful observation",
+        )?;
+        assert_single_keyed_remember(
+            &connection,
+            &created.workspace_id,
+            "corroboration-key",
+            &remember_content_hash(content),
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

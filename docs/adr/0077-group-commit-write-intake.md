@@ -88,12 +88,54 @@ until the RCH soak/perf proof for `bd-d67os.4` closes. The daemon-hosted write
 actor may use its bounded internal coalescing path for daemon-routed writes, but
 that does not flip the global one-shot/default CLI path.
 
-Success from `ee.daemon.write` / `ee.daemon.write_journal` means the daemon
+Success from a non-preview `ee.daemon.write` / `ee.daemon.write_journal` means the daemon
 write owner returned from the database transaction for that write. The database
 is the durable source of truth; derived search/index assets may lag and remain
 rebuildable. With the current WAL `synchronous=NORMAL` setting, the ACK is the
 normal SQLite committed-state contract for process/app crashes rather than a
 fresh checkpoint or power-loss fsync guarantee.
+
+### Memory write intent over the daemon socket
+
+`ee.daemon.write` accepts `dryRun` (`dry_run`), `validFrom` (`valid_from`),
+and `validTo` (`valid_to`) alongside its existing remember inputs. A dry run
+uses canonical remember validation and rendering before any actor submission.
+Its result explicitly carries `dryRun: true`, `persisted: false`, and
+`indexStatus: "dry_run_not_queued"`; it has no committed `entityId` or
+`indexJobId`. The nested `remember` report is a preview, including the normalized
+validity window. Preview success means validation succeeded; it does not
+acknowledge a database transaction. A preview does not initialize an absent
+store, append audit records, enqueue jobs, or create links and proposals.
+
+Ordinary writes carry their validity window through the actor payload into the
+same canonical validation and source transaction as direct remember writes.
+The timestamps use RFC3339 and are normalized to UTC; invalid windows fail
+without inserting a memory. Omitted validity bounds remain unbounded.
+
+The RPC rejects unknown parameter names and requires confidence, when supplied,
+to be a finite JSON number between zero and one. Omission retains the `0.8`
+default; a string, null, or out-of-range number is an error. Optional strings
+retain the established null-as-absent behavior. Aliases retain their established
+first-present precedence, with camel case before snake case for the new fields.
+The existing same-workspace authorization and committed-write acknowledgement
+rules apply unchanged.
+
+### Atomic remember idempotency
+
+For controlled remember writes with an idempotency key, admission and key
+insertion belong to the source transaction. The transaction checks the
+workspace-scoped key before inserting the memory and commits the key together
+with the memory, SQL audit, and durable index job. A matching concurrent replay
+returns the stored memory identity before audit-stream append, index work,
+linking, or proposal work; a conflicting request fails without another source
+write. A rolled-back source transaction leaves no key behind.
+
+The workspace and user-global remember paths share this boundary. If optional
+post-commit work fails, retrying the same key still resolves the committed
+memory. Reinforcement admits the key under its own source transaction and
+returns an existing matching identity without applying another confidence bump.
+The existing content, typed-field, and attempt-family hash contract determines
+whether a key matches.
 
 ### Telemetry schema
 

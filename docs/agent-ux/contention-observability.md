@@ -98,12 +98,17 @@ This is the key operational nuance:
 
 ## Daemon write durability contract
 
-`ee.daemon.write` and `ee.daemon.write_journal` success means the daemon write
+Non-preview `ee.daemon.write` and `ee.daemon.write_journal` success means the daemon write
 owner has returned from the database transaction for that write. The database is
 the durable source of truth; search and derived indexes may lag and are
 rebuildable. Under the current WAL `synchronous=NORMAL` policy this is the
 normal SQLite committed-state contract for process/app crashes, not a promise
 that a fresh OS or power-loss checkpoint has already happened.
+
+`ee.daemon.write` with `dryRun: true` validates and returns a preview before
+the actor queue. Its successful result explicitly says `persisted: false` and
+contains no committed memory or index-job acknowledgement. See
+[the write-intent contract](../adr/0077-group-commit-write-intake.md#memory-write-intent-over-the-daemon-socket).
 
 The shipped `[write].group_commit_enabled` default remains `false`. The daemon
 write actor uses a bounded internal group-commit path for daemon-routed writes,

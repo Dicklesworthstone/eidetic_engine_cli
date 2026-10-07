@@ -46,10 +46,11 @@ use ee::daemon::{
         ClientError, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE, DAEMON_CONTEXT_PARAMS_INVALID_CODE,
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-        DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_UNKNOWN_METHOD_CODE, DaemonSearchResult,
-        METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_PACK_SEARCH, METHOD_SEARCH,
-        METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip,
-        start_server, start_server_for_workspace,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_UNKNOWN_METHOD_CODE,
+        DAEMON_WRITE_PARAMS_INVALID_CODE, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_CONTEXT,
+        METHOD_ECHO, METHOD_PACK_SEARCH, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY,
+        METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip, start_server,
+        start_server_for_workspace,
     },
 };
 use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
@@ -1006,6 +1007,181 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
         !socket_path.exists(),
         "socket file must be unlinked after shutdown".to_owned(),
     )?;
+    Ok(())
+}
+
+#[test]
+fn daemon_write_intent_over_wire_preserves_preview_and_validity() -> TestResult {
+    fn source_counts(database: &Path) -> Result<Vec<i64>, String> {
+        let connection = DbConnection::open_file_read_only(database)
+            .map_err(|error| format!("inspect source: {error}"))?;
+        let counts = [
+            "memories",
+            "audit_log",
+            "search_index_jobs",
+            "remember_idempotency_keys",
+        ]
+        .into_iter()
+        .map(|table| {
+            connection
+                .count_table_rows(table)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(counts)
+    }
+
+    for initialized in [false, true] {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let (workspace, database) = if initialized {
+            seed_context_workspace(temp.path())?
+        } else {
+            let workspace = temp.path().join("workspace");
+            fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+            let database = workspace.join(".ee/ee.db");
+            (workspace, database)
+        };
+        let socket_path = secure_socket_path(temp.path(), "write-intent.sock")?;
+        let mut handle = start_server_for_workspace(&socket_path, workspace.display().to_string())
+            .map_err(|error| format!("start bound daemon: {error}"))?;
+        // A bound server hosts the real write actor and a startup read. Let
+        // that read settle before attributing any store change to the RPC.
+        let warm_deadline = Instant::now() + Duration::from_secs(20);
+        while handle.search_warm_posture() == "warming" && Instant::now() < warm_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        ensure(
+            handle.search_warm_posture() != "warming",
+            "daemon startup read did not settle before the write-intent probe",
+        )?;
+        let baseline = initialized.then(|| source_counts(&database)).transpose()?;
+        let params = serde_json::json!({
+            "workspacePath": workspace,
+            "content": "Release approval remains valid only during the recorded window.",
+            "level": "semantic",
+            "kind": "fact",
+            "confidence": 0.25,
+            "validFrom": "2020-01-01T02:00:00+02:00",
+            "validTo": "2100-01-01T02:00:00+02:00",
+            "dryRun": true,
+            "autoLink": false,
+            "proposeCandidates": false,
+        });
+        let mut request = DaemonRequest::new(
+            "req-write-intent-preview",
+            TEST_AGENT_ID,
+            METHOD_WRITE,
+            params.clone(),
+        );
+        request.workspace_id = Some(workspace.display().to_string());
+        let response = client_round_trip(handle.socket_path(), &request)
+            .map_err(|error| format!("preview round trip: {error}"))?;
+        ensure(
+            response.error.is_none(),
+            format!("preview rejected: {response:?}"),
+        )?;
+        let preview = response.result.ok_or("preview result missing")?;
+        ensure(
+            preview["success"] == true
+                && preview["dryRun"] == true
+                && preview["persisted"] == false
+                && preview["indexStatus"] == "dry_run_not_queued"
+                && preview.get("entityId").is_none()
+                && preview.get("indexJobId").is_none(),
+            format!("preview must not acknowledge a source write: {preview}"),
+        )?;
+        ensure(
+            preview.pointer("/remember/data/dry_run") == Some(&serde_json::json!(true))
+                && preview.pointer("/remember/data/persisted") == Some(&serde_json::json!(false))
+                && preview.pointer("/remember/data/valid_from")
+                    == Some(&serde_json::json!("2020-01-01T00:00:00Z"))
+                && preview.pointer("/remember/data/valid_to")
+                    == Some(&serde_json::json!("2100-01-01T00:00:00Z")),
+            format!("canonical preview lost write intent: {preview}"),
+        )?;
+
+        // A typo or malformed confidence must fail even when dryRun is
+        // explicitly false; neither is permission to use a default and write.
+        for (field, value) in [
+            ("dry_run_typo", serde_json::json!(true)),
+            ("confidence", serde_json::json!("0.25")),
+        ] {
+            request.params = params.clone();
+            request.params["dryRun"] = serde_json::json!(false);
+            request.params[field] = value;
+            let rejected = client_round_trip(handle.socket_path(), &request)
+                .map_err(|error| format!("invalid intent round trip: {error}"))?;
+            ensure(
+                rejected.error.as_ref().map(|error| error.code.as_str())
+                    == Some(DAEMON_WRITE_PARAMS_INVALID_CODE)
+                    && rejected.result.is_none(),
+                format!("invalid write intent was accepted: {rejected:?}"),
+            )?;
+        }
+        if let Some(baseline) = baseline {
+            ensure(
+                source_counts(&database)? == baseline,
+                "preview or rejected controls mutated source rows, audit, jobs, or idempotency keys",
+            )?;
+            request.params = params;
+            request.params["dryRun"] = serde_json::json!(false);
+            let response = client_round_trip(handle.socket_path(), &request)
+                .map_err(|error| format!("committed write round trip: {error}"))?;
+            ensure(
+                response.error.is_none(),
+                format!("write rejected: {response:?}"),
+            )?;
+            let committed = response.result.ok_or("committed result missing")?;
+            ensure(
+                committed["success"] == true && committed["persisted"] == true,
+                format!("ordinary write must still commit through the actor: {committed}"),
+            )?;
+            let memory_id = committed["entityId"]
+                .as_str()
+                .ok_or("committed memory ID missing")?;
+            let job_id = committed["indexJobId"]
+                .as_str()
+                .ok_or("durable index job ID missing")?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            let memory = connection
+                .get_memory(memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("acknowledged memory missing")?;
+            ensure(
+                memory.valid_from.as_deref() == Some("2020-01-01T00:00:00Z")
+                    && memory.valid_to.as_deref() == Some("2100-01-01T00:00:00Z")
+                    && (memory.confidence - 0.25).abs() < f32::EPSILON,
+                format!("actor persistence lost the requested validity or confidence: {memory:?}"),
+            )?;
+            let job = connection
+                .get_search_index_job(job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("acknowledged index job missing")?;
+            ensure(
+                job.document_id.as_deref() == Some(memory_id),
+                "durable index job must reference the acknowledged memory",
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+            let after = source_counts(&database)?;
+            ensure(
+                after[0] == baseline[0] + 1 && after[2] == baseline[2] + 1,
+                format!("one ordinary request must create one memory and one index job: {after:?}"),
+            )?;
+        } else {
+            ensure(
+                fs::read_dir(&workspace)
+                    .map_err(|error| error.to_string())?
+                    .next()
+                    .is_none(),
+                "preview and rejected controls must not initialize an addressed store",
+            )?;
+        }
+        handle
+            .shutdown()
+            .map_err(|error| format!("shutdown daemon: {error}"))?;
+    }
     Ok(())
 }
 
