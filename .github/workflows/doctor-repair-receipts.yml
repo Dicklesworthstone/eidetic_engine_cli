@@ -95,11 +95,18 @@ jobs:
           # where before an absent arm and a passing arm looked identical. That is the
           # exact confusion the comment above describes from the 2026-09-26 incident.
           #
-          # cargo's real exit comes from PIPESTATUS[0] rather than `|| failed=1` on the
-          # pipeline, so a tool failure is reported as a tool failure with its code,
-          # distinct from an assertion that did not match. `shell: bash` is declared on
-          # this step, so PIPESTATUS is available; it must be read on the line
-          # immediately after the pipeline.
+          # cargo's real exit is captured with `|| cargo_exit=$?` ON THE PIPELINE, so a
+          # tool failure is reported as a tool failure with its code, distinct from an
+          # assertion that did not match. Under `pipefail` the pipeline's status IS
+          # cargo's when cargo is what failed.
+          #
+          # IT MUST BE THE `||` FORM, NOT `PIPESTATUS`. `shell: bash` here means
+          # `bash -eo pipefail`, and these helpers are called BARE. I first wrote this as
+          # an unprotected pipeline followed by `local e=${PIPESTATUS[0]}`, and verified
+          # under the real flags that `-e` aborts the step at the failing pipeline: the
+          # attribution never prints AND THE REMAINING ARMS NEVER RUN -- reintroducing
+          # exactly the 2026-09-26 failure the comment above describes. The `||` suspends
+          # errexit for that command, which is why every arm here uses it.
           #
           # The floors are now numeric rather than regex alternations. The index-repair
           # arm previously said `(9|[1-9][0-9]+)` to mean "at least 9", which is correct
@@ -108,8 +115,8 @@ jobs:
           run_suite() {
             local name="$1" filter="$2" floor="$3"
             local log="$RUNNER_TEMP/doctor-receipts/$name.log"
-            cargo test --locked --lib "$filter" -- --test-threads=1 2>&1 | tee "$log"
-            local cargo_exit=${PIPESTATUS[0]}
+            local cargo_exit=0
+            cargo test --locked --lib "$filter" -- --test-threads=1 2>&1 | tee "$log" || cargo_exit=$?
             local ran
             ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$log" | head -1)
             if test "$cargo_exit" -ne 0; then
