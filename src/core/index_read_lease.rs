@@ -42,6 +42,24 @@ impl IndexGenerationLease {
         index_dir: &Path,
         maximum_generation: u64,
     ) -> Result<PathBuf, IndexRebuildError> {
+        let identity = super::active_semantic_identity();
+        self.index_for_snapshot_with_identity(
+            cx,
+            index_dir,
+            maximum_generation,
+            identity
+                .as_ref()
+                .map(|(id, dimension)| (id.as_str(), *dimension)),
+        )
+    }
+
+    pub(crate) fn index_for_snapshot_with_identity(
+        &self,
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        maximum_generation: u64,
+        identity: Option<(&str, u32)>,
+    ) -> Result<PathBuf, IndexRebuildError> {
         index_checkpoint(cx)?;
         let parent = index_parent(index_dir);
         verify_parent_identity(parent, &self._directory)?;
@@ -61,13 +79,19 @@ impl IndexGenerationLease {
             .ok()
             .flatten()
             .filter(|metadata| {
-                super::index_metadata_compatibility_error(&metadata_path, metadata).is_none()
+                super::index_metadata_compatibility_error_with_identity(
+                    &metadata_path,
+                    metadata,
+                    identity,
+                )
+                .is_none()
             })
             .and_then(|metadata| metadata.generation);
         index_checkpoint(cx)?;
         if let Some(generation) = current.filter(|generation| *generation <= maximum_generation) {
             ensure_generation_entries_are_regular(cx, index_dir)?;
-            let valid = super::validated_index_generation(index_dir).ok() == Some(generation);
+            let valid = super::validated_index_generation_with_identity(index_dir, identity).ok()
+                == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(index_dir.to_path_buf());
@@ -115,7 +139,12 @@ impl IndexGenerationLease {
                 .ok()
                 .flatten()
                 .filter(|metadata| {
-                    super::index_metadata_compatibility_error(&metadata_path, metadata).is_none()
+                    super::index_metadata_compatibility_error_with_identity(
+                        &metadata_path,
+                        metadata,
+                        identity,
+                    )
+                    .is_none()
                 })
                 .and_then(|metadata| metadata.generation)
                 .filter(|generation| *generation <= maximum_generation)
@@ -128,7 +157,8 @@ impl IndexGenerationLease {
         for (generation, _, path) in candidates.into_iter().rev() {
             index_checkpoint(cx)?;
             ensure_generation_entries_are_regular(cx, &path)?;
-            let valid = super::validated_index_generation(&path).ok() == Some(generation);
+            let valid = super::validated_index_generation_with_identity(&path, identity).ok()
+                == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(path);

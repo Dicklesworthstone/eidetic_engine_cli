@@ -9524,16 +9524,34 @@ async fn run_search_inner_with_performance(
         }
         #[cfg(unix)]
         let selected = match source_generation {
-            Some(generation) => lease
-                .index_for_snapshot(cx, &index_dir, generation)
-                .map_err(map_index_generation_error)?,
+            Some(generation) => match fast_embedder_override.as_deref() {
+                Some(embedder) => lease.index_for_snapshot_with_identity(
+                    cx,
+                    &index_dir,
+                    generation,
+                    Some((
+                        embedder.id(),
+                        u32::try_from(embedder.dimension())
+                            .map_err(|error| SearchError::Index(error.to_string()))?,
+                    )),
+                ),
+                None => lease.index_for_snapshot(cx, &index_dir, generation),
+            }
+            .map_err(map_index_generation_error)?,
             None => index_dir.clone(),
         };
         #[cfg(not(unix))]
         let selected = index_dir.clone();
         // Snapshot selection already validated the complete generation.
         if (!cfg!(unix) || source_generation.is_none())
-            && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&selected)
+            && let Err(reason) = match fast_embedder_override.as_deref() {
+                Some(embedder) => {
+                    crate::core::index::validate_index_corpus_compatibility_with_embedder(
+                        &selected, embedder,
+                    )
+                }
+                None => crate::core::index::validate_index_corpus_compatibility(&selected),
+            }
         {
             return Err(index_compatibility_search_error(&selected, reason));
         }

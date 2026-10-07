@@ -5488,6 +5488,21 @@ fn index_metadata_compatibility_error(
     metadata_path: &Path,
     metadata: &ParsedIndexMetadata,
 ) -> Option<String> {
+    let active_identity = active_semantic_identity();
+    index_metadata_compatibility_error_with_identity(
+        metadata_path,
+        metadata,
+        active_identity
+            .as_ref()
+            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
+    )
+}
+
+fn index_metadata_compatibility_error_with_identity(
+    metadata_path: &Path,
+    metadata: &ParsedIndexMetadata,
+    active_identity: Option<(&str, u32)>,
+) -> Option<String> {
     let expected_revision = expected_index_corpus_revision().as_str();
     if metadata.corpus_revision.as_deref() != Some(expected_revision) {
         return Some(format!(
@@ -5503,13 +5518,10 @@ fn index_metadata_compatibility_error(
             metadata.schema
         ));
     }
-    let active_identity = active_semantic_identity();
     if let Some(error) = embedding_space_compatibility_error(
         metadata_path,
         stored_semantic_identity(metadata),
-        active_identity
-            .as_ref()
-            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
+        active_identity,
     ) {
         return Some(error);
     }
@@ -5581,6 +5593,16 @@ pub(crate) fn validate_index_corpus_compatibility(index_dir: &Path) -> Result<()
     validated_index_generation(index_dir).map(|_| ())
 }
 
+/// Admit caller-built indexes against the embedder used for this read.
+pub(crate) fn validate_index_corpus_compatibility_with_embedder(
+    index_dir: &Path,
+    embedder: &dyn crate::search::Embedder,
+) -> Result<(), String> {
+    let dimension = u32::try_from(embedder.dimension()).map_err(|error| error.to_string())?;
+    validated_index_generation_with_identity(index_dir, Some((embedder.id(), dimension)))
+        .map(|_| ())
+}
+
 fn unique_index_metadata_temp_path(meta_path: &Path) -> Result<PathBuf, IndexRebuildError> {
     let file_name = meta_path.file_name().ok_or_else(|| {
         IndexRebuildError::Index(format!(
@@ -5632,6 +5654,19 @@ fn recoverable_index_generation(index_dir: &Path) -> Option<u64> {
 }
 
 fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
+    let active_identity = active_semantic_identity();
+    validated_index_generation_with_identity(
+        index_dir,
+        active_identity
+            .as_ref()
+            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
+    )
+}
+
+fn validated_index_generation_with_identity(
+    index_dir: &Path,
+    active_identity: Option<(&str, u32)>,
+) -> Result<u64, String> {
     let metadata_path = index_dir.join(INDEX_METADATA_FILE);
     let metadata = parse_index_metadata(index_dir)?.ok_or_else(|| {
         format!(
@@ -5639,7 +5674,9 @@ fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
             metadata_path.display()
         )
     })?;
-    if let Some(error) = index_metadata_compatibility_error(&metadata_path, &metadata) {
+    if let Some(error) =
+        index_metadata_compatibility_error_with_identity(&metadata_path, &metadata, active_identity)
+    {
         return Err(error);
     }
     let document_count = metadata
@@ -10818,6 +10855,15 @@ pub(crate) async fn repair_requested_index_with_cx_bounded(
     options: &IndexRebuildOptions,
     max_documents: u32,
 ) -> Result<bool, IndexRebuildError> {
+    repair_requested_index_with_cx_bounded_and_stack(cx, options, max_documents, None).await
+}
+
+async fn repair_requested_index_with_cx_bounded_and_stack(
+    cx: &asupersync::Cx,
+    options: &IndexRebuildOptions,
+    max_documents: u32,
+    stack_override: Option<EmbedderStack>,
+) -> Result<bool, IndexRebuildError> {
     index_checkpoint(cx)?;
     if options.dry_run
         || max_documents == 0
@@ -10863,7 +10909,19 @@ pub(crate) async fn repair_requested_index_with_cx_bounded(
             metadata.generation == Some(snapshot.generation)
                 && metadata.document_counts == Some(snapshot.document_counts)
         })
-        && index_corpus_compatibility_is_current(&index_dir)
+        && match stack_override.as_ref() {
+            Some(stack) => {
+                let fast = stack.fast();
+                u32::try_from(fast.dimension()).is_ok_and(|dimension| {
+                    validated_index_generation_with_identity(
+                        &index_dir,
+                        Some((fast.id(), dimension)),
+                    )
+                    .is_ok()
+                })
+            }
+            None => index_corpus_compatibility_is_current(&index_dir),
+        }
     {
         return Ok(false);
     }
@@ -10873,7 +10931,10 @@ pub(crate) async fn repair_requested_index_with_cx_bounded(
         // Publishing a complete empty generation also removes old results.
         hash_fallback_embedder_stack()
     } else {
-        workspace_embedder_stack(&db, &workspace_id)?.0
+        match stack_override {
+            Some(stack) => stack,
+            None => workspace_embedder_stack(&db, &workspace_id)?.0,
+        }
     };
     // Resolving a lazy selection is inert. Never call embed/initialize on it:
     // an interactive repair cannot start a download or use a remote endpoint.
@@ -12116,7 +12177,7 @@ mod tests {
 
     struct RequestedIndexRepairFixture {
         _root: tempfile::TempDir,
-        _embedder: TestWorkspaceEmbedderStackGuard,
+        stack: std::cell::RefCell<EmbedderStack>,
         options: IndexRebuildOptions,
         workspace_id: String,
         db: DbConnection,
@@ -12142,10 +12203,12 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-            let guard = install_test_hash_workspace_embedder(&workspace_id);
             let fixture = Self {
                 _root: root,
-                _embedder: guard,
+                stack: std::cell::RefCell::new(EmbedderStack::from_parts(
+                    Arc::new(TestSemanticEmbedder::new("requested-repair-unit", 256)),
+                    None,
+                )),
                 options: IndexRebuildOptions {
                     index_dir: Some(workspace.join(".ee/index")),
                     workspace_path: workspace,
@@ -12155,21 +12218,36 @@ mod tests {
                 workspace_id,
                 db,
             };
-            fixture.set_stack(EmbedderStack::from_parts(
-                Arc::new(TestSemanticEmbedder::new("requested-repair-unit", 256)),
-                None,
-            ))?;
             fixture.insert_memory(1, &fixture.workspace_id, Vec::new())?;
             Ok(fixture)
         }
 
         fn set_stack(&self, stack: EmbedderStack) -> TestResult {
-            TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
-                .get_or_init(|| Mutex::new(HashMap::new()))
-                .lock()
-                .map_err(|error| error.to_string())?
-                .insert(self.workspace_id.clone(), stack);
+            *self.stack.borrow_mut() = stack;
             Ok(())
+        }
+
+        fn validate(&self, index: &Path) -> Result<(), String> {
+            let stack = self.stack.borrow();
+            let fast = stack.fast();
+            validated_index_generation_with_identity(
+                index,
+                Some((
+                    fast.id(),
+                    u32::try_from(fast.dimension()).map_err(|error| error.to_string())?,
+                )),
+            )
+            .map(|_| ())
+        }
+
+        #[cfg(feature = "lexical-bm25")]
+        fn retrieve(&self) -> Result<Vec<String>, String> {
+            crate::core::search::run_search_with_embedder(
+                &self.search_options(),
+                self.stack.borrow().fast_arc(),
+            )
+            .map(|report| report.results.into_iter().map(|hit| hit.doc_id).collect())
+            .map_err(|error| error.to_string())
         }
 
         fn insert_memory(&self, n: u32, workspace_id: &str, tags: Vec<String>) -> TestResult {
@@ -12211,8 +12289,15 @@ mod tests {
         }
 
         fn repair(&self, limit: u32) -> Result<bool, String> {
+            let stack = self.stack.borrow().clone();
             crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
-                repair_requested_index_with_cx_bounded(&cx, &self.options, limit).await
+                repair_requested_index_with_cx_bounded_and_stack(
+                    &cx,
+                    &self.options,
+                    limit,
+                    Some(stack),
+                )
+                .await
             })
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
@@ -12282,6 +12367,12 @@ mod tests {
         }
         let index = fixture.options.resolve_index_dir();
         let metadata = parse_index_metadata(&index)?.ok_or("repair omitted index metadata")?;
+        fixture.validate(&index)?;
+        assert_eq!(
+            metadata.stored_model_id.as_deref(),
+            Some("requested-repair-unit")
+        );
+        assert_eq!(metadata.stored_dimension, Some(256));
         assert_eq!(metadata.document_count, Some(1));
         assert_eq!(
             metadata.generation,
@@ -12314,19 +12405,43 @@ mod tests {
 
         #[cfg(feature = "lexical-bm25")]
         {
-            let report =
-                crate::core::search::run_search(&fixture.search_options()).map_err(|error| {
-                    format!(
-                        "{error}; repaired corpus compatibility: {:?}",
-                        validate_index_corpus_compatibility(&index)
-                    )
-                })?;
-            assert_eq!(report.results.len(), 1);
-            assert_eq!(report.results[0].doc_id, format!("mem_{:026}", 1));
+            let results = fixture.retrieve().map_err(|error| {
+                format!(
+                    "{error}; repaired corpus compatibility: {:?}",
+                    fixture.validate(&index)
+                )
+            })?;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0], format!("mem_{:026}", 1));
         }
         let before = index_regular_file_snapshot(&index)?;
         assert!(!fixture.repair(64)?);
         assert_eq!(index_regular_file_snapshot(&index)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_rejects_mismatched_embedder_identity() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        fixture.request("2026-09-22T00:00:00Z")?;
+        assert!(fixture.repair(64)?);
+        let index = fixture.options.resolve_index_dir();
+        fixture.validate(&index)?;
+        let before = index_regular_file_snapshot(&index)?;
+        let mismatch = Arc::new(TestSemanticEmbedder::new("other-repair-backend", 256));
+        let error = validated_index_generation_with_identity(&index, Some((mismatch.id(), 256)))
+            .expect_err("equal dimensions must not admit a different embedding backend");
+        assert!(error.contains("requested-repair-unit"), "{error}");
+        assert!(error.contains("other-repair-backend"), "{error}");
+        assert!(error.contains("vectors from different embedding backends cannot be mixed"));
+        #[cfg(feature = "lexical-bm25")]
+        assert!(
+            crate::core::search::run_search_with_embedder(&fixture.search_options(), mismatch)
+                .is_err()
+        );
+        assert_eq!(index_regular_file_snapshot(&index)?, before);
+        fixture.validate(&index)?;
+        assert!(!fixture.repair(64)?);
         Ok(())
     }
 
@@ -12394,6 +12509,7 @@ mod tests {
     #[test]
     fn requested_index_repair_publishes_empty_generation_after_last_tombstone() -> TestResult {
         let fixture = RequestedIndexRepairFixture::new()?;
+        let _guard = install_test_hash_workspace_embedder(&fixture.workspace_id);
         fixture.request("2026-09-22T00:00:00Z")?;
         assert!(fixture.repair(64)?);
         assert!(
@@ -12451,13 +12567,13 @@ mod tests {
         let index = fixture.options.resolve_index_dir();
         std::fs::write(index.join(VECTOR_INDEX_FAST_FILE), b"truncated tier")
             .map_err(|error| error.to_string())?;
-        assert!(!index_corpus_compatibility_is_current(&index));
+        assert!(fixture.validate(&index).is_err());
         fixture.request("2026-09-22T00:15:00Z")?;
         assert!(fixture.repair(64)?);
         assert!(
-            index_corpus_compatibility_is_current(&index),
+            fixture.validate(&index).is_ok(),
             "repaired corpus compatibility: {:?}",
-            validate_index_corpus_compatibility(&index)
+            fixture.validate(&index)
         );
         assert_eq!(
             open_fast_vector_index_read_only(&index)
@@ -12502,6 +12618,14 @@ mod tests {
     #[test]
     fn requested_index_repair_consumes_orphaned_index_on_pack_reconciliation() -> TestResult {
         let fixture = RequestedIndexRepairFixture::new()?;
+        // This test exercises the production workspace-selection entry point.
+        // Other repair fixtures pass their stack directly and never install it.
+        let _guard = install_test_hash_workspace_embedder(&fixture.workspace_id);
+        TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(fixture.workspace_id.clone(), fixture.stack.borrow().clone());
         let index = fixture.options.resolve_index_dir();
         std::fs::create_dir(&index).map_err(|error| error.to_string())?;
         std::fs::write(index.join("orphaned-tier"), b"incomplete generation")
@@ -12621,11 +12745,12 @@ mod tests {
         let queued = fixture.queue(1)?;
         fixture.request("2026-09-22T00:00:00Z")?;
         let options = &fixture.options;
+        let stack = fixture.stack.borrow().clone();
         let cancelled = crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
             install_before_index_publish_hook(|cx| {
                 cx.set_cancel_reason(asupersync::CancelReason::user("requested repair cancelled"));
             });
-            repair_requested_index_with_cx_bounded(&cx, options, 64).await
+            repair_requested_index_with_cx_bounded_and_stack(&cx, options, 64, Some(stack)).await
         })
         .map_err(|error| error.to_string())?;
         assert!(matches!(cancelled, Err(IndexRebuildError::Cancelled(_))));
