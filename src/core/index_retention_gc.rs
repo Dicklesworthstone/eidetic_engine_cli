@@ -145,7 +145,6 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
     ensure_index_path_has_no_symlinks(parent, "plan retained index reclamation")?;
     let base = index_base_name(index_dir)?;
     let retained_prefix = format!("{base}{INDEX_RETAINED_SUFFIX}");
-    let reclaim_prefix = format!(".{base}{RECLAIM_PREFIX}");
     let entries = std::fs::read_dir(parent).map_err(|error| {
         IndexRebuildError::Index(format!(
             "Failed to inspect retained index generations in '{}': {error}",
@@ -176,7 +175,7 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
             continue;
         };
         let path = entry.path();
-        if name.starts_with(&reclaim_prefix) {
+        if is_reclaim_name(name, &base) {
             leftovers.push(path);
             continue;
         }
@@ -331,6 +330,30 @@ pub(crate) fn reclaim_after_publish(index_dir: &Path) -> Option<RetentionOutcome
 }
 
 fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Result<(), String> {
+    // A plan is data, not deletion authority. Recheck its namespace at the
+    // destructive boundary even though the ordinary planner emits only owned
+    // siblings. Never allow an active/staging/quarantine path, another index,
+    // an escaped parent, or a kept entry to be renamed or recursively removed.
+    if entry.path.parent() != Some(parent) {
+        return Err("refusing to reclaim a path outside the index parent".to_owned());
+    }
+    let owned = entry
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| match entry.reason {
+            RetentionReason::InterruptedReclaim => is_reclaim_name(name, base),
+            RetentionReason::BeyondRetentionLimit
+            | RetentionReason::DuplicateGeneration
+            | RetentionReason::UnusableGeneration => {
+                retained_generation_sequence(name, &format!("{base}{INDEX_RETAINED_SUFFIX}"))
+                    .is_some()
+            }
+            RetentionReason::NewestValid => false,
+        });
+    if !owned {
+        return Err("refusing to reclaim a path outside the owned retention namespace".to_owned());
+    }
     ensure_index_path_has_no_symlinks(&entry.path, "reclaim retained index generation")
         .map_err(|error| error.to_string())?;
     let metadata = std::fs::symlink_metadata(&entry.path).map_err(|error| error.to_string())?;
@@ -352,6 +375,26 @@ fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Re
             doomed.display()
         )
     })
+}
+
+/// Recognize exactly the names emitted by `allocate_reclaim_name`. A prefix
+/// match alone would adopt unrelated directories such as `.index.reclaim-notes`
+/// as interrupted deletions. The timestamp is canonical decimal `u128` and the
+/// collision sequence is exactly three ASCII digits (000 through 999).
+fn is_reclaim_name(name: &str, base: &str) -> bool {
+    let prefix = format!(".{base}{RECLAIM_PREFIX}");
+    let Some(suffix) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    let Some((stamp, sequence)) = suffix.split_once('-') else {
+        return false;
+    };
+    if sequence.len() != 3 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    stamp
+        .parse::<u128>()
+        .is_ok_and(|value| stamp == value.to_string())
 }
 
 fn allocate_reclaim_name(parent: &Path, base: &str) -> Result<PathBuf, String> {
@@ -579,6 +622,220 @@ mod tests {
             assert_eq!(classify_valid(candidates, 2), expected);
         }
         assert_eq!(expected.entries[0].path, Path::new("index.previous.003"));
+    }
+
+    #[test]
+    fn reclaim_name_recognizes_only_the_allocators_canonical_format() {
+        for base in ["index", "tenant.index", "индекс"] {
+            for stamp in [0, 1, monotonicish_stamp(), u128::MAX] {
+                for sequence in [0, 1, 42, 999] {
+                    let name = format!(".{base}{RECLAIM_PREFIX}{stamp}-{sequence:03}");
+                    assert!(is_reclaim_name(&name, base), "{name}");
+                    assert!(!is_reclaim_name(&name, "another-index"));
+                }
+            }
+        }
+        for suffix in [
+            "",
+            "notes",
+            "1",
+            "-000",
+            "1-",
+            "1-00",
+            "1-0000",
+            "1-1000",
+            "01-000",
+            "+1-000",
+            "-1-000",
+            "1-+00",
+            "1-00x",
+            "1-000-old",
+            "1-０００",
+            "340282366920938463463374607431768211456-000",
+        ] {
+            let name = format!(".index{RECLAIM_PREFIX}{suffix}");
+            assert!(!is_reclaim_name(&name, "index"), "{name}");
+        }
+    }
+
+    fn canary_directory(path: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+        std::fs::write(path.join("canary"), b"must survive unless explicitly owned")
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn planning_and_reclamation_preserve_unowned_siblings_and_resume_owned_leftovers()
+    -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index = parent.join("index");
+        let protected = [
+            "index",
+            ".index.publish-1-000",
+            ".index.rejected-1-000",
+            "other-index.previous",
+            ".other-index.reclaim-1-000",
+            ".index.reclaim-notes",
+            ".index.reclaim-01-000",
+            ".index.reclaim-1-000-old",
+            ".index.reclaim-1-1000",
+        ];
+        for name in protected {
+            canary_directory(&parent.join(name))?;
+        }
+        let retained = parent.join("index.previous");
+        canary_directory(&retained)?;
+        let interrupted = allocate_reclaim_name(&parent, "index")?;
+        canary_directory(&interrupted)?;
+        let regular_file = parent.join("index.previous.001");
+        std::fs::write(&regular_file, b"not a directory").map_err(|error| error.to_string())?;
+
+        let retention = plan(&index, 2).map_err(|error| error.to_string())?;
+        assert_eq!(retention.entries.len(), 2);
+        assert_eq!(
+            retention
+                .reclaimable()
+                .map(|entry| entry.path.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([retained.clone(), interrupted.clone()])
+        );
+        let expected_bytes = retention.reclaimable_bytes();
+        assert!(expected_bytes > 0);
+        let outcome = apply(&index, &retention);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(outcome.reclaimed.len(), 2);
+        assert_eq!(outcome.reclaimed_bytes(), expected_bytes);
+        assert!(!retained.exists());
+        assert!(!interrupted.exists());
+        for name in protected {
+            assert_eq!(
+                std::fs::read(parent.join(name).join("canary"))
+                    .map_err(|error| error.to_string())?,
+                b"must survive unless explicitly owned"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&regular_file).map_err(|error| error.to_string())?,
+            b"not a directory"
+        );
+        let next = plan(&index, 2).map_err(|error| error.to_string())?;
+        assert!(next.entries.is_empty());
+        assert!(apply(&index, &next).reclaimed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn destructive_boundary_rejects_forged_paths_and_dispositions() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let paths = [
+            ("index", RetentionReason::UnusableGeneration),
+            ("index", RetentionReason::InterruptedReclaim),
+            (".index.publish-1-000", RetentionReason::UnusableGeneration),
+            (".index.rejected-1-000", RetentionReason::UnusableGeneration),
+            ("other-index.previous", RetentionReason::DuplicateGeneration),
+            ("nested/index.previous", RetentionReason::BeyondRetentionLimit),
+            (".index.reclaim-notes", RetentionReason::InterruptedReclaim),
+            ("index.previous", RetentionReason::NewestValid),
+            ("index.previous", RetentionReason::InterruptedReclaim),
+            (".index.reclaim-1-000", RetentionReason::UnusableGeneration),
+        ];
+        for (relative, reason) in paths {
+            let path = parent.join(relative);
+            canary_directory(&path)?;
+            let entry = RetainedGenerationEntry {
+                path: path.clone(),
+                generation: Some(1),
+                reason,
+                size_bytes: 1,
+            };
+            assert!(reclaim_one(&parent, "index", &entry).is_err(), "{relative}");
+            assert!(path.join("canary").is_file(), "{relative}");
+        }
+        // Even a syntactically owned basename from a different parent is not
+        // transferable reclamation authority for this index.
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_path = outside.path().join("index.previous");
+        canary_directory(&outside_path)?;
+        let escaped = RetainedGenerationEntry {
+            path: outside_path.clone(),
+            generation: Some(1),
+            reason: RetentionReason::BeyondRetentionLimit,
+            size_bytes: 1,
+        };
+        assert!(reclaim_one(&parent, "index", &escaped).is_err());
+        assert!(outside_path.join("canary").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn one_rejected_entry_does_not_prevent_legitimate_reclamation() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index = parent.join("index");
+        let retained = parent.join("index.previous");
+        canary_directory(&index)?;
+        canary_directory(&retained)?;
+        let retention = RetentionPlan {
+            limit: 2,
+            entries: [&index, &retained]
+                .into_iter()
+                .map(|path| RetainedGenerationEntry {
+                    path: path.to_path_buf(),
+                    generation: None,
+                    reason: RetentionReason::UnusableGeneration,
+                    size_bytes: 1,
+                })
+                .collect(),
+        };
+        let outcome = apply(&index, &retention);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].0, index);
+        assert_eq!(outcome.reclaimed.len(), 1);
+        assert_eq!(outcome.reclaimed[0].path, retained);
+        assert!(index.join("canary").is_file());
+        assert!(!retained.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_reclaim_name_does_not_authorize_following_a_symlink() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let target = parent.join("unrelated-data");
+        canary_directory(&target)?;
+        let link = parent.join(".index.reclaim-1-000");
+        std::os::unix::fs::symlink(&target, &link).map_err(|error| error.to_string())?;
+        let entry = RetainedGenerationEntry {
+            path: link.clone(),
+            generation: None,
+            reason: RetentionReason::InterruptedReclaim,
+            size_bytes: 1,
+        };
+        assert!(reclaim_one(&parent, "index", &entry).is_err());
+        let retention = plan(&parent.join("index"), 2).map_err(|error| error.to_string())?;
+        assert!(retention.entries.is_empty());
+        assert!(target.join("canary").is_file());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .map_err(|error| error.to_string())?
+                .is_symlink()
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
