@@ -80,10 +80,27 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/promotion-recovery"
           failed=0
-          cargo check --locked --lib > "$RUNNER_TEMP/promotion-recovery/check.log" 2>&1 || failed=1
-          rustfmt --edition 2024 --config skip_children=true --check src/core/global_promotion.rs src/core/search_revision_admission.rs > "$RUNNER_TEMP/promotion-recovery/fmt.log" 2>&1 || failed=1
+          # bd-aav0v: the step is named "Record production check and edited-file
+          # formatting" -- two things -- and recorded one flag. A compile failure and a
+          # reflow are not the same problem.
+          check_exit=0
+          cargo check --locked --lib > "$RUNNER_TEMP/promotion-recovery/check.log" 2>&1 || check_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --config skip_children=true --check src/core/global_promotion.rs src/core/search_revision_admission.rs > "$RUNNER_TEMP/promotion-recovery/fmt.log" 2>&1 || fmt_exit=$?
           tail -n 80 "$RUNNER_TEMP/promotion-recovery/check.log"
           tail -n 80 "$RUNNER_TEMP/promotion-recovery/fmt.log"
+          if test "$check_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo check --lib' FAILED -- exit $check_exit; the library does not build"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo check --lib' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on global_promotion.rs and search_revision_admission.rs' FAILED -- exit $fmt_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on global_promotion.rs and search_revision_admission.rs' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

@@ -132,9 +132,39 @@ jobs:
         run: |
           set -o pipefail
           failed=0
-          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/seed-all-targets.log" || failed=1
-          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/seed-clippy.log" || failed=1
-          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_revision_admission.rs src/core/search_seed_admission_tests.rs 2>&1 | tee "$RUNNER_TEMP/seed-fmt.log" || failed=1
+          # bd-aav0v: three arms of DIFFERENT KINDS under one flag -- an all-targets
+          # compile, a library lint, and a format check on three named sources. The step
+          # is titled for two of the three and reported none of them.
+          #
+          # The compile arm matters most to separate: `cargo check --all-targets` failing
+          # means the tree does not build, which is a different emergency from a clippy
+          # warning or a reflow, and all three were previously indistinguishable.
+          check_exit=0
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/seed-all-targets.log" || check_exit=$?
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/seed-clippy.log" || clippy_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_revision_admission.rs src/core/search_seed_admission_tests.rs 2>&1 | tee "$RUNNER_TEMP/seed-fmt.log" || fmt_exit=$?
+          if test "$check_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' FAILED -- exit $check_exit; the tree does not build"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' ok"
+          fi
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/seed-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/seed-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three seed sources' FAILED -- exit $fmt_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three seed sources' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
