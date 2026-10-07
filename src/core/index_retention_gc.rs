@@ -7,7 +7,7 @@
 //! (`IndexGenerationLease::index_for_snapshot`) and crash recovery
 //! (`recover_interrupted_publish_for_snapshot`). Both use only a generation
 //! that validates completely, and both prefer the newest one. Keeping the
-//! newest [`RETAINED_GENERATION_LIMIT`] *valid* generations therefore keeps both
+//! newest [`RETAINED_GENERATION_LIMIT`] *distinct, valid* generations keeps both
 //! features while bounding disk to a constant number of index copies instead
 //! of one full copy per write.
 //!
@@ -20,6 +20,7 @@
 //! quarantine (`.rejected-*`): it recognizes only canonical retained names and
 //! its own interrupted reclamation leftovers.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -28,9 +29,9 @@ use super::{
     recoverable_index_generation, retained_generation_sequence,
 };
 
-/// Valid retained generations kept beside the active one. Two covers a reader
-/// whose snapshot predates the newest publication plus one older fallback for
-/// recovery when the newest retained copy is itself damaged.
+/// Distinct valid source generations kept beside the active one. Two covers a
+/// reader whose snapshot predates the newest publication plus one older
+/// fallback for recovery when the newest retained copy is itself damaged.
 pub(super) const RETAINED_GENERATION_LIMIT: usize = 2;
 
 /// Name prefix (after the dot and index base name) of a retained generation
@@ -44,6 +45,8 @@ pub enum RetentionReason {
     NewestValid,
     /// A valid generation older than the newest `limit` valid ones.
     BeyondRetentionLimit,
+    /// A newer validated copy already covers this source generation.
+    DuplicateGeneration,
     /// No readable generation watermark, or the generation does not validate,
     /// so neither search nor recovery could ever use it.
     UnusableGeneration,
@@ -57,6 +60,7 @@ impl RetentionReason {
         match self {
             Self::NewestValid => "newest_valid",
             Self::BeyondRetentionLimit => "beyond_retention_limit",
+            Self::DuplicateGeneration => "duplicate_generation",
             Self::UnusableGeneration => "unusable_generation",
             Self::InterruptedReclaim => "interrupted_reclaim",
         }
@@ -125,9 +129,10 @@ struct Candidate {
 }
 
 /// Classify every retained generation of `index_dir` without mutating
-/// anything. Only the newest `limit` generations that fully validate are
-/// kept; validation stops once `limit` are found, so the cost is bounded by
-/// `limit` tier opens regardless of how many copies have accumulated.
+/// anything. Keep one validated copy of each of the newest `limit` distinct
+/// source generations. Covered duplicates need no further tier opens. Invalid
+/// candidates may require extra opens before enough recoverable snapshots are
+/// found; a readable watermark alone is never sufficient to retain a copy.
 pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, IndexRebuildError> {
     let parent = index_parent(index_dir);
     let mut retention = RetentionPlan {
@@ -196,39 +201,7 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
         });
     }
 
-    // Newest first: a readable watermark beats none, then the higher source
-    // generation, then the later displacement, then the larger name.
-    candidates.sort_by(|left, right| {
-        (
-            right.generation.is_some(),
-            right.generation,
-            right.modified_nanos,
-            right.sequence,
-        )
-            .cmp(&(
-                left.generation.is_some(),
-                left.generation,
-                left.modified_nanos,
-                left.sequence,
-            ))
-    });
-
-    let mut kept = 0_usize;
-    for candidate in candidates {
-        let reason = if kept >= limit {
-            if candidate.generation.is_some() {
-                RetentionReason::BeyondRetentionLimit
-            } else {
-                RetentionReason::UnusableGeneration
-            }
-        } else if candidate.generation.is_some()
-            && recoverable_index_generation(&candidate.path) == candidate.generation
-        {
-            kept = kept.saturating_add(1);
-            RetentionReason::NewestValid
-        } else {
-            RetentionReason::UnusableGeneration
-        };
+    for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation) {
         retention.entries.push(RetainedGenerationEntry {
             size_bytes: directory_bytes(&candidate.path),
             path: candidate.path,
@@ -246,6 +219,49 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
         });
     }
     Ok(retention)
+}
+
+/// Rebuilding without a source write can retain several copies of the same
+/// watermark. Counting directories would let those copies evict the only
+/// generation usable by an older database snapshot. Count validated source
+/// watermarks instead, and never let a corrupt copy suppress a healthy one.
+fn classify_candidates(
+    mut candidates: Vec<Candidate>,
+    limit: usize,
+    mut recover_generation: impl FnMut(&Path) -> Option<u64>,
+) -> impl Iterator<Item = (Candidate, RetentionReason)> {
+    // Newest first: a readable watermark beats none, then the higher source
+    // generation, then the later displacement, then the larger name.
+    candidates.sort_by(|left, right| {
+        (
+            right.generation.is_some(),
+            right.generation,
+            right.modified_nanos,
+            right.sequence,
+        )
+            .cmp(&(
+                left.generation.is_some(),
+                left.generation,
+                left.modified_nanos,
+                left.sequence,
+            ))
+    });
+
+    let mut kept_generations = BTreeSet::new();
+    candidates.into_iter().map(move |candidate| {
+        let reason = match candidate.generation {
+            Some(generation) if kept_generations.contains(&generation) => {
+                RetentionReason::DuplicateGeneration
+            }
+            Some(_) if kept_generations.len() >= limit => RetentionReason::BeyondRetentionLimit,
+            Some(generation) if recover_generation(&candidate.path) == Some(generation) => {
+                kept_generations.insert(generation);
+                RetentionReason::NewestValid
+            }
+            _ => RetentionReason::UnusableGeneration,
+        };
+        (candidate, reason)
+    })
 }
 
 /// Delete every reclaimable entry of `retention`. The caller must hold the
@@ -367,4 +383,286 @@ fn directory_bytes(path: &Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn candidate(sequence: u32, generation: Option<u64>) -> Candidate {
+        Candidate {
+            path: PathBuf::from(format!("index.previous.{sequence:03}")),
+            sequence,
+            generation,
+            modified_nanos: u128::from(sequence),
+        }
+    }
+
+    fn classify_valid(candidates: Vec<Candidate>, limit: usize) -> RetentionPlan {
+        let watermarks: BTreeMap<_, _> = candidates
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.generation))
+            .collect();
+        RetentionPlan {
+            limit,
+            entries: classify_candidates(candidates, limit, |path| {
+                watermarks.get(path).copied().flatten()
+            })
+            .map(|(entry, reason)| RetainedGenerationEntry {
+                path: entry.path,
+                generation: entry.generation,
+                reason,
+                size_bytes: 1,
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn repeated_rebuilds_do_not_evict_the_older_source_snapshot() {
+        let retention = classify_valid(
+            vec![
+                candidate(1, Some(28)),
+                candidate(2, Some(29)),
+                candidate(3, Some(30)),
+                candidate(4, Some(30)),
+            ],
+            2,
+        );
+        assert_eq!(
+            retention
+                .kept()
+                .map(|entry| entry.generation)
+                .collect::<Vec<_>>(),
+            vec![Some(30), Some(29)]
+        );
+        assert_eq!(
+            retention.entries[1].reason,
+            RetentionReason::DuplicateGeneration
+        );
+        assert_eq!(retention.reclaimable_bytes(), 2);
+        assert_eq!(
+            RetentionReason::DuplicateGeneration.as_str(),
+            "duplicate_generation"
+        );
+        assert!(!RetentionReason::DuplicateGeneration.keeps());
+    }
+
+    #[test]
+    fn corrupt_newer_copy_does_not_suppress_a_valid_duplicate() {
+        let mut opened = Vec::new();
+        let classified: Vec<_> = classify_candidates(
+            vec![
+                candidate(1, Some(7)),
+                candidate(2, Some(8)),
+                candidate(3, Some(8)),
+            ],
+            2,
+            |path| {
+                opened.push(path.to_path_buf());
+                match path.to_str() {
+                    Some("index.previous.003") => None,
+                    Some("index.previous.002") => Some(8),
+                    _ => Some(7),
+                }
+            },
+        )
+        .map(|(entry, reason)| (entry.generation, reason))
+        .collect();
+        assert_eq!(
+            classified,
+            vec![
+                (Some(8), RetentionReason::UnusableGeneration),
+                (Some(8), RetentionReason::NewestValid),
+                (Some(7), RetentionReason::NewestValid),
+            ]
+        );
+        assert_eq!(opened.len(), 3);
+    }
+
+    #[test]
+    fn validation_must_agree_with_the_captured_watermark() {
+        let classified: Vec<_> = classify_candidates(
+            vec![candidate(1, Some(8)), candidate(2, Some(8))],
+            1,
+            |path| {
+                if path == Path::new("index.previous.002") {
+                    Some(9)
+                } else {
+                    Some(8)
+                }
+            },
+        )
+        .map(|(_, reason)| reason)
+        .collect();
+        assert_eq!(
+            classified,
+            vec![
+                RetentionReason::UnusableGeneration,
+                RetentionReason::NewestValid,
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_storm_opens_only_the_distinct_retained_generations() {
+        let mut candidates: Vec<_> = (3..=1102)
+            .map(|sequence| candidate(sequence, Some(30)))
+            .collect();
+        candidates.extend([candidate(2, Some(29)), candidate(1, Some(28))]);
+        let mut opens = 0;
+        let reasons: Vec<_> = classify_candidates(candidates, 2, |path| {
+            opens += 1;
+            Some(if path == Path::new("index.previous.002") {
+                29
+            } else {
+                30
+            })
+        })
+        .map(|(_, reason)| reason)
+        .collect();
+        assert_eq!(opens, 2);
+        assert_eq!(reasons.iter().filter(|reason| reason.keeps()).count(), 2);
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|reason| **reason == RetentionReason::DuplicateGeneration)
+                .count(),
+            1099
+        );
+        assert_eq!(reasons.last(), Some(&RetentionReason::BeyondRetentionLimit));
+    }
+
+    #[test]
+    fn zero_limit_and_missing_watermarks_never_open_tiers() {
+        for (limit, generation) in [(0, Some(0)), (2, None)] {
+            let reasons: Vec<_> = classify_candidates(vec![candidate(1, generation)], limit, |_| {
+                panic!("a zero budget or missing watermark must not open tiers")
+            })
+            .map(|(_, reason)| reason)
+            .collect();
+            assert_eq!(reasons.len(), 1);
+            assert!(!reasons[0].keeps());
+        }
+        let retention = classify_valid(vec![candidate(1, Some(0)), candidate(2, Some(0))], 2);
+        assert_eq!(retention.kept().count(), 1);
+        assert_eq!(retention.entries[0].generation, Some(0));
+        assert_eq!(
+            retention.entries[1].reason,
+            RetentionReason::DuplicateGeneration
+        );
+    }
+
+    #[test]
+    fn retention_is_independent_of_directory_enumeration_order() {
+        let build = || {
+            let mut candidates = vec![
+                candidate(1, Some(7)),
+                candidate(2, Some(8)),
+                candidate(3, Some(8)),
+                candidate(4, None),
+            ];
+            // Tie the newest copies' timestamps: canonical sequence breaks it.
+            candidates[1].modified_nanos = 10;
+            candidates[2].modified_nanos = 10;
+            candidates
+        };
+        let expected = classify_valid(build(), 2);
+        for offset in 0..4 {
+            let mut candidates = build();
+            candidates.rotate_left(offset);
+            assert_eq!(classify_valid(candidates, 2), expected);
+            let mut candidates = build();
+            candidates.reverse();
+            candidates.rotate_left(offset);
+            assert_eq!(classify_valid(candidates, 2), expected);
+        }
+        assert_eq!(expected.entries[0].path, Path::new("index.previous.003"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_tiers_keep_an_older_snapshot_readable_after_duplicate_reclamation() -> Result<(), String> {
+        use super::super::{
+            IndexBuilder, IndexDocumentCounts, IndexGenerationLease, hash_fallback_embedder_stack,
+            write_index_metadata,
+        };
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index = parent.join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            let older = parent.join("index.previous");
+            for (path, generation) in [
+                (older.clone(), 7),
+                (parent.join("index.previous.001"), 8),
+                (parent.join("index.previous.002"), 8),
+            ] {
+                let documents = vec![crate::search::IndexableDocument::new(
+                    "mem_retention_snapshot",
+                    "Retained source snapshots must survive repeated index rebuilds.",
+                )];
+                IndexBuilder::new(&path)
+                    .with_embedder_stack(hash_fallback_embedder_stack())
+                    .add_documents(documents.clone())
+                    .build(&cx)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                #[cfg(feature = "lexical-bm25")]
+                super::super::build_lexical_tier(&cx, &path, &documents)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                write_index_metadata(
+                    &path,
+                    generation,
+                    IndexDocumentCounts::memory_only(1),
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                assert_eq!(recoverable_index_generation(&path), Some(generation));
+            }
+            let publisher = IndexGenerationLease::publish(&cx, &index)
+                .await
+                .map_err(|error| error.to_string())?;
+            let retention = plan(&index, 2).map_err(|error| error.to_string())?;
+            assert_eq!(retention.kept().count(), 2);
+            assert_eq!(retention.reclaimable().count(), 1);
+            let outcome = apply(&index, &retention);
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            assert_eq!(outcome.reclaimed.len(), 1);
+            assert_eq!(
+                outcome.reclaimed[0].reason,
+                RetentionReason::DuplicateGeneration
+            );
+            assert_eq!(recoverable_index_generation(&older), Some(7));
+            drop(publisher);
+            let reader = IndexGenerationLease::read(&cx, &index)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                reader
+                    .index_for_snapshot(&cx, &index, 7)
+                    .map_err(|error| error.to_string())?,
+                older
+            );
+            assert!(reader.index_for_snapshot(&cx, &index, 6).is_err());
+            assert!(!index.exists(), "retention must not invent a live generation");
+            drop(reader);
+            let publisher = IndexGenerationLease::publish(&cx, &index)
+                .await
+                .map_err(|error| error.to_string())?;
+            let second = plan(&index, 2).map_err(|error| error.to_string())?;
+            assert_eq!(second.kept().count(), 2);
+            assert_eq!(second.reclaimable().count(), 0);
+            assert!(apply(&index, &second).reclaimed.is_empty());
+            drop(publisher);
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
+    }
 }
