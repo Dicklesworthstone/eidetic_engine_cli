@@ -867,12 +867,14 @@ fn persist_session_import_if_absent(
         }
 
         connection.insert_session(&session_id, &session_input(workspace_id, session))?;
-        let stored_session = connection.get_session(&session_id)?.ok_or_else(|| {
-            DbError::MalformedRow {
-                operation: DbOperation::Query,
-                message: "imported session row is missing inside its own transaction".to_owned(),
-            }
-        })?;
+        let stored_session =
+            connection
+                .get_session(&session_id)?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "imported session row is missing inside its own transaction"
+                        .to_owned(),
+                })?;
         for span in spans {
             let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
             connection.insert_evidence_span_in_session(
