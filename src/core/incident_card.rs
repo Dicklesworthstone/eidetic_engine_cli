@@ -485,7 +485,7 @@ mod tests {
     fn fix_facet_respects_its_budget_and_is_deterministic() {
         let anchors = BTreeSet::new();
         let long = "Fixed the bound by adding a missing import of the serde derive macro to the widget module. ".repeat(6);
-        let first = fix_facet(&[long.clone()], &anchors, 20).expect("fix");
+        let first = fix_facet(std::slice::from_ref(&long), &anchors, 20).expect("fix");
         assert!(
             crate::pack::estimate_tokens_default(&first) <= 20,
             "{first}"

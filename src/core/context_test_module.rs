@@ -11545,6 +11545,149 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    /// bd-zmctx: a pack that selected a peer workspace's memory by cross-shard
+    /// read persists its own items and names the excluded one, instead of the
+    /// whole write failing with "pack references a missing memory".
+    #[test]
+    fn persist_pack_record_leaves_cross_shard_items_out_of_the_ledger() -> Result<(), String> {
+        use std::collections::BTreeSet;
+        use std::path::Path;
+
+        use super::{
+            CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE, PackPersistenceSubspans, compute_pack_hash,
+            persist_pack_record_measured, push_cross_shard_items_not_persisted_degradation,
+        };
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use std::str::FromStr;
+
+        use crate::models::{ProvenanceUri, TrustClass, UnitScore};
+        use crate::pack::{
+            ContextRequest, PackCandidate, PackCandidateInput, PackItemEvidenceFreshness,
+            PackItemOrigin, PackProvenance, PackSection, TokenBudget, assemble_draft,
+        };
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789077777";
+        let workspace_path = "/tmp/ee-context-persist-cross-shard";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let local_id = MemoryId::from_uuid(uuid::Uuid::from_u128(91));
+        connection
+            .insert_memory(
+                &local_id.to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Run cargo fmt before release.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: TrustClass::AgentValidated.as_str().to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        // The peer memory lives in another workspace's shard: no row here.
+        let peer_id = MemoryId::from_uuid(uuid::Uuid::from_u128(92));
+        let candidate = |memory_id: MemoryId, content: &str| {
+            PackCandidate::new(PackCandidateInput {
+                memory_id,
+                section: PackSection::ProceduralRules,
+                content: content.to_string(),
+                estimated_tokens: 9,
+                relevance: UnitScore::parse(0.9).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+                provenance: vec![
+                    PackProvenance::new(
+                        ProvenanceUri::from_str("file://RELEASE.md#L1")
+                            .map_err(|error| error.to_string())?,
+                        "release notes",
+                    )
+                    .map_err(|error| error.to_string())?,
+                ],
+                why: "release task".to_string(),
+            })
+            .map_err(|error| error.to_string())
+        };
+        let local = candidate(local_id, "Run cargo fmt before release.")?;
+        let peer = candidate(peer_id, "Tag releases only from main.")?.with_source_signals(
+            PackItemEvidenceFreshness {
+                status: "unknown".to_owned(),
+                repair: None,
+            },
+            Some(PackItemOrigin {
+                lane: PackItemOrigin::CROSS_SHARD_LANE.to_owned(),
+                workspace_id: "wsp_peer".to_owned(),
+            }),
+        );
+        let request =
+            ContextRequest::from_query("prepare release").map_err(|error| error.to_string())?;
+        let mut draft = assemble_draft("prepare release", TokenBudget::default_context(), [
+            local, peer,
+        ])
+        .map_err(|error| error.to_string())?;
+        assert_eq!(draft.items.len(), 2);
+
+        let cross_shard = BTreeSet::from([peer_id.to_string()]);
+        let mut degraded = Vec::new();
+        push_cross_shard_items_not_persisted_degradation(&mut degraded, &draft, &cross_shard);
+        let notice = degraded
+            .iter()
+            .find(|entry| entry.code == CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE)
+            .ok_or("cross-shard exclusion must be reported")?;
+        assert!(notice.message.contains(&peer_id.to_string()), "{}", notice.message);
+        assert!(notice.message.contains("from wsp_peer"), "{}", notice.message);
+        draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
+
+        let mut subspans = PackPersistenceSubspans::default();
+        let unguarded = persist_pack_record_measured(
+            &connection,
+            Path::new(workspace_path),
+            &request,
+            &draft,
+            &degraded,
+            &BTreeSet::new(),
+            None,
+            None,
+            &mut subspans,
+        );
+        assert!(
+            unguarded.as_ref().is_err_and(|error| error.contains("missing memory")),
+            "{unguarded:?}"
+        );
+        persist_pack_record_measured(
+            &connection,
+            Path::new(workspace_path),
+            &request,
+            &draft,
+            &degraded,
+            &cross_shard,
+            None,
+            None,
+            &mut subspans,
+        )?;
+        let history = connection
+            .list_pack_records_for_memory(&local_id.to_string(), 10)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(history.len(), 1, "the workspace's own item is in the ledger");
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     #[test]
     fn persist_pack_record_seeded_replays_pack_id() -> Result<(), String> {
         use std::path::Path;

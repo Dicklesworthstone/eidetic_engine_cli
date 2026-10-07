@@ -24,7 +24,7 @@ use super::{
 use crate::db::{
     CompleteImportLedgerInput, CreateAuditInput, CreateEvidenceSpanInput, CreateImportLedgerInput,
     CreateSearchIndexJobInput, CreateSessionInput, DatabaseConfig, DbConnection, DbError,
-    DbOperation, EvidenceProducerKind, SearchIndexJobType,
+    DbOperation, EvidenceAdmissionTally, EvidenceProducerKind, SearchIndexJobType,
 };
 use crate::models::{
     AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
@@ -161,6 +161,9 @@ pub struct CassImportReport {
     pub index_required_action: Option<String>,
     pub status: String,
     pub sessions: Vec<ImportedCassSession>,
+    /// Admission of the spans this run wrote, by policy reason
+    /// (bd-reality-core-convergence-1azkt.49).
+    pub evidence_admission: EvidenceAdmissionTally,
 }
 
 impl CassImportReport {
@@ -214,6 +217,11 @@ impl CassImportReport {
             "indexJobsQueued": self.index_jobs_queued,
             "indexRequiredAction": self.index_required_action,
             "status": self.status,
+            "evidenceAdmission": {
+                "admitted": self.evidence_admission.admitted,
+                "quarantined": self.evidence_admission.quarantined,
+                "quarantineReasons": self.evidence_admission.quarantine_reasons,
+            },
             "sessions": self.sessions.iter().map(|session| {
                 let source_path = redact_import_report_source_ref(&session.source_path);
                 json!({
@@ -237,7 +245,7 @@ impl CassImportReport {
             .since
             .as_deref()
             .map_or_else(String::new, |cutoff| format!(" since {cutoff}"));
-        format!(
+        let mut summary = format!(
             "{mode}CASS import {status}{since}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
             status = self.status,
             imported = self.sessions_imported,
@@ -245,7 +253,24 @@ impl CassImportReport {
             spans = self.spans_imported,
             index_jobs = self.index_jobs_queued,
             discovered = self.sessions_discovered,
-        )
+        );
+        let admission = &self.evidence_admission;
+        if admission.quarantined > 0 {
+            let mut reasons = admission.quarantine_reasons.iter().collect::<Vec<_>>();
+            reasons.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+            let reasons = reasons
+                .iter()
+                .take(5)
+                .map(|(reason, count)| format!("{reason} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            summary.push_str(&format!(
+                "  {admitted} spans searchable; {quarantined} kept out of search and packs ({reasons})\n",
+                admitted = admission.admitted,
+                quarantined = admission.quarantined,
+            ));
+        }
+        summary
     }
 
     /// Render the human summary with an actual post-import publication
@@ -700,6 +725,7 @@ pub fn import_cass_sessions(
     let mut skipped = 0_u32;
     let mut spans_imported = 0_u32;
     let mut index_jobs_queued = 0_u32;
+    let mut evidence_admission = EvidenceAdmissionTally::default();
 
     let import_result: Result<(), CassImportError> = (|| {
         for session in sessions {
@@ -730,6 +756,7 @@ pub fn import_cass_sessions(
                     let mut session_spans = 0;
                     let index_job_id = if let Some(report) = refreshed {
                         session_spans = saturating_len(report.added_lines.len());
+                        evidence_admission.merge(&report.admission);
                         for line in report.added_lines {
                             cursor.record_span(&session.source_path, line);
                         }
@@ -771,7 +798,9 @@ pub fn import_cass_sessions(
                 SessionImportPersistResult::Imported {
                     session_id,
                     index_job_id,
+                    admission,
                 } => {
+                    evidence_admission.merge(&admission);
                     for span in &spans {
                         cursor.record_span(&session.source_path, span.end_line);
                     }
@@ -834,6 +863,7 @@ pub fn import_cass_sessions(
         index_required_action: Some(index_required_action(&workspace_path, Some(&database_path))),
         status: "completed".to_string(),
         sessions: session_reports,
+        evidence_admission,
     })
 }
 
@@ -842,6 +872,7 @@ enum SessionImportPersistResult {
     Imported {
         session_id: String,
         index_job_id: String,
+        admission: EvidenceAdmissionTally,
     },
     Skipped {
         session_id: String,
@@ -886,7 +917,7 @@ fn persist_session_import_if_absent(
                 )
             })
             .collect::<Vec<_>>();
-        connection.insert_evidence_spans_in_session(&rows, &stored_session)?;
+        let admission = connection.insert_evidence_spans_in_session(&rows, &stored_session)?;
         for span in spans {
             let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
             if span.redacted {
@@ -903,6 +934,7 @@ fn persist_session_import_if_absent(
         Ok(SessionImportPersistResult::Imported {
             session_id: session_id.clone(),
             index_job_id: index_job_id.clone(),
+            admission,
         })
     })
 }
@@ -1960,6 +1992,7 @@ fn dry_run_report(
                 missing_metadata: session.missing_metadata,
             })
             .collect(),
+        evidence_admission: EvidenceAdmissionTally::default(),
     }
 }
 
@@ -4325,6 +4358,7 @@ mod tests {
     fn report_json_identifies_import_command_and_session_status() -> TestResult {
         let mut report = CassImportReport {
             schema: IMPORT_CASS_SCHEMA_V1,
+            evidence_admission: Default::default(),
             workspace_path: "/tmp/work".to_string(),
             database_path: Some("/tmp/work/.ee/ee.db".to_string()),
             source_id: "cass://safe-source".to_string(),
@@ -4426,6 +4460,7 @@ mod tests {
         let session_token = format!("ghp_{}", "1234567890abcdef1234567890abcdef1234");
         let report = CassImportReport {
             schema: IMPORT_CASS_SCHEMA_V1,
+            evidence_admission: Default::default(),
             workspace_path: "/Users/alice/project".to_string(),
             database_path: Some("/Users/alice/project/.ee/ee.db".to_string()),
             source_id: format!(

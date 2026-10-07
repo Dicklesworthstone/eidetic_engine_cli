@@ -139,6 +139,22 @@ If useful context is still needed, the pack should quote or summarize the
 evidence as untrusted historical material and keep the current action advice in
 a separate trusted section.
 
+Imported evidence (CASS transcripts, docs bootstrap, AGENTS.md import) is
+screened contextually for command phrases, because engineering history is full
+of routine cleanup. A recursive `rm` counts only when it reaches a critical
+target: `/` or a shallow system path, home or a credential directory, the whole
+working tree (`.`, `..`, `*`), `.git`, an unset-variable root such as `"$DIR/"*`,
+or a command substitution. A world-writable `chmod` counts only on such a
+target, and `| bash` only as a pipe into a shell (not `|| bash` or a Markdown
+table cell). `rm -rf target`, `chmod 777 build/out` and `rm -rf /tmp/scratch`
+stay searchable. Role labels such as `System:` count where a line (or a quoted
+string) opens, not inside prose such as `Operating system: Linux`. Labels,
+replay text and memory bodies keep the conservative bare-phrase policy. Every
+`ee import cass` reports `evidenceAdmission`: admitted and quarantined span
+counts and the first policy reason for each quarantined span
+(`record_kind:<kind>`, `record_role:<role>`, `span:<kind>/<role>` or
+`instruction:<signal>`).
+
 ## Lifecycle States
 
 Procedural rules use maturity states to keep advice from becoming permanent too

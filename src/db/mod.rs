@@ -14219,6 +14219,49 @@ impl EvidenceAdmissionReport {
     }
 }
 
+/// Why newly written evidence was or was not admitted to search and packs,
+/// counted by the first policy reason (bd-reality-core-convergence-1azkt.49).
+///
+/// Reasons are stable codes: `record_kind:<kind>` and `record_role:<role>` for
+/// transcript records that are never indexable (tool calls, tool results,
+/// metadata, system or developer turns), `span:<kind>/<role>` for a span kind
+/// or role the store does not index, and `instruction:<signal>` for
+/// instruction-risk screening. Over-quarantine is visible here rather than
+/// only as a missing search hit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceAdmissionTally {
+    pub admitted: u32,
+    pub quarantined: u32,
+    pub quarantine_reasons: BTreeMap<String, u32>,
+}
+
+impl EvidenceAdmissionTally {
+    /// Count one written span by its policy reason (`None` when admitted).
+    pub fn record(&mut self, quarantine_reason: Option<&str>) {
+        match quarantine_reason {
+            None => self.admitted = self.admitted.saturating_add(1),
+            Some(reason) => {
+                self.quarantined = self.quarantined.saturating_add(1);
+                let count = self
+                    .quarantine_reasons
+                    .entry(reason.to_owned())
+                    .or_default();
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.admitted = self.admitted.saturating_add(other.admitted);
+        self.quarantined = self.quarantined.saturating_add(other.quarantined);
+        for (reason, count) in &other.quarantine_reasons {
+            let total = self.quarantine_reasons.entry(reason.clone()).or_default();
+            *total = total.saturating_add(*count);
+        }
+    }
+}
+
 /// Internal accounting for one bounded, snapshot-consistent evidence scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EvidenceAdmissionScan {
@@ -14858,6 +14901,9 @@ struct PreparedEvidenceSecurity {
     instruction_risk: &'static str,
     search_eligibility: &'static str,
     pack_eligibility: &'static str,
+    /// The first policy reason the span is not admitted; see
+    /// [`EvidenceAdmissionTally`].
+    quarantine_reason: Option<String>,
 }
 
 const EVIDENCE_INSERT_VALUE_COUNT: usize = 27;
@@ -15016,11 +15062,19 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
         ));
     }
 
-    let policy_quarantine = screen.instruction_like
-        || matches!(screen.instruction_risk, "medium" | "high")
-        || !evidence_span_kind_and_role_are_indexable(&input.span_kind, input.role.as_deref())
-        || (producer_kind == EvidenceProducerKind::CassImport
-            && !crate::policy::classify_transcript_record(&screen.content).is_indexable());
+    let quarantine_reason = evidence_quarantine_reason(
+        EvidenceInstructionScreen {
+            instruction_like: screen.instruction_like,
+            instruction_risk: screen.instruction_risk,
+            rejected_reasons: &screen.rejected_reasons,
+            signal_codes: &screen.signal_codes,
+        },
+        &input.span_kind,
+        input.role.as_deref(),
+        (producer_kind == EvidenceProducerKind::CassImport)
+            .then(|| crate::policy::classify_transcript_record(&screen.content)),
+    );
+    let policy_quarantine = quarantine_reason.is_some();
     let (search_eligibility, pack_eligibility) = match producer_kind {
         EvidenceProducerKind::CassImport if !policy_quarantine => ("admitted", "admitted"),
         EvidenceProducerKind::CassImport => ("quarantined", "quarantined"),
@@ -15068,7 +15122,48 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
         instruction_risk: screen.instruction_risk,
         search_eligibility,
         pack_eligibility,
+        quarantine_reason,
     })
+}
+
+/// The instruction-screening fields one admission decision reads.
+struct EvidenceInstructionScreen<'a> {
+    instruction_like: bool,
+    instruction_risk: &'a str,
+    rejected_reasons: &'a [String],
+    signal_codes: &'a [String],
+}
+
+/// The first policy reason, in a fixed precedence, that keeps a span out of
+/// search and packs: a transcript record kind or role that is never indexable,
+/// then a non-indexable span kind or role, then instruction-risk screening.
+fn evidence_quarantine_reason(
+    screen: EvidenceInstructionScreen<'_>,
+    span_kind: &str,
+    role: Option<&str>,
+    record: Option<crate::policy::TranscriptRecordClass>,
+) -> Option<String> {
+    if let Some(record) = record.filter(|record| !record.is_indexable()) {
+        return Some(match record.role {
+            Some(record_role) if matches!(record.span_kind, "message" | "file" | "summary") => {
+                format!("record_role:{record_role}")
+            }
+            _ => format!("record_kind:{}", record.span_kind),
+        });
+    }
+    if !evidence_span_kind_and_role_are_indexable(span_kind, role) {
+        return Some(format!("span:{span_kind}/{}", role.unwrap_or("none")));
+    }
+    if screen.instruction_like || matches!(screen.instruction_risk, "medium" | "high") {
+        let signal = screen
+            .rejected_reasons
+            .iter()
+            .chain(screen.signal_codes)
+            .find(|code| code.as_str() != "instruction_like_content")
+            .map_or("unknown", String::as_str);
+        return Some(format!("instruction:{signal}"));
+    }
+    None
 }
 
 struct LegacyEvidenceRescreenDecision {
@@ -15147,6 +15242,7 @@ fn prepare_quarantined_legacy_evidence(span: &StoredEvidenceSpan) -> PreparedEvi
         instruction_risk,
         search_eligibility: "quarantined",
         pack_eligibility: "quarantined",
+        quarantine_reason: Some("legacy_rescreen".to_owned()),
     }
 }
 
@@ -15339,15 +15435,33 @@ impl DbConnection {
         &self,
         spans: &[(String, CreateEvidenceSpanInput)],
         session: &StoredSession,
-    ) -> Result<()> {
+    ) -> Result<EvidenceAdmissionTally> {
+        let mut tally = EvidenceAdmissionTally::default();
         let rows = spans
             .iter()
             .map(|(id, input)| {
                 let prepared = prepare_evidence_security(input)?;
+                tally.record(prepared.quarantine_reason.as_deref());
                 self.build_evidence_row(id, input, prepared, session)
             })
             .collect::<Result<Vec<_>>>()?;
-        self.insert_evidence_rows(&rows)
+        self.insert_evidence_rows(&rows)?;
+        Ok(tally)
+    }
+
+    /// Insert one evidence span and report its admission reason.
+    pub fn insert_evidence_span_with_admission(
+        &self,
+        id: &str,
+        input: &CreateEvidenceSpanInput,
+    ) -> Result<Option<String>> {
+        let prepared = prepare_evidence_security(input)?;
+        let reason = prepared.quarantine_reason.clone();
+        let session = self
+            .get_session(&input.session_id)?
+            .ok_or_else(|| malformed_evidence_input("evidence session does not exist"))?;
+        self.insert_prepared_evidence_span(id, input, prepared, &session)?;
+        Ok(reason)
     }
 
     fn build_evidence_row(

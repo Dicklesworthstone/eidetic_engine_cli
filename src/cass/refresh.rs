@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{
-    CreateAuditInput, CreateSessionInput, DbConnection, DbError, DbOperation, SearchIndexJobStatus,
-    StoredSession,
+    CreateAuditInput, CreateSessionInput, DbConnection, DbError, DbOperation,
+    EvidenceAdmissionTally, SearchIndexJobStatus, StoredSession,
 };
 use crate::models::AuditId;
 
@@ -44,6 +44,8 @@ pub(super) struct RefreshReport {
     pub changed: bool,
     pub added_lines: Vec<u32>,
     pub index_job_id: Option<String>,
+    /// Admission of the added spans, by policy reason.
+    pub admission: EvidenceAdmissionTally,
 }
 
 /// Recover publication of the last committed snapshot without reading CASS.
@@ -197,6 +199,7 @@ pub(super) fn refresh_session(
                 changed: false,
                 added_lines: Vec::new(),
                 index_job_id,
+                admission: EvidenceAdmissionTally::default(),
             });
         }
 
@@ -221,15 +224,17 @@ pub(super) fn refresh_session(
         input.metadata_json = Some(serde_json::Value::Object(metadata).to_string());
 
         let mut added_lines = Vec::with_capacity(additions.len());
+        let mut admission = EvidenceAdmissionTally::default();
         for span in additions {
             let evidence_id = stable_evidence_id(session_id, &span.cass_span_id);
             if connection.get_evidence_span(&evidence_id)?.is_some() {
                 return Err(refusal("cass_refresh_evidence_identity_exists"));
             }
-            connection.insert_evidence_span(
+            let reason = connection.insert_evidence_span_with_admission(
                 &evidence_id,
                 &evidence_input(workspace_id, session_id, span),
             )?;
+            admission.record(reason.as_deref());
             if span.redacted {
                 connection.insert_audit(
                     &stable_cass_redaction_audit_id(&evidence_id),
@@ -275,6 +280,7 @@ pub(super) fn refresh_session(
             changed: true,
             added_lines,
             index_job_id: Some(job_id),
+            admission,
         })
     })
 }

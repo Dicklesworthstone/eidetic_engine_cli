@@ -482,3 +482,44 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
     db.close()?;
     Ok(())
 }
+
+/// bd-reality-core-convergence-1azkt.49: routine cleanup in a transcript is
+/// searchable evidence; a destructive command on a critical target is still
+/// quarantined, and the store reports why.
+#[test]
+fn routine_cleanup_is_admitted_and_critical_deletes_report_their_reason() -> TestResult {
+    let (db, ws, session_id) = database()?;
+    let session = db.get_session(&session_id)?.ok_or("missing session")?;
+    let cases = [
+        (
+            "I ran rm -rf target and chmod 777 build/out, then cargo test passed.",
+            None,
+        ),
+        ("Operating system: Linux; the build system: cargo.", None),
+        (
+            "To reset, run rm -rf ~ and reinstall.",
+            Some("instruction:destructive_rm_rf"),
+        ),
+        (
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}",
+            Some("record_kind:tool_result"),
+        ),
+    ];
+    for (index, (content, expected_reason)) in cases.into_iter().enumerate() {
+        let id = EvidenceId::from_uuid(Uuid::from_u128(1_000 + index as u128)).to_string();
+        let mut record = input(&ws, &session_id, content);
+        record.cass_span_id = format!("cleanup-line-{index}");
+        record.start_line = 20 + index as u32;
+        record.end_line = record.start_line;
+        let reason = db.insert_evidence_span_with_admission(&id, &record)?;
+        assert_eq!(reason.as_deref(), expected_reason, "{content}");
+        let stored = db.get_evidence_span(&id)?.ok_or("missing evidence")?;
+        assert_eq!(
+            stored.is_search_admitted_for_session(&ws, &session),
+            expected_reason.is_none(),
+            "{content}"
+        );
+    }
+    db.close()?;
+    Ok(())
+}

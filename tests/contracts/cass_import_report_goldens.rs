@@ -88,6 +88,7 @@ fn assert_golden(name: &str, extension: &str, actual: &str) -> TestResult {
 fn successful_two_session_report() -> CassImportReport {
     CassImportReport {
         schema: "ee.import.cass.v1",
+        evidence_admission: Default::default(),
         workspace_path: "ws-fixture-01".to_string(),
         database_path: Some("ws-fixture-01/ee.db".to_string()),
         source_id: "cass-fixture-source".to_string(),
@@ -127,6 +128,7 @@ fn successful_two_session_report() -> CassImportReport {
 fn dry_run_with_since_report() -> CassImportReport {
     CassImportReport {
         schema: "ee.import.cass.v1",
+        evidence_admission: Default::default(),
         workspace_path: "ws-fixture-02".to_string(),
         database_path: None,
         source_id: "cass-fixture-source".to_string(),
@@ -155,6 +157,7 @@ fn dry_run_with_since_report() -> CassImportReport {
 fn path_redacted_report() -> CassImportReport {
     CassImportReport {
         schema: "ee.import.cass.v1",
+        evidence_admission: Default::default(),
         workspace_path: "ws-fixture-03".to_string(),
         database_path: Some("ws-fixture-03/ee.db".to_string()),
         // Path-prefixed source_id must be substituted with [REDACTED_PATH].

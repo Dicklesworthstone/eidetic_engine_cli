@@ -2199,6 +2199,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "indexJobsQueued",
                 "indexRequiredAction",
                 "status",
+                "evidenceAdmission",
                 "sessions",
             ],
             FieldProfile::Full => &["*"],

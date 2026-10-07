@@ -11327,7 +11327,11 @@ async fn stale_index_live_snapshot_retrieval(
             // Collect the bounded whole pool before live admission. Otherwise
             // stale/ineligible rows could occupy top-k and conceal a new hit.
             index
-                .search(cx, &options.query, documents.len().max(1))
+                .search(
+                    cx,
+                    &crate::search::lexical_engine_query(&options.query),
+                    documents.len().max(1),
+                )
                 .await
         }
         .await;
@@ -11695,7 +11699,7 @@ async fn diag_search_sync(
     #[cfg(unix)]
     let _generation_lease = pin_search_generation(cx, index_dir).await?;
     let index_dir_owned = index_dir.to_path_buf();
-    let query_owned = query.to_string();
+    let query_owned = crate::search::lexical_engine_query(query).into_owned();
     #[allow(clippy::type_complexity)]
     let result_holder: Arc<Mutex<Option<Result<DiagSearchSyncResult, SearchError>>>> =
         Arc::new(Mutex::new(None));
@@ -12843,7 +12847,11 @@ async fn global_store_live_snapshot_hits(
         }
         index.commit(cx).await.map_err(|error| error.to_string())?;
         let results = index
-            .search(cx, &options.query, documents.len().max(1))
+            .search(
+                cx,
+                &crate::search::lexical_engine_query(&options.query),
+                documents.len().max(1),
+            )
             .await
             .map_err(|error| error.to_string())?;
         search_checkpoint(cx).map_err(|error| error.to_string())?;
@@ -13142,7 +13150,7 @@ fn compiled_search_plan(
     source_mode: SearchSourceMode,
 ) -> CompiledPlan {
     let parsed_query = EqlQuery {
-        q: query.to_owned(),
+        q: crate::search::lexical_engine_query(query).into_owned(),
         workspace: None,
         levels: Vec::new(),
         kinds: Vec::new(),

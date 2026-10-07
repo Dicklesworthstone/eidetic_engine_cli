@@ -162,7 +162,7 @@ $ ee remember --workspace . --level procedural --kind rule \
 ✓ indexed in 14ms
 
 # 3. Pull session evidence from your cass history and inspect the v2 payload
-$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}'
+$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction, evidenceAdmission}'
 {
   "schema": "ee.import.cass.v1",
   "status": "completed",
@@ -171,7 +171,12 @@ $ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, 
   "sessionsSkipped": 3,
   "spansImported": 312,
   "indexJobsQueued": 47,
-  "indexRequiredAction": "ee index rebuild --workspace /path/to/project --database /path/to/project/.ee/ee.db"
+  "indexRequiredAction": "ee index rebuild --workspace /path/to/project --database /path/to/project/.ee/ee.db",
+  "evidenceAdmission": {
+    "admitted": 141,
+    "quarantined": 171,
+    "quarantineReasons": {"record_kind:tool_call": 88, "record_kind:tool_result": 80, "instruction:destructive_rm_rf": 3}
+  }
 }
 
 # 4. Apply the reported indexing action (default workspace form shown)
@@ -190,6 +195,12 @@ $ ee why mem_01HQ3K5Z --workspace . --json
 $ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
 ✓ utility +0.08 → confidence 0.63
 ```
+
+`evidenceAdmission` says how many imported spans are searchable and why the
+rest are not: tool calls, tool results and metadata records are kept as
+provenance but never indexed, and instruction-risk screening holds back
+genuinely risky text such as `rm -rf ~` (routine `rm -rf target` stays
+searchable). See [trust model](docs/trust-model.md).
 
 The manual rule and imported CASS evidence are separate records in this
 example. Step 6 can select either one: durable memories appear as

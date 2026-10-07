@@ -2,6 +2,11 @@
   "command": "import cass",
   "databasePath": null,
   "dryRun": true,
+  "evidenceAdmission": {
+    "admitted": 0,
+    "quarantineReasons": {},
+    "quarantined": 0
+  },
   "indexJobsQueued": 0,
   "indexRequiredAction": "would_enqueue",
   "ledgerId": null,

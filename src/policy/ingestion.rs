@@ -9,7 +9,8 @@
 #[cfg(test)]
 use super::redact_secret_like_content;
 use super::{
-    ExternalIngestionScreenReport, detect_instruction_like_content, redact_git_capture_text,
+    ExternalIngestionScreenReport, detect_evidence_instruction_like_content,
+    redact_git_capture_text,
 };
 
 #[path = "ingestion_json.rs"]
@@ -173,7 +174,7 @@ fn screen_scanning_view(content: &str) -> (ExternalIngestionScreenReport, usize)
     };
     reasons.sort_unstable();
     reasons.dedup();
-    let instructions = detect_instruction_like_content(&content);
+    let instructions = detect_evidence_instruction_like_content(&content);
     (
         ExternalIngestionScreenReport {
             content,

@@ -168,6 +168,17 @@ fn imported_failure_fix_arc_packs_as_one_incident_card() -> TestResult {
     let workspace = workspace_arg(&fixture.workspace)?;
     let imported = fixture.run(&["import", "cass", "--workspace", workspace, "--limit", "5"])?;
     ensure(imported["sessionsImported"] == 1, format!("{imported}"))?;
+    // The two tool calls and two tool results are kept out of search by
+    // record kind, and the import says so (bd-reality-core-convergence-1azkt.49).
+    ensure(
+        imported["evidenceAdmission"]
+            == json!({
+                "admitted": 1,
+                "quarantined": 4,
+                "quarantineReasons": {"record_kind:tool_call": 2, "record_kind:tool_result": 2}
+            }),
+        format!("admission tally: {imported}"),
+    )?;
     fixture.run(&["index", "rebuild"])?;
 
     let pack = fixture.run(&[

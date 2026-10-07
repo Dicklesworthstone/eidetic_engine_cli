@@ -29,6 +29,7 @@
         "indexJobsQueued",
         "indexRequiredAction",
         "status",
+        "evidenceAdmission",
         "sessions"
       ],
       "additionalProperties": false,
@@ -48,6 +49,20 @@
         "indexJobsQueued": { "type": "integer" },
         "indexRequiredAction": { "type": ["string", "null"] },
         "status": { "type": "string" },
+        "evidenceAdmission": {
+          "type": "object",
+          "description": "Admission of the spans this run wrote. quarantineReasons counts each kept-out span by its first policy reason: record_kind:<kind>, record_role:<role>, span:<kind>/<role>, or instruction:<signal>.",
+          "required": ["admitted", "quarantined", "quarantineReasons"],
+          "additionalProperties": false,
+          "properties": {
+            "admitted": { "type": "integer", "minimum": 0 },
+            "quarantined": { "type": "integer", "minimum": 0 },
+            "quarantineReasons": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
         "sessions": {
           "type": "array",
           "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
@@ -82,6 +97,7 @@
       "indexJobsQueued",
       "indexRequiredAction",
       "status",
+      "evidenceAdmission",
       "sessions"
     ],
     "full": ["*"]

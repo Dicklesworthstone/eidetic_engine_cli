@@ -29,7 +29,7 @@ pub use frankensearch::{
 };
 #[cfg(feature = "lexical-bm25")]
 pub use frankensearch::{LexicalRead, LexicalWrite, TantivyIndex};
-pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
+pub use query::{ParsedSearchQuery, SearchQueryClause, lexical_engine_query, parse_search_query};
 pub use scoring::{
     AnchorMatchCandidateSignals, AnchorMatchContext, AnchorMatchScore,
     BeadAffinityCandidateSignals, BeadAffinityContext, BeadAffinityScore,

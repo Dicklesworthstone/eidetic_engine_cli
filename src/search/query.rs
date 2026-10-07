@@ -333,9 +333,90 @@ pub fn query_anchor_match_context(query: &str) -> AnchorMatchContext {
     }))
 }
 
+/// The query text handed to the lexical engine for an agent's search.
+///
+/// The engine's parser reads a leading `-` as "exclude this term", so a query
+/// such as `cargo fmt --check before release` excluded every memory that
+/// mentions `check`, including the one it described (bd-bka39). Agents quote
+/// command lines far more often than they mean exclusion, so a token shaped
+/// like a command-line option is searched as the word it names: a long option
+/// (`--check`, `--no-verify`) or a short flag cluster of at most three letters
+/// or digits (`-rf`, `-p`, `-j8`, `-1`). A longer single-dash word
+/// (`-legacy`) keeps its exclusion meaning, and text inside double quotes is
+/// left alone.
+///
+/// The parser also reads `word:` as "search field `word`", and a query naming
+/// a field the index does not have matched nothing at all: `std::fs::read`,
+/// `File::open` and `src/core/search.rs:120` returned no results. A colon
+/// outside quotes is a field prefix only after a real field name (`id`,
+/// `content`, `title`); anywhere else it separates words. Everything else
+/// passes through unchanged.
+#[must_use]
+pub fn lexical_engine_query(query: &str) -> std::borrow::Cow<'_, str> {
+    if !query.contains(['-', ':']) {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let mut out = String::with_capacity(query.len());
+    let mut in_quote = false;
+    let mut at_token_start = true;
+    let mut token_start = 0;
+    let mut rest = query;
+    while let Some(ch) = rest.chars().next() {
+        if ch == '"' {
+            in_quote = !in_quote;
+        }
+        if ch == ':' && !in_quote {
+            let field = out[token_start..].trim_start_matches(['(', '+', '-']);
+            if !matches!(field, "id" | "content" | "title") {
+                out.push(' ');
+                at_token_start = true;
+                token_start = out.len();
+                rest = &rest[1..];
+                continue;
+            }
+        }
+        if ch == '-' && at_token_start && !in_quote {
+            let dashes = rest.len() - rest.trim_start_matches('-').len();
+            let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let word = &rest[dashes..token_end];
+            let short_flag = dashes == 1
+                && (1..=3).contains(&word.len())
+                && word.bytes().all(|byte| byte.is_ascii_alphanumeric());
+            let long_option = dashes >= 2
+                && word
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_alphanumeric());
+            if short_flag || long_option {
+                out.push_str(word);
+            } else if dashes >= 2 && word.is_empty() {
+                // A bare `--` ends options in a command line; it names nothing.
+            } else {
+                out.push_str(&rest[..token_end]);
+            }
+            rest = &rest[token_end..];
+            at_token_start = false;
+            continue;
+        }
+        out.push(ch);
+        at_token_start = ch.is_whitespace() || ch == '(';
+        if at_token_start {
+            token_start = out.len();
+        }
+        rest = &rest[ch.len_utf8()..];
+    }
+    if out == query {
+        std::borrow::Cow::Borrowed(query)
+    } else {
+        std::borrow::Cow::Owned(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SearchQueryClause, parse_search_query, query_anchor_match_context};
+    use super::{
+        SearchQueryClause, lexical_engine_query, parse_search_query, query_anchor_match_context,
+    };
 
     #[test]
     fn search_query_parser_normalizes_terms_phrases_and_exclusions() {
@@ -657,5 +738,44 @@ mod tests {
         );
         // Prose with no exact code surface yields a cold-start context (no boost).
         assert!(query_anchor_match_context("just ordinary prose words").is_cold_start());
+    }
+
+    #[test]
+    fn lexical_engine_query_searches_command_line_options_as_words() {
+        for (query, expected) in [
+            (
+                "Always run cargo fmt --check before release",
+                "Always run cargo fmt check before release",
+            ),
+            ("rm -rf target", "rm rf target"),
+            (
+                "cargo test -p ee -j8 -- --nocapture",
+                "cargo test p ee j8  nocapture",
+            ),
+            ("git commit --no-verify", "git commit no-verify"),
+            ("retry with -1 offset", "retry with 1 offset"),
+            ("release -legacy", "release -legacy"),
+            ("plain words only", "plain words only"),
+            (
+                "\"cargo fmt --check\" release",
+                "\"cargo fmt --check\" release",
+            ),
+            ("(--check OR fmt)", "(check OR fmt)"),
+            ("well-known x-ray", "well-known x-ray"),
+            ("-", "-"),
+            ("std::fs::read_to_string", "std  fs  read_to_string"),
+            ("File::open failed", "File  open failed"),
+            ("src/core/search.rs:120", "src/core/search.rs 120"),
+            ("title:release notes", "title:release notes"),
+            ("(content:fmt)", "(content:fmt)"),
+            ("\"a::b\" c", "\"a::b\" c"),
+            ("Widget: Serialize", "Widget  Serialize"),
+        ] {
+            assert_eq!(lexical_engine_query(query), expected, "{query}");
+        }
+        assert!(matches!(
+            lexical_engine_query("no dashes here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }

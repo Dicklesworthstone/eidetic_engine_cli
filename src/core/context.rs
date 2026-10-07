@@ -3805,6 +3805,23 @@ async fn run_context_pack_with_performance_inner(
             PackSlotAcquisition::Bypassed { admission } => (None, admission, None),
         };
 
+    // A memory a cross-shard read selected from a peer workspace's shard has
+    // no row in this workspace's `memories` table, exactly like a user-global
+    // one, so the pack keeps it but its ledger cannot reference it (bd-zmctx).
+    let cross_shard_memory_ids = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.lane == crate::pack::PackItemOrigin::CROSS_SHARD_LANE)
+        })
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let non_ledger_memory_ids = global_store_memory_ids
+        .union(&cross_shard_memory_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let pack_start = Instant::now();
     control.check()?;
     let pack_candidates = if concurrent_limit_retry_after_ms.is_some() {
@@ -4042,6 +4059,11 @@ async fn run_context_pack_with_performance_inner(
             &draft,
             &global_store_memory_ids,
         );
+        push_cross_shard_items_not_persisted_degradation(
+            &mut response_degraded,
+            &draft,
+            &cross_shard_memory_ids,
+        );
     }
     let mut pack_hash_components = refresh_context_pack_hash(
         &request,
@@ -4069,7 +4091,7 @@ async fn run_context_pack_with_performance_inner(
                         &request,
                         &draft,
                         &response_degraded,
-                        &global_store_memory_ids,
+                        &non_ledger_memory_ids,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
                         &mut pack_persistence,
@@ -4081,7 +4103,7 @@ async fn run_context_pack_with_performance_inner(
                         &request,
                         &draft,
                         &response_degraded,
-                        &global_store_memory_ids,
+                        &non_ledger_memory_ids,
                         &determinism,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
@@ -4105,7 +4127,7 @@ async fn run_context_pack_with_performance_inner(
                                 &request,
                                 &draft,
                                 &response_degraded,
-                                &global_store_memory_ids,
+                                &non_ledger_memory_ids,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
                                 &mut pack_persistence,
@@ -4117,7 +4139,7 @@ async fn run_context_pack_with_performance_inner(
                                 &request,
                                 &draft,
                                 &response_degraded,
-                                &global_store_memory_ids,
+                                &non_ledger_memory_ids,
                                 &determinism,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
@@ -4150,7 +4172,10 @@ async fn run_context_pack_with_performance_inner(
         // The "persisted without its global items" notice was added before
         // the write so the persisted record and hash include it. No pack was
         // persisted, so it would now contradict `context_pack_persist_failed`.
-        response_degraded.retain(|entry| entry.code != GLOBAL_ITEMS_NOT_PERSISTED_CODE);
+        response_degraded.retain(|entry| {
+            entry.code != GLOBAL_ITEMS_NOT_PERSISTED_CODE
+                && entry.code != CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE
+        });
         let (message, repair) = context_pack_persist_failed_message_and_repair(&persist_error);
         push_degradation(
             &mut response_degraded,
@@ -6916,6 +6941,61 @@ fn push_global_items_not_persisted_degradation(
     );
 }
 
+const CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE: &str = "context_pack_cross_shard_items_not_persisted";
+
+/// bd-zmctx: a memory a cross-shard read selected from a peer workspace lives
+/// in that workspace's shard, so this workspace's pack ledger cannot reference
+/// it. The pack keeps the item; the ledger records the rest, and the response
+/// names each excluded memory and the workspace it came from, instead of the
+/// whole write failing as "pack references a missing memory".
+fn push_cross_shard_items_not_persisted_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    draft: &crate::pack::PackDraft,
+    cross_shard_memory_ids: &BTreeSet<String>,
+) {
+    if cross_shard_memory_ids.is_empty() {
+        return;
+    }
+    let selected = draft
+        .items
+        .iter()
+        .filter(|item| cross_shard_memory_ids.contains(&item.memory_id.to_string()))
+        .map(|item| {
+            let origin = item
+                .origin
+                .as_ref()
+                .map_or("unknown", |origin| origin.workspace_id.as_str());
+            format!("rank {} {} from {origin}", item.rank, item.memory_id)
+        })
+        .collect::<Vec<_>>();
+    let omissions = draft
+        .omitted
+        .iter()
+        .filter(|omission| cross_shard_memory_ids.contains(&omission.memory_id.to_string()))
+        .count();
+    if selected.is_empty() && omissions == 0 {
+        return;
+    }
+    let selected = if selected.is_empty() {
+        "no selected items".to_owned()
+    } else {
+        selected.join("; ")
+    };
+    push_degradation(
+        degraded,
+        CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE,
+        ContextResponseSeverity::Low,
+        format!(
+            "Pack persisted without its cross-shard memories ({selected}; {omissions} omission{}): they live in another workspace's shard, so this workspace's pack ledger does not record them.",
+            if omissions == 1 { "" } else { "s" }
+        ),
+        Some(
+            "Grade this workspace's own items with `ee outcome --pack <hash> --item <n>`; record outcomes for a cross-shard memory from its origin workspace."
+                .to_owned(),
+        ),
+    );
+}
+
 /// Persist the pack record, items, omissions and replay ledger.
 ///
 /// `global_store_memory_ids` names memories read from the separate
@@ -6925,7 +7005,9 @@ fn push_global_items_not_persisted_degradation(
 /// ledger while every workspace item keeps its rank, so the pack still
 /// persists and `ee outcome --pack <hash> --item <n>` resolves the
 /// workspace's own items (GH #57). The response reports the exclusion via
-/// `context_pack_global_items_not_persisted`.
+/// `context_pack_global_items_not_persisted`. Peer-shard memories selected by
+/// cross-shard read are excluded the same way (bd-zmctx) and reported via
+/// `context_pack_cross_shard_items_not_persisted`.
 fn persist_pack_record_with_pack_id(
     connection: &DbConnection,
     workspace_path: &Path,

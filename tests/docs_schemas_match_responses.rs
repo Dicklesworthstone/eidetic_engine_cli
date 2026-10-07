@@ -3300,6 +3300,7 @@ fn stored_memory_sample() -> StoredMemory {
 fn import_cass_sample() -> Value {
     let report = CassImportReport {
         schema: IMPORT_CASS_SCHEMA_V1,
+        evidence_admission: Default::default(),
         workspace_path: "/tmp/workspace".to_string(),
         database_path: Some("/tmp/workspace/.ee/ee.db".to_string()),
         source_id: "cass://fixture".to_string(),

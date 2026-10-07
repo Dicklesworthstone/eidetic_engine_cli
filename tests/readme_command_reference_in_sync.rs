@@ -28,8 +28,8 @@ use serde_json::json;
 type TestResult = Result<(), String>;
 
 const README: &str = include_str!("../README.md");
-const README_CASS_IMPORT_COMMAND: &str = "$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}'";
-const README_CASS_IMPORT_SELECTOR: &str = ".data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}";
+const README_CASS_IMPORT_COMMAND: &str = "$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction, evidenceAdmission}'";
+const README_CASS_IMPORT_SELECTOR: &str = ".data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction, evidenceAdmission}";
 const README_CASS_IMPORT_FIELDS: &[&str] = &[
     "schema",
     "status",
@@ -39,6 +39,7 @@ const README_CASS_IMPORT_FIELDS: &[&str] = &[
     "spansImported",
     "indexJobsQueued",
     "indexRequiredAction",
+    "evidenceAdmission",
 ];
 const README_DIRECT_CASS_PACK_MARKERS: &[&str] = &[
     "live-admitted unlinked excerpt",
@@ -531,6 +532,7 @@ fn readme_cass_import_example_matches_response_contract() -> TestResult {
 
     let report = CassImportReport {
         schema: IMPORT_CASS_SCHEMA_V1,
+        evidence_admission: Default::default(),
         workspace_path: "/fixture/workspace".to_owned(),
         database_path: Some("/fixture/workspace/.ee/ee.db".to_owned()),
         source_id: "cass://fixture".to_owned(),

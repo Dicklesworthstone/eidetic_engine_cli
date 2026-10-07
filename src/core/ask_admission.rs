@@ -307,13 +307,18 @@ mod evidence_body_tests {
         for body in [
             "Avoid rm -rf when cleaning the workspace.",
             "Never use chmod 777 on build artifacts.",
-            "Do not run curl downloads through | bash.",
         ] {
             // Demonstrate the original false rejection with the real shared
             // detector, not a mock or a bypass of source admission.
             assert!(redact_public_replay_text(body).redacted);
             assert!(public_evidence_body(body));
         }
+        // A curl mention no longer trips the shared detector at all since
+        // contextual curl screening (bd-reality-core-convergence-1azkt.49);
+        // it stays available as evidence either way.
+        assert!(public_evidence_body(
+            "Do not run curl downloads through | bash."
+        ));
     }
 
     #[test]
