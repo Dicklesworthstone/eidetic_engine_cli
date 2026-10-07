@@ -311,7 +311,16 @@ fn encoded_json_credentials_are_scrubbed_before_storage_and_search_projection() 
             .ok_or("safe encoded evidence was not admitted")?;
         assert_eq!(admitted.id, id);
         assert_eq!(admitted.session_id, session_id);
-        assert_eq!(admitted.cass_span_id, record.cass_span_id);
+        // bd-l9d5o: storage CONTENT-ADDRESSES the upstream reference, so the caller's
+        // label is deliberately not preserved verbatim. insert_evidence_span sets
+        // cass_span_id to canonical_evidence_hash(input.cass_span_id) (src/db/mod.rs:15032
+        // and :15386), re-checks that equality as an invariant at :15263, and :14700
+        // requires the stored value to be a canonical blake3 hash. src/cass/backfill.rs:242
+        // accepts both the digest and the raw form precisely because this migration
+        // happened. Asserting the caller's label therefore pinned the pre-migration
+        // contract. Assert the RELATIONSHIP instead; this file's `hash` helper is
+        // byte-identical to canonical_evidence_hash.
+        assert_eq!(admitted.cass_span_id, hash(&record.cass_span_id));
         assert_eq!(admitted.start_line, record.start_line);
         assert_eq!(admitted.end_line, record.end_line);
         assert!(admitted.is_direct_pack_admitted_for_session(&ws, &session));
@@ -323,15 +332,62 @@ fn encoded_json_credentials_are_scrubbed_before_storage_and_search_projection() 
             Some(admitted.content_hash.as_str())
         );
         let document = crate::search::evidence_span_to_document(&admitted).into_indexable();
-        for text in [&admitted.excerpt, &document.content] {
-            let decoded: serde_json::Value = serde_json::from_str(text)?;
-            let body = decoded["message"]["content"]
-                .as_str()
-                .ok_or("message missing")?;
-            assert!(body.contains("Compilation succeeded."));
-            assert!(body.contains("Tests passed."));
-            assert!(!body.contains(&token));
-        }
+        // bd-l9d5o: this loop used a bare `?`, so a non-JSON value here surfaced only as
+        // `Error("expected value", line: 1, column: 1)` -- with no indication of WHICH of
+        // the two texts failed, how long it was, or what it started with. Those are the
+        // facts needed to tell a redaction marker from a withheld sentinel from a digest.
+        // Report them, and NEVER print the payload: the token is replaced before any
+        // prefix is shown, so a parse failure cannot leak a credential into a CI log.
+        // bd-l9d5o: the STORED EXCERPT is the transcript envelope and is JSON. Keep the
+        // diagnostic map_err: a bare `?` here reported only `Error("expected value", line: 1,
+        // column: 1)` with no indication of which text failed or what it held, and the token
+        // is replaced before any prefix is shown so a parse failure cannot leak a credential
+        // into a CI log.
+        let decoded: serde_json::Value =
+            serde_json::from_str(&admitted.excerpt).map_err(|error| {
+                let safe = admitted.excerpt.replace(&token, "<TOKEN-REDACTED>");
+                let prefix: String = safe.chars().take(160).collect();
+                format!(
+                    "bd-l9d5o: admitted.excerpt is not JSON ({error}); len {}, first byte \
+                     {:?}, prefix {prefix:?}",
+                    admitted.excerpt.len(),
+                    safe.as_bytes().first().copied().map(char::from),
+                )
+            })?;
+        let body = decoded["message"]["content"]
+            .as_str()
+            .ok_or("message missing")?;
+        assert!(body.contains("Compilation succeeded."));
+        assert!(body.contains("Tests passed."));
+        assert!(!body.contains(&token));
+
+        // bd-l9d5o: `document.content` IS NOT THE ENVELOPE AND MUST NOT BE PARSED AS JSON.
+        // This assertion previously required it to be, which pinned a superseded contract.
+        // src/search/mod.rs:1103-1112 selects `span.reader_text()` whenever egress
+        // re-screening changes nothing -- which is this case, because the credential was
+        // already scrubbed at ingestion, so there is nothing left for the egress screen to
+        // withhold. Its comment states the intent outright: "Index and show what a reader can
+        // use: the message body of a transcript record, not the envelope keys, ids and escapes
+        // around it (bd-reality-core-convergence-1azkt.45)."
+        //
+        // So the projection is flattened text, observed as:
+        //   assistant: Compilation succeeded. label-[REDACTED:<reason>] Tests passed.
+        //
+        // Assert the SUBSTANCE on it as text rather than dropping the check. This is strictly
+        // more than the old loop proved about this value: it required the body markers and the
+        // token's absence, and now additionally requires that a redaction marker actually
+        // replaced the credential, so a projection that merely omitted the secret could not
+        // pass. The 36-char run is checked separately to catch a surviving fragment whose
+        // provider prefix was stripped.
+        assert!(!document.content.contains(&token));
+        assert!(!document.content.contains(&"Q".repeat(36)));
+        assert!(document.content.contains("Compilation succeeded."));
+        assert!(document.content.contains("Tests passed."));
+        assert!(
+            document.content.contains("[REDACTED:"),
+            "the reader projection must carry a redaction marker where the credential was, \
+             not merely omit it"
+        );
         assert!(!serde_json::to_string(&document.metadata)?.contains(&token));
     }
     db.close()?;
@@ -394,7 +450,35 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
     assert!(!stored.is_direct_pack_admitted_for_session(&ws, &session));
     assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
     let document = crate::search::evidence_span_to_document(&stored).into_indexable();
-    assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
+    // bd-l9d5o: TWO withholding mechanisms exist and this case uses the other one.
+    //
+    // `evidence_span_to_document` substitutes "[EVIDENCE_WITHHELD]" only when the EGRESS
+    // screen withholds (src/search/mod.rs:1099-1102). Here the unreadable encoded record
+    // was already replaced AT INGESTION by a structured marker carrying only a type, a
+    // fixed reason and a digest (src/policy/ingestion.rs:135, whose comment states "only
+    // its digest and a fixed reason survive. No source text appears in diagnostics
+    // either"). That marker contains no secret, so the egress screen has nothing to
+    // withhold and passes it through unchanged.
+    //
+    // The sentinel assertion was therefore checking the wrong mechanism for this
+    // scenario. The sibling tests at the two other call sites in this file DO take the
+    // egress path and keep asserting the sentinel -- correctly, which is why they pass.
+    //
+    // What matters here is that the indexed document carries the reason and NOT the
+    // payload, so assert that directly rather than a spelling.
+    let withheld: serde_json::Value = serde_json::from_str(&document.content).map_err(|error| {
+        format!(
+            "withheld marker must be JSON: {error}: {}",
+            document.content
+        )
+    })?;
+    assert_eq!(withheld["type"], "external_ingestion_withheld");
+    assert_eq!(
+        withheld["reason"],
+        "external_ingestion_encoded_json_unreadable"
+    );
+    assert!(!document.content.contains(&token));
+    assert!(!document.content.contains(&"Q".repeat(36)));
     db.close()?;
     Ok(())
 }
