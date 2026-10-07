@@ -14388,7 +14388,8 @@ fn collapse_incident_cards_by_error_class(
             .filter(|(_, count)| *count > 1)
         {
             candidate.item.why.push_str(&format!(
-                "; error class {class} was seen in {count} incidents in this workspace, this is the best-ranked"
+                "; error class {} was seen in {count} incidents in this workspace, this is the best-ranked",
+                crate::core::incident_card::error_class_label(class)
             ));
         }
         collapsed.push(candidate);

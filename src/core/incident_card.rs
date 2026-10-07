@@ -253,7 +253,9 @@ const FIX_WORDS: &[&str] = &[
     "move",
     "moved",
     "wrap",
+    "wrapped",
     "handle",
+    "handled",
     "implement",
     "implemented",
     "missing",
@@ -265,6 +267,18 @@ const FIX_WORDS: &[&str] = &[
     "should",
     "must",
     "convert",
+    "converted",
+    "converting",
+    "switched",
+    "deleted",
+    "corrected",
+    "adjusted",
+    "reverted",
+    "restored",
+    "declared",
+    "annotated",
+    "injecting",
+    "injected",
 ];
 
 const NARRATION_PREFIXES: &[&str] = &[
@@ -299,12 +313,12 @@ fn fix_facet(repairs: &[String], anchors: &BTreeSet<String>, budget: u32) -> Opt
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
 
+    // Only sentences that explain something: a fix verb or a term from the
+    // symptom. Narration alone ("Let me look at that.") is not a fix.
+    scored.retain(|(score, _)| *score >= 1);
     let mut chosen = Vec::new();
     let mut used = 0_u32;
-    for (score, position) in &scored {
-        if *score < 1 && !chosen.is_empty() {
-            break;
-        }
+    for (_, position) in &scored {
         let tokens = crate::pack::estimate_tokens_default(&sentences[*position]).saturating_add(1);
         if used.saturating_add(tokens) > budget {
             continue;
@@ -329,6 +343,28 @@ fn fix_facet(repairs: &[String], anchors: &BTreeSet<String>, budget: u32) -> Opt
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// Whether a repair turn explains a fix at all, judged by the same sentence
+/// scoring the card's Fix facet uses (anchors come from the failure's
+/// symptom line when there is one).
+pub(crate) fn explains_a_fix(text: &str, symptom: Option<&str>) -> bool {
+    let anchors = symptom.map(anchor_terms).unwrap_or_default();
+    split_sentences(text)
+        .iter()
+        .any(|sentence| sentence_score(sentence, &anchors) >= 1)
+}
+
+/// A short, readable name for a fingerprint key: `rustc:E0277` as is, and a
+/// message-template key as its tool plus a short digest.
+pub(crate) fn error_class_label(key: &str) -> String {
+    match key.split_once(":tmpl:") {
+        Some((tool, digest)) => {
+            let hex = digest.strip_prefix("blake3:").unwrap_or(digest);
+            format!("{tool} failure template {}", &hex[..hex.len().min(12)])
+        }
+        None => key.to_owned(),
+    }
 }
 
 fn sentence_score(sentence: &str, anchors: &BTreeSet<String>) -> i32 {
@@ -456,6 +492,35 @@ mod tests {
         );
         assert_eq!(fix_facet(&[long], &anchors, 20), Some(first));
         assert_eq!(fix_facet(&["ok".to_owned()], &anchors, 20), None);
+    }
+
+    #[test]
+    fn narration_alone_never_explains_a_fix() {
+        assert!(!explains_a_fix(
+            "Let me look at that failure. Running the tests now.",
+            None
+        ));
+        assert!(explains_a_fix(
+            "Let me look. Ledger::flush_all was renamed, so I updated the call site.",
+            None
+        ));
+        assert!(explains_a_fix(
+            "The widget store serializes it.",
+            Some("error[E0277]: the trait bound `Widget: Serialize` is not satisfied")
+        ));
+        assert_eq!(
+            fix_facet(
+                &["Let me look at that failure.".to_owned()],
+                &BTreeSet::new(),
+                60
+            ),
+            None
+        );
+        assert_eq!(error_class_label("rustc:E0277"), "rustc:E0277");
+        assert_eq!(
+            error_class_label("cargo:tmpl:blake3:68e0e38e3119313b826b1cc84e2bcfeba7"),
+            "cargo failure template 68e0e38e3119"
+        );
     }
 
     #[test]

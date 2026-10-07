@@ -296,7 +296,7 @@ fn resolve_pending(
             still_pending.push(failure);
             continue;
         }
-        let repair_ids = spans[failure.index + 1..success_index]
+        let turns = spans[failure.index + 1..success_index]
             .iter()
             .rev()
             .filter(|span| {
@@ -304,9 +304,29 @@ fn resolve_pending(
                     && span.role.as_deref() == Some("assistant")
                     && span.is_derivation_admitted_for_session(workspace_id, session)
             })
+            .collect::<Vec<_>>();
+        // Prefer turns that explain the fix over narration ("Let me look at
+        // that."), which recall would otherwise surface as a "prior fix". With
+        // no explanatory turn, the latest one still anchors the link.
+        let explanatory = turns
+            .iter()
+            .filter(|span| {
+                crate::core::incident_card::explains_a_fix(
+                    &span.reader_body(),
+                    failure.symptom.as_deref(),
+                )
+            })
             .take(MAX_REPAIR_TURNS)
             .map(|span| span.id.clone())
             .collect::<Vec<_>>();
+        let repair_ids = if explanatory.is_empty() {
+            turns
+                .first()
+                .map(|span| vec![span.id.clone()])
+                .unwrap_or_default()
+        } else {
+            explanatory
+        };
         arcs.push(failure.into_arc(Some(Resolution {
             proof_id: success.id.clone(),
             proof_family: family.clone(),
