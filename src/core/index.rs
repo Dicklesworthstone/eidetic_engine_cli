@@ -6896,8 +6896,28 @@ fn default_search_embedder_stack_with_provenance() -> (EmbedderStack, EmbedderSt
 }
 
 fn detect_default_search_embedder() -> DefaultSearchEmbedder {
+    let started = Instant::now();
     let settings = default_embedder_settings();
-    default_search_embedder_for_settings(&settings)
+    let selection = default_search_embedder_for_settings(&settings);
+    let _ = DEFAULT_SEARCH_EMBEDDER_LOAD.set(started.elapsed());
+    selection
+}
+
+/// How long the one-time, process-wide default embedder resolution (model
+/// discovery and weight load) took, once it has happened.
+static DEFAULT_SEARCH_EMBEDDER_LOAD: OnceLock<Duration> = OnceLock::new();
+
+/// Whether this process has already resolved its default search embedder.
+#[must_use]
+pub(crate) fn default_search_embedder_resolved() -> bool {
+    DEFAULT_SEARCH_EMBEDDER.get().is_some()
+}
+
+/// The one-time default embedder resolution cost, if it has been paid
+/// (bd-reality-core-convergence-1azkt.56).
+#[must_use]
+pub(crate) fn default_search_embedder_load_duration() -> Option<Duration> {
+    DEFAULT_SEARCH_EMBEDDER_LOAD.get().copied()
 }
 
 #[cfg(test)]

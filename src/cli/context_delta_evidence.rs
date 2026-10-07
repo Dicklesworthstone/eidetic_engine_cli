@@ -10,8 +10,8 @@
 use serde_json::{Value, json};
 
 use super::{ContextDeltaItemSnapshot, blake3_text_hash_for_replay};
-use crate::models::EvidenceId;
-use crate::pack::{PackEvidenceItem, pack_item_provenance_json};
+use crate::models::{EvidenceId, RuleId};
+use crate::pack::{PackEvidenceItem, PackRuleItem, pack_item_provenance_json};
 
 pub(super) fn from_item(item: &PackEvidenceItem) -> ContextDeltaItemSnapshot {
     let provenance = pack_item_provenance_json(&item.provenance);
@@ -35,6 +35,92 @@ pub(super) fn from_item(item: &PackEvidenceItem) -> ContextDeltaItemSnapshot {
                 crate::policy::redact_public_replay_field("trustSubclass", value).content
             })),
         )
+}
+
+/// A procedural rule packed under its own identity (bd-vp087), projected the
+/// same hash-only way as native evidence.
+pub(super) fn from_rule_item(item: &PackRuleItem) -> ContextDeltaItemSnapshot {
+    let provenance = pack_item_provenance_json(&item.provenance);
+    ContextDeltaItemSnapshot::new(&item.rule_id)
+        .with_field("entityKind", json!("rule"))
+        .with_field("entityRevision", json!(&item.entity_revision))
+        .with_field("rank", json!(item.rank))
+        .with_field("section", json!(item.section.as_str()))
+        .with_field("estimatedTokens", json!(item.estimated_tokens))
+        .with_field("relevance", json!(item.relevance.into_inner()))
+        .with_field("utility", json!(item.utility.into_inner()))
+        .with_field("whyHash", json!(blake3_text_hash_for_replay(&item.why)))
+        .with_field("diversityKeyHash", Value::Null)
+        .with_field(
+            "provenanceHash",
+            json!(blake3_text_hash_for_replay(&provenance)),
+        )
+        .with_field("trustClass", json!(item.trust.class.as_str()))
+        .with_field(
+            "trustSubclass",
+            json!(item.trust.subclass.as_deref().map(|value| {
+                crate::policy::redact_public_replay_field("trustSubclass", value).content
+            })),
+        )
+}
+
+/// The verified-ledger form of [`from_rule_item`].
+pub(super) fn from_rule_ledger(item: &Value) -> Result<ContextDeltaItemSnapshot, String> {
+    let invalid = || "verified prior pack rule has an invalid native identity".to_owned();
+    if item.get("entityKind").and_then(Value::as_str) != Some("rule")
+        || item.get("memoryId").is_some()
+        || item.get("evidenceSpanId").is_some()
+    {
+        return Err(invalid());
+    }
+    let rule_id = item
+        .get("entityId")
+        .and_then(Value::as_str)
+        .filter(|rule_id| rule_id.parse::<RuleId>().is_ok())
+        .ok_or_else(invalid)?;
+    let revision = item
+        .get("entityRevision")
+        .and_then(Value::as_str)
+        .filter(|revision| crate::db::is_canonical_blake3_hash(revision))
+        .ok_or_else(|| "verified prior pack rule omitted a canonical entityRevision".to_owned())?;
+    Ok(ContextDeltaItemSnapshot::new(rule_id)
+        .with_field("entityKind", json!("rule"))
+        .with_field("entityRevision", json!(revision))
+        .with_field("rank", item.get("rank").cloned().unwrap_or_default())
+        .with_field("section", item.get("section").cloned().unwrap_or_default())
+        .with_field(
+            "estimatedTokens",
+            item.get("estimatedTokens").cloned().unwrap_or_default(),
+        )
+        .with_field(
+            "relevance",
+            item.pointer("/scores/relevance")
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .with_field(
+            "utility",
+            item.pointer("/scores/utility").cloned().unwrap_or_default(),
+        )
+        .with_field(
+            "whyHash",
+            item.pointer("/why/hash").cloned().unwrap_or_default(),
+        )
+        .with_field("diversityKeyHash", Value::Null)
+        .with_field(
+            "provenanceHash",
+            item.pointer("/provenance/hash")
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .with_field(
+            "trustClass",
+            item.get("trustClass").cloned().unwrap_or_default(),
+        )
+        .with_field(
+            "trustSubclass",
+            redacted_trust_subclass(item.get("trustSubclass")),
+        ))
 }
 
 pub(super) fn from_ledger(item: &Value) -> Result<ContextDeltaItemSnapshot, String> {

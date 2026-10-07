@@ -95,6 +95,7 @@ const REQUIRED_TABLES: &[(&str, &str, &str)] = &[
         "derived_artifact_restore",
     ),
     ("pack_evidence_items", "pack", "derived_artifact_restore"),
+    ("pack_rule_items", "pack", "derived_artifact_restore"),
     ("pack_items", "pack", "derived_artifact_restore"),
     ("pack_omissions", "pack", "derived_artifact_restore"),
     ("pack_records", "pack", "derived_artifact_restore"),

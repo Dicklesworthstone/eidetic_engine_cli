@@ -5865,6 +5865,7 @@ fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> Consensu
         used_tokens,
         items,
         evidence_items: Vec::new(),
+        rule_items: Vec::new(),
         omitted: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile: ContextPackProfile::Balanced,

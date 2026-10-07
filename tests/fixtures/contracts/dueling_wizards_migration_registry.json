@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 127,
-  "nextPlannedMigration": 128,
+  "currentLastCompiledMigration": 128,
+  "nextPlannedMigration": 129,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -70,7 +70,8 @@
         "V124": "V124_TIMESTAMP_SPELLING_REPAIR (bd-o22r0 forward-only repair of rows whose timestamp spelling does not match their own column's canonical form)",
         "V125": "V125_SUPERSESSION_REDERIVE (bd-o22r0 re-derives supersession by instant after V123's lexical created_at comparison left two live heads in one chain; V124 could not repair it because migrations run in version order)",
         "V126": "V126_TYPED_PACK_AUXILIARY_IDENTITY (bd-vp087 native omission/impression foreign keys, retained historical replay bytes, and native pack workspace integrity)",
-        "V127": "V127_EVIDENCE_ADMISSION_VERDICTS (bd-reality-core-convergence-1azkt.47; shipped into a slot the registry had reserved for attestation_bundles; write-time evidence admission verdicts bound to the exact row and admission revision; derived, rebuilt by backfill)"
+        "V127": "V127_EVIDENCE_ADMISSION_VERDICTS (bd-reality-core-convergence-1azkt.47; shipped into a slot the registry had reserved for attestation_bundles; write-time evidence admission verdicts bound to the exact row and admission revision; derived, rebuilt by backfill)",
+        "V128": "V128_PACK_RULE_ITEMS (bd-vp087 procedural rules packed under their native RuleId; shipped into a slot the registry had reserved for attestation_bundles)"
       }
     }
   },
@@ -157,16 +158,6 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 128,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
-      "id": "query_miss_ledger",
       "version": 129,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
@@ -176,8 +167,18 @@
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
-      "id": "source_write_stats",
+      "id": "query_miss_ledger",
       "version": 130,
+      "status": "planned",
+      "runtimeRule": "planned_allocation_only",
+      "migrationConstant": "required_before_implemented",
+      "boundaryMigrationEvidence": "required_before_implemented",
+      "backupCoverageEvidence": "required_before_implemented",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "source_write_stats",
+      "version": 131,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -310,8 +311,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 128,
-      "migrationName": "V128_ATTESTATION_BUNDLES",
+      "version": 129,
+      "migrationName": "V129_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -322,8 +323,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 129,
-      "migrationName": "V129_QUERY_MISS_LEDGER",
+      "version": 130,
+      "migrationName": "V130_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -334,8 +335,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 130,
-      "migrationName": "V130_SOURCE_WRITE_STATS",
+      "version": 131,
+      "migrationName": "V131_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

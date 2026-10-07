@@ -19,6 +19,7 @@ const PACK_TABLES: &[&str] = &[
     "pack_records",
     "pack_items",
     "pack_evidence_items",
+    "pack_rule_items",
     "pack_omissions",
     "pack_candidate_impressions",
     "pack_baselines",
@@ -132,6 +133,9 @@ impl Rows {
                 &(&row.pack_id, &row.evidence_id),
                 row,
             )?;
+        }
+        for row in &history.rule_items {
+            self.insert("pack_rule_items", &(&row.pack_id, &row.rule_id), row)?;
         }
         for row in &history.omissions {
             self.insert("pack_omissions", &(&row.pack_id, &row.memory_id), row)?;

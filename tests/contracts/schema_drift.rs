@@ -1903,6 +1903,7 @@ mod tests {
         "pack_items",
         "pack_omissions",
         "pack_records",
+        "pack_rule_items",
         "plan_recipes",
         "preflight_bypass_tokens",
         "primer_cache",

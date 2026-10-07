@@ -11361,6 +11361,62 @@ END;
     "blake3:v127_evidence_admission_verdicts_2026_10_07",
 );
 
+/// Procedural rules packed under their native `RuleId` (bd-vp087, ADR 0085).
+///
+/// A sourceless rule is searchable but had no pack identity: the pack path
+/// could only hydrate a rule through one of its source memories. Mirrors
+/// `pack_evidence_items` (V100): the source FK is RESTRICT, so deleting a rule
+/// cannot silently rewrite historical pack provenance, and a trigger keeps the
+/// rule inside the pack's workspace.
+pub const V128_PACK_RULE_ITEMS: Migration = Migration::new(
+    128,
+    "pack_rule_items",
+    r#"
+CREATE TABLE pack_rule_items (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    rule_id TEXT NOT NULL REFERENCES procedural_rules(id) ON DELETE RESTRICT
+        CHECK (rule_id GLOB 'rule_*' AND length(rule_id) = 31),
+    entity_revision TEXT NOT NULL CHECK (
+        length(entity_revision) = 71 AND substr(entity_revision, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section = 'procedural_rules'),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    provenance_json TEXT NOT NULL CHECK (length(trim(provenance_json)) > 0),
+    trust_class TEXT NOT NULL CHECK (length(trim(trust_class)) > 0),
+    trust_subclass TEXT,
+    PRIMARY KEY (pack_id, rule_id),
+    UNIQUE (pack_id, rank)
+);
+
+CREATE INDEX idx_pack_rule_items_rule ON pack_rule_items(rule_id);
+
+CREATE TRIGGER pack_rule_items_workspace_insert
+BEFORE INSERT ON pack_rule_items
+WHEN NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+
+CREATE TRIGGER pack_rule_items_workspace_update
+BEFORE UPDATE OF pack_id, rule_id ON pack_rule_items
+WHEN NOT EXISTS (
+    SELECT 1 FROM procedural_rules r JOIN pack_records p ON p.id = NEW.pack_id
+    WHERE r.id = NEW.rule_id AND r.workspace_id = p.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+"#,
+    "blake3:v128_pack_rule_items_2026_10_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11490,6 +11546,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V125_SUPERSESSION_REDERIVE,
     V126_TYPED_PACK_AUXILIARY_IDENTITY,
     V127_EVIDENCE_ADMISSION_VERDICTS,
+    V128_PACK_RULE_ITEMS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14776,6 +14833,57 @@ struct PreparedEvidenceSecurity {
     pack_eligibility: &'static str,
 }
 
+const EVIDENCE_INSERT_VALUE_COUNT: usize = 27;
+const EVIDENCE_INSERT_BATCH_ROWS: usize = PACK_INSERT_MAX_BIND_PARAMS / EVIDENCE_INSERT_VALUE_COUNT;
+const EVIDENCE_VERDICT_INSERT_VALUE_COUNT: usize = 5;
+const EVIDENCE_VERDICT_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / EVIDENCE_VERDICT_INSERT_VALUE_COUNT;
+
+/// Bind values for one `evidence_spans` row, in column order.
+fn evidence_row_params(span: &StoredEvidenceSpan) -> [Value; EVIDENCE_INSERT_VALUE_COUNT] {
+    [
+        Value::Text(span.id.clone()),
+        Value::Text(span.workspace_id.clone()),
+        Value::Text(span.session_id.clone()),
+        span.memory_id
+            .as_ref()
+            .map_or(Value::Null, |memory| Value::Text(memory.clone())),
+        Value::Text(span.cass_span_id.clone()),
+        Value::Text(span.span_kind.clone()),
+        Value::BigInt(i64::from(span.start_line)),
+        Value::BigInt(i64::from(span.end_line)),
+        span.start_byte
+            .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+        span.end_byte
+            .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+        span.role
+            .as_ref()
+            .map_or(Value::Null, |role| Value::Text(role.clone())),
+        Value::Text(span.excerpt.clone()),
+        Value::Text(span.content_hash.clone()),
+        span.metadata_json
+            .as_ref()
+            .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+        Value::Text(span.producer_kind.clone()),
+        Value::BigInt(i64::from(span.screening_version)),
+        Value::Text(span.secret_redaction_status.clone()),
+        Value::Text(span.redaction_classes_json.clone()),
+        Value::Text(span.instruction_risk.clone()),
+        Value::Text(span.search_eligibility.clone()),
+        Value::Text(span.pack_eligibility.clone()),
+        Value::BigInt(i64::from(span.canonical_provenance_revision)),
+        span.canonical_excerpt_hash
+            .as_ref()
+            .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+        Value::BigInt(i64::from(span.security_policy_epoch)),
+        span.upstream_ref_hash
+            .as_ref()
+            .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+        Value::Text(span.created_at.clone()),
+        Value::Text(span.updated_at.clone()),
+    ]
+}
+
 fn admission_verdict_binding(mut hasher: blake3::Hasher, admitted: bool) -> String {
     hasher.update(if admitted { b"admitted" } else { b"denied\0\0" });
     format!("blake3:{}", hasher.finalize().to_hex())
@@ -15183,22 +15291,6 @@ impl DbConnection {
         self.insert_prepared_evidence_span(id, input, prepared, &session)
     }
 
-    /// [`Self::insert_evidence_span`] for a caller that already read the live
-    /// session row inside its own transaction, such as a bulk import writing
-    /// every span of one session. The same session and workspace checks run
-    /// against that row instead of re-reading it once per span
-    /// (bd-reality-core-convergence-1azkt.48); the schema trigger enforces
-    /// the same join again at insert.
-    pub fn insert_evidence_span_in_session(
-        &self,
-        id: &str,
-        input: &CreateEvidenceSpanInput,
-        session: &StoredSession,
-    ) -> Result<()> {
-        let prepared = prepare_evidence_security(input)?;
-        self.insert_prepared_evidence_span(id, input, prepared, session)
-    }
-
     fn insert_prepared_evidence_span(
         &self,
         id: &str,
@@ -15206,6 +15298,38 @@ impl DbConnection {
         prepared: PreparedEvidenceSecurity,
         session: &StoredSession,
     ) -> Result<()> {
+        let span = self.build_evidence_row(id, input, prepared, session)?;
+        self.insert_evidence_row(&span)
+    }
+
+    /// Insert many spans of one session through the canonical screening
+    /// boundary with multi-row statements (bd-reality-core-convergence-1azkt.48).
+    ///
+    /// Every row is screened and checked exactly as [`Self::insert_evidence_span`]
+    /// would; only the statement count changes. A failing row fails the batch,
+    /// so callers run this inside the transaction that owns the session.
+    pub fn insert_evidence_spans_in_session(
+        &self,
+        spans: &[(String, CreateEvidenceSpanInput)],
+        session: &StoredSession,
+    ) -> Result<()> {
+        let rows = spans
+            .iter()
+            .map(|(id, input)| {
+                let prepared = prepare_evidence_security(input)?;
+                self.build_evidence_row(id, input, prepared, session)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.insert_evidence_rows(&rows)
+    }
+
+    fn build_evidence_row(
+        &self,
+        id: &str,
+        input: &CreateEvidenceSpanInput,
+        prepared: PreparedEvidenceSecurity,
+        session: &StoredSession,
+    ) -> Result<StoredEvidenceSpan> {
         if session.id != input.session_id {
             return Err(malformed_evidence_input(
                 "evidence session does not match the supplied session row",
@@ -15256,7 +15380,7 @@ impl DbConnection {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.insert_evidence_row(&span)
+        Ok(span)
     }
 
     /// Restore one already-screened evidence row exactly as captured.
@@ -15295,55 +15419,28 @@ impl DbConnection {
     /// inside the caller's transaction, so reads reuse the decision instead
     /// of re-screening the excerpt (bd-reality-core-convergence-1azkt.47).
     fn insert_evidence_row(&self, span: &StoredEvidenceSpan) -> Result<()> {
-        self.execute_for(
-            DbOperation::Execute,
-            "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
-            &[
-                Value::Text(span.id.clone()),
-                Value::Text(span.workspace_id.clone()),
-                Value::Text(span.session_id.clone()),
-                span.memory_id
-                    .as_ref()
-                    .map_or(Value::Null, |memory| Value::Text(memory.clone())),
-                Value::Text(span.cass_span_id.clone()),
-                Value::Text(span.span_kind.clone()),
-                Value::BigInt(i64::from(span.start_line)),
-                Value::BigInt(i64::from(span.end_line)),
-                span.start_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                span.end_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                span.role
-                    .as_ref()
-                    .map_or(Value::Null, |role| Value::Text(role.clone())),
-                Value::Text(span.excerpt.clone()),
-                Value::Text(span.content_hash.clone()),
-                span.metadata_json
-                    .as_ref()
-                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
-                Value::Text(span.producer_kind.clone()),
-                Value::BigInt(i64::from(span.screening_version)),
-                Value::Text(span.secret_redaction_status.clone()),
-                Value::Text(span.redaction_classes_json.clone()),
-                Value::Text(span.instruction_risk.clone()),
-                Value::Text(span.search_eligibility.clone()),
-                Value::Text(span.pack_eligibility.clone()),
-                Value::BigInt(i64::from(span.canonical_provenance_revision)),
-                span.canonical_excerpt_hash
-                    .as_ref()
-                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                Value::BigInt(i64::from(span.security_policy_epoch)),
-                span.upstream_ref_hash
-                    .as_ref()
-                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                Value::Text(span.created_at.clone()),
-                Value::Text(span.updated_at.clone()),
-            ],
-        )?;
-        if span.is_search_admission_candidate() {
-            self.record_evidence_admission_verdict(span)?;
+        self.insert_evidence_rows(std::slice::from_ref(span))
+    }
+
+    /// Multi-row form of [`Self::insert_evidence_row`]: spans in chunks under
+    /// the bind-parameter cap, then the candidates' verdicts.
+    fn insert_evidence_rows(&self, spans: &[StoredEvidenceSpan]) -> Result<()> {
+        for chunk in spans.chunks(EVIDENCE_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at) VALUES ",
+            );
+            append_multi_row_placeholders(&mut sql, chunk.len(), EVIDENCE_INSERT_VALUE_COUNT);
+            let mut params = Vec::with_capacity(chunk.len() * EVIDENCE_INSERT_VALUE_COUNT);
+            for span in chunk {
+                params.extend(evidence_row_params(span));
+            }
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
-        Ok(())
+        let candidates = spans
+            .iter()
+            .filter(|span| span.is_search_admission_candidate())
+            .collect::<Vec<_>>();
+        self.record_evidence_admission_verdicts(&candidates)
     }
 
     /// Whether this database carries V127's verdict table. A connection on an
@@ -15513,6 +15610,38 @@ impl DbConnection {
             }
         }
         Ok(recorded_count)
+    }
+
+    /// Persist current verdicts for many stored rows with multi-row upserts.
+    fn record_evidence_admission_verdicts(&self, spans: &[&StoredEvidenceSpan]) -> Result<()> {
+        if spans.is_empty() || !self.admission_verdicts_available()? {
+            return Ok(());
+        }
+        let decided_at = Utc::now().to_rfc3339();
+        for chunk in spans.chunks(EVIDENCE_VERDICT_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT INTO evidence_admission_verdicts (evidence_span_id, verdict, verdict_binding, verdict_revision, decided_at) VALUES ",
+            );
+            append_multi_row_placeholders(
+                &mut sql,
+                chunk.len(),
+                EVIDENCE_VERDICT_INSERT_VALUE_COUNT,
+            );
+            sql.push_str(" ON CONFLICT(evidence_span_id) DO UPDATE SET verdict = excluded.verdict, verdict_binding = excluded.verdict_binding, verdict_revision = excluded.verdict_revision, decided_at = excluded.decided_at");
+            let mut params = Vec::with_capacity(chunk.len() * EVIDENCE_VERDICT_INSERT_VALUE_COUNT);
+            for span in chunk {
+                let (admitted, binding) = span.admission_verdict_record();
+                params.extend([
+                    Value::Text(span.id.clone()),
+                    Value::Text(if admitted { "admitted" } else { "denied" }.to_owned()),
+                    Value::Text(binding),
+                    Value::BigInt(i64::from(EVIDENCE_ADMISSION_VERDICT_REVISION)),
+                    Value::Text(decided_at.clone()),
+                ]);
+            }
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
+        Ok(())
     }
 
     /// Persist the current row-level admission verdict for one stored row.
@@ -32133,6 +32262,41 @@ pub struct CreatePackEvidenceItemInput {
     pub trust_subclass: Option<String>,
 }
 
+/// Input for one procedural rule packed under its native identity (bd-vp087).
+#[derive(Debug, Clone)]
+pub struct CreatePackRuleItemInput {
+    pub pack_id: String,
+    pub rule_id: String,
+    pub entity_revision: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
+}
+
+/// A stored `pack_rule_items` row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredPackRuleItem {
+    pub pack_id: String,
+    pub rule_id: String,
+    pub entity_revision: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
+}
+
 /// A stored `pack_evidence_items` row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32230,6 +32394,9 @@ pub(crate) struct StoredPackHistory {
     pub record: StoredPackRecord,
     pub items: Vec<StoredPackItem>,
     pub evidence_items: Vec<StoredPackEvidenceItem>,
+    /// Absent from histories captured before V128.
+    #[serde(default)]
+    pub rule_items: Vec<StoredPackRuleItem>,
     pub omissions: Vec<StoredPackOmission>,
     pub impressions: Vec<StoredImpression>,
     pub baselines: Vec<StoredPackBaseline>,
@@ -32301,6 +32468,26 @@ impl StoredPackHistory {
             .collect()
     }
 
+    fn rule_inputs(&self) -> Vec<CreatePackRuleItemInput> {
+        self.rule_items
+            .iter()
+            .map(|item| CreatePackRuleItemInput {
+                pack_id: item.pack_id.clone(),
+                rule_id: item.rule_id.clone(),
+                entity_revision: item.entity_revision.clone(),
+                rank: item.rank,
+                section: item.section.clone(),
+                estimated_tokens: item.estimated_tokens,
+                relevance: item.relevance,
+                utility: item.utility,
+                why: item.why.clone(),
+                provenance_json: item.provenance_json.clone(),
+                trust_class: item.trust_class.clone(),
+                trust_subclass: item.trust_subclass.clone(),
+            })
+            .collect()
+    }
+
     fn omission_inputs(&self) -> Vec<CreatePackOmissionInput> {
         self.omissions
             .iter()
@@ -32317,10 +32504,12 @@ impl StoredPackHistory {
     pub(crate) fn validate(&self) -> Result<()> {
         let items = self.item_inputs();
         let evidence = self.evidence_inputs();
+        let rules = self.rule_inputs();
         validate_pack_record_input(
             &self.record.id,
             &self.record_input(),
             &items,
+            &rules,
             &evidence,
             &self.omission_inputs(),
             &self.record.created_at,
@@ -32340,6 +32529,7 @@ impl StoredPackHistory {
                 let expected = items
                     .iter()
                     .map(pack_ledger_selected_item)
+                    .chain(rules.iter().map(pack_ledger_selected_rule_item))
                     .chain(evidence.iter().map(pack_ledger_selected_evidence_item))
                     .map(|item| (item.rank, item))
                     .collect::<BTreeMap<_, _>>();
@@ -32486,6 +32676,12 @@ impl StoredPackHistory {
                     .iter()
                     .find(|item| item.rank == selected.rank)
                     .map(|item| item.why.as_str())
+                    .or_else(|| {
+                        self.rule_items
+                            .iter()
+                            .find(|item| item.rank == selected.rank)
+                            .map(|item| item.why.as_str())
+                    })
                     .or_else(|| {
                         self.evidence_items
                             .iter()
@@ -32929,6 +33125,7 @@ fn validate_pack_record_input(
     id: &str,
     input: &CreatePackRecordInput,
     items: &[CreatePackItemInput],
+    rule_items: &[CreatePackRuleItemInput],
     evidence_items: &[CreatePackEvidenceItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
@@ -32963,13 +33160,16 @@ fn validate_pack_record_input(
             message: "pack created_at must be RFC 3339".to_owned(),
         });
     }
-    let item_count =
-        u32::try_from(items.len().saturating_add(evidence_items.len())).map_err(|_| {
-            DbError::MalformedRow {
-                operation: DbOperation::Execute,
-                message: "pack item length does not fit u32".to_owned(),
-            }
-        })?;
+    let item_count = u32::try_from(
+        items
+            .len()
+            .saturating_add(rule_items.len())
+            .saturating_add(evidence_items.len()),
+    )
+    .map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: "pack item length does not fit u32".to_owned(),
+    })?;
     if item_count != input.item_count {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
@@ -32989,6 +33189,11 @@ fn validate_pack_record_input(
     let selected_token_sum = items
         .iter()
         .map(|item| u64::from(item.estimated_tokens))
+        .chain(
+            rule_items
+                .iter()
+                .map(|item| u64::from(item.estimated_tokens)),
+        )
         .chain(
             evidence_items
                 .iter()
@@ -33021,6 +33226,32 @@ fn validate_pack_record_input(
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
             message: "selected evidence item pack_id does not match containing pack".to_owned(),
+        });
+    }
+    let selected_rule_ids = rule_items
+        .iter()
+        .map(|item| item.rule_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected_rule_ids.len() != rule_items.len()
+        || rule_items.iter().any(|item| {
+            item.pack_id != id
+                || !is_canonical_rule_id(&item.rule_id)
+                || !is_canonical_blake3_hash(&item.entity_revision)
+                || item.section != "procedural_rules"
+                || item.estimated_tokens == 0
+                || !item.relevance.is_finite()
+                || !(0.0..=1.0).contains(&item.relevance)
+                || !item.utility.is_finite()
+                || !(0.0..=1.0).contains(&item.utility)
+                || item.why.trim().is_empty()
+                || !is_pack_trust_class(&item.trust_class)
+                || item.trust_subclass.as_deref() != Some("procedural_rule")
+                || serde_json::from_str::<serde_json::Value>(&item.provenance_json).is_err()
+        })
+    {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack rule items require unique canonical identities, revisions, the procedural_rules section, advisory rule trust, and provenance".to_owned(),
         });
     }
     if omissions.iter().any(|omission| omission.pack_id != id) {
@@ -33061,6 +33292,7 @@ fn validate_pack_record_input(
     let mut selected_ranks = items
         .iter()
         .map(|item| item.rank)
+        .chain(rule_items.iter().map(|item| item.rank))
         .chain(evidence_items.iter().map(|item| item.rank))
         .collect::<Vec<_>>();
     selected_ranks.sort_unstable();
@@ -33162,6 +33394,12 @@ fn is_pack_section(value: &str) -> bool {
         value,
         "procedural_rules" | "decisions" | "failures" | "evidence" | "artifacts"
     )
+}
+
+fn is_canonical_rule_id(value: &str) -> bool {
+    value.len() == 31
+        && value.starts_with("rule_")
+        && value[5..].bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn is_canonical_evidence_id(value: &str) -> bool {
@@ -33280,7 +33518,7 @@ impl DbConnection {
         let (ledger_json, ledger_hash) = if inject_reference_issue {
             (None, None)
         } else {
-            validate_pack_record_input(id, input, &[], &[], &[], &created_at)?;
+            validate_pack_record_input(id, input, &[], &[], &[], &[], &created_at)?;
             let (ledger_json, ledger_hash) =
                 build_pack_selection_ledger(id, input, &[], &[], &[], &created_at, None)?;
             (Some(ledger_json), Some(ledger_hash))
@@ -33359,8 +33597,17 @@ impl DbConnection {
             operation: DbOperation::Execute,
             message: format!("pack record created_at must be RFC 3339: {error}"),
         })?;
-        self.insert_pack_record_with_timings_at(id, input, items, &[], omissions, created_at, None)
-            .map(|_| ())
+        self.insert_pack_record_with_timings_at(
+            id,
+            input,
+            items,
+            &[],
+            &[],
+            omissions,
+            created_at,
+            None,
+        )
+        .map(|_| ())
     }
 
     /// Insert a pack record with its items and omissions, returning diagnostic timings.
@@ -33404,11 +33651,37 @@ impl DbConnection {
         omissions: &[CreatePackOmissionInput],
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
+        self.insert_pack_record_with_native_items(
+            id,
+            input,
+            items,
+            &[],
+            evidence_items,
+            omissions,
+            task_lens,
+        )
+    }
+
+    /// Insert a pack record whose selected entities may include procedural
+    /// rules and evidence spans under their native identities (ADR 0085). All
+    /// children and the replay ledger commit atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_pack_record_with_native_items(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        rule_items: &[CreatePackRuleItemInput],
+        evidence_items: &[CreatePackEvidenceItemInput],
+        omissions: &[CreatePackOmissionInput],
+        task_lens: Option<&CreatePackTaskLensInput>,
+    ) -> Result<PackRecordInsertTimings> {
         let now = Utc::now().to_rfc3339();
         self.insert_pack_record_with_timings_at(
             id,
             input,
             items,
+            rule_items,
             evidence_items,
             omissions,
             &now,
@@ -33416,17 +33689,27 @@ impl DbConnection {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_pack_record_with_timings_at(
         &self,
         id: &str,
         input: &CreatePackRecordInput,
         items: &[CreatePackItemInput],
+        rule_items: &[CreatePackRuleItemInput],
         evidence_items: &[CreatePackEvidenceItemInput],
         omissions: &[CreatePackOmissionInput],
         created_at: &str,
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
-        validate_pack_record_input(id, input, items, evidence_items, omissions, created_at)?;
+        validate_pack_record_input(
+            id,
+            input,
+            items,
+            rule_items,
+            evidence_items,
+            omissions,
+            created_at,
+        )?;
         if task_lens.is_some_and(|lens| {
             lens.id.trim().is_empty()
                 || lens.version == 0
@@ -33441,10 +33724,11 @@ impl DbConnection {
         }
         let mut timings = PackRecordInsertTimings::default();
         let ledger_start = Instant::now();
-        let (ledger_json, ledger_hash) = build_pack_selection_ledger(
+        let (ledger_json, ledger_hash) = build_pack_selection_ledger_with_native_items(
             id,
             input,
             items,
+            rule_items,
             evidence_items,
             omissions,
             created_at,
@@ -33462,6 +33746,7 @@ impl DbConnection {
         self.with_transaction(|| {
             self.validate_pack_memory_workspace_membership(input, items, omissions)?;
             self.validate_pack_evidence_workspace_membership(input, evidence_items)?;
+            self.validate_pack_rule_workspace_membership(input, rule_items)?;
             let record_start = Instant::now();
             self.insert_pack_record_row(
                 id,
@@ -33474,6 +33759,7 @@ impl DbConnection {
 
             let item_start = Instant::now();
             self.insert_pack_items(items)?;
+            self.insert_pack_rule_items(rule_items)?;
             self.insert_pack_evidence_items(evidence_items)?;
             timings.item_writes = item_start.elapsed();
 
@@ -33778,6 +34064,57 @@ impl DbConnection {
             self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
 
+        Ok(())
+    }
+
+    fn validate_pack_rule_workspace_membership(
+        &self,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackRuleItemInput],
+    ) -> Result<()> {
+        for item in items {
+            let rule =
+                self.get_procedural_rule(&item.rule_id)?
+                    .ok_or_else(|| DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "pack references a missing procedural rule".to_owned(),
+                    })?;
+            if rule.workspace_id != input.workspace_id
+                || rule.tombstoned_at.is_some()
+                || rule.superseded_by.is_some()
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack rule is retired or belongs to a different workspace".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_pack_rule_items(&self, items: &[CreatePackRuleItemInput]) -> Result<()> {
+        for item in items {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO pack_rule_items (pack_id, rule_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class, trust_subclass) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                &[
+                    Value::Text(item.pack_id.clone()),
+                    Value::Text(item.rule_id.clone()),
+                    Value::Text(item.entity_revision.clone()),
+                    Value::BigInt(i64::from(item.rank)),
+                    Value::Text(item.section.clone()),
+                    Value::BigInt(i64::from(item.estimated_tokens)),
+                    Value::Float(item.relevance),
+                    Value::Float(item.utility),
+                    Value::Text(item.why.clone()),
+                    Value::Text(item.provenance_json.clone()),
+                    Value::Text(item.trust_class.clone()),
+                    item.trust_subclass
+                        .as_ref()
+                        .map_or(Value::Null, |subclass| Value::Text(subclass.clone())),
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -34150,6 +34487,7 @@ impl DbConnection {
             record,
             items: self.get_pack_items(id)?,
             evidence_items: self.get_pack_evidence_items(id)?,
+            rule_items: self.get_pack_rule_items(id)?,
             omissions,
             impressions: self.list_impressions_for_pack(id)?,
             baselines,
@@ -34178,8 +34516,19 @@ impl DbConnection {
         let input = history.record_input();
         let items = history.item_inputs();
         let evidence = history.evidence_inputs();
+        let rules = history.rule_inputs();
         let omissions = history.omission_inputs();
         self.validate_pack_memory_workspace_membership(&input, &items, &omissions)?;
+        for item in &rules {
+            let rule = self
+                .get_procedural_rule(&item.rule_id)?
+                .ok_or_else(|| pack_recovery_error("recovered pack rule is missing"))?;
+            if rule.workspace_id != input.workspace_id {
+                return Err(pack_recovery_error(
+                    "recovered pack rule belongs to a different workspace",
+                ));
+            }
+        }
         for item in &evidence {
             let span = self
                 .get_evidence_span(&item.evidence_id)?
@@ -34198,6 +34547,7 @@ impl DbConnection {
             history.record.ledger_hash.as_deref(),
         )?;
         self.insert_pack_items(&items)?;
+        self.insert_pack_rule_items(&rules)?;
         self.insert_pack_evidence_items(&evidence)?;
         self.insert_pack_omissions(&omissions)?;
         // Replay the recorded rows with strict inserts. A constraint failure
@@ -34231,6 +34581,16 @@ impl DbConnection {
                         Value::Text(baseline.pack_hash.clone()), Value::Text(baseline.created_at.clone())])?;
         }
         Ok(())
+    }
+
+    /// Get procedural rules packed under their native identity.
+    pub fn get_pack_rule_items(&self, pack_id: &str) -> Result<Vec<StoredPackRuleItem>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_id, rule_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class, trust_subclass FROM pack_rule_items WHERE pack_id = ?1 ORDER BY rank ASC",
+            &[Value::Text(pack_id.to_owned())],
+        )?;
+        rows.iter().map(stored_pack_rule_item_from_row).collect()
     }
 
     /// Get direct imported-evidence items for a pack.
@@ -34596,10 +34956,34 @@ fn build_pack_selection_ledger(
     created_at: &str,
     task_lens: Option<&CreatePackTaskLensInput>,
 ) -> Result<(String, String)> {
-    let (ledger_json, ledger_hash) = build_uncompressed_pack_selection_ledger(
+    build_pack_selection_ledger_with_native_items(
         id,
         input,
         items,
+        &[],
+        evidence_items,
+        omissions,
+        created_at,
+        task_lens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pack_selection_ledger_with_native_items(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    rule_items: &[CreatePackRuleItemInput],
+    evidence_items: &[CreatePackEvidenceItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+    task_lens: Option<&CreatePackTaskLensInput>,
+) -> Result<(String, String)> {
+    let (ledger_json, ledger_hash) = build_uncompressed_pack_selection_ledger_with_native_items(
+        id,
+        input,
+        items,
+        rule_items,
         evidence_items,
         omissions,
         created_at,
@@ -34610,6 +34994,7 @@ fn build_pack_selection_ledger(
     Ok((stored_ledger_json, ledger_hash))
 }
 
+#[cfg(test)]
 fn build_uncompressed_pack_selection_ledger(
     id: &str,
     input: &CreatePackRecordInput,
@@ -34619,9 +35004,33 @@ fn build_uncompressed_pack_selection_ledger(
     created_at: &str,
     task_lens: Option<&CreatePackTaskLensInput>,
 ) -> Result<(String, String)> {
+    build_uncompressed_pack_selection_ledger_with_native_items(
+        id,
+        input,
+        items,
+        &[],
+        evidence_items,
+        omissions,
+        created_at,
+        task_lens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_uncompressed_pack_selection_ledger_with_native_items(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    rule_items: &[CreatePackRuleItemInput],
+    evidence_items: &[CreatePackEvidenceItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+    task_lens: Option<&CreatePackTaskLensInput>,
+) -> Result<(String, String)> {
     let mut selected_items = items
         .iter()
         .map(pack_ledger_selected_item)
+        .chain(rule_items.iter().map(pack_ledger_selected_rule_item))
         .chain(
             evidence_items
                 .iter()
@@ -34810,6 +35219,38 @@ fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedIt
         attempt_family_multiplicity: item.attempt_family_multiplicity.clone(),
         why,
         diversity_key: item.diversity_key.clone(),
+        trust_class: item.trust_class.clone(),
+        trust_subclass: item.trust_subclass.clone(),
+        provenance,
+        redaction_classes: redaction_classes.into_iter().collect(),
+        freshness: "unavailable".to_owned(),
+    }
+}
+
+fn pack_ledger_selected_rule_item(item: &CreatePackRuleItemInput) -> PackLedgerSelectedItem {
+    let why = pack_ledger_text_record(&item.why);
+    let provenance = pack_ledger_provenance_summary(&item.provenance_json);
+    let mut redaction_classes = BTreeSet::new();
+    redaction_classes.extend(why.redaction_reasons.iter().cloned());
+    redaction_classes.extend(provenance.redaction_reasons.iter().cloned());
+
+    PackLedgerSelectedItem {
+        memory_id: String::new(),
+        evidence_span_id: String::new(),
+        entity_kind: "rule".to_owned(),
+        entity_id: item.rule_id.clone(),
+        entity_revision: item.entity_revision.clone(),
+        rank: item.rank,
+        section: item.section.clone(),
+        estimated_tokens: item.estimated_tokens,
+        scores: PackLedgerScoreComponents {
+            relevance: item.relevance,
+            utility: item.utility,
+            combined_score: None,
+        },
+        attempt_family_multiplicity: None,
+        why,
+        diversity_key: None,
         trust_class: item.trust_class.clone(),
         trust_subclass: item.trust_subclass.clone(),
         provenance,
@@ -35391,6 +35832,14 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
                     && item.entity_id == item.evidence_span_id
                     && is_canonical_blake3_hash(&item.entity_revision)
                     && item.trust_class == "cass_evidence"
+            }
+            "rule" => {
+                item.memory_id.is_empty()
+                    && item.evidence_span_id.is_empty()
+                    && is_canonical_rule_id(&item.entity_id)
+                    && is_canonical_blake3_hash(&item.entity_revision)
+                    && item.section == "procedural_rules"
+                    && item.trust_subclass.as_deref() == Some("procedural_rule")
             }
             _ => false,
         };
@@ -36128,6 +36577,23 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
         trust_class: required_text(row, offset + 10, DbOperation::Query, "trust_class")?
             .to_string(),
         trust_subclass: optional_text(row, offset + 11)?.map(str::to_string),
+    })
+}
+
+fn stored_pack_rule_item_from_row(row: &Row) -> Result<StoredPackRuleItem> {
+    Ok(StoredPackRuleItem {
+        pack_id: required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned(),
+        rule_id: required_text(row, 1, DbOperation::Query, "rule_id")?.to_owned(),
+        entity_revision: required_text(row, 2, DbOperation::Query, "entity_revision")?.to_owned(),
+        rank: required_u32(row, 3, DbOperation::Query, "rank")?,
+        section: required_text(row, 4, DbOperation::Query, "section")?.to_owned(),
+        estimated_tokens: required_u32(row, 5, DbOperation::Query, "estimated_tokens")?,
+        relevance: required_f64(row, 6, DbOperation::Query, "relevance")? as f32,
+        utility: required_f64(row, 7, DbOperation::Query, "utility")? as f32,
+        why: required_text(row, 8, DbOperation::Query, "why")?.to_owned(),
+        provenance_json: required_text(row, 9, DbOperation::Query, "provenance_json")?.to_owned(),
+        trust_class: required_text(row, 10, DbOperation::Query, "trust_class")?.to_owned(),
+        trust_subclass: optional_text(row, 11)?.map(str::to_owned),
     })
 }
 

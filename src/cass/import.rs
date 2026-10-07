@@ -875,13 +875,20 @@ fn persist_session_import_if_absent(
                     message: "imported session row is missing inside its own transaction"
                         .to_owned(),
                 })?;
+        // One screened multi-row write per batch instead of one INSERT per
+        // span (bd-reality-core-convergence-1azkt.48).
+        let rows = spans
+            .iter()
+            .map(|span| {
+                (
+                    stable_evidence_id(&session_id, &span.cass_span_id),
+                    evidence_input(workspace_id, &session_id, span),
+                )
+            })
+            .collect::<Vec<_>>();
+        connection.insert_evidence_spans_in_session(&rows, &stored_session)?;
         for span in spans {
             let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
-            connection.insert_evidence_span_in_session(
-                &evidence_id,
-                &evidence_input(workspace_id, &session_id, span),
-                &stored_session,
-            )?;
             if span.redacted {
                 connection.insert_audit(
                     &stable_cass_redaction_audit_id(&evidence_id),

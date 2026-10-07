@@ -156,10 +156,10 @@ counters on planned-only evidence. The current state:
   `verify_backup`, so `backup_verify` is uncovered for the other two. The
   remaining clauses are owned by `bd-vxrcu`.
 - `source_write_stats` is `not_applicable_not_stored`. Its registry allocation
-  (V130_SOURCE_WRITE_STATS) is only `planned`, and bd-1n0np.8.5 closed on
+  (V131_SOURCE_WRITE_STATS) is only `planned`, and bd-1n0np.8.5 closed on
   computing write-stats from caller-supplied observations, with no table. The
   bd-1n0np.23.2 orchestrator ruling puts it out of that bead's scope; whether
-  to build V130 or withdraw the reservation is an operator decision.
+  to build V131 or withdraw the reservation is an operator decision.
 - The other seven kinds are `not_conformant_evidence_pending` on
   `bd-1n0np.23.2`.
 

@@ -695,3 +695,71 @@ fn candidate_construction_rejects_malformed_rule_trust_and_missing_source() {
         }
     }
 }
+
+/// bd-vp087: a live, admitted rule with no source memory is packed under its
+/// own `RuleId` as advisory guidance instead of being dropped with
+/// `context_rule_hit_unhydrated`. A rule with a source memory keeps hydrating
+/// through it.
+#[test]
+fn sourceless_admitted_rules_take_the_direct_rule_lane() {
+    let f = Fixture::new();
+    let sourced = f.add(1, |_| {}, |_| {});
+    let sourceless = f.add(
+        2,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids.clear();
+            rule.trust_class = "human_explicit".to_owned();
+        },
+    );
+    let search = report(&[&sourced.rule, &sourceless.rule]);
+    let mut degraded = Vec::new();
+    let mut direct_rules = Vec::new();
+    let (candidates, _) = candidates_from_search_for_task_paths(
+        &f.db,
+        &f.workspace,
+        &search,
+        &QueryFilters::default(),
+        false,
+        &mut degraded,
+        None,
+        &[],
+        Some(timestamp(BOUND)),
+        &mut direct_rules,
+    );
+    assert_eq!(sources(&candidates), BTreeSet::from([sourced.memory]));
+    assert_eq!(
+        direct_rules
+            .iter()
+            .map(|(_, projection)| projection.rule().id.clone())
+            .collect::<Vec<_>>(),
+        vec![sourceless.rule.clone()]
+    );
+    assert!(
+        !degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated"),
+        "a sourceless rule is no longer an unhydrated hit: {degraded:?}"
+    );
+
+    let request = ContextRequest::from_query(search.query.clone()).unwrap();
+    let items = direct_rule_pack_candidates(
+        direct_rules,
+        &request,
+        &QueryFilters::default(),
+        true,
+        &mut degraded,
+    );
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item.rule_id, sourceless.rule);
+    assert_eq!(item.section, PackSection::ProceduralRules);
+    assert_eq!(item.content, "Run formatting before release 2.");
+    assert_eq!(item.trust.class, TrustClass::HumanExplicit);
+    assert_eq!(item.trust.posture(), PackTrustPosture::Advisory);
+    assert_eq!(
+        item.provenance[0].rendered().uri,
+        format!("ee://rule/{}", sourceless.rule)
+    );
+    assert!(crate::db::is_canonical_blake3_hash(&item.entity_revision));
+}

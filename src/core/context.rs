@@ -2648,6 +2648,7 @@ pub fn explain_why_not(
         Some(&search_preloaded_memories),
         &task_paths::normalize(&options.workspace_path, &options.task_paths)?,
         request.reference_time,
+        &mut Vec::new(),
     );
 
     let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
@@ -2858,6 +2859,9 @@ async fn run_context_pack_with_performance_inner(
     search_provider: Option<&ContextSearchProvider<'_>>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
+    // The default embedder loads once per process. Whether this request paid
+    // for it decides what the assembly SLO below may charge to the pack.
+    let embedder_resolved_before = crate::core::index::default_search_embedder_resolved();
     control.check()?;
     let mut trace = ContextPerformanceTrace::default();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -3356,6 +3360,7 @@ async fn run_context_pack_with_performance_inner(
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let mut direct_rule_hits = Vec::new();
     let (mut candidates, mut candidate_metrics) = candidates_from_search_for_task_paths(
         read_connection,
         &options.workspace_path,
@@ -3366,6 +3371,7 @@ async fn run_context_pack_with_performance_inner(
         Some(&search_preloaded_memories),
         &request.task_paths,
         request.reference_time,
+        &mut direct_rule_hits,
     );
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
@@ -3703,8 +3709,16 @@ async fn run_context_pack_with_performance_inner(
         &effective_filters,
         &mut degraded,
     );
-    let pagination_info = apply_pagination(
+    let mut rule_candidates = direct_rule_pack_candidates(
+        direct_rule_hits,
+        &request,
+        &effective_filters,
+        output_redaction_enabled,
+        &mut degraded,
+    );
+    let pagination_info = apply_pagination_with_rules(
         &mut candidates,
+        &mut rule_candidates,
         &mut evidence_candidates,
         &options.pagination,
         request.max_results,
@@ -3819,6 +3833,7 @@ async fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
+        append_direct_rule_pack_items(rule_candidates, &request, &mut draft, &mut degraded);
         append_direct_evidence_pack_items(evidence_candidates, &request, &mut draft, &mut degraded);
     }
     if !policy_omissions.is_empty() {
@@ -3846,7 +3861,7 @@ async fn run_context_pack_with_performance_inner(
     push_pack_budget_too_small_degradation(
         &mut degraded,
         draft.selection_audit.candidate_count,
-        draft.items.len().saturating_add(draft.evidence_items.len()),
+        draft.selected_item_count(),
         draft.used_tokens,
         draft.budget.max_tokens(),
         candidate_token_costs_min,
@@ -3933,6 +3948,16 @@ async fn run_context_pack_with_performance_inner(
     // after this point, and `elapsed_ms` answers 0 for an unknown span, so the
     // by-name form would silently restore the same false `within_budget`.
     let observed_elapsed_ms = duration_millis_u64(total_start.elapsed());
+    // bd-reality-core-convergence-1azkt.56: the one-time model load is a
+    // process cold-start cost, not pack assembly. Charging it made
+    // `pack_assembly_elapsed_over_budget` fire on every CLI pack. Everything
+    // else the caller waited for still counts.
+    let model_load_ms = if embedder_resolved_before {
+        0
+    } else {
+        crate::core::index::default_search_embedder_load_duration().map_or(0, duration_millis_u64)
+    };
+    let observed_elapsed_ms = observed_elapsed_ms.saturating_sub(model_load_ms);
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
         let actuals = PackAssemblySloActuals::from_pack_run(
             &draft,
@@ -5521,6 +5546,7 @@ impl PaginationInfo {
     }
 }
 
+#[cfg(test)]
 fn apply_pagination(
     candidates: &mut Vec<PackCandidate>,
     evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
@@ -5528,6 +5554,34 @@ fn apply_pagination(
     max_results: Option<u32>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PaginationInfo {
+    apply_pagination_with_rules(
+        candidates,
+        &mut Vec::new(),
+        evidence_candidates,
+        pagination,
+        max_results,
+        degraded,
+    )
+}
+
+/// Paginate memory, then direct-rule, then direct-evidence candidates as one
+/// ordered sequence.
+fn apply_pagination_with_rules(
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    pagination: &Option<ContextPagination>,
+    max_results: Option<u32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> PaginationInfo {
+    if let Some(max_results) = max_results {
+        let rule_limit = (max_results as usize).saturating_sub(candidates.len());
+        if rule_candidates.len() > rule_limit {
+            let trimmed = rule_candidates.len() - rule_limit;
+            rule_candidates.truncate(rule_limit);
+            push_direct_rule_result_limit_degradation(degraded, trimmed);
+        }
+    }
     let Some(pagination) = pagination else {
         return PaginationInfo::default();
     };
@@ -5550,7 +5604,9 @@ fn apply_pagination(
     // the remaining cap to the native tail before calculating page offsets.
     // Without pagination, selection retains its existing shared result cap.
     if let Some(max_results) = max_results {
-        let evidence_limit = (max_results as usize).saturating_sub(candidates.len());
+        let evidence_limit = (max_results as usize)
+            .saturating_sub(candidates.len())
+            .saturating_sub(rule_candidates.len());
         if evidence_candidates.len() > evidence_limit {
             let trimmed = evidence_candidates.len() - evidence_limit;
             evidence_candidates.truncate(evidence_limit);
@@ -5558,12 +5614,16 @@ fn apply_pagination(
         }
     }
     let memory_total = candidates.len();
-    let total = memory_total.saturating_add(evidence_candidates.len());
+    let rule_total = rule_candidates.len();
+    let total = memory_total
+        .saturating_add(rule_total)
+        .saturating_add(evidence_candidates.len());
     let offset = pagination.offset as usize;
     let limit = pagination.limit as usize;
 
     if offset >= total {
         candidates.clear();
+        rule_candidates.clear();
         evidence_candidates.clear();
         return PaginationInfo {
             applied: true,
@@ -5586,10 +5646,20 @@ fn apply_pagination(
         .take(limit)
         .cloned()
         .collect();
-    *evidence_candidates = evidence_candidates
+    *rule_candidates = rule_candidates
         .iter()
         .skip(offset.saturating_sub(memory_total))
         .take(page_size.saturating_sub(candidates.len()))
+        .cloned()
+        .collect();
+    *evidence_candidates = evidence_candidates
+        .iter()
+        .skip(offset.saturating_sub(memory_total.saturating_add(rule_total)))
+        .take(
+            page_size
+                .saturating_sub(candidates.len())
+                .saturating_sub(rule_candidates.len()),
+        )
         .cloned()
         .collect();
 
@@ -6853,6 +6923,7 @@ fn persist_pack_record_with_pack_id(
     subspans.attempted = true;
     subspans.item_count = ledger_items
         .len()
+        .saturating_add(draft.rule_items.len())
         .saturating_add(draft.evidence_items.len());
     subspans.omission_count = ledger_omissions.len();
 
@@ -6913,6 +6984,7 @@ fn persist_pack_record_with_pack_id(
         item_count: u32::try_from(
             ledger_items
                 .len()
+                .saturating_add(draft.rule_items.len())
                 .saturating_add(draft.evidence_items.len()),
         )
         .unwrap_or(u32::MAX),
@@ -6963,6 +7035,24 @@ fn persist_pack_record_with_pack_id(
             trust_subclass: item.trust.subclass.clone(),
         })
         .collect();
+    let rule_items: Vec<crate::db::CreatePackRuleItemInput> = draft
+        .rule_items
+        .iter()
+        .map(|item| crate::db::CreatePackRuleItemInput {
+            pack_id: pack_id.to_string(),
+            rule_id: item.rule_id.clone(),
+            entity_revision: item.entity_revision.clone(),
+            rank: item.rank,
+            section: item.section.as_str().to_owned(),
+            estimated_tokens: item.estimated_tokens,
+            relevance: item.relevance.into_inner(),
+            utility: item.utility.into_inner(),
+            why: item.why.clone(),
+            provenance_json: pack_item_provenance_json(&item.provenance),
+            trust_class: item.trust.class.as_str().to_owned(),
+            trust_subclass: item.trust.subclass.clone(),
+        })
+        .collect();
     subspans.item_input_build = item_input_start.elapsed();
 
     let omission_input_start = Instant::now();
@@ -6988,10 +7078,11 @@ fn persist_pack_record_with_pack_id(
     });
 
     connection
-        .insert_pack_record_with_timings_task_lens_and_evidence(
+        .insert_pack_record_with_native_items(
             &pack_id.to_string(),
             &input,
             &items,
+            &rule_items,
             &evidence_items,
             &omissions,
             db_task_lens.as_ref(),
@@ -8902,6 +8993,13 @@ fn compute_pack_hash_components(
     for item in &draft.evidence_items {
         hash_pack_hash_evidence_item(&mut items_hasher, item);
     }
+    // Packs without native rules keep their historical hash bytes.
+    if !draft.rule_items.is_empty() {
+        hash_labeled_count(&mut items_hasher, "rule.count", draft.rule_items.len());
+        for item in &draft.rule_items {
+            hash_pack_hash_rule_item(&mut items_hasher, item);
+        }
+    }
 
     let mut omitted_hasher = pack_hash_component_hasher("omitted");
     hash_labeled_count(&mut omitted_hasher, "omission.count", draft.omitted.len());
@@ -9290,6 +9388,37 @@ fn hash_pack_hash_item(hasher: &mut blake3::Hasher, item: &crate::pack::PackDraf
     }
 }
 
+fn hash_pack_hash_rule_item(hasher: &mut blake3::Hasher, item: &crate::pack::PackRuleItem) {
+    hash_labeled_bytes(hasher, "rule.rule_id", item.rule_id.as_bytes());
+    hash_labeled_bytes(
+        hasher,
+        "rule.entity_revision",
+        item.entity_revision.as_bytes(),
+    );
+    hash_labeled_u64(hasher, "rule.rank", u64::from(item.rank));
+    hash_labeled_bytes(hasher, "rule.section", item.section.as_str().as_bytes());
+    hash_labeled_bytes(hasher, "rule.content", item.content.as_bytes());
+    hash_labeled_u64(
+        hasher,
+        "rule.estimated_tokens",
+        u64::from(item.estimated_tokens),
+    );
+    hash_labeled_q20_12(hasher, "rule.relevance", item.relevance.into_inner());
+    hash_labeled_q20_12(hasher, "rule.utility", item.utility.into_inner());
+    hash_labeled_bytes(hasher, "rule.why", item.why.as_bytes());
+    hash_labeled_bytes(
+        hasher,
+        "rule.trust.class",
+        item.trust.class.as_str().as_bytes(),
+    );
+    hash_labeled_optional_bytes(
+        hasher,
+        "rule.trust.subclass",
+        item.trust.subclass.as_deref().map(str::as_bytes),
+    );
+    hash_pack_hash_provenance(hasher, "rule.provenance", &item.provenance);
+}
+
 fn hash_pack_hash_evidence_item(hasher: &mut blake3::Hasher, item: &crate::pack::PackEvidenceItem) {
     for (label, value) in [
         ("evidence.evidence_id", item.evidence_id.as_str()),
@@ -9497,6 +9626,7 @@ fn candidates_from_search_with_metrics(
             .and_then(|validity| validity.reference_time)
             .or(filters.temporal.as_of)
             .map(crate::pack::canonical_pack_reference_time),
+        &mut Vec::new(),
     )
 }
 
@@ -9511,6 +9641,7 @@ fn candidates_from_search_for_task_paths(
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
     targets: &[String],
     reference_time: Option<DateTime<Utc>>,
+    direct_rules: &mut Vec<(SearchHit, RuleIndexProjection)>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let requested = crate::core::workspace::stable_workspace_id(workspace_path);
     let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
@@ -9558,6 +9689,7 @@ fn candidates_from_search_for_task_paths(
         ) {
             continue;
         }
+        let direct_rules_before = direct_rules.len();
         let resolution = match MemoryId::from_str(&hit.doc_id) {
             Ok(id) => Some((id, None)),
             Err(_) => {
@@ -9567,12 +9699,24 @@ fn candidates_from_search_for_task_paths(
                     // memories the same way artifact hits hydrate through
                     // their memory links (bd-3h6bz).
                     .or_else(|| {
-                        rule_linked_memory_id(connection, targets, workspace_path, hit, degraded)
-                            .map(|(memory_id, projection)| {
+                        match rule_linked_memory_id(
+                            connection,
+                            targets,
+                            workspace_path,
+                            hit,
+                            degraded,
+                        ) {
+                            Some(RuleHitResolution::Linked(memory_id, projection)) => {
                                 let rule_id = projection.rule().id.clone();
                                 rules_map.insert(rule_id.clone(), projection);
-                                (memory_id, Some(rule_id))
-                            })
+                                Some((memory_id, Some(rule_id)))
+                            }
+                            Some(RuleHitResolution::Direct(projection)) => {
+                                direct_rules.push((hit.clone(), projection));
+                                None
+                            }
+                            None => None,
+                        }
                     })
                     .or(match evidence_resolution {
                         Some(EvidencePackHitResolution::Linked {
@@ -9583,6 +9727,10 @@ fn candidates_from_search_for_task_paths(
                     })
             }
         };
+        if direct_rules.len() > direct_rules_before {
+            // Selected by the direct-rule lane; not an unresolved memory hit.
+            continue;
+        }
         if resolution.is_some() {
             metrics.resolved_memory_ids = metrics.resolved_memory_ids.saturating_add(1);
         }
@@ -13416,13 +13564,22 @@ fn artifact_linked_memory_id(
 /// document so the candidate's `why` names the applied rule. A matched rule
 /// with no hydratable source memory degrades honestly instead of being
 /// silently dropped: the rule stays retrievable via `ee search`.
+/// How an admitted rule hit enters a pack.
+enum RuleHitResolution {
+    /// Hydrates through one of its source memories (the original v2 path).
+    Linked(MemoryId, RuleIndexProjection),
+    /// No source memory can carry it: it enters under its own `RuleId`
+    /// (bd-vp087, ADR 0085).
+    Direct(RuleIndexProjection),
+}
+
 fn rule_linked_memory_id(
     connection: &DbConnection,
     targets: &[String],
     workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Option<(MemoryId, RuleIndexProjection)> {
+) -> Option<RuleHitResolution> {
     let claims_rule = hit
         .metadata
         .as_ref()
@@ -13613,24 +13770,169 @@ fn rule_linked_memory_id(
                 }
             },
         );
-    if let Some(memory_id) = memory_id {
-        return Some((memory_id, projection));
+    match memory_id {
+        Some(memory_id) => Some(RuleHitResolution::Linked(memory_id, projection)),
+        // A sourceless rule is live, admitted guidance in its own right. It
+        // packs as advisory guidance under its RuleId instead of being
+        // dropped or borrowing a synthetic memory identity.
+        None => Some(RuleHitResolution::Direct(projection)),
     }
+}
 
-    push_degradation(
-        degraded,
-        "context_rule_hit_unhydrated",
-        ContextResponseSeverity::Low,
-        format!(
-            "Rule {} matched search but has no source memories to hydrate into the pack; the rule remains retrievable via ee search.",
-            rule_id
-        ),
-        Some(format!(
-            "ee rule update {} --source-memory <memory-id> --json",
-            rule_id
-        )),
-    );
-    None
+/// Build pack items for admitted rules that no source memory can carry
+/// (bd-vp087). Admission already ran in `rule_linked_memory_id`; this applies
+/// the request's query filters and shapes each rule as advisory guidance
+/// under its own `RuleId`, in search order.
+fn direct_rule_pack_candidates(
+    hits: Vec<(SearchHit, RuleIndexProjection)>,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    output_redaction_enabled: bool,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<crate::pack::PackRuleItem> {
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut filtered_count = 0_usize;
+    for (hit, projection) in hits {
+        let rule = projection.rule();
+        if !seen.insert(rule.id.clone()) {
+            continue;
+        }
+        let Ok(trust_class) = TrustClass::from_str(&rule.trust_class) else {
+            continue;
+        };
+        if !filters.trust.matches(
+            trust_class.as_str(),
+            crate::pack::PackTrustPosture::Advisory.as_str(),
+        ) || !filters.matches_tags(projection.tags())
+            || !temporal_record_matches(&rule.created_at, &rule.updated_at, &filters.temporal)
+        {
+            filtered_count = filtered_count.saturating_add(1);
+            continue;
+        }
+        let (Some(relevance), Some(utility)) = (
+            pack_candidate_relevance_from_search_hit(&hit),
+            unit_score(rule.utility),
+        ) else {
+            continue;
+        };
+        let Ok(provenance_uri) = ProvenanceUri::from_str(&format!("ee://rule/{}", rule.id)) else {
+            continue;
+        };
+        let Ok(provenance) = PackProvenance::new(
+            provenance_uri,
+            format!(
+                "Procedural rule {} ({} maturity, {} scope) with no source memory",
+                rule.id, rule.maturity, rule.scope
+            ),
+        ) else {
+            continue;
+        };
+        let (content, _redactions) = if output_redaction_enabled {
+            crate::pack::redact_pack_item_content(rule.content.clone())
+        } else {
+            (rule.content.clone(), Vec::new())
+        };
+        let mut why = candidate_selection_why(
+            &request.query,
+            hit.source.as_str(),
+            relevance.into_inner(),
+            utility.into_inner(),
+            Some(&rule.id),
+        );
+        why.push_str("; packed under its own rule identity");
+        let applicability = task_paths::scope_explanation(&projection);
+        let applicability_tokens = applicability.as_deref().map_or(0, estimate_tokens_default);
+        if let Some(applicability) = applicability {
+            why.push(' ');
+            why.push_str(&applicability);
+        }
+        let estimated_tokens = estimate_tokens_default(&content)
+            .max(1)
+            .saturating_add(applicability_tokens);
+        items.push(crate::pack::PackRuleItem {
+            rank: 0,
+            rule_id: rule.id.clone(),
+            entity_revision: projection.entity_revision().to_owned(),
+            section: PackSection::ProceduralRules,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance: vec![provenance],
+            why,
+            trust: PackTrustSignal::new(trust_class, Some("procedural_rule".to_owned())),
+        });
+    }
+    if filtered_count > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!("{filtered_count} procedural rule candidates excluded by query filters."),
+            None,
+        );
+    }
+    items
+}
+
+/// Append direct rule items after memory selection and before direct
+/// evidence, within the remaining token budget and result cap.
+fn append_direct_rule_pack_items(
+    candidates: Vec<crate::pack::PackRuleItem>,
+    request: &ContextRequest,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let mut result_limit_count = 0_usize;
+    let mut appended = 0_usize;
+    for mut item in candidates {
+        if request
+            .max_results
+            .is_some_and(|limit| draft.selected_item_count() >= limit as usize)
+        {
+            result_limit_count = result_limit_count.saturating_add(1);
+            continue;
+        }
+        let Some(next_used_tokens) = draft.used_tokens.checked_add(item.estimated_tokens) else {
+            continue;
+        };
+        if next_used_tokens > draft.budget.max_tokens() {
+            continue;
+        }
+        item.rank =
+            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
+        draft.rule_items.push(item);
+        draft.used_tokens = next_used_tokens;
+        appended = appended.saturating_add(1);
+    }
+    if appended > 0 {
+        draft.selection_audit.candidate_count = draft
+            .selection_audit
+            .candidate_count
+            .saturating_add(appended);
+        draft.selection_audit.selected_count = draft.selected_item_count();
+        draft.selection_audit.budget_used = draft.used_tokens;
+        draft.hash = None;
+    }
+    push_direct_rule_result_limit_degradation(degraded, result_limit_count);
+}
+
+fn push_direct_rule_result_limit_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    result_limit_count: usize,
+) {
+    if result_limit_count > 0 {
+        push_degradation(
+            degraded,
+            "context_query_max_results_applied",
+            ContextResponseSeverity::Low,
+            format!(
+                "{result_limit_count} procedural rule candidates excluded by query-file budget.maxResults."
+            ),
+            Some("Increase budget.maxResults in the query file.".to_owned()),
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -13824,9 +14126,10 @@ fn append_direct_evidence_pack_items(
         {
             continue;
         }
-        if request.max_results.is_some_and(|limit| {
-            draft.items.len().saturating_add(draft.evidence_items.len()) >= limit as usize
-        }) {
+        if request
+            .max_results
+            .is_some_and(|limit| draft.selected_item_count() >= limit as usize)
+        {
             result_limit_count = result_limit_count.saturating_add(1);
             continue;
         }
@@ -13837,14 +14140,8 @@ fn append_direct_evidence_pack_items(
         if next_used_tokens > draft.budget.max_tokens() {
             continue;
         }
-        item.rank = u32::try_from(
-            draft
-                .items
-                .len()
-                .saturating_add(draft.evidence_items.len())
-                .saturating_add(1),
-        )
-        .unwrap_or(u32::MAX);
+        item.rank =
+            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
         draft.evidence_items.push(item);
         draft.used_tokens = next_used_tokens;
     }
@@ -13853,8 +14150,7 @@ fn append_direct_evidence_pack_items(
             .selection_audit
             .candidate_count
             .saturating_add(draft.evidence_items.len());
-        draft.selection_audit.selected_count =
-            draft.items.len().saturating_add(draft.evidence_items.len());
+        draft.selection_audit.selected_count = draft.selected_item_count();
         draft.selection_audit.budget_used = draft.used_tokens;
         draft.hash = None;
     }

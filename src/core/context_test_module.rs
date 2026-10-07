@@ -9703,6 +9703,7 @@ pub fn unrelated_context() -> u64 {{
                 )?,
             ],
             evidence_items: Vec::new(),
+            rule_items: Vec::new(),
             omitted: Vec::new(),
             selection_audit: PackSelectionAudit {
                 profile: ContextPackProfile::Balanced,
@@ -10094,6 +10095,7 @@ pub fn unrelated_context() -> u64 {{
             used_tokens: 10,
             items: vec![base_item.clone()],
             evidence_items: Vec::new(),
+            rule_items: Vec::new(),
             omitted: vec![],
             selection_audit: PackSelectionAudit {
                 profile: request.profile,
@@ -10440,6 +10442,7 @@ pub fn unrelated_context() -> u64 {{
                 used_tokens: 8,
                 items: vec![scored],
                 evidence_items: Vec::new(),
+                rule_items: Vec::new(),
                 omitted: Vec::new(),
                 selection_audit: PackSelectionAudit {
                     profile: request.profile,
@@ -10518,6 +10521,7 @@ pub fn unrelated_context() -> u64 {{
             used_tokens: 9,
             items: vec![item],
             evidence_items: Vec::new(),
+            rule_items: Vec::new(),
             omitted: Vec::new(),
             selection_audit: PackSelectionAudit {
                 profile: request.profile,

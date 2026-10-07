@@ -17292,6 +17292,7 @@ fn pack_quality_actuals_for_cases(
             .items
             .iter()
             .map(|item| item.content.as_str())
+            .chain(pack.rule_items.iter().map(|item| item.content.as_str()))
             .chain(pack.evidence_items.iter().map(|item| item.content.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
@@ -43425,6 +43426,14 @@ fn context_delta_snapshot_from_response(
             response
                 .data
                 .pack
+                .rule_items
+                .iter()
+                .map(context_delta_evidence::from_rule_item),
+        )
+        .chain(
+            response
+                .data
+                .pack
                 .evidence_items
                 .iter()
                 .map(context_delta_evidence::from_item),
@@ -43479,6 +43488,9 @@ fn context_delta_item_snapshot_from_pack_ledger(
 ) -> Result<ContextDeltaItemSnapshot, String> {
     if item.get("entityKind").and_then(serde_json::Value::as_str) == Some("evidence_span") {
         return context_delta_evidence::from_ledger(item);
+    }
+    if item.get("entityKind").and_then(serde_json::Value::as_str) == Some("rule") {
+        return context_delta_evidence::from_rule_ledger(item);
     }
     let memory_id = item
         .get("memoryId")
@@ -46914,7 +46926,8 @@ fn redact_public_projection_strings(value: &mut serde_json::Value, field: Option
                 }
                 Some("entityId")
                     if text.parse::<crate::models::MemoryId>().is_ok()
-                        || text.parse::<crate::models::EvidenceId>().is_ok() =>
+                        || text.parse::<crate::models::EvidenceId>().is_ok()
+                        || text.parse::<crate::models::RuleId>().is_ok() =>
                 {
                     Some(text.clone())
                 }
@@ -47110,6 +47123,23 @@ fn diff_item_from_ledger(value: &serde_json::Value) -> Option<PackDiffItem> {
             }
             (
                 crate::pack::PackEntityRef::EvidenceSpan(evidence_id.parse().ok()?),
+                Some(revision.to_owned()),
+            )
+        }
+        "rule" => {
+            let rule_id = value.get("entityId")?.as_str()?;
+            let revision = value.get("entityRevision")?.as_str()?;
+            if ["memoryId", "evidenceSpanId"].iter().any(|field| {
+                value
+                    .get(*field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+            }) || !crate::db::is_canonical_blake3_hash(revision)
+            {
+                return None;
+            }
+            (
+                crate::pack::PackEntityRef::Rule(rule_id.parse().ok()?),
                 Some(revision.to_owned()),
             )
         }
@@ -50907,6 +50937,69 @@ fn resolve_outcome_pack_item_target(
         });
     }
 
+    if selected_item
+        .get("entityKind")
+        .and_then(serde_json::Value::as_str)
+        == Some("rule")
+    {
+        // A procedural rule packed under its own identity (bd-vp087). The
+        // outcome targets the rule itself, never a memory it does not have.
+        let rule_id = selected_item
+            .get("entityId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence has an inconsistent rule identity."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let entity_revision = selected_item
+            .get("entityRevision")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence omitted the rule revision.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let rule = connection
+            .get_procedural_rule(rule_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to verify the packed rule: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence references a missing rule.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if rule.workspace_id != expected_workspace_id {
+            return Err(DomainError::PolicyDenied {
+                message: "Packed rule is not bound to the current workspace.".to_owned(),
+                repair: Some("Inspect the database with `ee doctor --json`.".to_owned()),
+            });
+        }
+        let persisted_items = connection
+            .get_pack_rule_items(&record.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to verify persisted pack rules: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if !persisted_items.iter().any(|persisted| {
+            persisted.rank == item
+                && persisted.rule_id == rule_id
+                && persisted.entity_revision == entity_revision
+        }) {
+            return Err(DomainError::Storage {
+                message: "Verified replay ledger does not match the persisted rule item."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            });
+        }
+        return Ok(ResolvedOutcomePackItemTarget {
+            target_type: "rule".to_owned(),
+            target_id: rule_id.to_owned(),
+            workspace_id: expected_workspace_id,
+            entity_revision: Some(entity_revision.to_owned()),
+        });
+    }
+
     let memory_id = selected_item
         .get("memoryId")
         .and_then(serde_json::Value::as_str)
@@ -51119,10 +51212,10 @@ where
                                 "schema": "ee.outcome.pack_item_evidence.v1",
                                 "packId": pack_id,
                                 "itemRank": item,
-                                "entityKind": if target.target_type == "evidence" {
-                                    "evidence_span"
-                                } else {
-                                    "memory"
+                                "entityKind": match target.target_type.as_str() {
+                                    "evidence" => "evidence_span",
+                                    "rule" => "rule",
+                                    _ => "memory",
                                 },
                                 "entityId": &target.target_id,
                                 "entityRevision": &target.entity_revision,

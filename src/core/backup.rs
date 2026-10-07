@@ -1884,9 +1884,17 @@ pub struct BackupPackHistoryCounts {
     pub records: u64,
     pub items: u64,
     pub evidence_items: u64,
+    /// Procedural rules packed under their native identity (V128).
+    #[serde(skip_serializing_if = "is_zero_count")]
+    pub rule_items: u64,
     pub omissions: u64,
     pub impressions: u64,
     pub baselines: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_count(count: &u64) -> bool {
+    *count == 0
 }
 
 impl BackupPackHistoryCounts {
@@ -1894,6 +1902,7 @@ impl BackupPackHistoryCounts {
         self.records += 1;
         self.items += history.items.len() as u64;
         self.evidence_items += history.evidence_items.len() as u64;
+        self.rule_items += history.rule_items.len() as u64;
         self.omissions += history.omissions.len() as u64;
         self.impressions += history.impressions.len() as u64;
         self.baselines += history.baselines.len() as u64;
@@ -2248,6 +2257,7 @@ fn reconcile_derived_recovery_inventory(
         ("pack_records", pack_counts.records),
         ("pack_items", pack_counts.items),
         ("pack_evidence_items", pack_counts.evidence_items),
+        ("pack_rule_items", pack_counts.rule_items),
         ("pack_omissions", pack_counts.omissions),
         ("pack_candidate_impressions", pack_counts.impressions),
         ("pack_baselines", pack_counts.baselines),
@@ -8133,6 +8143,10 @@ fn collect_pack_history_payloads(
                 .trust_subclass
                 .as_deref()
                 .map(|s| redact_content(s, redaction));
+        }
+        for item in &mut history.rule_items {
+            item.why = redact_content(&item.why, redaction);
+            item.provenance_json = redact_work_history_json(&item.provenance_json, redaction)?;
         }
         for omission in &mut history.omissions {
             omission.memory_id = restored_memory(&omission.memory_id)?;
@@ -19061,6 +19075,7 @@ mod tests {
                     records: 1,
                     items: 1,
                     evidence_items: 0,
+                    rule_items: 0,
                     omissions: 1,
                     impressions: 1,
                     baselines: 3,

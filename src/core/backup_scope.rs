@@ -50,7 +50,7 @@ fn scope(table: &str) -> Option<Scope> {
         "rule_source_memories" | "rule_tags" => child("rule_id", "procedural_rules", "id"),
         "artifact_links" => child("artifact_id", "artifacts", "id"),
         "rationale_trace_links" => child("trace_id", "rationale_traces", "trace_id"),
-        "pack_items" | "pack_evidence_items" | "pack_omissions" => {
+        "pack_items" | "pack_evidence_items" | "pack_rule_items" | "pack_omissions" => {
             child("pack_id", "pack_records", "id")
         }
         "recorder_events" => Scope::Child {

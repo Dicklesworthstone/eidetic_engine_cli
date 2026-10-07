@@ -51,6 +51,9 @@ use super::id::{MemoryId, ParseIdError};
 const ACCEPTED_PROVENANCE_SCHEMES: &str = "cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect, journal, sec-filing, earnings-call, analyst-note, case, pacer, westlaw, ga4, mixpanel, campaign, interview, linear, notion, cve, mitre, incident, pubmed, guideline, emr, crm, salesforce, gong";
 
 const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
+    // Native ee entity references without a dedicated variant, such as a
+    // procedural rule packed under its own identity: `ee://rule/<rule-id>`.
+    "ee",
     "manual",
     "bench-run",
     "git-sha",

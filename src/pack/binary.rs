@@ -460,7 +460,16 @@ pub fn serialize_context_response_binary(
         .iter()
         .map(|item| item.content.as_bytes())
         // Match the canonical batch renderer: memories first, then native
-        // evidence. Evidence-only packs must not become empty binary packs.
+        // rules, then native evidence. Native-only packs must not become empty
+        // binary packs.
+        .chain(
+            response
+                .data
+                .pack
+                .rule_items
+                .iter()
+                .map(|item| item.content.as_bytes()),
+        )
         .chain(
             response
                 .data

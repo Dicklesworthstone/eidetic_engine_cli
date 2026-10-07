@@ -2570,6 +2570,7 @@ impl EffectManifest {
                     "pack_candidate_impressions",
                     "pack_omissions",
                     "pack_evidence_items",
+                    "pack_rule_items",
                     "pack_baselines",
                     "audit_log",
                 ],
