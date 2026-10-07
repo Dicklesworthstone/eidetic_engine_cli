@@ -119,10 +119,58 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo test --locked --lib core::workspace::relocation::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-unit.log" || failed=1
-          grep -Fq 'test result: ok. 13 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-unit.log" || failed=1
-          cargo test --locked --lib db::tests::workspace_relocation_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-primitive.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-primitive.log" || failed=1
+          # bd-aav0v + bd-lagsa. FOUR arms under one flag, and the first one CANNOT PASS.
+          #
+          # `core::workspace::relocation::tests` NAMES A MODULE THAT DOES NOT EXIST. Measured
+          # 2026-10-07 at 5cc9fdf7e: src/core/workspace.rs declares exactly one module,
+          # `mod tests` at :3075, the string "relocation" appears in it ZERO times, there is no
+          # src/core/workspace/ directory, and no `mod relocation` declaration exists anywhere
+          # under src/ in any of its three spellings. A cargo filter is a substring match on the
+          # full test path, so this one matches NOTHING.
+          #
+          # That is why this lane has no successes in its last 30 runs, and why the failure was
+          # invisible: a filter matching zero tests makes cargo print
+          # "test result: ok. 0 passed; ... N filtered out" and EXIT 0, so the `|| failed=1` on
+          # the cargo line never fires and only the count grep fails -- with nothing to say that
+          # the cause was an empty selection rather than a regression.
+          #
+          # I am deliberately NOT repairing it by choosing another filter. Relocation tests do
+          # exist -- src/core/artifact_relocation.rs holds 31 `#[test]` and is mounted as
+          # `pub mod artifact_relocation` (src/core/mod.rs:18), and src/workspace_rebind_tests.rs
+          # holds 16 -- but picking one of those decides WHAT THIS GATE VERIFIES, which is a
+          # design decision, not a repair. Selecting whichever filter happens to pass would be
+          # weakening a gate to make a red go away. The exact 13 stays until an owner says which
+          # module this arm is meant to cover.
+          #
+          # What changes here is that the next run states the cause in one line instead of
+          # presenting an unsatisfiable selection as a test failure.
+          unit_exit=0
+          cargo test --locked --lib core::workspace::relocation::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-unit.log" || unit_exit=$?
+          unit_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/relocation-unit.log" | head -1)
+          if test "$unit_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::workspace::relocation::tests' FAILED -- cargo exit $unit_exit (a failing assertion or a crashed harness, not a count)"
+            failed=1
+          elif test "${unit_ran:-0}" = 0; then
+            echo "ATTRIBUTION: arm 'core::workspace::relocation::tests' FAILED -- the filter MATCHED ZERO TESTS (cargo exited 0 and reported '${unit_ran:-no result line}' passed). This is not a regression: no module named relocation exists under core::workspace. The filter, not the code, is wrong. See the comment above."
+            failed=1
+          elif test "$unit_ran" != 13; then
+            echo "ATTRIBUTION: arm 'core::workspace::relocation::tests' FAILED -- expected exactly 13 passing, counted $unit_ran"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::workspace::relocation::tests' ok -- exactly 13 passed"
+          fi
+          prim_exit=0
+          cargo test --locked --lib db::tests::workspace_relocation_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/relocation-primitive.log" || prim_exit=$?
+          prim_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/relocation-primitive.log" | head -1)
+          if test "$prim_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'db::tests::workspace_relocation_' FAILED -- cargo exit $prim_exit (a failing assertion or a crashed harness, not a count)"
+            failed=1
+          elif test -z "$prim_ran" || test "$prim_ran" -lt 1; then
+            echo "ATTRIBUTION: arm 'db::tests::workspace_relocation_' FAILED -- counted '${prim_ran:-none}' passing with 0 failures; the filter matched nothing or the suite reported nothing. src/db/mod.rs holds 3 fns named workspace_relocation_*, so a zero here means the filter drifted."
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'db::tests::workspace_relocation_' ok -- $prim_ran passed, floor 1"
+          fi
           exit "$failed"
       - name: Verify the public copy approval reindex and retrieval loop
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
