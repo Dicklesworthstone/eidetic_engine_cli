@@ -39,6 +39,9 @@ use super::{
 #[cfg(feature = "lexical-bm25")]
 use super::LEXICAL_INDEX_SUBDIR;
 
+#[path = "index_delta_batch.rs"]
+mod batch;
+
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
 const DOC_DIGESTS_SCHEMA_V2: &str = "ee.index.doc_digests.v2";
@@ -407,26 +410,27 @@ pub(super) async fn apply(
         })
         .transpose()?;
 
+    let removals: Vec<_> = delta.removals.iter().map(String::as_str).collect();
+    batch::checkpoint(cx, "fast")?;
     let mut fast = super::open_fast_vector_index(staging_dir)?;
-    let mut removed = false;
-    for id in &delta.removals {
-        removed |= fast
-            .soft_delete(id)
-            .map_err(|error| tier_error(format!("fast-tier vector delete failed: {error}")))?;
-    }
-    if removed {
+    if !removals.is_empty()
+        && fast
+            .soft_delete_batch(&removals)
+            .map_err(|error| tier_error(format!("fast-tier vector delete failed: {error}")))?
+            > 0
+    {
         super::vacuum_incremental_vector_index(&mut fast, "fast")?;
     }
-    let fast_embedder = stack.fast_arc();
-    for document in &delta.upserts {
-        let vector = fast_embedder
-            .embed_bound(cx, &document.content)
-            .await
-            .map_err(|error| tier_error(format!("fast-tier embedding failed: {error}")))?;
-        validate_bound_embedding(&vector, &fast_identity, "fast")?;
-        fast.append(&document.id, &vector.values)
-            .map_err(|error| tier_error(format!("fast-tier vector upsert failed: {error}")))?;
-    }
+    batch::upsert(
+        cx,
+        &mut fast,
+        stack.fast(),
+        &delta.upserts,
+        &fast_identity,
+        "fast",
+    )
+    .await?;
+    batch::checkpoint(cx, "fast")?;
     super::compact_incremental_vector_index(&mut fast, "fast")?;
     drop(fast);
 
@@ -434,37 +438,38 @@ pub(super) async fn apply(
         let expected_identity = quality_identity.as_deref().ok_or_else(|| {
             tier_error("quality-tier embedder appeared after identity validation".to_owned())
         })?;
+        batch::checkpoint(cx, "quality")?;
         let mut quality = super::open_quality_vector_index(staging_dir)?.ok_or_else(|| {
             tier_error(
                 "quality-tier vector index is absent for a two-tier embedder stack".to_owned(),
             )
         })?;
-        let mut removed = false;
-        for id in &delta.removals {
-            removed |= quality.soft_delete(id).map_err(|error| {
-                tier_error(format!("quality-tier vector delete failed: {error}"))
-            })?;
-        }
-        if removed {
+        if !removals.is_empty()
+            && quality
+                .soft_delete_batch(&removals)
+                .map_err(|error| {
+                    tier_error(format!("quality-tier vector delete failed: {error}"))
+                })?
+                > 0
+        {
             super::vacuum_incremental_vector_index(&mut quality, "quality")?;
         }
-        for document in &delta.upserts {
-            let vector = quality_embedder
-                .embed_bound(cx, &document.content)
-                .await
-                .map_err(|error| tier_error(format!("quality-tier embedding failed: {error}")))?;
-            validate_bound_embedding(&vector, expected_identity, "quality")?;
-            quality
-                .append(&document.id, &vector.values)
-                .map_err(|error| {
-                    tier_error(format!("quality-tier vector upsert failed: {error}"))
-                })?;
-        }
+        batch::upsert(
+            cx,
+            &mut quality,
+            quality_embedder.as_ref(),
+            &delta.upserts,
+            expected_identity,
+            "quality",
+        )
+        .await?;
+        batch::checkpoint(cx, "quality")?;
         super::compact_incremental_vector_index(&mut quality, "quality")?;
     }
 
     #[cfg(feature = "lexical-bm25")]
     {
+        batch::checkpoint(cx, "lexical")?;
         let lexical = super::open_lexical_index(staging_dir)?;
         for id in &delta.removals {
             lexical
