@@ -71,12 +71,41 @@ jobs:
           cargo test --locked --lib core::journal::ingestion_tests:: -- --test-threads=2 > "$RUNNER_TEMP/journal-focused.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/journal-focused.log"
           test "$status" -eq 0
-          grep -Fq 'test result: ok. 6 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/journal-focused.log"
+          # FLOOR (bd-lagsa). Pin matches today -- src/core/journal_ingestion_tests.rs holds
+          # exactly 6 #[test] functions -- but it sits under an abort-on-error shell with a
+          # second cargo suite after it, so a seventh test would switch that suite off.
+          # 6 kept as the reviewed minimum.
+          focused_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$RUNNER_TEMP/journal-focused.log" | head -1)
+          if test -z "$focused_ran" || test "$focused_ran" -lt 6; then
+            echo "ATTRIBUTION: core::journal::ingestion_tests:: reported count '${focused_ran:-none}', required floor 6"
+            exit 1
+          fi
+          echo "ATTRIBUTION: core::journal::ingestion_tests:: ran $focused_ran tests (floor 6)"
           status=0
           cargo test --locked --lib policy::ingestion:: -- --test-threads=2 > "$RUNNER_TEMP/journal-policy.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/journal-policy.log"
           test "$status" -eq 0
-          grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/journal-policy.log"
+          # THIS PIN IS ACTIVELY STALE, not a landmine (bd-lagsa). It demanded exactly 8
+          # while the filter now matches roughly THIRTY tests, so this lane fails here on
+          # every dispatch -- it has simply not been dispatched, because its trigger paths
+          # are only scripts/delivery/journal-ingestion-20260919/** and this file, so edits
+          # under src/policy/ never fire it.
+          #
+          # `policy::ingestion::` is a subtree, which is where the drift came from. Counted
+          # at HEAD: src/policy/ingestion.rs carries 10 #[test] in its own `mod tests`
+          # (:198), plus `#[path = "ingestion_json.rs"] mod encoded_json` (:14-16) with 11,
+          # plus `#[cfg(test)] #[path = "ingestion_store_tests.rs"] mod store_tests` (:438-440)
+          # with 9. The filter matches all three. ingestion.rs was last touched 2026-10-06,
+          # so this is live drift, not ancient history.
+          #
+          # 8 is kept as the floor rather than re-pinned to 30: re-pinning would just reset
+          # the clock, and 8 is the inventory this assertion was reviewed against.
+          policy_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$RUNNER_TEMP/journal-policy.log" | head -1)
+          if test -z "$policy_ran" || test "$policy_ran" -lt 8; then
+            echo "ATTRIBUTION: policy::ingestion:: reported count '${policy_ran:-none}', required floor 8"
+            exit 1
+          fi
+          echo "ATTRIBUTION: policy::ingestion:: ran $policy_ran tests (floor 8)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
