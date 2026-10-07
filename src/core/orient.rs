@@ -2878,42 +2878,82 @@ mod tests {
         }
 
         let temp = orient_test_tempdir()?;
-        let output =
-            std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        for home_present in [false, true] {
+            let root = temp.path().join(if home_present {
+                "home-present"
+            } else {
+                "home-absent"
+            });
+            let mut command = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            );
+            // Configure only this child. Ambient EE_* overrides must not
+            // redirect either store or introduce an unrelated malformed layer.
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(|key| {
+                    key.get(..3)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("EE_"))
+                }) {
+                    command.env_remove(key);
+                }
+            }
+            command
                 .arg("--exact")
                 .arg("core::orient::tests::orient_fast_content_hydrates_isolated_global_store")
                 .arg("--nocapture")
                 .arg("--test-threads=1")
                 .env(CHILD_MARKER, "1")
-                .env(TEST_ROOT, temp.path())
-                .env("XDG_DATA_HOME", temp.path())
-                .env_remove("HOME")
+                .env(TEST_ROOT, &root)
+                .env("XDG_DATA_HOME", root.join("data"))
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("LOCALAPPDATA", root.join("local-app-data"))
+                .env("EE_EMBED_DOWNLOAD", "off")
+                .env("EE_EMBED_BACKEND", "local")
+                .env_remove("EMBEDDING_MODEL");
+            if home_present {
+                command.env("HOME", root.join("home"));
+                command.env("USERPROFILE", root.join("home"));
+            } else {
+                command.env_remove("HOME");
+                command.env_remove("USERPROFILE");
+            }
+            let output = command
                 .output()
                 .map_err(|error| format!("launch isolated global-store child: {error}"))?;
-        if output.status.success() {
-            return Ok(());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !output.status.success() || !stdout.contains("1 passed; 0 failed") {
+                return Err(format!(
+                    "isolated global-store child (HOME present: {home_present}) failed with {}\nstdout:\n{stdout}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
         }
-        Err(format!(
-            "isolated global-store child failed with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        Ok(())
     }
 
     fn orient_fast_content_hydrates_isolated_global_store_child(root: &Path) -> TestResult {
         let paths = crate::core::global_store::default_global_store_paths_from_env()
             .map_err(|error| format!("resolve isolated global store: {error}"))?;
-        ensure(
-            paths.root.starts_with(root),
-            format!(
-                "global store escaped isolated root: root={}, store={}",
-                root.display(),
-                paths.root.display()
-            ),
+        ensure_equal(
+            &paths.root,
+            &root.join("data").join("ee").join("global"),
+            "global store must use the isolated XDG data root",
         )?;
 
         let workspace = root.join("workspace");
+        let config = crate::core::config_surface::merged_workspace_config(&workspace)
+            .map_err(|error| format!("resolve isolated search configuration: {error}"))?;
+        ensure_equal(
+            &config.values.storage.database_path,
+            &Some(root.join("data").join("ee").join("ee.db")),
+            "built-in database and global store must share the user data root",
+        )?;
+        ensure_equal(
+            &config.values.storage.index_dir,
+            &Some(root.join("data").join("ee").join("indexes")),
+            "built-in index directory must use the isolated XDG data root",
+        )?;
         std::fs::create_dir_all(&workspace)
             .map_err(|error| format!("create isolated workspace: {error}"))?;
         remember_fixture(

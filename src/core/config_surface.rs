@@ -392,8 +392,7 @@ fn merged_config_with_environment(
     let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let home = process_environment.get(home_variable).map(PathBuf::from);
     let expander = PathExpander::with_env(home, process_environment.clone());
-    let defaults =
-        built_in_config(&expander).map_err(|source| ConfigSurfaceError::Environment { source })?;
+    let defaults = built_in_config(&expander);
     let environment = config_from_env(process_environment, &expander)
         .map_err(|source| ConfigSurfaceError::Environment { source })?;
     let project = read_project_config(options, &expander)?.unwrap_or_else(ConfigFile::default);
@@ -505,13 +504,18 @@ fn read_project_config(
 
 fn read_user_config(expander: &PathExpander) -> Result<Option<ConfigFile>, ConfigSurfaceError> {
     let path = expander
-        .expand("~/.config/ee/config.toml")
-        .map_err(|source| ConfigSurfaceError::Environment {
-            source: EnvironmentConfigError::PathExpansion {
-                variable: "HOME",
-                source,
-            },
-        })?;
+        .absolute_env_path("XDG_CONFIG_HOME")
+        .map(|root| root.join("ee").join("config.toml"))
+        .or_else(|| {
+            expander
+                .home_dir()
+                .map(|home| home.join(".config").join("ee").join("config.toml"))
+        });
+    let Some(path) = path else {
+        // With no discoverable user-config directory, there is no user layer
+        // to read. Actual files and explicit path values remain fail-closed.
+        return Ok(None);
+    };
     match read_optional_config_contents(&path)? {
         Some(contents) => ConfigFile::parse_with_expander(&contents, expander)
             .map(Some)
@@ -1466,6 +1470,252 @@ mod tests {
         if merged.source(POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY) != Some(ConfigValueSource::Project)
         {
             return Err(format!("unexpected project-layer source: {merged:?}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn merged_config_resolves_xdg_storage_and_user_layer_with_or_without_home() -> TestResult {
+        let temp = workspace()?;
+        let workspace_root = temp.path().join("workspace");
+        let data_root = temp.path().join("xdg-data");
+        let config_root = temp.path().join("xdg-config");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&workspace_root).map_err(|error| error.to_string())?;
+        fs::create_dir_all(config_root.join("ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(home.join(".config").join("ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            config_root.join("ee").join("config.toml"),
+            "[pack]\ncandidate_pool = 17\n",
+        )
+        .map_err(|error| error.to_string())?;
+        // An explicit XDG_CONFIG_HOME selects one user layer; HOME must not
+        // introduce a second configuration file after that selection.
+        fs::write(home.join(".config/ee/config.toml"), "[malformed")
+            .map_err(|error| error.to_string())?;
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        for home_present in [false, true] {
+            let mut environment = BTreeMap::from([
+                (
+                    "XDG_DATA_HOME".to_owned(),
+                    data_root.as_os_str().to_os_string(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".to_owned(),
+                    config_root.as_os_str().to_os_string(),
+                ),
+            ]);
+            if home_present {
+                environment.insert(home_variable.to_owned(), home.as_os_str().to_os_string());
+            }
+            let merged = merged_config_with_environment(&options(&workspace_root), &environment)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                merged.values.storage.database_path,
+                Some(data_root.join("ee").join("ee.db"))
+            );
+            assert_eq!(
+                merged.values.storage.index_dir,
+                Some(data_root.join("ee").join("indexes"))
+            );
+            assert_eq!(
+                merged.source(crate::config::STORAGE_DATABASE_PATH_KEY),
+                Some(ConfigValueSource::Default)
+            );
+            assert_eq!(merged.values.pack.candidate_pool, Some(17));
+            assert_eq!(
+                merged.source(crate::config::PACK_CANDIDATE_POOL_KEY),
+                Some(ConfigValueSource::User)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn merged_config_accepts_complete_storage_overlays_without_home_or_xdg() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            root.join(".ee/config.toml"),
+            "[storage]\ndatabase_path = 'project.db'\n[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let mut environment = BTreeMap::new();
+        let partial = merged_config_with_environment(&options(root), &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            partial.values.storage.database_path,
+            Some(std::path::PathBuf::from("project.db"))
+        );
+        assert!(partial.values.storage.index_dir.is_none());
+        assert_eq!(partial.values.search.lexical_weight, Some(0.45));
+        environment.insert(
+            "EE_INDEX_DIR".to_owned(),
+            OsString::from("environment-indexes"),
+        );
+        let merged = merged_config_with_environment(&options(root), &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            merged.values.storage.database_path,
+            Some(std::path::PathBuf::from("project.db"))
+        );
+        assert_eq!(
+            merged.values.storage.index_dir,
+            Some(std::path::PathBuf::from("environment-indexes"))
+        );
+        assert_eq!(
+            merged.source(crate::config::STORAGE_DATABASE_PATH_KEY),
+            Some(ConfigValueSource::Project)
+        );
+        assert_eq!(
+            merged.source(crate::config::STORAGE_INDEX_DIR_KEY),
+            Some(ConfigValueSource::Environment)
+        );
+        assert_eq!(merged.values.memory.include_global, Some(false));
+        environment.insert(
+            "EE_DATABASE_PATH".to_owned(),
+            OsString::from("environment.db"),
+        );
+        let merged = merged_config_with_environment(&options(root), &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            merged.values.storage.database_path,
+            Some(std::path::PathBuf::from("environment.db"))
+        );
+        assert_eq!(
+            merged.source(crate::config::STORAGE_DATABASE_PATH_KEY),
+            Some(ConfigValueSource::Environment)
+        );
+        assert_eq!(merged.values.search.lexical_weight, Some(0.45));
+        Ok(())
+    }
+
+    #[test]
+    fn merged_config_preserves_explicit_layer_errors_without_home() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        let project_path = root.join(".ee/config.toml");
+        let environment = BTreeMap::from([
+            (
+                "EE_DATABASE_PATH".to_owned(),
+                OsString::from("environment.db"),
+            ),
+            (
+                "EE_INDEX_DIR".to_owned(),
+                OsString::from("environment-indexes"),
+            ),
+        ]);
+        for contents in [
+            "[search",
+            "[search]\nlexical_weight = 'broken'\n",
+            "[storage]\ndatabase_path = '~/unavailable.db'\n",
+            "[storage]\ndatabase_path = '$UNKNOWN_CONFIG_ROOT/ee.db'\n",
+        ] {
+            fs::write(&project_path, contents).map_err(|error| error.to_string())?;
+            let error = merged_config_with_environment(&options(root), &environment)
+                .expect_err("invalid lower-precedence project settings must still fail");
+            assert!(matches!(
+                error,
+                super::ConfigSurfaceError::Parse { path, .. } if path == project_path
+            ));
+        }
+        fs::write(
+            &project_path,
+            "[storage]\ndatabase_path = 'project.db'\nindex_dir = 'project-indexes'\n",
+        )
+        .map_err(|error| error.to_string())?;
+        for invalid in ["~/unavailable.db", "$UNKNOWN_CONFIG_ROOT/ee.db"] {
+            let mut invalid_environment = environment.clone();
+            invalid_environment.insert("EE_DATABASE_PATH".to_owned(), OsString::from(invalid));
+            let error = merged_config_with_environment(&options(root), &invalid_environment)
+                .expect_err("explicit environment path failures must remain visible");
+            assert!(matches!(
+                error,
+                super::ConfigSurfaceError::Environment {
+                    source: crate::config::EnvironmentConfigError::PathExpansion {
+                        variable: "EE_DATABASE_PATH",
+                        ..
+                    }
+                }
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn merged_config_preserves_malformed_xdg_user_layer_despite_overrides() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path();
+        let user_config = root.join("xdg-config").join("ee").join("config.toml");
+        fs::create_dir_all(root.join("xdg-config").join("ee"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            root.join(".ee/config.toml"),
+            "[pack]\ncandidate_pool = 20\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let environment = BTreeMap::from([
+            (
+                "EE_DATABASE_PATH".to_owned(),
+                OsString::from("environment.db"),
+            ),
+            (
+                "EE_INDEX_DIR".to_owned(),
+                OsString::from("environment-indexes"),
+            ),
+            (
+                "XDG_CONFIG_HOME".to_owned(),
+                root.join("xdg-config").into_os_string(),
+            ),
+        ]);
+        for contents in [
+            "[pack",
+            "[pack]\ncandidate_pool = 0\n",
+            "[storage]\ndatabase_path = '~/unavailable.db'\n",
+        ] {
+            fs::write(&user_config, contents).map_err(|error| error.to_string())?;
+            let error = merged_config_with_environment(&options(root), &environment)
+                .expect_err("an existing malformed user layer cannot be ignored");
+            assert!(matches!(
+                error,
+                super::ConfigSurfaceError::Parse { path, .. } if path == user_config
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn merged_config_ignores_relative_xdg_config_and_keeps_home_only_defaults() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path();
+        let home = root.join("home");
+        fs::create_dir_all(home.join(".config").join("ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            home.join(".config/ee/config.toml"),
+            "[pack]\ncandidate_pool = 23\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        for xdg in ["", "relative-config", "~/.config"] {
+            let environment = BTreeMap::from([
+                (home_variable.to_owned(), home.as_os_str().to_os_string()),
+                ("XDG_CONFIG_HOME".to_owned(), OsString::from(xdg)),
+                ("XDG_DATA_HOME".to_owned(), OsString::from(xdg)),
+            ]);
+            let merged = merged_config_with_environment(&options(root), &environment)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(merged.values.pack.candidate_pool, Some(23));
+            assert_eq!(
+                merged.values.storage.database_path,
+                Some(home.join(".local/share/ee/ee.db"))
+            );
+            assert_eq!(
+                merged.values.storage.index_dir,
+                Some(home.join(".local/share/ee/indexes"))
+            );
         }
         Ok(())
     }

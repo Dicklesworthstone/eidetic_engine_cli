@@ -23,7 +23,7 @@ type TestResult = Result<(), String>;
 
 fn merged_graph_config(project_toml: &str) -> Result<GraphConfig, String> {
     let expander = PathExpander::from_process_env();
-    let defaults = built_in_config(&expander).map_err(|error| error.to_string())?;
+    let defaults = built_in_config(&expander);
     let project = ConfigFile::parse(project_toml).map_err(|error| error.to_string())?;
     let mut layers = ConfigLayers::with_defaults(defaults);
     layers.project = project;

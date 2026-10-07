@@ -44,7 +44,14 @@ fn session(db: &DbConnection, seed: u128) -> String {
     id
 }
 
-fn span(db: &DbConnection, session: &str, line: u32, kind: &str, role: &str, value: Value) -> String {
+fn span(
+    db: &DbConnection,
+    session: &str,
+    line: u32,
+    kind: &str,
+    role: &str,
+    value: Value,
+) -> String {
     let excerpt = value.to_string();
     let hash = blake3::hash(format!("{session}:{line}").as_bytes());
     let mut seed = [0_u8; 16];

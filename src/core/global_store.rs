@@ -138,16 +138,18 @@ impl GlobalStorePaths {
 }
 
 /// Resolve the ee user-data root from environment values without touching the
-/// filesystem. `XDG_DATA_HOME=/tmp/data` maps to `/tmp/data/ee`; otherwise
-/// `HOME=/home/a` maps to `/home/a/.local/share/ee`.
+/// filesystem. An absolute `XDG_DATA_HOME=/tmp/data` maps to `/tmp/data/ee`;
+/// missing, empty, or relative XDG roots fall back to
+/// `HOME=/home/a`, which maps to `/home/a/.local/share/ee`.
 #[must_use]
 pub fn default_user_data_root_from_values(
     xdg_data_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Option<PathBuf> {
     xdg_data_home
-        .filter(|value| !value.is_empty())
-        .map(|root| PathBuf::from(root).join("ee"))
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .map(|root| root.join("ee"))
         .or_else(|| {
             home.filter(|value| !value.is_empty())
                 .map(|root| PathBuf::from(root).join(DEFAULT_USER_DATA_SUFFIX))
@@ -980,6 +982,38 @@ mod tests {
         assert_eq!(
             paths.index_dir,
             PathBuf::from("/home/agent/.local/share/ee/global/indexes")
+        );
+    }
+
+    #[test]
+    fn default_user_data_root_requires_absolute_xdg_and_preserves_home_fallback() {
+        let xdg = std::env::temp_dir().join("ee-global-$literal-data");
+        let home = PathBuf::from("/home/agent");
+        for home_value in [None, Some(home.as_os_str())] {
+            assert_eq!(
+                super::default_user_data_root_from_values(Some(xdg.as_os_str()), home_value),
+                Some(xdg.join("ee"))
+            );
+        }
+        for xdg_value in ["", "relative-data", "~/.local/share"] {
+            assert_eq!(
+                super::default_user_data_root_from_values(
+                    Some(std::ffi::OsStr::new(xdg_value)),
+                    Some(home.as_os_str()),
+                ),
+                Some(home.join(".local/share/ee"))
+            );
+            assert_eq!(
+                super::default_user_data_root_from_values(
+                    Some(std::ffi::OsStr::new(xdg_value)),
+                    None,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            super::default_user_data_root_from_values(None, Some(std::ffi::OsStr::new(""))),
+            None
         );
     }
 

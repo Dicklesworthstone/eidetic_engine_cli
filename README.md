@@ -1720,8 +1720,21 @@ CLI path end to end.
 1. CLI flags
 2. Environment variables (`EE_*`)
 3. Project config: `<workspace>/.ee/config.toml`
-4. User config: `~/.config/ee/config.toml`
+4. User config: `$XDG_CONFIG_HOME/ee/config.toml` when that root is absolute,
+   otherwise `~/.config/ee/config.toml`
 5. Built-in defaults
+
+Built-in database and index settings use an absolute `$XDG_DATA_HOME/ee` when
+available, otherwise `~/.local/share/ee`. Empty or relative XDG roots are
+ignored. Without a home directory or an absolute XDG data root, those two
+storage defaults remain unspecified; search and other settings still resolve
+for callers using an existing workspace store or explicit database/index paths.
+An unavailable user-config directory means there is no user layer to load.
+
+Existing configuration files and explicitly supplied values are still validated
+in every layer, even when a higher-precedence value would override them. An
+explicit `~/...` path still requires a home directory, and malformed TOML or an
+unknown variable in a configured path remains an error.
 
 Unknown TOML keys are rejected rather than silently ignored. The error names the
 full key path and, when there is one unambiguous close match among sibling keys,

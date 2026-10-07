@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - src/cass/**
+      - src/config/**
+      - src/core/config_surface.rs
+      - src/core/global_store.rs
+      - src/core/orient.rs
       - src/core/cass_error_recall*.rs
       - src/core/incident_card*.rs
       - src/core/backup*.rs
@@ -27,6 +31,7 @@ on:
       - src/mcp*.rs
       - tests/contracts/backup_import_roundtrip.rs
       - tests/contracts/cass_session_info*.rs
+      - tests/contracts/graph_config_behavior.rs
       - tests/e2e_core_workflow.rs
       - tests/no_mocks_e2e.rs
       - tests/retrieval_index_regression_oracle.rs
@@ -103,6 +108,32 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
+      - name: Exercise configuration and isolated global hydration
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
+            tail -n 100 "$log"
+            if test "$status" -ne 0; then
+              echo "Case '$label' failed with exit $status."
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "Case '$label' did not execute a passing, nonempty test selection."
+              failed=1
+            fi
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+          done <<'CASES'
+          config-paths config::path::tests::
+          config-defaults config::merge::tests::
+          config-layers core::config_surface::tests::merged_config_
+          config-global-root core::global_store::tests::default_user_data_root_requires_absolute_xdg_and_preserves_home_fallback
+          config-global-hydration core::orient::tests::orient_fast_content_hydrates_isolated_global_store
+          CASES
+          exit "$failed"
       - name: Exercise daemon write payloads and committed acknowledgements
         if: ${{ !cancelled() }}
         run: |

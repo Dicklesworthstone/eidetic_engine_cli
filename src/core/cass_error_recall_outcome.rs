@@ -32,9 +32,7 @@ fn exit_report(text: &str) -> ExitReport {
         .iter()
         .find_map(|prefix| {
             let rest = lower.strip_prefix(*prefix)?;
-            if !rest.is_empty()
-                && !rest.starts_with(char::is_whitespace)
-                && !rest.starts_with(':')
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) && !rest.starts_with(':')
             {
                 return None;
             }

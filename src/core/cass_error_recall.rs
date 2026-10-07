@@ -239,8 +239,7 @@ pub(crate) fn session_failure_arcs(
                     }
                 }
                 ToolEvent::Result { id, output } => {
-                    let Some((family, call_index)) =
-                        id.as_deref().and_then(|id| calls.remove(id))
+                    let Some((family, call_index)) = id.as_deref().and_then(|id| calls.remove(id))
                     else {
                         continue;
                     };
@@ -312,7 +311,8 @@ fn resolve_pending(
             still_pending.push(failure);
             continue;
         }
-        let Some(range) = repair_span_range(failure.index, success_call_index, success_index) else {
+        let Some(range) = repair_span_range(failure.index, success_call_index, success_index)
+        else {
             still_pending.push(failure);
             continue;
         };
@@ -357,8 +357,7 @@ fn repair_span_range(
     call_index: usize,
     result_index: usize,
 ) -> Option<std::ops::Range<usize>> {
-    (failure_index < call_index && call_index < result_index)
-        .then(|| failure_index + 1..call_index)
+    (failure_index < call_index && call_index < result_index).then(|| failure_index + 1..call_index)
 }
 
 /// A command reduced to the part that decides whether a later run verifies an

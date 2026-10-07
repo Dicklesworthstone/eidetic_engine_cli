@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Errors produced by [`PathExpander::expand`].
 ///
@@ -97,7 +97,24 @@ impl PathExpander {
     /// environments, callers should pre-uppercase keys before insertion.)
     #[must_use]
     pub fn with_env(home: Option<PathBuf>, env: BTreeMap<String, OsString>) -> Self {
-        Self { home, env }
+        Self {
+            home: home.filter(|path| !path.as_os_str().is_empty()),
+            env,
+        }
+    }
+
+    /// The non-empty home directory captured by this snapshot.
+    pub(crate) fn home_dir(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
+    /// Read an absolute path without expanding or decoding its OS bytes.
+    /// Relative XDG roots must not acquire meaning from the launch directory.
+    pub(crate) fn absolute_env_path(&self, variable: &str) -> Option<PathBuf> {
+        self.env
+            .get(variable)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
     }
 
     /// Build an expander from the current process environment.
@@ -116,7 +133,7 @@ impl PathExpander {
                 env.insert(key_str.to_owned(), value);
             }
         }
-        Self { home, env }
+        Self::with_env(home, env)
     }
 
     /// Expand `input` lexically. Does not touch the filesystem.
@@ -375,6 +392,18 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("HOME"));
         assert!(rendered.contains("~/foo"));
+    }
+
+    #[test]
+    fn empty_home_does_not_resolve_tilde_against_the_launch_directory() {
+        let expander = fixed(Some(""), &[]);
+        assert!(expander.home_dir().is_none());
+        assert_eq!(
+            must_err(expander.expand("~/ee.db")),
+            PathExpansionError::MissingHomeDir {
+                input: "~/ee.db".to_owned(),
+            }
+        );
     }
 
     #[test]

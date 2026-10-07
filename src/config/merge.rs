@@ -174,9 +174,6 @@ pub const PRIVACY_PRIMER_KEYWORD_GATE_KEY: &str = "privacy.primer_keyword_gate";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
 pub const TRUST_PROMPT_INJECTION_GUARD_KEY: &str = "trust.prompt_injection_guard";
 
-const BUILT_IN_DATABASE_PATH: &str = "~/.local/share/ee/ee.db";
-const BUILT_IN_INDEX_DIR: &str = "~/.local/share/ee/indexes";
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ConfigValueSource {
     Cli,
@@ -1153,25 +1150,23 @@ pub struct ConfigShowReport {
     pub entry_count: usize,
 }
 
-/// Build the documented default config.
+/// Build the documented default config from one environment snapshot.
 ///
-/// # Errors
-///
-/// Returns [`EnvironmentConfigError::PathExpansion`] when the default storage
-/// paths cannot be expanded with the supplied expander.
-pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, EnvironmentConfigError> {
-    Ok(ConfigFile {
+/// Storage defaults follow an absolute XDG data root, then the home directory.
+/// When neither is available, those two entries remain absent: a caller may
+/// already address a workspace store or provide explicit storage paths. Other
+/// defaults do not depend on an ambient directory. Explicit configuration
+/// paths are still expanded and validated by their own layer parsers.
+#[must_use]
+pub fn built_in_config(expander: &PathExpander) -> ConfigFile {
+    let user_data_root = expander
+        .absolute_env_path("XDG_DATA_HOME")
+        .map(|root| root.join("ee"))
+        .or_else(|| expander.home_dir().map(|home| home.join(".local/share/ee")));
+    ConfigFile {
         storage: StorageConfig {
-            database_path: Some(expand_env_path(
-                "EE_BUILT_IN_DATABASE_PATH",
-                BUILT_IN_DATABASE_PATH,
-                expander,
-            )?),
-            index_dir: Some(expand_env_path(
-                "EE_BUILT_IN_INDEX_DIR",
-                BUILT_IN_INDEX_DIR,
-                expander,
-            )?),
+            database_path: user_data_root.as_ref().map(|root| root.join("ee.db")),
+            index_dir: user_data_root.as_ref().map(|root| root.join("indexes")),
             jsonl_export: Some(false),
             read_pool: ReadPoolConfig {
                 size: Some(1),
@@ -1398,7 +1393,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             include_global: Some(true),
             participate: Some(true),
         },
-    })
+    }
 }
 
 /// Parse supported `EE_*` environment variables into a config layer.
@@ -3098,9 +3093,112 @@ mod tests {
     }
 
     #[test]
+    fn built_in_storage_prefers_absolute_xdg_with_or_without_home() {
+        let data_root = std::env::temp_dir().join("ee-config-$literal-data");
+        let environment = BTreeMap::from([(
+            "XDG_DATA_HOME".to_owned(),
+            data_root.as_os_str().to_os_string(),
+        )]);
+        for home in [None, Some(PathBuf::from("/home/agent"))] {
+            let snapshot = PathExpander::with_env(home, environment.clone());
+            let defaults = built_in_config(&snapshot);
+            assert_eq!(
+                defaults.storage.database_path,
+                Some(data_root.join("ee").join("ee.db"))
+            );
+            assert_eq!(
+                defaults.storage.index_dir,
+                Some(data_root.join("ee").join("indexes"))
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_storage_ignores_relative_and_empty_xdg_roots() {
+        for xdg in ["", "relative-data", "~/.local/share"] {
+            let environment = BTreeMap::from([("XDG_DATA_HOME".to_owned(), OsString::from(xdg))]);
+            let with_home =
+                PathExpander::with_env(Some(PathBuf::from("/home/agent")), environment.clone());
+            let defaults = built_in_config(&with_home);
+            assert_eq!(
+                defaults.storage.database_path,
+                Some(PathBuf::from("/home/agent/.local/share/ee/ee.db"))
+            );
+            let without_home = PathExpander::with_env(None, environment);
+            let defaults = built_in_config(&without_home);
+            assert!(defaults.storage.database_path.is_none());
+            assert!(defaults.storage.index_dir.is_none());
+            assert_eq!(defaults.search.lexical_weight, Some(0.45));
+            assert_eq!(defaults.memory.include_global, Some(true));
+        }
+    }
+
+    #[test]
+    fn storage_overlays_merge_in_every_layer_without_ambient_defaults() {
+        let defaults = built_in_config(&PathExpander::default());
+        assert!(defaults.storage.database_path.is_none());
+        assert!(defaults.storage.index_dir.is_none());
+        for source in [
+            ConfigValueSource::Cli,
+            ConfigValueSource::Environment,
+            ConfigValueSource::Project,
+            ConfigValueSource::User,
+        ] {
+            let mut layers = ConfigLayers::with_defaults(defaults.clone());
+            let layer = match source {
+                ConfigValueSource::Cli => &mut layers.cli,
+                ConfigValueSource::Environment => &mut layers.environment,
+                ConfigValueSource::Project => &mut layers.project,
+                ConfigValueSource::User => &mut layers.user,
+                ConfigValueSource::Default => unreachable!("explicit layer only"),
+            };
+            layer.storage.database_path = Some(PathBuf::from("explicit.db"));
+            layer.storage.index_dir = Some(PathBuf::from("explicit-indexes"));
+            let merged = merge_config(&layers);
+            assert_eq!(
+                merged.values.storage.database_path,
+                Some(PathBuf::from("explicit.db"))
+            );
+            assert_eq!(
+                merged.values.storage.index_dir,
+                Some(PathBuf::from("explicit-indexes"))
+            );
+            assert_eq!(merged.source(STORAGE_DATABASE_PATH_KEY), Some(source));
+            assert_eq!(merged.source(STORAGE_INDEX_DIR_KEY), Some(source));
+            assert_eq!(merged.values.search.lexical_weight, Some(0.45));
+            assert_eq!(merged.values.memory.include_global, Some(true));
+        }
+    }
+
+    #[test]
+    fn partial_storage_overlay_does_not_require_an_unused_builtin_path() {
+        let defaults = built_in_config(&PathExpander::default());
+        let mut database_only = ConfigLayers::with_defaults(defaults.clone());
+        database_only.project.storage.database_path = Some(PathBuf::from("explicit.db"));
+        let merged = merge_config(&database_only);
+        assert_eq!(
+            merged.values.storage.database_path,
+            Some(PathBuf::from("explicit.db"))
+        );
+        assert!(merged.values.storage.index_dir.is_none());
+        assert_eq!(merged.source(STORAGE_INDEX_DIR_KEY), None);
+        assert_eq!(merged.values.search.lexical_weight, Some(0.45));
+
+        let mut index_only = ConfigLayers::with_defaults(defaults);
+        index_only.environment.storage.index_dir = Some(PathBuf::from("explicit-indexes"));
+        let merged = merge_config(&index_only);
+        assert!(merged.values.storage.database_path.is_none());
+        assert_eq!(merged.source(STORAGE_DATABASE_PATH_KEY), None);
+        assert_eq!(
+            merged.values.storage.index_dir,
+            Some(PathBuf::from("explicit-indexes"))
+        );
+        assert_eq!(merged.values.search.lexical_weight, Some(0.45));
+    }
+
+    #[test]
     fn built_in_defaults_match_readme_contract() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
 
         ensure_equal(
             &defaults.storage.database_path,
@@ -3569,8 +3667,7 @@ mod tests {
 
     #[test]
     fn merge_cass_subprocess_timeout_layers_env_over_project_over_defaults() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
         ensure_equal(
             &defaults.cass.subprocess_timeout_secs,
             &Some(30),
@@ -3724,8 +3821,7 @@ mod tests {
 
     #[test]
     fn merge_uses_cli_environment_project_user_default_order() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
         let user_bugfix = task_lens_override("bugfix", 1, "User bugfix lens.")?;
         let user_custom = task_lens_override("local-review", 1, "User local review lens.")?;
         let project_bugfix = task_lens_override("bugfix", 2, "Project bugfix lens.")?;
@@ -4443,8 +4539,7 @@ mod tests {
 
     #[test]
     fn source_keys_are_deterministically_ordered() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
         let merged = merge_config(&ConfigLayers::with_defaults(defaults));
 
         let keys: Vec<&str> = merged.sources().keys().copied().collect();
@@ -4456,8 +4551,7 @@ mod tests {
 
     #[test]
     fn show_report_includes_recent_surface_keys() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
         let report = merge_config(&ConfigLayers::with_defaults(defaults)).to_show_report();
         let keys: Vec<&str> = report.entries.iter().map(|entry| entry.key).collect();
 
@@ -4519,8 +4613,7 @@ mod tests {
 
     #[test]
     fn show_report_covers_every_resolved_source_key() -> TestResult {
-        let defaults =
-            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let defaults = built_in_config(&expander());
         let merged = merge_config(&ConfigLayers::with_defaults(defaults));
         let report = merged.to_show_report();
         let report_keys: Vec<&str> = report.entries.iter().map(|entry| entry.key).collect();
@@ -4535,7 +4628,7 @@ mod tests {
 
     #[test]
     fn scoring_defaults_match_the_live_contract_and_are_visible() -> TestResult {
-        let defaults = built_in_config(&expander()).map_err(|error| error.to_string())?;
+        let defaults = built_in_config(&expander());
         let expected = ConfigFile::parse(
             "[scoring]\nrecency_tau_days = 30\nconfidence_floor = 0.1\nutility_floor = 0.5\n\
              harmful_penalty_per_hit = 0.1\nharmful_penalty_floor = 0.2\nscope_match_bonus = 1.2\n\
