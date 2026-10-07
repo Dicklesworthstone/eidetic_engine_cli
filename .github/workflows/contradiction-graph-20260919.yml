@@ -83,12 +83,44 @@ jobs:
           rustc --edition 2024 --test src/core/contradiction_guard.rs -o "$RUNNER_TEMP/guard-core-tests"
           "$RUNNER_TEMP/guard-core-tests" > "$RUNNER_TEMP/guard-core.log" 2>&1
           cat "$RUNNER_TEMP/guard-core.log"
-          grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/guard-core.log"
+          # FLOOR, NOT AN EXACT COUNT, AND THIS IS THE DEEPEST KILL SWITCH IN THE CENSUS
+          # (bd-lagsa).
+          #
+          # This pinned `12 passed` as a literal and it gates EVERYTHING below it: the
+          # verify() function that follows runs a `cargo check --all-targets` and two
+          # `cargo test` suites, and none of them execute if this grep fails. A thirteenth
+          # test in contradiction_guard.rs -- or in the graph_tests module it pulls in --
+          # would therefore switch off the entire remaining verification AND the lane's
+          # commit, while reporting only that one grep failed.
+          #
+          # The count is correct today: contradiction_guard.rs has 4 direct #[test]
+          # functions and declares `mod graph_tests` at :327, whose file carries 8, for 12
+          # total. So this is a landmine, not an outage. 12 is kept as the FLOOR because it
+          # is the reviewed inventory; deletion below it is still refused.
+          #
+          # Numeric comparison rather than a widened regex: a correct regex floor for 12 is
+          # (1[2-9]|[2-9][0-9]|[1-9][0-9]{2,}), which is exactly the sort of thing that gets
+          # written slightly wrong and silently admits 1 or 2.
+          core_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/guard-core.log" | head -1)
+          if test -z "$core_ran" || test "$core_ran" -lt 12; then
+            echo "ATTRIBUTION: contradiction_guard standalone test binary reported passing-with-zero-failures count '${core_ran:-none}', required floor 12"
+            exit 1
+          fi
+          echo "ATTRIBUTION: contradiction_guard standalone test binary ran $core_ran tests (floor 12)"
           verify() {
             cargo check --locked --all-targets > "$RUNNER_TEMP/guard-check.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/guard-check.log"; return 1; }
             cargo test --locked --lib pack::native_evidence_guard_tests -- --test-threads=2 > "$RUNNER_TEMP/guard-pack.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/guard-pack.log"; return 1; }
             tail -n 80 "$RUNNER_TEMP/guard-pack.log"
-            grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/guard-pack.log"
+            # FLOOR (bd-lagsa), same reasoning. This one suppresses the contradiction_guard
+            # regression run below it via `return 1`. src/pack/native_evidence_guard_tests.rs
+            # holds exactly 12 #[test] functions today, so 12 is kept as the floor.
+            local pack_ran
+            pack_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/guard-pack.log" | head -1)
+            if test -z "$pack_ran" || test "$pack_ran" -lt 12; then
+              echo "ATTRIBUTION: pack::native_evidence_guard_tests reported passing-with-zero-failures count '${pack_ran:-none}', required floor 12"
+              return 1
+            fi
+            echo "ATTRIBUTION: pack::native_evidence_guard_tests ran $pack_ran tests (floor 12)"
             cargo test --locked --lib contradiction_guard -- --test-threads=2 > "$RUNNER_TEMP/guard-regressions.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/guard-regressions.log"; return 1; }
             tail -n 80 "$RUNNER_TEMP/guard-regressions.log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/guard-regressions.log"
