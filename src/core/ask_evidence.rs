@@ -1,3 +1,34 @@
+//! SUPERSEDED AND UNMOUNTED -- DO NOT MOUNT THIS FILE (bd-fdw88).
+//!
+//! Nothing in the repository mounts this file: there is no `mod ask_evidence;`, no
+//! `#[path = "...ask_evidence.rs"]` and no `include!` of it. It therefore does not
+//! compile, and its nine `#[test]` functions have never run. Rust does not warn
+//! about a source file nothing mounts, which is why that went unnoticed.
+//!
+//! MOUNTING IT WOULD BE A DEFECT, NOT A REPAIR. Its `load_candidates` has exactly
+//! one reference in the repository -- its own definition -- and the live path is a
+//! near-identical reimplementation in the module that was meant to host it:
+//!
+//! ```text
+//! here                   pub(crate) fn load_candidates(
+//!                            connection, workspace_id, scope, candidates, native_sources)
+//! ask_admission.rs:54    pub(super) fn append_evidence(
+//!                            connection, workspace_id, scope, candidates, native_sources)
+//! ```
+//!
+//! Same parameter list, and both open with the identical scope guard rejecting
+//! anything other than `MemoryScope::Workspace | MemoryScope::Swarm`. The feature
+//! reaches production through `admission::append_evidence`, called at
+//! ask_corpus.rs:252. Mounting this file would introduce a second, unreferenced
+//! implementation of a live code path.
+//!
+//! Its correct disposition is RETIREMENT, which needs explicit operator
+//! authorisation. This notice exists so the file is not mounted in the meantime --
+//! the bead that found it originally listed "mount it" as the first option, which
+//! is the mistake this header is here to stop.
+//!
+//! ---
+//!
 //! Direct CASS evidence for extractive answers, without manufacturing memories.
 //!
 //! Only the database's current-snapshot positive-admission visitor may feed
