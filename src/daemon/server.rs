@@ -6052,12 +6052,18 @@ fn required_string_any(
     Ok(value)
 }
 
+/// Read the first present alias. An explicit null means absence and still
+/// takes precedence over later aliases, just like a present string. Other
+/// JSON types remain invalid; they must not fall through to a later alias.
 fn optional_string_any(
     object: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
 ) -> Result<Option<String>, String> {
     for key in keys {
         if let Some(value) = object.get(*key) {
+            if value.is_null() {
+                return Ok(None);
+            }
             return value
                 .as_str()
                 .map(|text| Some(text.to_owned()))
@@ -9431,6 +9437,250 @@ mod tests {
         assert!(DaemonWriteParams::from_value(&missing_workspace).is_err());
         let not_object = serde_json::json!("nope");
         assert!(DaemonWriteParams::from_value(&not_object).is_err());
+        for value in [
+            serde_json::json!({ "workspacePath": "/tmp/ws", "content": null }),
+            serde_json::json!({
+                "workspacePath": null, "workspace_path": "/tmp/ws", "content": "x",
+            }),
+            serde_json::json!({
+                "workspace_path": null, "workspace": "/tmp/ws", "content": "x",
+            }),
+            serde_json::json!({ "workspace": null, "content": "x" }),
+        ] {
+            assert!(
+                DaemonWriteParams::from_value(&value).is_err(),
+                "required strings cannot be null or fall through to a later alias: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_write_params_nullable_strings_round_trip_through_rpc_and_actor() {
+        for present in 0_u8..8 {
+            let expected = DaemonWriteParams {
+                workspace_path: PathBuf::from("/tmp/daemon-write-roundtrip"),
+                content: "Preserve every optional write string.".to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                tags: (present & 1 != 0).then(|| "a,b".to_owned()),
+                confidence: 0.5,
+                source: (present & 2 != 0).then(|| "manual://roundtrip".to_owned()),
+                workflow_id: (present & 4 != 0).then(|| "workflow-roundtrip".to_owned()),
+                auto_link: false,
+                propose_candidates: false,
+            };
+            let payload = expected.to_payload();
+            let mut omitted = payload.clone();
+            for (field, value) in [
+                ("tags", expected.tags.as_deref()),
+                ("source", expected.source.as_deref()),
+                ("workflow_id", expected.workflow_id.as_deref()),
+            ] {
+                assert_eq!(
+                    payload.get(field),
+                    Some(&serde_json::to_value(value).expect("optional string")),
+                    "the typed actor payload retains its explicit nullable shape"
+                );
+                if value.is_none() {
+                    omitted
+                        .as_object_mut()
+                        .expect("payload object")
+                        .remove(field);
+                }
+            }
+            for wire in [payload, omitted] {
+                let parsed = DaemonWriteParams::from_value(&wire).expect("valid RPC params");
+                assert_eq!(
+                    parsed, expected,
+                    "RPC roundtrip for optional mask {present}"
+                );
+                assert_eq!(
+                    DaemonWriteParams::from_payload(&wire).expect("valid actor payload"),
+                    expected,
+                    "actor roundtrip for optional mask {present}"
+                );
+                assert_eq!(
+                    DaemonWriteParams::from_payload(&parsed.to_payload())
+                        .expect("RPC forwards typed payload to the actor"),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_write_params_null_optional_strings_match_omission() {
+        let base = serde_json::json!({
+            "workspacePath": "/tmp/daemon-write-null",
+            "content": "Null optional strings are absent.",
+        });
+        let expected = DaemonWriteParams::from_value(&base).expect("minimal write params");
+        for field in [
+            "level",
+            "kind",
+            "tags",
+            "source",
+            "workflow",
+            "workflowId",
+            "workflow_id",
+        ] {
+            let mut value = base.clone();
+            value[field] = serde_json::Value::Null;
+            assert_eq!(
+                DaemonWriteParams::from_value(&value).expect("null optional string"),
+                expected,
+                "null must match omission for {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_write_params_workflow_aliases_use_first_present_even_when_null() {
+        for (aliases, expected) in [
+            (
+                serde_json::json!({
+                    "workflow": "first", "workflowId": "second", "workflow_id": "third",
+                }),
+                Some("first"),
+            ),
+            (
+                serde_json::json!({
+                    "workflow": null, "workflowId": "second", "workflow_id": "third",
+                }),
+                None,
+            ),
+            (
+                serde_json::json!({ "workflowId": "second", "workflow_id": "third" }),
+                Some("second"),
+            ),
+            (
+                serde_json::json!({ "workflowId": null, "workflow_id": "third" }),
+                None,
+            ),
+            (serde_json::json!({ "workflow_id": "third" }), Some("third")),
+            (serde_json::json!({ "workflow_id": null }), None),
+            (
+                serde_json::json!({ "workflow": "", "workflowId": "second" }),
+                Some(""),
+            ),
+            (
+                serde_json::json!({ "workflow": "first", "workflowId": null }),
+                Some("first"),
+            ),
+            (
+                serde_json::json!({ "workflow": "first", "workflowId": 42 }),
+                Some("first"),
+            ),
+            (
+                serde_json::json!({ "workflow": null, "workflowId": 42 }),
+                None,
+            ),
+        ] {
+            let mut value = serde_json::json!({
+                "workspacePath": "/tmp/daemon-write-alias",
+                "content": "Alias order is explicit.",
+            });
+            for (key, alias_value) in aliases.as_object().expect("alias object") {
+                value[key.as_str()] = alias_value.clone();
+            }
+            let params = DaemonWriteParams::from_value(&value).expect("first alias is valid");
+            assert_eq!(params.workflow_id.as_deref(), expected, "{aliases}");
+            assert_eq!(
+                DaemonWriteParams::from_payload(&params.to_payload())
+                    .expect("actor payload preserves alias resolution"),
+                params
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_write_params_invalid_optional_strings_are_rejected_before_source_write() {
+        let workspace = private_tempdir();
+        for (field, fallback) in [
+            ("level", None),
+            ("kind", None),
+            ("tags", None),
+            ("source", None),
+            ("workflow", Some("workflowId")),
+            ("workflowId", Some("workflow_id")),
+            ("workflow_id", None),
+        ] {
+            for invalid in [
+                serde_json::json!(false),
+                serde_json::json!(42),
+                serde_json::json!(0.5),
+                serde_json::json!(["value"]),
+                serde_json::json!({ "value": "string" }),
+            ] {
+                let mut value = serde_json::json!({
+                    "workspacePath": workspace.path(),
+                    "content": "An invalid option must not write a memory.",
+                });
+                value[field] = invalid;
+                if let Some(fallback) = fallback {
+                    value[fallback] = serde_json::json!("later-valid-alias");
+                }
+                let expected = format!("field `{field}` must be a string");
+                assert_eq!(
+                    DaemonWriteParams::from_value(&value).expect_err("invalid string type"),
+                    expected
+                );
+                let mut request = DaemonRequest::new(
+                    "req-invalid-write-string",
+                    TEST_AGENT_ID,
+                    METHOD_WRITE,
+                    value,
+                );
+                request.workspace_id = Some(workspace.path().display().to_string());
+                let response = dispatch_write(&request, None);
+                let error = response.error.as_ref().expect("reject before dispatch");
+                assert_eq!(error.code, DAEMON_WRITE_PARAMS_INVALID_CODE);
+                assert_eq!(error.message, expected);
+                assert!(response.result.is_none());
+                assert_eq!(response.request_id, request.request_id);
+                assert_eq!(response.agent_id, request.agent_id);
+                assert_eq!(response.workspace_id, request.workspace_id);
+            }
+        }
+        assert!(
+            fs::read_dir(workspace.path())
+                .expect("inspect rejected-write workspace")
+                .next()
+                .is_none(),
+            "invalid optional strings must not create any store or source-write artifacts"
+        );
+    }
+
+    #[test]
+    fn daemon_context_params_null_optional_strings_match_omission() {
+        let base = serde_json::json!({
+            "workspacePath": "/tmp/daemon-context-null",
+            "task": "Optional context strings use the same decoder.",
+        });
+        let expected = DaemonContextParams::from_value(&base).expect("minimal context params");
+        for field in [
+            "profile",
+            "speed",
+            "sourceMode",
+            "source_mode",
+            "packProfile",
+            "pack_profile",
+            "resourceProfile",
+            "resource_profile",
+            "databasePath",
+            "database_path",
+            "database",
+            "indexDir",
+            "index_dir",
+        ] {
+            let mut value = base.clone();
+            value[field] = serde_json::Value::Null;
+            assert_eq!(
+                DaemonContextParams::from_value(&value).expect("null optional context string"),
+                expected,
+                "null must match omission for {field}"
+            );
+        }
     }
 
     #[test]
