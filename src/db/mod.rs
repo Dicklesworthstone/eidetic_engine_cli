@@ -357,6 +357,9 @@ pub struct DbConnection {
     /// separated by no bump are inside one unchanged view of the database.
     statement_epoch: std::sync::atomic::AtomicU64,
     snapshot_memo: Mutex<Option<SnapshotMemoEntry>>,
+    /// Latched once V127's verdict table is seen. Tables are never dropped by
+    /// a forward-only migration, so only the absent case is re-checked.
+    admission_verdicts_present: std::sync::atomic::AtomicBool,
 }
 
 /// One derived value cached for the lifetime of a single caller-held read
@@ -1240,6 +1243,7 @@ impl DbConnection {
             agent_context_profile_pack_cache: RwLock::new(None),
             statement_epoch: std::sync::atomic::AtomicU64::new(0),
             snapshot_memo: Mutex::new(None),
+            admission_verdicts_present: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -11317,6 +11321,42 @@ END;
     "blake3:v126_typed_pack_auxiliary_identity_2026_09_27",
 );
 
+/// Persist each evidence row's admission verdict at write time
+/// (bd-reality-core-convergence-1azkt.47, plan invariant I-1).
+///
+/// A verdict is a cache of the pure row-level admission function, keyed by a
+/// binding digest over every input that function reads plus the code revision
+/// that computed it. Reads honour a verdict only while its binding matches the
+/// live row: a missing verdict, a row changed after its verdict, a verdict
+/// copied from another row, or one recorded under an older admission revision
+/// all fall back to full revalidation. The live session join is never cached.
+/// Like the evidence rows themselves, the table is trusted local state; the
+/// binding guards against drift, not against a writer able to forge rows. It
+/// is derived: backup restore, the V127 upgrade and `ee index rebuild`
+/// recompute it.
+pub const V127_EVIDENCE_ADMISSION_VERDICTS: Migration = Migration::new(
+    127,
+    "evidence_admission_verdicts",
+    r#"
+CREATE TABLE evidence_admission_verdicts (
+    evidence_span_id TEXT PRIMARY KEY NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('admitted', 'denied')),
+    verdict_binding TEXT NOT NULL CHECK (
+        verdict_binding GLOB 'blake3:*' AND length(verdict_binding) = 71
+    ),
+    verdict_revision INTEGER NOT NULL CHECK (verdict_revision > 0),
+    decided_at TEXT NOT NULL CHECK (length(trim(decided_at)) > 0)
+);
+
+CREATE TRIGGER trg_evidence_admission_verdicts_span_delete
+AFTER DELETE ON evidence_spans
+BEGIN
+    DELETE FROM evidence_admission_verdicts WHERE evidence_span_id = OLD.id;
+END;
+"#,
+    "blake3:v127_evidence_admission_verdicts_2026_10_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11445,6 +11485,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V124_TIMESTAMP_SPELLING_REPAIR,
     V125_SUPERSESSION_REDERIVE,
     V126_TYPED_PACK_AUXILIARY_IDENTITY,
+    V127_EVIDENCE_ADMISSION_VERDICTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11572,6 +11613,21 @@ impl DbConnection {
             match outcome {
                 ApplyOutcome::Applied => applied.push(migration.version),
                 ApplyOutcome::AlreadyApplied => skipped.push(migration.version),
+            }
+        }
+
+        // The verdict table starts empty on an upgraded store. Decide every
+        // existing candidate once here, in the write that created the table,
+        // instead of on every later read. Verdicts only ever save work, so a
+        // failure leaves reads on full revalidation rather than failing the
+        // migration.
+        if applied.contains(&V127_EVIDENCE_ADMISSION_VERDICTS.version) {
+            if let Err(error) = self.backfill_evidence_admission_verdicts(None) {
+                tracing::warn!(
+                    target: "ee::db::migrate",
+                    error = %error,
+                    "evidence admission verdict backfill failed; reads revalidate in full until `ee index rebuild`"
+                );
             }
         }
 
@@ -14005,31 +14061,6 @@ fn stored_session_from_row(row: &Row) -> Result<StoredSession> {
     })
 }
 
-fn stored_session_from_joined_row(row: &Row, offset: usize) -> Result<Option<StoredSession>> {
-    if optional_text(row, offset)?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(StoredSession {
-        id: required_text(row, offset, DbOperation::Query, "session_id")?.to_owned(),
-        workspace_id: required_text(row, offset + 1, DbOperation::Query, "session_workspace_id")?
-            .to_owned(),
-        cass_session_id: required_text(row, offset + 2, DbOperation::Query, "cass_session_id")?
-            .to_owned(),
-        source_path: optional_text(row, offset + 3)?.map(str::to_owned),
-        agent_name: optional_text(row, offset + 4)?.map(str::to_owned),
-        model: optional_text(row, offset + 5)?.map(str::to_owned),
-        started_at: optional_text(row, offset + 6)?.map(str::to_owned),
-        ended_at: optional_text(row, offset + 7)?.map(str::to_owned),
-        message_count: required_u32(row, offset + 8, DbOperation::Query, "message_count")?,
-        token_count: optional_u32(row, offset + 9, DbOperation::Query, "session_token_count")?,
-        content_hash: required_text(row, offset + 10, DbOperation::Query, "session_content_hash")?
-            .to_owned(),
-        metadata_json: optional_text(row, offset + 11)?.map(str::to_owned),
-        imported_at: required_text(row, offset + 12, DbOperation::Query, "imported_at")?.to_owned(),
-        updated_at: required_text(row, offset + 13, DbOperation::Query, "updated_at")?.to_owned(),
-    }))
-}
-
 pub const EVIDENCE_SECURITY_METADATA_SCHEMA_V1: &str = "ee.evidence.security_metadata.v1";
 pub const EVIDENCE_SECURITY_RESCREEN_REPORT_SCHEMA_V1: &str = "ee.evidence.security_rescreen.v1";
 pub const EVIDENCE_SECURITY_RESCREEN_AUDIT_SCHEMA_V1: &str =
@@ -14045,6 +14076,12 @@ const INDEX_SOURCE_READ_PAGE_SIZE: u32 = 128;
 pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
+/// Revision of the row-level evidence admission function whose result
+/// `evidence_admission_verdicts` caches. Bump it whenever transcript
+/// classification, ingestion screening or any admission clause changes
+/// meaning: every recorded verdict then stops matching, rows revalidate in
+/// full, and the next write-side backfill records fresh verdicts.
+pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 1;
 
 /// Closed producer vocabulary for the shared evidence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14155,6 +14192,7 @@ struct EvidenceSearchReadCursor {
 struct EvidenceSearchReadRow {
     span: StoredEvidenceSpan,
     session: Option<StoredSession>,
+    recorded_verdict: Option<String>,
 }
 
 /// One redaction-safe decision from a bounded legacy evidence re-screen.
@@ -14213,6 +14251,37 @@ pub struct CreateEvidenceSpanInput {
     /// The canonical boundary validates these tokens and requires the supplied
     /// excerpt to contain an explicit redaction marker before preserving them.
     pub inherited_redaction_classes: Vec<String>,
+}
+
+/// One evidence row hydrated with its live session and its recorded
+/// write-time admission verdict binding, if any.
+#[derive(Debug, Clone)]
+pub struct HydratedEvidenceSpan {
+    pub span: StoredEvidenceSpan,
+    pub session: Option<StoredSession>,
+    pub recorded_verdict: Option<String>,
+}
+
+impl HydratedEvidenceSpan {
+    /// Search admission against the live session, reusing the recorded
+    /// verdict when it still binds this exact row.
+    #[must_use]
+    pub fn is_search_admitted(&self, expected_workspace_id: &str) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            self.span.is_search_admitted_with_recorded_verdict(
+                expected_workspace_id,
+                session,
+                self.recorded_verdict.as_deref(),
+            )
+        })
+    }
+
+    /// Direct pack admission: search admission plus the explicit pack
+    /// eligibility decision.
+    #[must_use]
+    pub fn is_direct_pack_admitted(&self, expected_workspace_id: &str) -> bool {
+        self.is_search_admitted(expected_workspace_id) && self.span.pack_eligibility == "admitted"
+    }
 }
 
 /// A stored evidence_spans row.
@@ -14331,13 +14400,138 @@ impl StoredEvidenceSpan {
         expected_workspace_id: &str,
         session: &StoredSession,
     ) -> bool {
+        self.is_bound_to_session(expected_workspace_id, session) && self.row_admission_verdict()
+    }
+
+    /// [`Self::is_derivation_admitted_for_session`], reusing a write-time
+    /// verdict when its binding still matches this exact row
+    /// (bd-reality-core-convergence-1azkt.47).
+    ///
+    /// The session and workspace joins are always re-checked live. Only the
+    /// row-level verdict, whose inputs the binding covers completely, is
+    /// reused; a missing, stale or mismatched binding re-derives it in full.
+    #[must_use]
+    pub fn is_derivation_admitted_with_recorded_verdict(
+        &self,
+        expected_workspace_id: &str,
+        session: &StoredSession,
+        recorded_binding: Option<&str>,
+    ) -> bool {
+        if !self.is_bound_to_session(expected_workspace_id, session) {
+            return false;
+        }
+        match self.recorded_admission_verdict(recorded_binding) {
+            Some(admitted) => admitted,
+            None => self.row_admission_verdict(),
+        }
+    }
+
+    /// [`Self::is_search_admitted_for_session`] with a recorded verdict; see
+    /// [`Self::is_derivation_admitted_with_recorded_verdict`].
+    #[must_use]
+    pub fn is_search_admitted_with_recorded_verdict(
+        &self,
+        expected_workspace_id: &str,
+        session: &StoredSession,
+        recorded_binding: Option<&str>,
+    ) -> bool {
+        self.is_search_admission_candidate()
+            && self.is_derivation_admitted_with_recorded_verdict(
+                expected_workspace_id,
+                session,
+                recorded_binding,
+            )
+    }
+
+    /// The recorded verdict, when its binding matches this row exactly.
+    fn recorded_admission_verdict(&self, recorded_binding: Option<&str>) -> Option<bool> {
+        let recorded = recorded_binding?;
+        let hasher = self.admission_verdict_hasher();
+        if recorded == admission_verdict_binding(hasher.clone(), true) {
+            Some(true)
+        } else if recorded == admission_verdict_binding(hasher, false) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// The verdict to persist for this row and the binding that authorizes
+    /// reusing it: the full row-level admission function, evaluated once.
+    #[must_use]
+    pub(crate) fn admission_verdict_record(&self) -> (bool, String) {
+        let admitted = self.row_admission_verdict();
+        (
+            admitted,
+            admission_verdict_binding(self.admission_verdict_hasher(), admitted),
+        )
+    }
+
+    fn is_bound_to_session(&self, expected_workspace_id: &str, session: &StoredSession) -> bool {
+        self.workspace_id == expected_workspace_id
+            && session.id == self.session_id
+            && session.workspace_id == self.workspace_id
+    }
+
+    /// Every input the row-level verdict reads, plus the code revisions that
+    /// define it, length-prefixed so no two rows share an encoding.
+    /// `memory_id`, line locators and timestamps are deliberately absent: the
+    /// verdict does not read them, and attaching a memory must not invalidate
+    /// it.
+    fn admission_verdict_hasher(&self) -> blake3::Hasher {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.evidence.admission_verdict.v1");
+        for number in [
+            EVIDENCE_ADMISSION_VERDICT_REVISION,
+            EVIDENCE_SCREENING_VERSION,
+            EVIDENCE_SECURITY_POLICY_EPOCH,
+            EVIDENCE_CANONICAL_PROVENANCE_REVISION,
+            self.screening_version,
+            self.security_policy_epoch,
+            self.canonical_provenance_revision,
+        ] {
+            hasher.update(&number.to_le_bytes());
+        }
+        for field in [
+            Some(self.id.as_str()),
+            Some(self.workspace_id.as_str()),
+            Some(self.session_id.as_str()),
+            Some(self.producer_kind.as_str()),
+            Some(self.cass_span_id.as_str()),
+            Some(self.span_kind.as_str()),
+            self.role.as_deref(),
+            Some(self.excerpt.as_str()),
+            Some(self.content_hash.as_str()),
+            self.metadata_json.as_deref(),
+            Some(self.secret_redaction_status.as_str()),
+            Some(self.redaction_classes_json.as_str()),
+            Some(self.instruction_risk.as_str()),
+            Some(self.search_eligibility.as_str()),
+            Some(self.pack_eligibility.as_str()),
+            self.canonical_excerpt_hash.as_deref(),
+            self.upstream_ref_hash.as_deref(),
+        ] {
+            match field {
+                None => {
+                    hasher.update(&[0]);
+                }
+                Some(value) => {
+                    hasher.update(&[1]);
+                    hasher.update(&(value.len() as u64).to_le_bytes());
+                    hasher.update(value.as_bytes());
+                }
+            }
+        }
+        hasher
+    }
+
+    /// The row-level admission function: everything except the live session
+    /// join. Pure over the row and the current code revision.
+    fn row_admission_verdict(&self) -> bool {
         let Some(producer_kind) = EvidenceProducerKind::parse(&self.producer_kind) else {
             return false;
         };
-        if self.workspace_id != expected_workspace_id
-            || session.id != self.session_id
-            || session.workspace_id != self.workspace_id
-            || producer_kind == EvidenceProducerKind::LegacyUnknown
+        if producer_kind == EvidenceProducerKind::LegacyUnknown
             || self.screening_version != EVIDENCE_SCREENING_VERSION
             || self.security_policy_epoch != EVIDENCE_SECURITY_POLICY_EPOCH
             || self.canonical_provenance_revision != EVIDENCE_CANONICAL_PROVENANCE_REVISION
@@ -14542,6 +14736,11 @@ struct PreparedEvidenceSecurity {
     instruction_risk: &'static str,
     search_eligibility: &'static str,
     pack_eligibility: &'static str,
+}
+
+fn admission_verdict_binding(mut hasher: blake3::Hasher, admitted: bool) -> String {
+    hasher.update(if admitted { b"admitted" } else { b"denied\0\0" });
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn canonical_evidence_hash(content: &str) -> String {
@@ -14959,52 +15158,36 @@ impl DbConnection {
             }
         }
         let now = Utc::now().to_rfc3339();
-
-        self.execute_for(
-            DbOperation::Execute,
-            "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
-            &[
-                Value::Text(id.to_string()),
-                Value::Text(input.workspace_id.clone()),
-                Value::Text(input.session_id.clone()),
-                input
-                    .memory_id
-                    .as_ref()
-                    .map_or(Value::Null, |memory| Value::Text(memory.clone())),
-                Value::Text(prepared.upstream_ref_hash.clone()),
-                Value::Text(input.span_kind.clone()),
-                Value::BigInt(i64::from(input.start_line)),
-                Value::BigInt(i64::from(input.end_line)),
-                input
-                    .start_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                input
-                    .end_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                input
-                    .role
-                    .as_ref()
-                    .map_or(Value::Null, |role| Value::Text(role.clone())),
-                Value::Text(prepared.excerpt),
-                Value::Text(prepared.canonical_excerpt_hash.clone()),
-                Value::Text(prepared.safe_metadata_json),
-                Value::Text(prepared.producer_kind.as_str().to_owned()),
-                Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
-                Value::Text(prepared.secret_redaction_status.to_owned()),
-                Value::Text(prepared.redaction_classes_json),
-                Value::Text(prepared.instruction_risk.to_owned()),
-                Value::Text(prepared.search_eligibility.to_owned()),
-                Value::Text(prepared.pack_eligibility.to_owned()),
-                Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
-                Value::Text(prepared.canonical_excerpt_hash),
-                Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
-                Value::Text(prepared.upstream_ref_hash),
-                Value::Text(now.clone()),
-                Value::Text(now),
-            ],
-        )?;
-
-        Ok(())
+        let span = StoredEvidenceSpan {
+            id: id.to_owned(),
+            workspace_id: input.workspace_id.clone(),
+            session_id: input.session_id.clone(),
+            memory_id: input.memory_id.clone(),
+            cass_span_id: prepared.upstream_ref_hash.clone(),
+            span_kind: input.span_kind.clone(),
+            start_line: input.start_line,
+            end_line: input.end_line,
+            start_byte: input.start_byte,
+            end_byte: input.end_byte,
+            role: input.role.clone(),
+            excerpt: prepared.excerpt,
+            content_hash: prepared.canonical_excerpt_hash.clone(),
+            metadata_json: Some(prepared.safe_metadata_json),
+            producer_kind: prepared.producer_kind.as_str().to_owned(),
+            screening_version: EVIDENCE_SCREENING_VERSION,
+            secret_redaction_status: prepared.secret_redaction_status.to_owned(),
+            redaction_classes_json: prepared.redaction_classes_json,
+            instruction_risk: prepared.instruction_risk.to_owned(),
+            search_eligibility: prepared.search_eligibility.to_owned(),
+            pack_eligibility: prepared.pack_eligibility.to_owned(),
+            canonical_provenance_revision: EVIDENCE_CANONICAL_PROVENANCE_REVISION,
+            canonical_excerpt_hash: Some(prepared.canonical_excerpt_hash),
+            security_policy_epoch: EVIDENCE_SECURITY_POLICY_EPOCH,
+            upstream_ref_hash: Some(prepared.upstream_ref_hash),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.insert_evidence_row(&span)
     }
 
     /// Restore one already-screened evidence row exactly as captured.
@@ -15035,6 +15218,14 @@ impl DbConnection {
             }
         }
 
+        self.insert_evidence_row(span)
+    }
+
+    /// The single INSERT every evidence write goes through. A search
+    /// admission candidate also records its write-time admission verdict
+    /// inside the caller's transaction, so reads reuse the decision instead
+    /// of re-screening the excerpt (bd-reality-core-convergence-1azkt.47).
+    fn insert_evidence_row(&self, span: &StoredEvidenceSpan) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
@@ -15078,6 +15269,201 @@ impl DbConnection {
                     .map_or(Value::Null, |hash| Value::Text(hash.clone())),
                 Value::Text(span.created_at.clone()),
                 Value::Text(span.updated_at.clone()),
+            ],
+        )?;
+        if span.is_search_admission_candidate() {
+            self.record_evidence_admission_verdict(span)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this database carries V127's verdict table. A connection on an
+    /// older schema (a migration test seeding history, or a read before
+    /// `ee migrate`) simply records and reuses no verdicts.
+    fn admission_verdicts_available(&self) -> Result<bool> {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+        if self
+            .admission_verdicts_present
+            .load(AtomicOrdering::Acquire)
+        {
+            return Ok(true);
+        }
+        let present = !self
+            .query_for(
+                DbOperation::Query,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'evidence_admission_verdicts'",
+                &[],
+            )?
+            .is_empty();
+        if present {
+            self.admission_verdicts_present
+                .store(true, AtomicOrdering::Release);
+        }
+        Ok(present)
+    }
+
+    /// Live session rows for many ids, by primary-key lookup. Missing ids are
+    /// absent, exactly as a `get_session` per id would report them.
+    fn sessions_by_ids(
+        &self,
+        ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, StoredSession>> {
+        const CHUNK: usize = 128;
+        let mut sessions = std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params = chunk
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id IN ({placeholders})"
+                ),
+                &params,
+            )?;
+            for row in &rows {
+                let session = stored_session_from_row(row)?;
+                sessions.insert(session.id.clone(), session);
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// Recorded verdict bindings for many evidence ids, by primary-key
+    /// lookup. Deliberately a separate query rather than a third JOIN: the
+    /// engine evaluates joins as nested loops, and a verdict join multiplied
+    /// every evidence page by the verdict table's size.
+    fn recorded_admission_verdicts(
+        &self,
+        ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        const CHUNK: usize = 128;
+        let mut recorded = std::collections::HashMap::with_capacity(ids.len());
+        if ids.is_empty() || !self.admission_verdicts_available()? {
+            return Ok(recorded);
+        }
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params = chunk
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id IN ({placeholders})"
+                ),
+                &params,
+            )?;
+            for row in &rows {
+                recorded.insert(
+                    required_text(row, 0, DbOperation::Query, "evidence_span_id")?.to_owned(),
+                    required_text(row, 1, DbOperation::Query, "verdict_binding")?.to_owned(),
+                );
+            }
+        }
+        Ok(recorded)
+    }
+
+    /// Record a current verdict for every search admission candidate whose
+    /// recorded verdict is missing or no longer binds the row (rows written
+    /// before V127, under an older [`EVIDENCE_ADMISSION_VERDICT_REVISION`], or
+    /// changed in place since). Pages are bounded and each commits on its
+    /// own, so an interrupted backfill keeps its progress and a rerun
+    /// resumes. Returns the number of verdicts recorded.
+    pub fn backfill_evidence_admission_verdicts(&self, workspace_id: Option<&str>) -> Result<u64> {
+        const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
+        const PAGE_ROWS: usize = 256;
+        if !self.admission_verdicts_available()? {
+            return Ok(0);
+        }
+        let mut recorded_count = 0_u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut params = Vec::with_capacity(3);
+            let mut clauses = Vec::with_capacity(3);
+            if let Some(workspace_id) = workspace_id {
+                params.push(Value::Text(workspace_id.to_owned()));
+                clauses.push(format!("e.workspace_id = ?{}", params.len()));
+            }
+            if let Some(cursor) = &cursor {
+                params.push(Value::Text(cursor.clone()));
+                clauses.push(format!("e.id > ?{}", params.len()));
+            }
+            clauses.push(EVIDENCE_SEARCH_CANDIDATE_PREDICATE.to_owned());
+            params.push(Value::BigInt(i64::try_from(PAGE_ROWS).unwrap_or(i64::MAX)));
+            let sql = format!(
+                "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE {} ORDER BY e.id ASC LIMIT ?{}",
+                clauses.join(" AND "),
+                params.len()
+            );
+            let spans = self
+                .query_for(DbOperation::Query, &sql, &params)?
+                .iter()
+                .map(stored_evidence_span_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            let Some(last) = spans.last() else {
+                break;
+            };
+            cursor = Some(last.id.clone());
+            let ids = spans
+                .iter()
+                .map(|span| span.id.as_str())
+                .collect::<Vec<_>>();
+            let recorded = self.recorded_admission_verdicts(&ids)?;
+            let stale = spans
+                .iter()
+                .filter(|span| {
+                    span.recorded_admission_verdict(recorded.get(&span.id).map(String::as_str))
+                        .is_none()
+                })
+                .collect::<Vec<_>>();
+            if !stale.is_empty() {
+                self.with_transaction(|| {
+                    for span in &stale {
+                        self.record_evidence_admission_verdict(span)?;
+                    }
+                    Ok(())
+                })?;
+                recorded_count =
+                    recorded_count.saturating_add(u64::try_from(stale.len()).unwrap_or(u64::MAX));
+            }
+            if spans.len() < PAGE_ROWS {
+                break;
+            }
+        }
+        Ok(recorded_count)
+    }
+
+    /// Persist the current row-level admission verdict for one stored row.
+    pub(crate) fn record_evidence_admission_verdict(
+        &self,
+        span: &StoredEvidenceSpan,
+    ) -> Result<()> {
+        if !self.admission_verdicts_available()? {
+            return Ok(());
+        }
+        let (admitted, binding) = span.admission_verdict_record();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO evidence_admission_verdicts (evidence_span_id, verdict, verdict_binding, verdict_revision, decided_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(evidence_span_id) DO UPDATE SET verdict = excluded.verdict, verdict_binding = excluded.verdict_binding, verdict_revision = excluded.verdict_revision, decided_at = excluded.decided_at",
+            &[
+                Value::Text(span.id.clone()),
+                Value::Text(if admitted { "admitted" } else { "denied" }.to_owned()),
+                Value::Text(binding),
+                Value::BigInt(i64::from(EVIDENCE_ADMISSION_VERDICT_REVISION)),
+                Value::Text(Utc::now().to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -15445,9 +15831,8 @@ impl DbConnection {
     pub fn get_evidence_spans_with_sessions(
         &self,
         ids: &[&str],
-    ) -> Result<Vec<(StoredEvidenceSpan, Option<StoredSession>)>> {
+    ) -> Result<Vec<HydratedEvidenceSpan>> {
         const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
-        const SESSION_COLUMNS: &str = "s.id, s.workspace_id, s.cass_session_id, s.source_path, s.agent_name, s.model, s.started_at, s.ended_at, s.message_count, s.token_count, s.content_hash, s.metadata_json, s.imported_at, s.updated_at";
         const CHUNK: usize = 128;
 
         let mut loaded = Vec::with_capacity(ids.len());
@@ -15464,14 +15849,28 @@ impl DbConnection {
                 .map(|id| Value::Text((*id).to_owned()))
                 .collect::<Vec<_>>();
             let sql = format!(
-                "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE e.id IN ({placeholders}) ORDER BY e.id ASC"
+                "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE e.id IN ({placeholders}) ORDER BY e.id ASC"
             );
-            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
-            for row in &rows {
-                loaded.push((
-                    stored_evidence_span_from_row(row)?,
-                    stored_session_from_joined_row(row, 27)?,
-                ));
+            let spans = self
+                .query_for(DbOperation::Query, &sql, &params)?
+                .iter()
+                .map(stored_evidence_span_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            let session_ids = spans
+                .iter()
+                .map(|span| span.session_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let sessions = self.sessions_by_ids(&session_ids)?;
+            let mut recorded = self.recorded_admission_verdicts(chunk)?;
+            for span in spans {
+                let recorded_verdict = recorded.remove(&span.id);
+                loaded.push(HydratedEvidenceSpan {
+                    session: sessions.get(&span.session_id).cloned(),
+                    span,
+                    recorded_verdict,
+                });
             }
         }
         Ok(loaded)
@@ -15659,8 +16058,14 @@ impl DbConnection {
             scan.rows_read = scan.rows_read.saturating_add(u64::from(count));
         }
         let mut cursor = None;
+        let mut session_cache = std::collections::HashMap::new();
         loop {
-            let page = self.read_evidence_search_page(workspace_id, session_id, cursor.as_ref())?;
+            let page = self.read_evidence_search_page(
+                workspace_id,
+                session_id,
+                cursor.as_ref(),
+                &mut session_cache,
+            )?;
             let page_len = page.len();
             if page_len == 0 {
                 break;
@@ -15681,8 +16086,11 @@ impl DbConnection {
                     evidence_id: row.span.id.clone(),
                 });
                 let validated = row.session.as_ref().is_some_and(|session| {
-                    row.span
-                        .is_search_admitted_for_session(workspace_id, session)
+                    row.span.is_search_admitted_with_recorded_verdict(
+                        workspace_id,
+                        session,
+                        row.recorded_verdict.as_deref(),
+                    )
                 });
                 scan.admission.record(
                     &row.span.producer_kind,
@@ -15700,14 +16108,19 @@ impl DbConnection {
         Ok(scan)
     }
 
+    /// One keyset page of candidate evidence with its live sessions and
+    /// recorded verdicts. The page is a single-table read: sessions and
+    /// verdicts arrive by primary-key lookups (sessions cached across pages
+    /// of one scan, inside the same read snapshot), because the engine runs a
+    /// JOIN as a nested loop over the whole evidence table on every page.
     fn read_evidence_search_page(
         &self,
         workspace_id: &str,
         session_id: Option<&str>,
         cursor: Option<&EvidenceSearchReadCursor>,
+        session_cache: &mut std::collections::HashMap<String, Option<StoredSession>>,
     ) -> Result<Vec<EvidenceSearchReadRow>> {
         const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
-        const SESSION_COLUMNS: &str = "s.id, s.workspace_id, s.cass_session_id, s.source_path, s.agent_name, s.model, s.started_at, s.ended_at, s.message_count, s.token_count, s.content_hash, s.metadata_json, s.imported_at, s.updated_at";
 
         let (where_clause, params) = match (session_id, cursor) {
             (None, None) => (
@@ -15750,17 +16163,37 @@ impl DbConnection {
         };
         let limit_parameter = params.len();
         let sql = format!(
-            "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE {where_clause} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
+            "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE {where_clause} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
         );
-        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
-        rows.iter()
-            .map(|row| {
-                Ok(EvidenceSearchReadRow {
-                    span: stored_evidence_span_from_row(row)?,
-                    session: stored_session_from_joined_row(row, 27)?,
-                })
+        let spans = self
+            .query_for(DbOperation::Query, &sql, &params)?
+            .iter()
+            .map(stored_evidence_span_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        let missing_sessions = spans
+            .iter()
+            .map(|span| span.session_id.as_str())
+            .filter(|id| !session_cache.contains_key(*id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut loaded_sessions = self.sessions_by_ids(&missing_sessions)?;
+        for id in missing_sessions {
+            session_cache.insert(id.to_owned(), loaded_sessions.remove(id));
+        }
+        let ids = spans
+            .iter()
+            .map(|span| span.id.as_str())
+            .collect::<Vec<_>>();
+        let mut recorded = self.recorded_admission_verdicts(&ids)?;
+        Ok(spans
+            .into_iter()
+            .map(|span| EvidenceSearchReadRow {
+                session: session_cache.get(&span.session_id).cloned().flatten(),
+                recorded_verdict: recorded.remove(&span.id),
+                span,
             })
-            .collect()
+            .collect())
     }
 
     /// Group the rows the admission scan never pages: everything outside
@@ -49936,6 +50369,194 @@ UPDATE memories
             .get_search_admitted_evidence_span(&evidence_id, "wsp_01234567890123456789012345")?
             .is_some();
         ensure(admitted, "redacted CASS evidence must pass live admission")
+    }
+
+    /// bd-reality-core-convergence-1azkt.47: a write-time admission verdict is
+    /// reused only while its binding names this exact row under the current
+    /// admission revision. Any other row state revalidates in full.
+    #[test]
+    fn evidence_admission_verdicts_bind_the_exact_row_and_fall_back_to_full_validation()
+    -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8547_0001)).to_string();
+        let first_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8547_0002)).to_string();
+        let second_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8547_0003)).to_string();
+        connection.insert_session(&session_id, &session_input("verdict-session"))?;
+        connection.insert_evidence_span(
+            &first_id,
+            &evidence_span_input(&session_id, "verdict-span-a", 1),
+        )?;
+        connection.insert_evidence_span(
+            &second_id,
+            &evidence_span_input(&session_id, "verdict-span-b", 5),
+        )?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("verdict session missing"))?;
+        let span = connection
+            .get_evidence_span(&first_id)?
+            .ok_or_else(|| TestFailure::new("verdict span missing"))?;
+
+        let recorded =
+            connection.recorded_admission_verdicts(&[first_id.as_str(), second_id.as_str()])?;
+        let binding = recorded
+            .get(&first_id)
+            .cloned()
+            .ok_or_else(|| TestFailure::new("an admitted insert must record its verdict"))?;
+        ensure_equal(
+            &span.admission_verdict_record(),
+            &(true, binding.clone()),
+            "the recorded verdict is the row's current full verdict",
+        )?;
+        ensure(
+            span.is_search_admitted_with_recorded_verdict(WORKSPACE, &session, Some(&binding)),
+            "a matching verdict admits",
+        )?;
+        let second_binding = recorded
+            .get(&second_id)
+            .cloned()
+            .ok_or_else(|| TestFailure::new("second verdict missing"))?;
+        ensure(
+            span.recorded_admission_verdict(Some(&second_binding))
+                .is_none(),
+            "a verdict recorded for another row never transfers",
+        )?;
+
+        // Changing any admission input orphans the verdict, and the full
+        // check then refuses the drifted row.
+        let mut drifted = span.clone();
+        drifted
+            .excerpt
+            .push_str(" api_key=super-secret-evidence-value-123456789");
+        ensure(
+            drifted.recorded_admission_verdict(Some(&binding)).is_none(),
+            "a drifted row must not reuse the verdict",
+        )?;
+        ensure(
+            !drifted.is_search_admitted_with_recorded_verdict(WORKSPACE, &session, Some(&binding)),
+            "a drifted row revalidates in full and is refused",
+        )?;
+        // The live session join is never cached.
+        let mut moved_session = session.clone();
+        moved_session.workspace_id = "wsp_99999999999999999999999999".to_owned();
+        ensure(
+            !span.is_search_admitted_with_recorded_verdict(
+                WORKSPACE,
+                &moved_session,
+                Some(&binding),
+            ),
+            "a session in another workspace refuses despite a matching verdict",
+        )?;
+
+        // A candidate whose full check fails records a denied verdict, and the
+        // scan keeps refusing it.
+        let denied_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8547_0004)).to_string();
+        let mut denied = span.clone();
+        denied.id.clone_from(&denied_id);
+        denied.excerpt = "Deploy with api_key=super-secret-evidence-value-123456789.".to_owned();
+        denied.content_hash = super::canonical_evidence_hash(&denied.excerpt);
+        denied.canonical_excerpt_hash = Some(denied.content_hash.clone());
+        denied.cass_span_id = super::canonical_evidence_hash("verdict-span-denied");
+        denied.upstream_ref_hash = Some(denied.cass_span_id.clone());
+        denied.start_line = 20;
+        denied.end_line = 20;
+        connection.insert_evidence_span_for_recovery(&denied)?;
+        let denied_binding = connection
+            .recorded_admission_verdicts(&[denied_id.as_str()])?
+            .remove(&denied_id)
+            .ok_or_else(|| TestFailure::new("denied verdict missing"))?;
+        ensure_equal(
+            &denied.recorded_admission_verdict(Some(&denied_binding)),
+            &Some(false),
+            "a refused candidate records a denied verdict",
+        )?;
+        let (admitted, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &admitted
+                .iter()
+                .map(|span| span.id.clone())
+                .collect::<BTreeSet<_>>(),
+            &[first_id.clone(), second_id.clone()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "the scan admits exactly the rows a full check admits",
+        )?;
+
+        // Backfill restores missing verdicts once, and is then a no-op.
+        connection.execute_raw("DELETE FROM evidence_admission_verdicts")?;
+        ensure_equal(
+            &connection.backfill_evidence_admission_verdicts(Some(WORKSPACE))?,
+            &3_u64,
+            "backfill records every candidate lacking a verdict",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_admission_verdicts(None)?,
+            &0_u64,
+            "a second backfill finds nothing stale",
+        )?;
+        let (after_backfill, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &after_backfill.len(),
+            &2_usize,
+            "backfill never changes admission",
+        )?;
+
+        // Deleting a span deletes its verdict.
+        connection.execute_raw(&format!(
+            "DELETE FROM evidence_spans WHERE id = '{second_id}'"
+        ))?;
+        ensure(
+            connection
+                .recorded_admission_verdicts(&[second_id.as_str()])?
+                .is_empty(),
+            "a deleted span leaves no verdict behind",
+        )
+    }
+
+    /// A connection on a schema before V127 records and reuses no verdicts,
+    /// and admission still works by full validation.
+    #[test]
+    fn evidence_admission_without_the_verdict_table_revalidates_in_full() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 126)?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8547_0101)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8547_0102)).to_string();
+        connection.insert_session(&session_id, &session_input("pre-v127-session"))?;
+        connection.insert_evidence_span(
+            &evidence_id,
+            &evidence_span_input(&session_id, "pre-v127-span", 1),
+        )?;
+        let (admitted, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(&admitted.len(), &1_usize, "full validation admits")?;
+        ensure_equal(
+            &connection.backfill_evidence_admission_verdicts(None)?,
+            &0_u64,
+            "nothing to backfill without the table",
+        )?;
+
+        // Migrating creates the table and decides the existing row once.
+        connection.migrate()?;
+        ensure_equal(
+            &connection
+                .recorded_admission_verdicts(&[evidence_id.as_str()])?
+                .len(),
+            &1_usize,
+            "the V127 migration backfills existing candidates",
+        )
     }
 
     #[test]

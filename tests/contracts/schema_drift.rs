@@ -1859,6 +1859,7 @@ mod tests {
         "ee_wal_holds",
         "error_fingerprints",
         "error_repair_links",
+        "evidence_admission_verdicts",
         "evidence_spans",
         "feedback_events",
         "feedback_events_v037",

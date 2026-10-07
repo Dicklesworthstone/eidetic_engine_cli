@@ -1938,7 +1938,8 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
                 "derived_artifact_optional",
             )
         }
-        "memory_anchor_index"
+        "evidence_admission_verdicts"
+        | "memory_anchor_index"
         | "primer_cache"
         | "retrieval_affinity_accumulation"
         | "retrieval_affinity_cursor"

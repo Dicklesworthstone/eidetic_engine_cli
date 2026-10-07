@@ -13674,7 +13674,7 @@ fn collect_direct_evidence_pack_candidates(
         .get_evidence_spans_with_sessions(&hit_id_refs)
         .map(|rows| {
             rows.into_iter()
-                .map(|(span, session)| (span.id.clone(), (span, session)))
+                .map(|row| (row.span.id.clone(), row))
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
@@ -13688,29 +13688,28 @@ fn collect_direct_evidence_pack_candidates(
             continue;
         };
         let canonical_id = evidence_id.to_string();
-        let (span, session) = match hydrated.remove(&canonical_id) {
-            Some((span, session)) => (span, session),
+        let row = match hydrated.remove(&canonical_id) {
+            Some(row) => row,
             None => {
                 let Ok(Some(span)) = connection.get_evidence_span(&canonical_id) else {
                     rejected_live_admission = rejected_live_admission.saturating_add(1);
                     continue;
                 };
                 let session = connection.get_session(&span.session_id).ok().flatten();
-                (span, session)
+                crate::db::HydratedEvidenceSpan {
+                    span,
+                    session,
+                    recorded_verdict: None,
+                }
             }
         };
-        if !workspace_ids.iter().any(|id| id == &span.workspace_id) {
+        if !workspace_ids.iter().any(|id| id == &row.span.workspace_id)
+            || !row.is_direct_pack_admitted(&row.span.workspace_id)
+        {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         }
-        let Some(session) = session else {
-            rejected_live_admission = rejected_live_admission.saturating_add(1);
-            continue;
-        };
-        if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
-            rejected_live_admission = rejected_live_admission.saturating_add(1);
-            continue;
-        }
+        let span = row.span;
         // Native evidence has its own identity and trust class. It must not
         // inherit tags or authority from a linked memory, or bypass filters
         // simply because it is appended after memory candidate selection.

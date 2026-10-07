@@ -1675,6 +1675,21 @@ impl From<DbError> for IndexRebuildError {
     }
 }
 
+/// A full rebuild is the repair path for evidence verdicts that are missing
+/// or recorded under an older admission revision
+/// (bd-reality-core-convergence-1azkt.47): decide them once here so the
+/// collection that follows and every later read reuse the decision. Verdicts
+/// only save work, so a failure leaves admission on full revalidation.
+fn backfill_evidence_admission_verdicts_for_rebuild(db: &DbConnection, workspace_id: &str) {
+    if let Err(error) = db.backfill_evidence_admission_verdicts(Some(workspace_id)) {
+        tracing::warn!(
+            target: "ee::index",
+            error = %error,
+            "evidence admission verdict backfill failed; admission revalidates in full"
+        );
+    }
+}
+
 pub fn rebuild_index(
     options: &IndexRebuildOptions,
 ) -> Result<IndexRebuildReport, IndexRebuildError> {
@@ -1705,6 +1720,9 @@ pub async fn rebuild_index_with_cx(
     } else {
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
+    if !options.dry_run {
+        backfill_evidence_admission_verdicts_for_rebuild(&db, &workspace_id);
+    }
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,
@@ -1879,6 +1897,9 @@ async fn reembed_index_with_cx_and_stack(
     } else {
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
+    if !options.dry_run {
+        backfill_evidence_admission_verdicts_for_rebuild(&db, &workspace_id);
+    }
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,

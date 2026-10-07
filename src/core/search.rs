@@ -13794,12 +13794,10 @@ fn live_admitted_evidence_spans_with_connection(
     match connection.get_evidence_spans_with_sessions(&canonical_ids) {
         Ok(rows) => rows
             .into_iter()
-            .filter_map(|(span, session)| {
-                let session = session?;
-                (evidence_ids.contains(&span.id)
-                    && span.is_search_admitted_for_session(&workspace_id, &session))
-                .then(|| (span.id.clone(), span))
+            .filter(|row| {
+                evidence_ids.contains(&row.span.id) && row.is_search_admitted(&workspace_id)
             })
+            .map(|row| (row.span.id.clone(), row.span))
             .collect(),
         Err(error) => {
             tracing::warn!(

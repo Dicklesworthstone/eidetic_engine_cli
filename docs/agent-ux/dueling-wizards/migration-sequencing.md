@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V126`. The next
-planned allocation starts at `V127`. `V094_MEMORY_ATTEMPT_FAMILY` and
+The current compiled migration tail in `src/db/mod.rs` is `V127`. The next
+planned allocation starts at `V128`. `V094_MEMORY_ATTEMPT_FAMILY` and
 `V095_ATTEMPT_FAMILY_LEDGER` are non-initiative attempt-family migrations
 (bd-multiplicity-aware-trust-p0u7g), and `V096_MEMORY_SENTINEL_POLARITY` is the
 shipped inverse-sentinel migration (bd-wake-on-condition-inverse-sentinel-65uci).
@@ -46,8 +46,9 @@ needed the actual next compiled slot, then moved together again to
 compiled as `V099` and `V100`, then to `V102`-`V104` when the forward-only
 attempt-family immutability repair compiled as `V101`, then to `V105`-`V107`
 when the graph-intelligence projections and the T2.0 origin stream compiled
-as `V102`-`V104`, and now to `V127`-`V129` after the team, curation-repair,
-evidence-feedback, and native pack-reference migrations compiled through `V126`.
+as `V102`-`V104`, and now to `V128`-`V130` after the team, curation-repair,
+evidence-feedback, native pack-reference and evidence-admission-verdict migrations
+compiled through `V127`.
 This preserves their order and ownership without inserting placeholder migrations. Runtime
 migration versions cannot skip a reservation: the schema-version watermark
 would advance past the hole and make a later migration at that version
@@ -186,9 +187,9 @@ does not rewrite either the V088 history record or already canonical rows.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V127` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V128` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V129` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V128` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V129` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V130` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
