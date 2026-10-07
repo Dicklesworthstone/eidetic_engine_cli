@@ -136,14 +136,46 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-sj2p7: `global_store_e2e` WAS PASSED AS A TARGET AND IS NOT ONE.
+          # Cargo.toml sets `autotests = false` and declares 46 [[test]] targets;
+          # tests/global_store_e2e.rs is not among them. It is a MODULE of
+          # integration_g_m (tests/suites/integration_g_m.rs, `#[path =
+          # "../global_store_e2e.rs"]`), so `--test global_store_e2e` could only ever
+          # answer "no test target named ...". This step was therefore structurally
+          # incapable of running the tests it was written to check.
+          # diagnostic-generation-20260919.yml:119 already does it correctly, and that
+          # is the shape adopted here.
+          #
+          # The helper now takes an OPTIONAL FILTER so a module can be addressed
+          # through its real target without duplicating the attribution logic.
+          #
+          # AND THE COUNT WAS STALE TOO (bd-lagsa), which the target fix would have
+          # exposed as a fresh red: this demanded exactly 6 while
+          # tests/global_store_e2e.rs now holds 7 #[test] functions. Converted to a
+          # FLOOR, keeping 6 as the reviewed inventory rather than re-pinning to 7,
+          # with the observed count printed on both paths so a gap stays visible
+          # instead of hiding inside a passing grep. Same repair as this file's
+          # sibling lane took for the same file.
           run_target() {
-            local target="$1" expected="$2" status=0
-            cargo test --locked --test "$target" -- --test-threads=2 > "$RUNNER_TEMP/global-$target.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/global-$target.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/global-$target.log"; then failed=1; fi
+            local target="$1" floor="$2" filter="${3-}" status=0 ran=""
+            local slug="${3-$1}"
+            slug="${slug//:/}"
+            if test -n "$filter"; then
+              cargo test --locked --test "$target" "$filter" -- --test-threads=2 > "$RUNNER_TEMP/global-$slug.log" 2>&1 || status=$?
+            else
+              cargo test --locked --test "$target" -- --test-threads=2 > "$RUNNER_TEMP/global-$slug.log" 2>&1 || status=$?
+            fi
+            tail -n 100 "$RUNNER_TEMP/global-$slug.log"
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/global-$slug.log" | head -1)
+            if test "$status" -ne 0 || test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: '$slug' FAILED -- cargo exit $status, passing-with-zero-failures count '${ran:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: '$slug' ok -- $ran tests ran, floor $floor"
+            fi
           }
           run_target search_conformal_e2e 3
-          run_target global_store_e2e 6
+          run_target integration_g_m 6 'global_store_e2e::'
           exit "$failed"
       - name: Check production Clippy and source formatting
         if: ${{ !cancelled() }}

@@ -148,14 +148,28 @@ jobs:
           set -uo pipefail
           failed=0
           target/debug/ee --json eval report fx.release_failure.v1 > "$RUNNER_TEMP/eval-diagnostics-report.json" 2> "$RUNNER_TEMP/eval-diagnostics-report-stderr.log" || failed=1
-          cargo test --locked --test eval_report_e2e -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1 || failed=1
+          cargo test --locked --test integration_e_f 'eval_report_e2e::' -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1 || failed=1
           tail -n 120 "$RUNNER_TEMP/eval-diagnostics-golden.log"
-          # VACUITY FLOOR (bd-lagsa). `|| failed=1` carries cargo's exit, so a FAILING test
-          # was always caught. What was not caught is a run that executed nothing -- and
-          # this invocation names an entire TEST TARGET (`--test eval_report_e2e`) rather
-          # than a filter, so the way it empties is different: if that target is renamed or
-          # removed from Cargo.toml's autotests discovery, cargo can succeed while running
-          # no tests from it. Floor of 1 distinguishes the two.
+          # bd-sj2p7: `eval_report_e2e` WAS PASSED AS A TARGET AND IS NOT ONE.
+          # Cargo.toml sets `autotests = false` and declares 46 [[test]] targets;
+          # tests/eval_report_e2e.rs is not among them. It is a MODULE of
+          # integration_e_f (tests/suites/integration_e_f.rs:225, `#[path =
+          # "../eval_report_e2e.rs"]`), so `--test eval_report_e2e` could only ever
+          # answer "no test target named ...". Addressed through its real target with a
+          # module filter.
+          #
+          # CORRECTING THE COMMENT THIS REPLACES, which reasoned about the wrong failure
+          # mode: it said "if that target is renamed or removed from Cargo.toml's
+          # autotests discovery, cargo can succeed while running no tests from it".
+          # There is no autotests discovery -- `autotests = false` -- and the target was
+          # never declared, so the command did not pass vacuously, it failed outright.
+          # The floor was right for the wrong reason; it stays, because with a FILTER the
+          # vacuity mode it describes becomes real (a filter matching nothing exits 0).
+          #
+          # VACUITY FLOOR (bd-lagsa). `|| failed=1` carries cargo's exit, so a FAILING
+          # test was always caught. A filter that matches nothing also exits 0, and
+          # tests/eval_report_e2e.rs holds exactly 1 #[test], so a floor of 1 is both the
+          # reviewed inventory and the minimum that rules out an empty run.
           ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/eval-diagnostics-golden.log" | head -1)
           if test -z "$ran" || test "$ran" -lt 1; then
             echo "ATTRIBUTION: test target eval_report_e2e produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
