@@ -1660,14 +1660,14 @@ mod tests {
         });
         assert_eq!(
             super::context_effective_filters(&options).temporal.as_of,
-            Some(query_time("2026-05-01T00:00:00.456Z")),
+            Some(query_time("2026-05-01T00:00:00.456999999Z")),
             "the independent query-file row-history cutoff remains in force"
         );
 
         for expected in [
-            Some(query_time("2026-05-02T00:00:00.123Z")),
-            Some(query_time("2026-05-01T12:00:00.789Z")),
-            Some(query_time("2026-05-01T00:00:00.456Z")),
+            Some(query_time("2026-05-02T00:00:00.123999999Z")),
+            Some(query_time("2026-05-01T12:00:00.789999999Z")),
+            Some(query_time("2026-05-01T00:00:00.456999999Z")),
             None,
         ] {
             let capped = super::context_request_from_options_with_runtime_profile(
@@ -1706,23 +1706,38 @@ mod tests {
             }
         }
 
-        options.as_of = Some(query_time("2026-05-02T00:00:00.123999Z"));
-        let effective = super::context_effective_filters(&options);
-        let memory = stored_memory_with_time(
-            "2026-05-01T00:00:00Z",
-            "2026-05-01T00:00:00Z",
-            None,
-            Some("2026-05-02T00:00:00.123500Z"),
-        );
-        assert_eq!(
-            super::temporal_memory_validity_outcome(&memory, &effective.temporal),
-            super::TemporalCandidateOutcome::Include,
-            "selection must use .123Z, not the unbound .123999Z input"
-        );
+        // Every spelling of one millisecond selects alike, and everything
+        // stamped inside that millisecond has happened (bd-s6f7o).
+        for spelling in ["2026-05-02T00:00:00.123Z", "2026-05-02T00:00:00.123000001Z"] {
+            options.as_of = Some(query_time(spelling));
+            let effective = super::context_effective_filters(&options);
+            let starts_inside = stored_memory_with_time(
+                "2026-05-01T00:00:00Z",
+                "2026-05-01T00:00:00Z",
+                Some("2026-05-02T00:00:00.123500Z"),
+                None,
+            );
+            assert_eq!(
+                super::temporal_memory_validity_outcome(&starts_inside, &effective.temporal),
+                super::TemporalCandidateOutcome::Include,
+                "a revision written inside the reference millisecond is current at {spelling}"
+            );
+            let ends_inside = stored_memory_with_time(
+                "2026-05-01T00:00:00Z",
+                "2026-05-01T00:00:00Z",
+                None,
+                Some("2026-05-02T00:00:00.123500Z"),
+            );
+            assert_ne!(
+                super::temporal_memory_validity_outcome(&ends_inside, &effective.temporal),
+                super::TemporalCandidateOutcome::Include,
+                "an expiry inside the reference millisecond has happened at {spelling}"
+            );
+        }
         assert_eq!(
             crate::pack::canonical_pack_reference_time(query_time("1969-12-31T23:59:59.999999Z")),
-            query_time("1969-12-31T23:59:59.999Z"),
-            "pre-epoch instants truncate toward the start of their millisecond"
+            query_time("1969-12-31T23:59:59.999999999Z"),
+            "pre-epoch instants canonicalize inside their own millisecond"
         );
         Ok(())
     }
@@ -9159,9 +9174,10 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| format!("first timed pack failed: {error:?}"))?;
         assert!(first_timed.data.adaptive_budget.is_some());
         assert!(!first_timed.data.request.task_paths.is_empty());
+        // Identity names .123; selection evaluates at that millisecond's end.
         assert_eq!(
             first_timed.data.request.reference_time,
-            Some(query_time("2098-01-01T00:00:00.123Z"))
+            Some(query_time("2098-01-01T00:00:00.123999999Z"))
         );
         timed_options.as_of = Some(query_time("2098-01-01T00:00:00.124111Z"));
         let second_timed = super::run_context_pack(&timed_options)

@@ -277,9 +277,10 @@ fn caller_floor_preserves_a_strong_turn_hidden_by_a_weak_matched_card() {
         .collect::<Vec<_>>();
     // Search admission uses engine relevance; the final pack projection can
     // differ after quality scoring, so its earlier floor cannot prevent this.
-    assert!(hits.iter().all(|hit| {
-        crate::core::search::search_hit_meets_relevance_floor(hit, Some(0.7))
-    }));
+    assert!(
+        hits.iter()
+            .all(|hit| { crate::core::search::search_hit_meets_relevance_floor(hit, Some(0.7)) })
+    );
     assert_eq!(hits[0].ranking_relevance_score(), 0.9);
     assert_eq!(hits[1].ranking_relevance_score(), 0.5);
     let mut search = SearchReport {
@@ -336,10 +337,16 @@ fn caller_floor_preserves_a_strong_turn_hidden_by_a_weak_matched_card() {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].item.evidence_id, card_id);
-        assert_eq!(candidates[0].item.relevance.into_inner(), expected_relevance);
+        assert_eq!(
+            candidates[0].item.relevance.into_inner(),
+            expected_relevance
+        );
         assert!(candidates[0].incident_card);
         assert_eq!(
-            candidates[0].item.why.contains(&format!("through its source turn {turn_id}")),
+            candidates[0]
+                .item
+                .why
+                .contains(&format!("through its source turn {turn_id}")),
             floor.is_some(),
         );
         if floor.is_some() {

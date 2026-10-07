@@ -18,7 +18,7 @@ Context includes 2 degraded signals; semantic embedding is unavailable, so treat
 Run cargo fmt --check before release.
 ```
 
-**Why:** matched 'format before release' via lexical (relevance 0.8280, utility 0.8000)
+**Why:** matched 'format before release' via lexical (relevance 0.5520, utility 0.8000)
 
 **Trust:** `human_explicit` / `authoritative`
 

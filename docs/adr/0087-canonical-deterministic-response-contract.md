@@ -215,7 +215,10 @@ targets. That execution domain is owned by
   serialized as UTC RFC 3339 with exactly three fractional digits and `Z`.
   Equivalent offsets and sub-millisecond spellings bind identically. Search,
   candidate validity checks and lifecycle explanations use that same
-  millisecond domain. The independent query-file row-history cutoff remains
+  millisecond domain: they evaluate at the millisecond's last nanosecond, so
+  every lifecycle event stamped inside it (stored timestamps keep
+  nanoseconds) has happened -- a revision is current at its own revision
+  instant (bd-s6f7o). The independent query-file row-history cutoff remains
   a row-history filter; when present, it is also truncated to milliseconds.
   Existing whole-second row-bound inclusion semantics are retained.
 - An absent explicit reference time is encoded as `mode=wall_clock`, with no

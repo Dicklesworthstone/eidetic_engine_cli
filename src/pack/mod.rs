@@ -1742,15 +1742,24 @@ impl ContextRequest {
     }
 }
 
-/// Truncate an explicit pack reference time to the millisecond domain shared
-/// by selection and snapshot identity (ADR 0087 S7). Subtracting only the
-/// fractional remainder also handles instants before the Unix epoch.
+/// Canonicalize an explicit pack reference time to the millisecond domain
+/// shared by selection and snapshot identity (ADR 0087 S7).
+///
+/// Identity names the millisecond (RFC 3339, three fractional digits).
+/// Selection evaluates at that millisecond's LAST nanosecond, so everything
+/// stamped inside it has happened. Stored lifecycle timestamps carry
+/// nanoseconds: truncating to the millisecond's first nanosecond made a memory
+/// revised at `.339100789` "not yet valid" for `--as-of` equal to its own
+/// revision instant, and its superseded predecessor current, so a read-only
+/// historical pack at the revision boundary came back empty (bd-s6f7o). Any
+/// two spellings of one millisecond still select identically. Working on the
+/// sub-millisecond remainder also handles instants before the Unix epoch.
 #[must_use]
 pub(crate) fn canonical_pack_reference_time(
     instant: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
     let submillisecond_nanos = instant.timestamp_subsec_nanos() % 1_000_000;
-    instant - chrono::Duration::nanoseconds(i64::from(submillisecond_nanos))
+    instant + chrono::Duration::nanoseconds(i64::from(999_999 - submillisecond_nanos))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14787,7 +14796,10 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
             assert_eq!(draft.items.len(), 1);
-            assert_eq!(draft.items[0].selected_in, PackSelectionPhase::AntiPatternFirst);
+            assert_eq!(
+                draft.items[0].selected_in,
+                PackSelectionPhase::AntiPatternFirst
+            );
         }
         Ok(())
     }
@@ -14807,7 +14819,10 @@ mod tests {
                         ..classic_pack_options()
                     },
                 );
-                assert!(matches!(result, Err(PackValidationError::InvalidRelevanceFloor)));
+                assert!(matches!(
+                    result,
+                    Err(PackValidationError::InvalidRelevanceFloor)
+                ));
             }
         }
         Ok(())
@@ -15257,15 +15272,12 @@ mod tests {
             "score-floor reason",
         )?;
         ensure(
-            report
-                .filters_applied
-                .iter()
-                .any(|filter| {
-                    filter.code == "below_relevance_floor"
-                        && !filter.passed
-                        && filter.detail.contains("0.0500")
-                        && filter.detail.contains("default coverage fill")
-                }),
+            report.filters_applied.iter().any(|filter| {
+                filter.code == "below_relevance_floor"
+                    && !filter.passed
+                    && filter.detail.contains("0.0500")
+                    && filter.detail.contains("default coverage fill")
+            }),
             "score-floor filter should name the effective default floor",
         )
     }

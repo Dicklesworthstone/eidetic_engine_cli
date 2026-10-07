@@ -107,7 +107,7 @@
         "utility": 0.8,
         "why": "Selected because the memory matches release-formatting work.",
         "packHash": "blake3:1b56a8dedc62dabb0004ad59e5652008bdf40a2bc5cb60ce7eced9c33aad2c07",
-        "ledgerHash": "blake3:8e5a6d35153fdfc1ba21ce834655599ffac921c89f5a9163006214e399b51983",
+        "ledgerHash": "blake3:399fe48bd08487b742536b73c306b8c4047cd2882e97bf60380da307cfb93a20",
         "ledgerStatus": "available",
         "ledgerStorage": {
           "mode": "uncompressed_in_row",

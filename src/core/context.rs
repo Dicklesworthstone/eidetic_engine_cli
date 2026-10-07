@@ -8246,7 +8246,9 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_optional_u64(
         &mut hasher,
         "relevance_floor",
-        options.relevance_floor.map(|floor| u64::from(floor.to_bits())),
+        options
+            .relevance_floor
+            .map(|floor| u64::from(floor.to_bits())),
     );
     hash_labeled_bytes(
         &mut hasher,
@@ -15169,9 +15171,9 @@ mod relevance_floor_tests {
         assert!(degraded.iter().any(|entry| {
             entry.code == "context_filtered_results"
                 && entry.message.contains("caller relevance floor 0.5000")
-                && entry.message.contains(
-                    "1 memory, 1 procedural rule, and 1 imported evidence",
-                )
+                && entry
+                    .message
+                    .contains("1 memory, 1 procedural rule, and 1 imported evidence")
         }));
 
         let page = apply_pagination_with_rules(
@@ -15214,7 +15216,12 @@ mod relevance_floor_tests {
         assert_eq!(draft.rule_items.len(), 2);
         assert_eq!(draft.evidence_items.len(), 2);
         assert_eq!(draft.used_tokens, 40);
-        assert!(draft.rule_items.iter().all(|item| item.relevance.into_inner() >= 0.5));
+        assert!(
+            draft
+                .rule_items
+                .iter()
+                .all(|item| item.relevance.into_inner() >= 0.5)
+        );
         assert!(
             draft
                 .evidence_items

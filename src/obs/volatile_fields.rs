@@ -206,9 +206,15 @@ const TIMING_DEGRADED_CODES: &[&str] = crate::pack::NON_CANONICAL_TELEMETRY_DEGR
 /// direction: it can never turn into a silent pass.
 const TIMING_DEGRADED_MESSAGE_PREFIX: &str = "Pack assembly took ";
 
-/// Erase the wall-clock degradation and every value derived from it, so a
-/// response reads identically on a fast and a slow host. Returns how many
-/// entries were dropped, so a caller can tell "bit" from "no-op".
+/// Erase the wall-clock degradation, so a response reads identically on a fast
+/// and a slow host. Returns how many entries were dropped, so a caller can
+/// tell "bit" from "no-op".
+///
+/// Only the entries: nothing else in a response is derived from them. The
+/// canonical `pack.text` never rendered them (ADR 0087 T2), and since bd-ophw7
+/// the advisory banner's `degradationCount` and summary count retrieval
+/// signals only, so a slow host's banner already reads like a fast host's.
+/// Adjusting those counts here would now double-subtract.
 ///
 /// THE OTHER HALF OF [`normalize_pack_slo_measurements`], AND IT LIVES HERE FOR
 /// THAT REASON. That function strips the SLO's own timing fields; this one
@@ -222,11 +228,7 @@ const TIMING_DEGRADED_MESSAGE_PREFIX: &str = "Pack assembly took ";
 /// them. A scrub that simply emptied `degraded[]` would be indistinguishable
 /// from this one on a slow host and would delete real evidence on every host.
 pub fn normalize_pack_timing_degradations(value: &mut Value) -> usize {
-    let dropped = strip_timing_degraded_entries(value);
-    if dropped > 0 {
-        adjust_timing_derived_counts(value, dropped);
-    }
-    dropped
+    strip_timing_degraded_entries(value)
 }
 
 /// Filter timing entries out of every `degraded` array, returning the LARGEST
@@ -264,42 +266,6 @@ fn is_timing_degradation(item: &Value) -> bool {
     item.get("code")
         .and_then(Value::as_str)
         .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
-}
-
-/// Bring every value DERIVED from the degraded list back to its fast-host
-/// reading: the numeric count and the count inside prose.
-///
-/// `pack.text` is skipped. It is canonical (ADR 0087 §1): the product renders
-/// it without the timing entry, so its count never included one, and a timing
-/// bullet found there is a regression that
-/// [`normalize_pack_envelope_timing`] must see, not a volatile value to erase.
-fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object.iter_mut() {
-                if key == "text" {
-                    continue;
-                }
-                if key == "degradationCount" {
-                    if let Some(count) = child.as_u64() {
-                        *child = Value::from(count.saturating_sub(dropped as u64));
-                        continue;
-                    }
-                }
-                adjust_timing_derived_counts(child, dropped);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                adjust_timing_derived_counts(item, dropped);
-            }
-        }
-        Value::String(text) => {
-            let without_bullet = strip_timing_degradation_markdown(text);
-            *text = renumber_degraded_signal_prose(&without_bullet, dropped);
-        }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {}
-    }
 }
 
 /// Rewrite "Context includes N degraded signal(s)" down by `dropped`.
@@ -349,11 +315,10 @@ fn renumber_degraded_signal_prose(text: &str, dropped: usize) -> String {
 /// The markdown half of [`normalize_pack_timing_degradations`], for a pack
 /// rendered with `--format markdown`, where there is no `degraded[]` to count.
 ///
-/// The JSON normalizer learns how many entries it dropped from the array and
-/// rewrites the prose by that number. A standalone markdown document has only
-/// the rendered bullets, so the count comes from them instead: each timing
-/// bullet is one entry the "Context includes N degraded signals" sentence
-/// counted. Without this, tests/fixtures/golden/agent/context_pack.md.golden
+/// The product no longer renders a timing bullet (ADR 0087 T2), so on current
+/// output this is a no-op; it still converges a document rendered the old way,
+/// where each timing bullet is one entry the "Context includes N degraded
+/// signals" sentence counted. Without this, tests/fixtures/golden/agent/context_pack.md.golden
 /// stayed load-sensitive after the JSON golden was fixed -- it read 3 signals
 /// plus a millisecond bullet on a loaded worker and 2 without it on an idle one
 /// (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
@@ -690,9 +655,9 @@ mod tests {
 
         // `degraded` is serialized at BOTH `.degraded` and `.data.degraded`,
         // which is what the "largest, not total" rule in the stripper exists for.
-        // `pack.text` is canonical (ADR 0087 §1): the product renders it from
-        // the deterministic degradations only, so it reads the same on both
-        // hosts. The banner still counts the timing entry.
+        // `pack.text` is canonical (ADR 0087 §1) and the advisory banner counts
+        // retrieval signals only (bd-ophw7): neither counts the timing entry,
+        // so both read the same on both hosts.
         let document = |entries: serde_json::Value, count: u64| {
             let sentence =
                 format!("Context includes {count} degraded signals; semantic embedding is off.");
@@ -710,7 +675,7 @@ mod tests {
 
         (
             document(serde_json::json!([embed, freshness]), 2),
-            document(serde_json::json!([embed, freshness, timing]), 3),
+            document(serde_json::json!([embed, freshness, timing]), 2),
         )
     }
 
@@ -826,27 +791,32 @@ mod tests {
         Ok(())
     }
 
-    /// 2 -> 1 must read "signal", not "signals": the renderer pluralizes from
-    /// the same count it prints, so a normalizer that only rewrites the digit
-    /// produces prose the product never emits.
+    /// The banner never counted the timing entry (bd-ophw7), so dropping the
+    /// entry must leave the banner's count and prose exactly as they were: a
+    /// normalizer that still subtracted would turn a correct "1 degraded
+    /// signal" into "0 degraded signals".
     #[test]
-    fn dropping_to_one_repluralizes_the_prose() -> TestResult {
+    fn dropping_a_timing_entry_leaves_banner_counts_alone() -> TestResult {
         let mut value = serde_json::json!({
             "degraded": [
                 {"code": "embed_model_unavailable"},
                 {"code": crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE},
             ],
-            "summary": "Context includes 2 degraded signals; check the index.",
+            "data": {"pack": {"advisoryBanner": {"degradationCount": 1}}},
+            "summary": "Context includes 1 degraded signal; check the index.",
         });
         let dropped = normalize_pack_timing_degradations(&mut value);
         if dropped != 1 {
             return Err(format!("expected to drop 1, dropped {dropped}"));
         }
-        let summary = value["summary"].as_str().unwrap_or_default();
-        if summary != "Context includes 1 degraded signal; check the index." {
-            return Err(format!("prose not re-pluralized: {summary}"));
+        let expected = serde_json::json!({
+            "degraded": [{"code": "embed_model_unavailable"}],
+            "data": {"pack": {"advisoryBanner": {"degradationCount": 1}}},
+            "summary": "Context includes 1 degraded signal; check the index.",
+        });
+        if value != expected {
+            return Err(format!("only the entry may change:\n{value:#}"));
         }
-        println!("re-pluralized to: {summary}");
         Ok(())
     }
 

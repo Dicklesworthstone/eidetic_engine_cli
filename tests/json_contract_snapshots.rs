@@ -745,14 +745,12 @@ const TIMING_DEGRADED_MESSAGE_PREFIX: &str = "Pack assembly took ";
 
 /// Normalize a response so it reads identically on a fast and a slow host.
 ///
-/// Erases the timing degradation and every count derived from it. Deterministic
-/// degradations are untouched, so the snapshot keeps asserting them.
+/// Erases the timing degradation. Nothing else is derived from it: the
+/// canonical `pack.text` never rendered it and the advisory banner counts
+/// retrieval signals only (bd-ophw7). Deterministic degradations are
+/// untouched, so the snapshot keeps asserting them.
 fn normalize_timing_degradations(value: &mut Value) {
-    let dropped = strip_timing_degraded_entries(value);
-    if dropped == 0 {
-        return;
-    }
-    adjust_timing_derived_counts(value, dropped);
+    strip_timing_degraded_entries(value);
 }
 
 /// Filter timing entries out of every `degraded` array, returning the LARGEST
@@ -790,110 +788,6 @@ fn is_timing_degradation(item: &Value) -> bool {
     item.get("code")
         .and_then(Value::as_str)
         .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
-}
-
-/// Bring every value DERIVED from the degraded list back to its fast-host
-/// reading: the numeric count, the count inside prose, and the rendered
-/// markdown bullet.
-fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object.iter_mut() {
-                // `pack.text` is canonical (ADR 0087 §1): rendered without the
-                // timing entry, so there is nothing to strip or renumber, and
-                // renumbering it would under-count.
-                if key == "text" {
-                    continue;
-                }
-                if key == "degradationCount" {
-                    if let Some(count) = child.as_u64() {
-                        *child = json!(count.saturating_sub(dropped as u64));
-                        continue;
-                    }
-                }
-                adjust_timing_derived_counts(child, dropped);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                adjust_timing_derived_counts(item, dropped);
-            }
-        }
-        Value::String(text) => {
-            let without_bullet = strip_timing_degradation_markdown(text);
-            *text = renumber_degraded_signal_prose(&without_bullet, dropped);
-        }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {}
-    }
-}
-
-/// Rewrite "Context includes N degraded signal(s)" down by `dropped`.
-///
-/// The sentence is built from `degraded.len()`, so it counted the timing entry.
-/// The noun is re-pluralized because the renderer pluralizes from the same
-/// count, and 2 -> 1 must read "signal", not "signals".
-fn renumber_degraded_signal_prose(text: &str, dropped: usize) -> String {
-    const PREFIX: &str = "Context includes ";
-    const SUFFIX: &str = " degraded signal";
-    if !text.contains(SUFFIX) {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(PREFIX) {
-        let split = at + PREFIX.len();
-        out.push_str(&rest[..split]);
-        rest = &rest[split..];
-
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if digits.is_empty() {
-            continue;
-        }
-        let Ok(count) = digits.parse::<usize>() else {
-            continue;
-        };
-        let after_digits = &rest[digits.len()..];
-        if !after_digits.starts_with(SUFFIX) {
-            continue;
-        }
-        let after_noun = &after_digits[SUFFIX.len()..];
-        let tail = after_noun.strip_prefix('s').unwrap_or(after_noun);
-
-        let adjusted = count.saturating_sub(dropped);
-        out.push_str(&adjusted.to_string());
-        out.push_str(SUFFIX);
-        if adjusted != 1 {
-            out.push('s');
-        }
-        rest = tail;
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Take the rendered timing bullet, and its indented repair line, out of a
-/// markdown body.
-fn strip_timing_degradation_markdown(text: &str) -> String {
-    if !text.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
-        return text.to_string();
-    }
-    let mut kept: Vec<&str> = Vec::new();
-    let mut skipping = false;
-    for line in text.split('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("- **[") && line.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
-            skipping = true;
-            continue;
-        }
-        if skipping {
-            if trimmed.starts_with("- *Repair:*") {
-                continue;
-            }
-            skipping = false;
-        }
-        kept.push(line);
-    }
-    kept.join("\n")
 }
 
 fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
@@ -1495,7 +1389,8 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
     };
 
     let fast = document(json!([embed, freshness]), 2);
-    let slow = document(json!([embed, freshness, timing]), 3);
+    // The banner counts retrieval signals only, so it reads 2 on both hosts.
+    let slow = document(json!([embed, freshness, timing]), 2);
 
     // The fixtures must actually differ, or this test would pass against a
     // normalization that does nothing at all.
@@ -1721,31 +1616,6 @@ fn pack_slo_reads_the_same_on_a_fast_and_a_slow_host() -> TestResult {
 
     println!("normalized SLO: {slo:#}");
 
-    Ok(())
-}
-
-/// The count is re-pluralized, because the renderer pluralizes from the same
-/// number it prints. Dropping the timing entry from a two-signal response must
-/// yield "1 degraded signal", never "1 degraded signals".
-#[test]
-fn renumbering_degraded_prose_repluralizes_at_the_singular_boundary() -> TestResult {
-    let renumbered = renumber_degraded_signal_prose(
-        "Context includes 2 degraded signals; semantic embedding is unavailable.",
-        1,
-    );
-    if renumbered != "Context includes 1 degraded signal; semantic embedding is unavailable." {
-        return Err(format!(
-            "singular boundary not handled, got: {renumbered:?}"
-        ));
-    }
-
-    // A sentence with no count must pass through untouched.
-    let untouched = renumber_degraded_signal_prose("Context is clear.", 1);
-    if untouched != "Context is clear." {
-        return Err(format!("unrelated prose was rewritten, got: {untouched:?}"));
-    }
-
-    println!("renumbered: {renumbered}");
     Ok(())
 }
 

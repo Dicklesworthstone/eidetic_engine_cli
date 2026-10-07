@@ -14116,8 +14116,8 @@ mod tests {
                     && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
                 "isolated child must start without a configured model root or resolved defaults",
             )?;
-            let connection = DbConnection::open_file_read_only(&database)
-                .map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
             let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
             let RegisteredModel2VecResolution::Rejected(rejected) =
                 registered_model2vec_resolution(&connection, &workspace_id)
@@ -14127,9 +14127,12 @@ mod tests {
             };
             ensure(
                 rejected.source == EmbedModelSource::RegistryRejected
-                    && rejected.registry_rejection.as_ref().is_some_and(|rejection| {
-                        rejection.reason == EmbedRegistryRejectionReason::StatusNotAvailable
-                    }),
+                    && rejected
+                        .registry_rejection
+                        .as_ref()
+                        .is_some_and(|rejection| {
+                            rejection.reason == EmbedRegistryRejectionReason::StatusNotAvailable
+                        }),
                 "fixture must reach the local registry rejection without loading weights",
             )?;
             let (stack, _) = workspace_embedder_stack(&connection, &workspace_id)
