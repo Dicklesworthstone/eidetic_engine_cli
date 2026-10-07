@@ -64,9 +64,9 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
             "entityType": "memory",
-            "rankingBound": 1.2,
+            "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
             "components": {
               "base": 1.0,
@@ -174,7 +174,7 @@
               "value": 0.99722606,
               "contribution": "source-derived quality ranking component",
               "sourceField": "metadata.qualityScoring.components.recency",
-              "formula": "exp(-age_days / recency_tau_days)"
+              "formula": "max(recency_floor, exp(-age_days / recency_tau_days))"
             },
             {
               "name": "confidence",
@@ -282,9 +282,9 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
             "entityType": "memory",
-            "rankingBound": 1.2,
+            "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
             "components": {
               "base": 0.6233764,
@@ -392,7 +392,7 @@
               "value": 0.9972492,
               "contribution": "source-derived quality ranking component",
               "sourceField": "metadata.qualityScoring.components.recency",
-              "formula": "exp(-age_days / recency_tau_days)"
+              "formula": "max(recency_floor, exp(-age_days / recency_tau_days))"
             },
             {
               "name": "confidence",
@@ -500,9 +500,9 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:4ed5af7fc33ad6891cb12deb3e9717aa02f02d7aaa3f92ad1d226918c86c0051",
+            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
             "entityType": "memory",
-            "rankingBound": 1.2,
+            "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
             "components": {
               "base": 0.36304024,
@@ -610,7 +610,7 @@
               "value": 0.99727225,
               "contribution": "source-derived quality ranking component",
               "sourceField": "metadata.qualityScoring.components.recency",
-              "formula": "exp(-age_days / recency_tau_days)"
+              "formula": "max(recency_floor, exp(-age_days / recency_tau_days))"
             },
             {
               "name": "confidence",

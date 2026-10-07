@@ -1236,7 +1236,7 @@ Each multiplier is `[0..k]`, default 1.0; agents can pass `--explain` to see per
 ### 13.3 Recency, confidence, utility, maturity multipliers
 
 ```
-recency_multiplier  = exp(-Δt_days / τ)                    // τ default 30
+recency_multiplier  = max(0.5, exp(-Δt_days / τ))          // τ default 30; floor: age orders, never evicts
 confidence_mult     = max(0.1, confidence)                  // 0.1 floor
 utility_mult        = 0.5 + 0.5 * utility_score             // [0.5, 1.0]
 maturity_mult       = match maturity {

@@ -100,6 +100,7 @@ fn draft(items: Vec<PackDraftItem>) -> PackDraft {
         budget: TokenBudget::new(400).expect("budget should be valid"),
         used_tokens: items.iter().map(|item| item.estimated_tokens).sum(),
         evidence_items: Vec::new(),
+        rule_items: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile: ContextPackProfile::Balanced,
             objective: PackSelectionObjective::MmrRedundancy,

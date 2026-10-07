@@ -200,7 +200,8 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
         });
     }
 
-    for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation) {
+    for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation)
+    {
         retention.entries.push(RetainedGenerationEntry {
             size_bytes: directory_bytes(&candidate.path),
             path: candidate.path,
@@ -580,11 +581,12 @@ mod tests {
     #[test]
     fn zero_limit_and_missing_watermarks_never_open_tiers() {
         for (limit, generation) in [(0, Some(0)), (2, None)] {
-            let reasons: Vec<_> = classify_candidates(vec![candidate(1, generation)], limit, |_| {
-                panic!("a zero budget or missing watermark must not open tiers")
-            })
-            .map(|(_, reason)| reason)
-            .collect();
+            let reasons: Vec<_> =
+                classify_candidates(vec![candidate(1, generation)], limit, |_| {
+                    panic!("a zero budget or missing watermark must not open tiers")
+                })
+                .map(|(_, reason)| reason)
+                .collect();
             assert_eq!(reasons.len(), 1);
             assert!(!reasons[0].keeps());
         }
@@ -840,7 +842,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn real_tiers_keep_an_older_snapshot_readable_after_duplicate_reclamation() -> Result<(), String> {
+    fn real_tiers_keep_an_older_snapshot_readable_after_duplicate_reclamation() -> Result<(), String>
+    {
         use super::super::{
             IndexBuilder, IndexDocumentCounts, IndexGenerationLease, hash_fallback_embedder_stack,
             write_index_metadata,
@@ -874,13 +877,8 @@ mod tests {
                 super::super::build_lexical_tier(&cx, &path, &documents)
                     .await
                     .map_err(|error| error.to_string())?;
-                write_index_metadata(
-                    &path,
-                    generation,
-                    IndexDocumentCounts::memory_only(1),
-                    None,
-                )
-                .map_err(|error| error.to_string())?;
+                write_index_metadata(&path, generation, IndexDocumentCounts::memory_only(1), None)
+                    .map_err(|error| error.to_string())?;
                 assert_eq!(recoverable_index_generation(&path), Some(generation));
             }
             let publisher = IndexGenerationLease::publish(&cx, &index)
@@ -908,7 +906,10 @@ mod tests {
                 older
             );
             assert!(reader.index_for_snapshot(&cx, &index, 6).is_err());
-            assert!(!index.exists(), "retention must not invent a live generation");
+            assert!(
+                !index.exists(),
+                "retention must not invent a live generation"
+            );
             drop(reader);
             let publisher = IndexGenerationLease::publish(&cx, &index)
                 .await

@@ -862,6 +862,7 @@ fn make_context_response_fixture() -> ContextResponse {
         used_tokens: 21,
         items,
         evidence_items: Vec::new(),
+        rule_items: Vec::new(),
         omitted: vec![PackOmission {
             memory_id: fixed_memory_id(3),
             estimated_tokens: 900,

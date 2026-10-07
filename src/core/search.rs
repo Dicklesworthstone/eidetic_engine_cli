@@ -7130,7 +7130,10 @@ impl ScoreExplanation {
             if let Some(components) = scoring.get("components") {
                 for (key, formula) in [
                     ("base", "ranking_base = relevanceScore"),
-                    ("recency", "exp(-age_days / recency_tau_days)"),
+                    (
+                        "recency",
+                        "max(recency_floor, exp(-age_days / recency_tau_days))",
+                    ),
                     ("confidence", "max(confidence_floor, confidence)"),
                     ("utility", "utility_floor + (1 - utility_floor) * utility"),
                     (

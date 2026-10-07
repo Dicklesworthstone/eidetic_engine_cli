@@ -150,6 +150,7 @@ fn fixture_response() -> ContextResponse {
         used_tokens,
         items,
         evidence_items: Vec::new(),
+        rule_items: Vec::new(),
         omitted: Vec::new(),
         selection_audit,
         hash: Some("blake3:context-stream-fixture-pack".to_owned()),

@@ -5157,6 +5157,18 @@ fn context_advisory_banner(
     pack: &PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> PackAdvisoryBanner {
+    // The banner summarizes degraded RETRIEVAL signals. Wall-clock telemetry
+    // (`pack_assembly_elapsed_over_budget`) leaves the pack contents unaffected
+    // and is kept out of pack identity, so the hash-bearing Markdown is rendered
+    // without it; counting it here made JSON say five where the Markdown of the
+    // same response said four, and only on a slow host (bd-ophw7). It stays in
+    // the envelope's `degraded[]`.
+    let degraded: Vec<ContextResponseDegradation> = degraded
+        .iter()
+        .filter(|entry| !is_non_canonical_telemetry_degradation_code(&entry.code))
+        .cloned()
+        .collect();
+    let degraded = degraded.as_slice();
     let counts = pack.trust_counts();
     let mut notes = Vec::new();
 
@@ -15903,6 +15915,64 @@ mod tests {
             assert_eq!(draft.omitted[0].memory_id, memory_id(401));
         }
         Ok(())
+    }
+
+    #[test]
+    fn advisory_banner_counts_agree_between_markdown_and_json_with_timing_telemetry() -> TestResult
+    {
+        let request = ContextRequest::from_query("review release checklist")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let draft = assemble_draft(
+            request.query.clone(),
+            request.budget,
+            vec![candidate(1, 0.9, 0.8, 10)?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let retrieval = ContextResponseDegradation::new(
+            "semantic_index_unavailable",
+            ContextResponseSeverity::Medium,
+            "Semantic search is unavailable; lexical retrieval was used.",
+            None,
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+        let timing = ContextResponseDegradation::new(
+            super::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+            ContextResponseSeverity::Low,
+            "Pack assembly took 516ms. The pack contents are unaffected.",
+            None,
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+        // Markdown is rendered from the hash-time list, which never holds
+        // wall-clock telemetry; the response carries it afterwards.
+        let markdown = render_context_markdown_with_analysis(
+            &request,
+            &draft,
+            std::slice::from_ref(&retrieval),
+            &[],
+            &[],
+            None,
+        );
+        let response = ContextResponse::new(request, draft, vec![retrieval, timing])
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+        ensure_equal(
+            &response.data.degraded.len(),
+            &2,
+            "envelope keeps telemetry",
+        )?;
+
+        let banner = response.data.advisory_banner();
+        ensure_equal(&banner.degradation_count, &1, "retrieval signals only")?;
+        ensure(
+            markdown.contains(&escape_markdown_text(&banner.summary)),
+            format!(
+                "markdown and JSON disagree: {} vs {markdown}",
+                banner.summary
+            ),
+        )?;
+        ensure(
+            banner.summary.contains("1 degraded retrieval signal;"),
+            banner.summary.clone(),
+        )
     }
 
     #[test]

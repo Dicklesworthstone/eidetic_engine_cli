@@ -77,6 +77,7 @@ fn response() -> ContextResponse {
         used_tokens: 8,
         items: vec![item],
         evidence_items: Vec::new(),
+        rule_items: Vec::new(),
         omitted: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile: ContextPackProfile::Balanced,

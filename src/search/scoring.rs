@@ -19,6 +19,19 @@ pub const SEARCH_SCORING_POLICY_V1: &str = "ee.search.quality_scoring.v1";
 
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
+/// Lower bound of the recency multiplier.
+///
+/// Every other quality multiplier in this stack has a floor (confidence 0.1,
+/// utility 0.5, harmful feedback 0.2, anchor drift 0.4) because each one is a
+/// ranking adjustment, not an eviction. Recency had none, so `exp(-age/tau)`
+/// with `tau = 30` scored a six-month-old exact match at 0.0025 of a fresh one,
+/// and a pack's relevance projection (ranking score over the policy bound) fell
+/// below the coverage-fill floor for any memory older than about three months.
+/// Durable memory is the product: age orders otherwise-equal results and stops
+/// demoting once a memory is about three weeks old (`tau * ln 2`). Staleness is
+/// expressed by confidence decay, harmful feedback and validity windows, which
+/// keep their own floors.
+pub const DEFAULT_RECENCY_FLOOR: f32 = 0.5;
 /// Lower bound the code-coupled freshness drift multiplier is clamped to
 /// (ADR 0056, bd-1n0np.3.7). A `floor` of `1.0` means "no penalty"; a smaller
 /// floor lets a drifted anchor rank DOWN but never vanish. Use
@@ -164,6 +177,8 @@ impl SearchScoringConfig {
                 self.established_maturity_multiplier,
             ),
             ("ranking_bound", self.ranking_bound()),
+            // Packs ranked before recency had a floor must not be reused.
+            ("recency_floor", DEFAULT_RECENCY_FLOOR),
         ] {
             hasher.update(&(name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());
@@ -723,7 +738,9 @@ fn recency_multiplier(age_days: Option<f32>, tau_days: f32) -> f32 {
         return 1.0;
     };
     let tau = finite_positive(tau_days).unwrap_or(DEFAULT_RECENCY_TAU_DAYS);
-    (-finite_nonnegative(age_days) / tau).exp()
+    (-finite_nonnegative(age_days) / tau)
+        .exp()
+        .max(DEFAULT_RECENCY_FLOOR)
 }
 
 fn harmful_penalty(harmful_count: u32, per_hit: f32, floor: f32) -> f32 {
@@ -852,10 +869,10 @@ mod tests {
         AnchorMatchCandidateSignals, AnchorMatchContext, BeadAffinityCandidateSignals,
         BeadAffinityContext, DEFAULT_ANCHOR_MATCH_BIAS_CAP, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR, DEFAULT_GRAPH_CENTRALITY_WEIGHT,
-        DEFAULT_RECENCY_TAU_DAYS, DEFAULT_STALE_ANCHOR_PENALTY, RetrievalMaturity,
-        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
-        anchor_match_score, bead_affinity_score, final_score, freshness_drift_multiplier,
-        stale_anchor_floor,
+        DEFAULT_RECENCY_FLOOR, DEFAULT_RECENCY_TAU_DAYS, DEFAULT_STALE_ANCHOR_PENALTY,
+        RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
+        SpeedMode, anchor_match_score, bead_affinity_score, final_score,
+        freshness_drift_multiplier, stale_anchor_floor,
     };
     use crate::models::MemoryAnchorFreshnessState;
 
@@ -867,43 +884,35 @@ mod tests {
     }
 
     #[test]
-    fn recency_multiplier_matches_zero_one_two_and_ten_tau_boundaries() {
+    fn recency_multiplier_decays_then_holds_at_its_floor() {
         let config = SearchScoringConfig::default();
         let base = SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic);
+        let recency = |age_days: f32| {
+            SearchScoreComponents::from_signals(
+                SearchScoringSignals {
+                    age_days: Some(age_days),
+                    ..base
+                },
+                config,
+            )
+            .recency
+        };
 
-        let at_zero = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                age_days: Some(0.0),
-                ..base
-            },
-            config,
+        assert_close(recency(0.0), 1.0);
+        assert_close(recency(DEFAULT_RECENCY_TAU_DAYS / 2.0), (-0.5_f32).exp());
+        // exp(-1) and beyond would rank an exact match below a fresh weak one
+        // by orders of magnitude; age is a tie-breaker, never an eviction.
+        assert_close(recency(DEFAULT_RECENCY_TAU_DAYS), DEFAULT_RECENCY_FLOOR);
+        assert_close(
+            recency(DEFAULT_RECENCY_TAU_DAYS * 2.0),
+            DEFAULT_RECENCY_FLOOR,
         );
-        let at_one_tau = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                age_days: Some(DEFAULT_RECENCY_TAU_DAYS),
-                ..base
-            },
-            config,
+        assert_close(
+            recency(DEFAULT_RECENCY_TAU_DAYS * 10.0),
+            DEFAULT_RECENCY_FLOOR,
         );
-        let at_two_tau = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                age_days: Some(DEFAULT_RECENCY_TAU_DAYS * 2.0),
-                ..base
-            },
-            config,
-        );
-        let at_ten_tau = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                age_days: Some(DEFAULT_RECENCY_TAU_DAYS * 10.0),
-                ..base
-            },
-            config,
-        );
-
-        assert_close(at_zero.recency, 1.0);
-        assert_close(at_one_tau.recency, std::f32::consts::E.recip());
-        assert_close(at_two_tau.recency, (-2.0_f32).exp());
-        assert_close(at_ten_tau.recency, (-10.0_f32).exp());
+        assert_close(recency(365.0 * 5.0), DEFAULT_RECENCY_FLOOR);
+        assert!(recency(1.0) > recency(10.0));
     }
 
     #[test]
@@ -1622,6 +1631,17 @@ mod tests {
         legacy.update(&(name.len() as u64).to_le_bytes());
         legacy.update(name.as_bytes());
         legacy.update(&config.ranking_bound().to_bits().to_le_bytes());
+        let unfloored_hash = format!("blake3:{}", legacy.finalize().to_hex());
+        assert_ne!(
+            config.policy_hash(),
+            unfloored_hash,
+            "packs ranked without a recency floor must not be reused"
+        );
+
+        let name = "recency_floor";
+        legacy.update(&(name.len() as u64).to_le_bytes());
+        legacy.update(name.as_bytes());
+        legacy.update(&DEFAULT_RECENCY_FLOOR.to_bits().to_le_bytes());
         let expected_hash = format!("blake3:{}", legacy.finalize().to_hex());
         assert_eq!(config.policy_hash(), expected_hash);
     }
