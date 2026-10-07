@@ -321,6 +321,7 @@ pub fn error_recall_report(
 #[serde(rename_all = "camelCase")]
 pub struct RecalledRepairEvidence {
     pub evidence_id: String,
+    /// `incident_card` for a derived failure->fix summary (ADR 0091),
     /// `repair` for a fix turn, `proof` for the run that verified it.
     pub role: &'static str,
     pub provenance_uri: String,
@@ -346,6 +347,7 @@ pub fn recalled_repair_evidence(
     workspace_id: &str,
     report: &ErrorRecallReport,
 ) -> Result<Vec<RecalledRepairEvidence>> {
+    let mut cards = Vec::new();
     let mut evidence = Vec::new();
     for target in report
         .helpful_repairs
@@ -353,6 +355,18 @@ pub fn recalled_repair_evidence(
         .filter(|id| id.starts_with("ev_"))
     {
         if let Some(span) = connection.get_search_admitted_evidence_span(target, workspace_id)? {
+            // A derived incident card (ADR 0091) is already the compact
+            // symptom/fix/verification summary of a repair, bounded by its own
+            // token budget; show it whole and ahead of the raw turns.
+            if span.is_derived_incident_card() {
+                cards.push(RecalledRepairEvidence {
+                    evidence_id: span.id.clone(),
+                    role: "incident_card",
+                    provenance_uri: span.canonical_provenance_uri(),
+                    text: Some(span.reader_text().into_owned()),
+                });
+                continue;
+            }
             let text = span
                 .reader_text()
                 .chars()
@@ -366,6 +380,8 @@ pub fn recalled_repair_evidence(
             });
         }
     }
+    cards.append(&mut evidence);
+    let mut evidence = cards;
     for target in report.proof_links.iter().filter(|id| id.starts_with("ev_")) {
         if let Some(span) = connection
             .get_evidence_span(target)?

@@ -13939,6 +13939,10 @@ fn push_direct_rule_result_limit_degradation(
 struct DirectEvidencePackCandidate {
     item: PackEvidenceItem,
     linked_memory_id: Option<String>,
+    /// A derived incident card (ADR 0091) rather than a transcript line.
+    incident_card: bool,
+    /// Retrieval source of the hit that selected it.
+    source: String,
 }
 
 /// Admit and deduplicate native evidence before pagination, without spending
@@ -14019,70 +14023,25 @@ fn collect_direct_evidence_pack_candidates(
             filtered_count = filtered_count.saturating_add(1);
             continue;
         }
-        // Pack the projected message body, not the transcript envelope: the
-        // token budget pays for content a reader can use
-        // (bd-reality-core-convergence-1azkt.45). Provenance still names the
-        // exact stored lines.
-        let content = span.reader_text().into_owned();
-        let estimated_tokens = estimate_tokens_default(&content).max(1);
-        let Ok(provenance_uri) = ProvenanceUri::from_str(&span.canonical_provenance_uri()) else {
-            rejected_live_admission = rejected_live_admission.saturating_add(1);
-            continue;
-        };
-        let Ok(provenance) = PackProvenance::new(
-            provenance_uri,
-            format!(
-                "Imported CASS transcript span {} lines {}-{}",
-                span.id, span.start_line, span.end_line
-            ),
+        let Some(candidate) = direct_evidence_pack_candidate(
+            span,
+            hit.ranking_relevance_score(),
+            hit.source.as_str(),
+            &request.query,
+            None,
         ) else {
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
-        // bd-reality-core-convergence-1azkt.11. Was
-        // `.unwrap_or_else(|_| UnitScore::zero())`: a projection the unit type
-        // REFUSED was admitted as a confident 0.0, and the `why` string two
-        // statements below then reported that manufactured number to the agent
-        // as "relevance {:.4}". Rejecting it uses the same `continue` this loop
-        // already applies to an unconstructable provenance directly above, so
-        // an unscorable hit is counted as a rejected admission rather than
-        // admitted with an invented score.
-        let Ok(relevance) = UnitScore::parse(hit.ranking_relevance_score()) else {
-            rejected_live_admission = rejected_live_admission.saturating_add(1);
-            continue;
-        };
-        let utility = UnitScore::neutral();
-        let entity_revision = span.pack_entity_revision();
-        let why = format!(
-            "matched '{}' via {} (relevance {:.4}, utility 0.5000); selected live-admitted imported evidence {}",
-            request.query,
-            hit.source.as_str(),
-            hit.ranking_relevance_score(),
-            span.id
-        );
-        candidates.push(DirectEvidencePackCandidate {
-            linked_memory_id: span.memory_id,
-            item: PackEvidenceItem {
-                rank: 0,
-                evidence_id: span.id,
-                entity_revision,
-                session_id: span.session_id,
-                start_line: span.start_line,
-                end_line: span.end_line,
-                section: PackSection::Evidence,
-                content,
-                estimated_tokens,
-                relevance,
-                utility,
-                provenance: vec![provenance],
-                why,
-                trust: PackTrustSignal::new(
-                    TrustClass::CassEvidence,
-                    Some("imported_transcript_excerpt".to_owned()),
-                ),
-            },
-        });
+        candidates.push(candidate);
     }
+    let candidates = prefer_incident_cards(
+        connection,
+        &workspace_ids,
+        filters,
+        &request.query,
+        candidates,
+    );
     if rejected_live_admission > 0 {
         push_degradation(
             degraded,
@@ -14104,6 +14063,232 @@ fn collect_direct_evidence_pack_candidates(
         );
     }
     candidates
+}
+
+/// One admitted evidence row as a pack candidate. `matched_through` names the
+/// transcript turn whose search hit selected a covering incident card.
+fn direct_evidence_pack_candidate(
+    span: crate::db::StoredEvidenceSpan,
+    relevance_score: f32,
+    source: &str,
+    query: &str,
+    matched_through: Option<&str>,
+) -> Option<DirectEvidencePackCandidate> {
+    let incident_card = span.is_derived_incident_card();
+    // Pack the projected message body, not the transcript envelope: the
+    // token budget pays for content a reader can use
+    // (bd-reality-core-convergence-1azkt.45). Provenance still names the
+    // exact stored lines.
+    let content = span.reader_text().into_owned();
+    let estimated_tokens = estimate_tokens_default(&content).max(1);
+    let provenance_uri = ProvenanceUri::from_str(&span.canonical_provenance_uri()).ok()?;
+    let provenance = PackProvenance::new(
+        provenance_uri,
+        if incident_card {
+            format!(
+                "Derived incident card {} over CASS transcript lines {}-{}",
+                span.id, span.start_line, span.end_line
+            )
+        } else {
+            format!(
+                "Imported CASS transcript span {} lines {}-{}",
+                span.id, span.start_line, span.end_line
+            )
+        },
+    )
+    .ok()?;
+    // bd-reality-core-convergence-1azkt.11. Was
+    // `.unwrap_or_else(|_| UnitScore::zero())`: a projection the unit type
+    // REFUSED was admitted as a confident 0.0, and the `why` string below then
+    // reported that manufactured number to the agent as "relevance {:.4}".
+    // An unscorable hit is a rejected admission, not an invented score.
+    let relevance = UnitScore::parse(relevance_score).ok()?;
+    let utility = UnitScore::neutral();
+    let entity_revision = span.pack_entity_revision();
+    let selected = if incident_card {
+        format!(
+            "selected live-admitted derived incident card {} (symptom, fix and verification of one failure->fix arc)",
+            span.id
+        )
+    } else {
+        format!("selected live-admitted imported evidence {}", span.id)
+    };
+    let through = matched_through
+        .map(|turn| format!(" through its source turn {turn}"))
+        .unwrap_or_default();
+    let why = format!(
+        "matched '{query}' via {source}{through} (relevance {relevance_score:.4}, utility 0.5000); {selected}"
+    );
+    Some(DirectEvidencePackCandidate {
+        linked_memory_id: span.memory_id,
+        incident_card,
+        source: source.to_owned(),
+        item: PackEvidenceItem {
+            rank: 0,
+            evidence_id: span.id,
+            entity_revision,
+            session_id: span.session_id,
+            start_line: span.start_line,
+            end_line: span.end_line,
+            section: PackSection::Evidence,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance: vec![provenance],
+            why,
+            trust: PackTrustSignal::new(
+                TrustClass::CassEvidence,
+                Some(
+                    if incident_card {
+                        "derived_incident_card"
+                    } else {
+                        "imported_transcript_excerpt"
+                    }
+                    .to_owned(),
+                ),
+            ),
+        },
+    })
+}
+
+/// Incident cards (ADR 0091) replace the transcript turns they summarize: a
+/// matched turn inside an admitted card's line range brings the card instead,
+/// at the turn's rank, and a turn is dropped when its card is already a
+/// candidate. Cards of one error class collapse to the best-ranked one, which
+/// says how many incidents of that class the workspace holds. Order is the
+/// search order throughout, so the result is deterministic.
+fn prefer_incident_cards(
+    connection: &DbConnection,
+    workspace_ids: &[String],
+    filters: &crate::models::QueryFilters,
+    query: &str,
+    candidates: Vec<DirectEvidencePackCandidate>,
+) -> Vec<DirectEvidencePackCandidate> {
+    let sessions = candidates
+        .iter()
+        .filter(|candidate| !candidate.incident_card)
+        .map(|candidate| candidate.item.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut cards = if sessions.is_empty() {
+        Vec::new()
+    } else {
+        connection
+            .incident_card_spans_for_sessions(&sessions)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                workspace_ids.iter().any(|id| id == &row.span.workspace_id)
+                    && row.is_direct_pack_admitted(&row.span.workspace_id)
+                    && direct_evidence_matches_filters(&row.span, filters)
+            })
+            .map(|row| row.span)
+            .collect::<Vec<_>>()
+    };
+    // Narrowest covering card first, so nested ranges resolve to the tightest.
+    cards.sort_by(|left, right| {
+        (left.end_line - left.start_line)
+            .cmp(&(right.end_line - right.start_line))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen = BTreeSet::new();
+    let mut preferred = Vec::with_capacity(candidates.len());
+    for candidate in &candidates {
+        if candidate.incident_card {
+            seen.insert(candidate.item.evidence_id.clone());
+        }
+    }
+    let mut emitted = BTreeSet::new();
+    for candidate in candidates {
+        if candidate.incident_card {
+            if emitted.insert(candidate.item.evidence_id.clone()) {
+                preferred.push(candidate);
+            }
+            continue;
+        }
+        let covering = cards.iter().find(|card| {
+            card.session_id == candidate.item.session_id
+                && card.start_line <= candidate.item.start_line
+                && candidate.item.end_line <= card.end_line
+        });
+        let Some(card) = covering else {
+            preferred.push(candidate);
+            continue;
+        };
+        if seen.contains(&card.id) {
+            // The card itself matched; its source turn adds nothing.
+            continue;
+        }
+        if !emitted.insert(card.id.clone()) {
+            continue;
+        }
+        match direct_evidence_pack_candidate(
+            card.clone(),
+            candidate.item.relevance.into_inner(),
+            &candidate.source,
+            query,
+            Some(&candidate.item.evidence_id),
+        ) {
+            Some(card_candidate) => preferred.push(card_candidate),
+            None => {
+                emitted.remove(&card.id);
+                preferred.push(candidate);
+            }
+        }
+    }
+    collapse_incident_cards_by_error_class(connection, preferred)
+}
+
+fn collapse_incident_cards_by_error_class(
+    connection: &DbConnection,
+    candidates: Vec<DirectEvidencePackCandidate>,
+) -> Vec<DirectEvidencePackCandidate> {
+    let card_ids = candidates
+        .iter()
+        .filter(|candidate| candidate.incident_card)
+        .map(|candidate| candidate.item.evidence_id.clone())
+        .collect::<Vec<_>>();
+    if card_ids.is_empty() {
+        return candidates;
+    }
+    let workspace_id = match connection.get_evidence_span(&card_ids[0]) {
+        Ok(Some(span)) => span.workspace_id,
+        _ => return candidates,
+    };
+    let refs = card_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let Ok((classes, counts)) = connection.incident_card_error_classes(&workspace_id, &refs) else {
+        return candidates;
+    };
+    let mut represented = BTreeSet::new();
+    let mut collapsed = Vec::with_capacity(candidates.len());
+    for mut candidate in candidates {
+        if !candidate.incident_card {
+            collapsed.push(candidate);
+            continue;
+        }
+        let Some(card_classes) = classes.get(&candidate.item.evidence_id) else {
+            collapsed.push(candidate);
+            continue;
+        };
+        if card_classes.iter().any(|class| represented.contains(class)) {
+            continue;
+        }
+        represented.extend(card_classes.iter().cloned());
+        if let Some((class, count)) = card_classes
+            .iter()
+            .filter_map(|class| counts.get(class).map(|count| (class, *count)))
+            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(left.0)))
+            .filter(|(_, count)| *count > 1)
+        {
+            candidate.item.why.push_str(&format!(
+                "; error class {class} was seen in {count} incidents in this workspace, this is the best-ranked"
+            ));
+        }
+        collapsed.push(candidate);
+    }
+    collapsed
 }
 
 fn append_direct_evidence_pack_items(
@@ -14786,5 +14971,9 @@ mod rule_admission_tests;
 #[cfg(test)]
 #[path = "context_candidate_pool_tests.rs"]
 mod candidate_pool_tests;
+
+#[cfg(test)]
+#[path = "context_incident_card_tests.rs"]
+mod incident_card_tests;
 
 include!("context_test_module.rs");

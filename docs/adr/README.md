@@ -120,3 +120,4 @@ them at the revisions where they existed.
 - [ADR 0088: `degraded[].repair` is prose; actionability is a separate, declared field](0088-degraded-repair-actionability.md)
 - [ADR 0089: Swarm Repair Plan Contract](0089-swarm-repair-plan-contract.md)
 - [ADR 0090: Daemon SocketBroker lifecycle boundary](0090-daemon-socketbroker-lifecycle-boundary.md)
+- [ADR 0091: Derived Incident Cards](0091-derived-incident-cards.md)

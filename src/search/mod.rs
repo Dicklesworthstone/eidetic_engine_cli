@@ -1110,9 +1110,14 @@ pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> Canoni
         egress.content
     };
     let (content, content_truncated) = content_preview_with_flag(&safe_excerpt);
+    let label = if span.is_derived_incident_card() {
+        "Derived incident card"
+    } else {
+        "Imported evidence"
+    };
     let mut doc = CanonicalSearchDocument::new(&span.id, safe_excerpt, DocumentSource::Import)
         .with_title(format!(
-            "Imported evidence {} (session {}, lines {}-{})",
+            "{label} {} (session {}, lines {}-{})",
             span.id, span.session_id, span.start_line, span.end_line
         ))
         .with_kind("evidence_span")

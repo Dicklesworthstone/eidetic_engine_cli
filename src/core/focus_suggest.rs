@@ -288,6 +288,8 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         match connection.list_search_admitted_evidence_spans_for_workspace(&workspace_id) {
             Ok((rows, _admission)) => rows
                 .into_iter()
+                // Transcript activity only; derived incident cards restate it.
+                .filter(|span| !span.is_derived_incident_card())
                 .filter(|span| {
                     DateTime::parse_from_rfc3339(&span.created_at)
                         .ok()

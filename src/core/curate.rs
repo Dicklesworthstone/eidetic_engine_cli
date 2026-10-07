@@ -2744,12 +2744,14 @@ pub fn review_session_proposals(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
     )?;
-    let evidence_spans = connection
-        .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list session evidence spans: {error}"),
-            repair: Some("ee import cass --workspace . --json".to_owned()),
-        })?;
+    let evidence_spans = transcript_spans(
+        connection
+            .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list session evidence spans: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?,
+    );
 
     let mut candidates = build_review_session_candidates(
         &prepared.workspace_id,
@@ -2828,12 +2830,14 @@ pub fn capture_suggestions(
         .filter(|value| !value.is_empty());
     let session =
         resolve_review_session(&connection, &prepared.workspace_id, requested_session_id)?;
-    let evidence_spans = connection
-        .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list capture suggestion evidence spans: {error}"),
-            repair: Some("ee import cass --workspace . --json".to_owned()),
-        })?;
+    let evidence_spans = transcript_spans(
+        connection
+            .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list capture suggestion evidence spans: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?,
+    );
     let existing_candidates = connection
         .list_curation_candidates(&prepared.workspace_id, None, None, None)
         .map_err(|error| DomainError::Storage {
@@ -3065,11 +3069,21 @@ fn list_workspace_cass_evidence_spans(
 ) -> Result<Vec<StoredEvidenceSpan>, DomainError> {
     connection
         .list_search_admitted_evidence_spans_for_workspace(workspace_id)
-        .map(|(spans, _)| spans)
+        .map(|(spans, _)| transcript_spans(spans))
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list workspace CASS evidence spans: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
         })
+}
+
+/// Curation reads transcript turns. A derived incident card (ADR 0091) is a
+/// summary of turns already in the list; reading it back would count the same
+/// failure and fix twice and let a derivation feed on its own output.
+fn transcript_spans(spans: Vec<StoredEvidenceSpan>) -> Vec<StoredEvidenceSpan> {
+    spans
+        .into_iter()
+        .filter(|span| !span.is_derived_incident_card())
+        .collect()
 }
 
 fn count_workspace_cass_evidence_spans(

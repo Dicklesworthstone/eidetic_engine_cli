@@ -79,6 +79,7 @@ pub mod hygiene_beads_state;
 pub mod hygiene_classifier;
 pub mod hygiene_coordination;
 pub mod impact;
+pub mod incident_card;
 pub mod index;
 pub mod influence;
 pub mod init;

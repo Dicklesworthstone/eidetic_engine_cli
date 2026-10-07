@@ -44,6 +44,8 @@ mod harness_conformance_simulator;
 mod hotset_manifest_contract;
 #[path = "../hotset_prewarm_e2e.rs"]
 mod hotset_prewarm_e2e;
+#[path = "../incident_card_cli.rs"]
+mod incident_card_cli;
 #[path = "../index_retention_e2e.rs"]
 mod index_retention_e2e;
 #[path = "../index_vacuum_e2e.rs"]

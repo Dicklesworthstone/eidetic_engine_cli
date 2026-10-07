@@ -50,6 +50,8 @@ pub struct CassErrorRecallReport {
     pub fingerprints_recorded: u32,
     pub resolved_failures: u32,
     pub repair_links_recorded: u32,
+    /// Derived incident cards written by this run (ADR 0091).
+    pub incident_cards_recorded: u32,
 }
 
 /// Derive and record error fingerprints and repair links for one imported
@@ -69,7 +71,11 @@ pub fn record_session_error_recall(
     if session.workspace_id != workspace_id {
         return Ok(CassErrorRecallReport::default());
     }
-    let spans = connection.list_evidence_spans_for_session(session_id)?;
+    let spans = connection
+        .list_evidence_spans_for_session(session_id)?
+        .into_iter()
+        .filter(|span| !span.is_derived_incident_card())
+        .collect::<Vec<_>>();
     let arcs = session_failure_arcs(workspace_id, &session, &spans);
     let mut report = CassErrorRecallReport::default();
     if arcs.is_empty() {
@@ -94,6 +100,29 @@ pub fn record_session_error_recall(
                     .repair_links_recorded
                     .saturating_add(u32::try_from(recorded_here).unwrap_or(u32::MAX));
             }
+            let Some(card) = crate::core::incident_card::draft_incident_card(
+                workspace_id,
+                session_id,
+                &spans,
+                arc,
+            ) else {
+                continue;
+            };
+            if connection.get_evidence_span(&card.id)?.is_none() {
+                connection.insert_evidence_span(&card.id, &card.input)?;
+                report.incident_cards_recorded = report.incident_cards_recorded.saturating_add(1);
+            }
+            // The card is the compact form of this arc's repair: recall of the
+            // error class surfaces it, and its failing span stays its anchor.
+            let card_recording = ErrorRepairLinkRecording {
+                helpful_repairs: vec![card.id],
+                created_by: Some(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned()),
+                evidence_ref: Some(arc.failure_id.clone()),
+                ..ErrorRepairLinkRecording::default()
+            };
+            for diagnostic in &arc.diagnostics {
+                record_error_repair_links(connection, workspace_id, diagnostic, &card_recording)?;
+            }
         }
         Ok(())
     })?;
@@ -104,6 +133,13 @@ pub fn record_session_error_recall(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FailureArc {
     pub failure_id: String,
+    /// The tool call that ran the failing command.
+    pub attempt_id: String,
+    pub family: CommandFamily,
+    /// The first diagnostic line of the failing output (and its source
+    /// location), secret-redacted but otherwise raw tool output: a derivation
+    /// that shows it must screen it again.
+    pub symptom: Option<String>,
     pub diagnostics: Vec<CanonicalDiagnostic>,
     pub resolution: Option<Resolution>,
 }
@@ -111,6 +147,9 @@ pub(crate) struct FailureArc {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Resolution {
     pub proof_id: String,
+    pub proof_family: CommandFamily,
+    /// Admitted assistant turns between the failure and its proof, newest
+    /// first.
     pub repair_ids: Vec<String>,
 }
 
@@ -138,9 +177,24 @@ impl FailureArc {
 struct PendingFailure {
     index: usize,
     failure_id: String,
+    attempt_id: String,
     family: CommandFamily,
+    symptom: Option<String>,
     compile_error: bool,
     diagnostics: Vec<CanonicalDiagnostic>,
+}
+
+impl PendingFailure {
+    fn into_arc(self, resolution: Option<Resolution>) -> FailureArc {
+        FailureArc {
+            failure_id: self.failure_id,
+            attempt_id: self.attempt_id,
+            family: self.family,
+            symptom: self.symptom,
+            diagnostics: self.diagnostics,
+            resolution,
+        }
+    }
 }
 
 /// Walk a session in transcript order and pair failures with the success that
@@ -203,16 +257,13 @@ pub(crate) fn session_failure_arcs(
                         continue;
                     }
                     if pending.len() == MAX_PENDING_FAILURES {
-                        let dropped = pending.remove(0);
-                        arcs.push(FailureArc {
-                            failure_id: dropped.failure_id,
-                            diagnostics: dropped.diagnostics,
-                            resolution: None,
-                        });
+                        arcs.push(pending.remove(0).into_arc(None));
                     }
                     pending.push(PendingFailure {
                         index,
                         failure_id: span.id.clone(),
+                        attempt_id: spans[call_index].id.clone(),
+                        symptom: symptom_line(&output),
                         compile_error: diagnostics
                             .iter()
                             .any(|diagnostic| diagnostic.canonical_code.is_some()),
@@ -223,11 +274,7 @@ pub(crate) fn session_failure_arcs(
             }
         }
     }
-    arcs.extend(pending.into_iter().map(|failure| FailureArc {
-        failure_id: failure.failure_id,
-        diagnostics: failure.diagnostics,
-        resolution: None,
-    }));
+    arcs.extend(pending.into_iter().map(|failure| failure.into_arc(None)));
     arcs.sort_by(|left, right| left.failure_id.cmp(&right.failure_id));
     arcs
 }
@@ -260,14 +307,11 @@ fn resolve_pending(
             .take(MAX_REPAIR_TURNS)
             .map(|span| span.id.clone())
             .collect::<Vec<_>>();
-        arcs.push(FailureArc {
-            failure_id: failure.failure_id,
-            diagnostics: failure.diagnostics,
-            resolution: Some(Resolution {
-                proof_id: success.id.clone(),
-                repair_ids,
-            }),
-        });
+        arcs.push(failure.into_arc(Some(Resolution {
+            proof_id: success.id.clone(),
+            proof_family: family.clone(),
+            repair_ids,
+        })));
     }
     *pending = still_pending;
 }
@@ -278,6 +322,15 @@ fn resolve_pending(
 pub(crate) struct CommandFamily {
     program: String,
     subcommand: Option<String>,
+}
+
+impl std::fmt::Display for CommandFamily {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.subcommand {
+            Some(subcommand) => write!(formatter, "{} {subcommand}", self.program),
+            None => formatter.write_str(&self.program),
+        }
+    }
 }
 
 impl CommandFamily {
@@ -576,6 +629,32 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
         }
     }
     diagnostics
+}
+
+/// The line an agent would read first in a failing output: the first rustc
+/// error (with the `-->` location that follows it), else the first failing
+/// test or panic. Secret-redacted; never the whole log.
+fn symptom_line(output: &ToolOutput) -> Option<String> {
+    let text = bounded(&output.text);
+    let lines = text.lines().map(str::trim).collect::<Vec<_>>();
+    let line = if let Some(index) = lines
+        .iter()
+        .position(|line| rustc_error_line(line).is_some())
+    {
+        let location = lines[index + 1..lines.len().min(index + 3)]
+            .iter()
+            .find_map(|line| line.strip_prefix("--> "));
+        match location {
+            Some(location) => format!("{} ({})", lines[index], location.trim()),
+            None => lines[index].to_owned(),
+        }
+    } else {
+        (*lines.iter().find(|line| {
+            (line.starts_with("test ") && line.ends_with("FAILED")) || line.contains("panicked at")
+        })?)
+        .to_owned()
+    };
+    Some(crate::policy::redact_secret_like_content(&line).content)
 }
 
 fn bounded(text: &str) -> &str {

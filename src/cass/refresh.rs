@@ -134,6 +134,12 @@ pub(super) fn refresh_session(
             let observed = by_stored_reference
                 .get(row.cass_span_id.as_str())
                 .or_else(|| incoming.get(row.cass_span_id.as_str()));
+            // A derived incident card summarizes this transcript; it is not a
+            // line of it (ADR 0091). Its derived reference can never name an
+            // upstream line, so it neither blocks nor joins reconciliation.
+            if row.is_derived_incident_card() && observed.is_none() {
+                continue;
+            }
             if !matches!(row.producer_kind.as_str(), "cass_import" | "legacy_unknown") {
                 // Other producers may attach their own evidence to a session.
                 // They cannot confer authority on a second interpretation of
@@ -883,6 +889,48 @@ mod canonical_reference_tests {
         assert_eq!(report.added_lines, vec![1, 2]);
         assert_eq!(db.get_evidence_span(&other_id).unwrap(), Some(retained));
         assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 3);
+        let again = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert!(!again.changed);
+        assert!(again.added_lines.is_empty());
+    }
+
+    #[test]
+    fn derived_incident_cards_neither_block_nor_join_transcript_refresh() {
+        let (db, workspace, id, session) = fixture("/private/incident-card.jsonl", 1);
+        let card_id = crate::core::incident_card::incident_card_id(&workspace, "ev_failure");
+        let excerpt = format!(
+            "{}1-1): `cargo test` failed, then passed after a fix.\nSymptom: cargo: test failed\nFix: Added the missing derive to the widget type.\nVerified: `cargo test` succeeded afterwards.",
+            crate::core::incident_card::INCIDENT_CARD_PREFIX
+        );
+        db.insert_evidence_span(
+            &card_id,
+            &crate::db::CreateEvidenceSpanInput {
+                workspace_id: workspace.clone(),
+                session_id: id.clone(),
+                memory_id: None,
+                producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                cass_span_id: format!("ee-incident-card:test:{card_id}"),
+                span_kind: "summary".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: None,
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .unwrap();
+        let card = db.get_evidence_span(&card_id).unwrap().unwrap();
+        assert!(card.is_derived_incident_card());
+        assert_eq!(card.search_eligibility, "admitted");
+
+        let incoming = [span(&session, 1), span(&session, 2)];
+        let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert_eq!(report.added_lines, vec![2]);
+        assert_eq!(db.get_evidence_span(&card_id).unwrap(), Some(card));
         let again = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
         assert!(!again.changed);
         assert!(again.added_lines.is_empty());

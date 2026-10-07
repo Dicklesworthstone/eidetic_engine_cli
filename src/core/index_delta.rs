@@ -454,9 +454,11 @@ pub(super) async fn apply(
                 .await
                 .map_err(|error| tier_error(format!("quality-tier embedding failed: {error}")))?;
             validate_bound_embedding(&vector, expected_identity, "quality")?;
-            quality.append(&document.id, &vector.values).map_err(|error| {
-                tier_error(format!("quality-tier vector upsert failed: {error}"))
-            })?;
+            quality
+                .append(&document.id, &vector.values)
+                .map_err(|error| {
+                    tier_error(format!("quality-tier vector upsert failed: {error}"))
+                })?;
         }
         super::compact_incremental_vector_index(&mut quality, "quality")?;
     }
@@ -725,10 +727,8 @@ mod tests {
 
     #[test]
     fn missing_identities_never_match_each_other_or_verified_producers() -> TestResult {
-        let legacy = EmbedderStack::from_parts(
-            Arc::new(LegacyEmbedder(HashEmbedder::default_256())),
-            None,
-        );
+        let legacy =
+            EmbedderStack::from_parts(Arc::new(LegacyEmbedder(HashEmbedder::default_256())), None);
         let verified = super::super::hash_fallback_embedder_stack();
         assert_eq!(legacy.fast().id(), verified.fast().id());
         assert_eq!(embedder_identity(&legacy), None);

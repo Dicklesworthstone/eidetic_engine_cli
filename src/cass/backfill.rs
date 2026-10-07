@@ -112,6 +112,11 @@ pub(super) fn backfill_session(
                 return Err(backfill_error("Foreign CASS backfill evidence"));
             }
             let source_line = incoming.get(&stored.start_line).copied();
+            // A derived incident card (ADR 0091) covers a range of this
+            // transcript without being one of its lines.
+            if stored.is_derived_incident_card() {
+                continue;
+            }
             if !matches!(
                 stored.producer_kind.as_str(),
                 "cass_import" | "legacy_unknown"

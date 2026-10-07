@@ -2494,6 +2494,9 @@ fn derive_session_error_recall(
                             "resolvedFailures": report.resolved_failures,
                             "fingerprintsRecorded": report.fingerprints_recorded,
                             "repairLinksRecorded": report.repair_links_recorded,
+                            "incidentCardsRecorded": report.incident_cards_recorded,
+                            "incidentCardDerivation":
+                                crate::core::incident_card::INCIDENT_CARD_DERIVATION,
                         })
                         .to_string(),
                     ),
@@ -2512,10 +2515,13 @@ fn derive_session_error_recall(
     }
 }
 
+/// The marker names the card extractor version too, so a store derived before
+/// incident cards existed (or under an older extractor) is derived once more.
 fn stable_cass_error_recall_audit_id(session_id: &str) -> String {
     AuditId::from_uuid(stable_uuid(&format!(
-        "audit:{}:{session_id}",
-        crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE
+        "audit:{}:{}:{session_id}",
+        crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE,
+        crate::core::incident_card::INCIDENT_CARD_DERIVATION
     )))
     .to_string()
 }

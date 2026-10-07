@@ -743,7 +743,10 @@ mod tests {
             (".index.publish-1-000", RetentionReason::UnusableGeneration),
             (".index.rejected-1-000", RetentionReason::UnusableGeneration),
             ("other-index.previous", RetentionReason::DuplicateGeneration),
-            ("nested/index.previous", RetentionReason::BeyondRetentionLimit),
+            (
+                "nested/index.previous",
+                RetentionReason::BeyondRetentionLimit,
+            ),
             (".index.reclaim-notes", RetentionReason::InterruptedReclaim),
             ("index.previous", RetentionReason::NewestValid),
             ("index.previous", RetentionReason::InterruptedReclaim),

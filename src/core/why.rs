@@ -1549,6 +1549,15 @@ fn explain_evidence_with_connection(
     if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
         return WhyReport::not_found(evidence_id.to_owned());
     }
+    // A derived incident card names the transcript spans it summarizes
+    // (ADR 0091). Missing links leave the card explainable as evidence.
+    let derivation = if span.is_derived_incident_card() {
+        conn.incident_card_derivation(&span.workspace_id, &span.id)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
 
     let egress = crate::policy::redact_public_replay_body(&span.excerpt);
     let redaction_classes =
@@ -1564,6 +1573,7 @@ fn explain_evidence_with_connection(
                     egress,
                     redaction_classes,
                     None,
+                    derivation.as_ref(),
                 )
                 .with_degradation(WhyDegradation {
                     code: "why_pack_selection_unavailable",
@@ -1580,6 +1590,7 @@ fn explain_evidence_with_connection(
         egress,
         redaction_classes,
         latest_pack_selection,
+        derivation.as_ref(),
     )
 }
 
@@ -1590,7 +1601,9 @@ fn evidence_why_report(
     egress: crate::policy::PublicReplayTextRedactionReport,
     redaction_classes: Vec<String>,
     latest_pack_selection: Option<PackSelectionExplanation>,
+    derivation: Option<&crate::db::IncidentCardDerivation>,
 ) -> WhyReport {
+    let incident_card = span.is_derived_incident_card();
     let search_admitted = span.is_search_admitted_for_session(&span.workspace_id, session);
     let pack_admitted = span.is_direct_pack_admitted_for_session(&span.workspace_id, session);
     let selection_score = latest_pack_selection
@@ -1601,7 +1614,7 @@ fn evidence_why_report(
         .iter()
         .map(|reason| (*reason).to_owned())
         .collect::<Vec<_>>();
-    let entity = WhyEntityExplanation {
+    let mut entity = WhyEntityExplanation {
         kind: "evidence_span".to_owned(),
         id: span.id.clone(),
         revision: Some(span.pack_entity_revision()),
@@ -1637,12 +1650,38 @@ fn evidence_why_report(
             },
         }),
     };
+    if incident_card && let Some(details) = entity.details.as_object_mut() {
+        details.insert(
+            "incidentCard".to_owned(),
+            derivation.map_or_else(
+                || {
+                    serde_json::json!({
+                        "derivation": crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+                        "sourcesAvailable": false,
+                    })
+                },
+                |derivation| serde_json::json!(derivation),
+            ),
+        );
+    }
     WhyReport::found(
         span.id.clone(),
         StorageExplanation {
-            origin: "Imported CASS evidence span".to_owned(),
+            origin: if incident_card {
+                "Derived incident card summarizing a failure->fix arc of an imported CASS session"
+            } else {
+                "Imported CASS evidence span"
+            }
+            .to_owned(),
             trust_class: "cass_evidence".to_owned(),
-            trust_subclass: Some("imported_transcript_excerpt".to_owned()),
+            trust_subclass: Some(
+                if incident_card {
+                    "derived_incident_card"
+                } else {
+                    "imported_transcript_excerpt"
+                }
+                .to_owned(),
+            ),
             provenance_uri: Some(span.canonical_provenance_uri()),
             workflow_id: None,
             created_at: span.created_at.clone(),

@@ -14314,6 +14314,18 @@ pub struct CreateEvidenceSpanInput {
     pub inherited_redaction_classes: Vec<String>,
 }
 
+/// The sources of a derived incident card (ADR 0091), read from the links the
+/// card derivation recorded.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncidentCardDerivation {
+    pub derivation: &'static str,
+    pub failure_span_id: String,
+    pub error_classes: Vec<String>,
+    pub repair_span_ids: Vec<String>,
+    pub proof_span_ids: Vec<String>,
+}
+
 /// One evidence row hydrated with its live session and its recorded
 /// write-time admission verdict binding, if any.
 #[derive(Debug, Clone)]
@@ -14414,6 +14426,21 @@ impl StoredEvidenceSpan {
             },
             borrowed @ std::borrow::Cow::Borrowed(_) => borrowed,
         }
+    }
+
+    /// Whether this row is a derived incident card (ADR 0091) rather than an
+    /// imported transcript line. Cards are evidence of the session they
+    /// summarize, but they are not part of its upstream transcript: refresh
+    /// and backfill must not reconcile them against it, and derivations that
+    /// read transcript turns must not read them back.
+    #[must_use]
+    pub fn is_derived_incident_card(&self) -> bool {
+        crate::core::incident_card::is_incident_card_row(
+            &self.producer_kind,
+            &self.span_kind,
+            self.role.as_deref(),
+            &self.excerpt,
+        )
     }
 
     /// [`Self::reader_text`] without the role label, for derivations that read
@@ -25211,6 +25238,161 @@ impl DbConnection {
     }
 
     /// List persisted repair/proof/outcome links for a fingerprint.
+    /// Derived incident cards (ADR 0091) of the given sessions, hydrated for
+    /// live admission. Cards are the only role-less `summary` rows a CASS
+    /// import writes as plain text; the shape check discards anything else.
+    pub fn incident_card_spans_for_sessions(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<Vec<HydratedEvidenceSpan>> {
+        let mut ids = Vec::new();
+        for chunk in session_ids.chunks(128) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params = chunk
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect::<Vec<_>>();
+            let sql = format!(
+                "SELECT id FROM evidence_spans WHERE session_id IN ({placeholders}) AND span_kind = 'summary' AND role IS NULL AND producer_kind = 'cass_import' ORDER BY id ASC"
+            );
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                ids.push(required_text(&row, 0, DbOperation::Query, "id")?.to_owned());
+            }
+        }
+        let refs = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        Ok(self
+            .get_evidence_spans_with_sessions(&refs)?
+            .into_iter()
+            .filter(|row| row.span.is_derived_incident_card())
+            .collect())
+    }
+
+    /// Where a derived incident card came from: its failing span, the error
+    /// classes it repairs, and the repair turns and verifying run recorded for
+    /// that failure. `None` when no card link names this id.
+    pub fn incident_card_derivation(
+        &self,
+        workspace_id: &str,
+        card_id: &str,
+    ) -> Result<Option<IncidentCardDerivation>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT evidence_ref, fingerprint_key FROM error_repair_links WHERE workspace_id = ?1 AND target_id = ?2 AND link_kind = 'repair' AND created_by = ?3 ORDER BY fingerprint_key ASC",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(card_id.to_owned()),
+                Value::Text(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned()),
+            ],
+        )?;
+        let mut failure_span_id = None;
+        let mut error_classes = BTreeSet::new();
+        for row in &rows {
+            if let Some(evidence_ref) = optional_text(row, 0)? {
+                failure_span_id.get_or_insert_with(|| evidence_ref.to_owned());
+            }
+            error_classes
+                .insert(required_text(row, 1, DbOperation::Query, "fingerprint_key")?.to_owned());
+        }
+        let Some(failure_span_id) = failure_span_id else {
+            return Ok(None);
+        };
+        let mut repair_span_ids = BTreeSet::new();
+        let mut proof_span_ids = BTreeSet::new();
+        for row in self.query_for(
+            DbOperation::Query,
+            "SELECT link_kind, target_id FROM error_repair_links WHERE workspace_id = ?1 AND evidence_ref = ?2 AND created_by = ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(failure_span_id.clone()),
+                Value::Text(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+            ],
+        )? {
+            let target = required_text(&row, 1, DbOperation::Query, "target_id")?.to_owned();
+            match required_text(&row, 0, DbOperation::Query, "link_kind")? {
+                "repair" => {
+                    repair_span_ids.insert(target);
+                }
+                "proof" => {
+                    proof_span_ids.insert(target);
+                }
+                _ => {}
+            }
+        }
+        Ok(Some(IncidentCardDerivation {
+            derivation: crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+            failure_span_id,
+            error_classes: error_classes.into_iter().collect(),
+            repair_span_ids: repair_span_ids.into_iter().collect(),
+            proof_span_ids: proof_span_ids.into_iter().collect(),
+        }))
+    }
+
+    /// For each derived incident card id, the error classes it was recorded as
+    /// a repair of, and how many cards each of those classes has in the
+    /// workspace. Both read only links written by the card derivation.
+    pub fn incident_card_error_classes(
+        &self,
+        workspace_id: &str,
+        card_ids: &[&str],
+    ) -> Result<(BTreeMap<String, BTreeSet<String>>, BTreeMap<String, usize>)> {
+        let actor = Value::Text(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned());
+        let mut classes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for chunk in card_ids.chunks(128) {
+            let placeholders = (3..chunk.len() + 3)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut params = vec![Value::Text(workspace_id.to_owned()), actor.clone()];
+            params.extend(chunk.iter().map(|id| Value::Text((*id).to_owned())));
+            let sql = format!(
+                "SELECT target_id, fingerprint_key FROM error_repair_links WHERE workspace_id = ?1 AND link_kind = 'repair' AND created_by = ?2 AND target_id IN ({placeholders})"
+            );
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                classes
+                    .entry(required_text(&row, 0, DbOperation::Query, "target_id")?.to_owned())
+                    .or_default()
+                    .insert(
+                        required_text(&row, 1, DbOperation::Query, "fingerprint_key")?.to_owned(),
+                    );
+            }
+        }
+        let keys = classes
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut cards_per_class: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for chunk in keys.chunks(128) {
+            let placeholders = (3..chunk.len() + 3)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut params = vec![Value::Text(workspace_id.to_owned()), actor.clone()];
+            params.extend(chunk.iter().map(|key| Value::Text(key.clone())));
+            let sql = format!(
+                "SELECT fingerprint_key, target_id FROM error_repair_links WHERE workspace_id = ?1 AND link_kind = 'repair' AND created_by = ?2 AND fingerprint_key IN ({placeholders})"
+            );
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                cards_per_class
+                    .entry(
+                        required_text(&row, 0, DbOperation::Query, "fingerprint_key")?.to_owned(),
+                    )
+                    .or_default()
+                    .insert(required_text(&row, 1, DbOperation::Query, "target_id")?.to_owned());
+            }
+        }
+        let counts = cards_per_class
+            .into_iter()
+            .map(|(key, cards)| (key, cards.len()))
+            .collect();
+        Ok((classes, counts))
+    }
+
     pub fn list_error_repair_links(
         &self,
         workspace_id: &str,

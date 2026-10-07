@@ -3964,8 +3964,8 @@ fn download_executed_by_shell(normalized: &str) -> Option<&'static str> {
             let mut rest = command;
             while let Some(pipe) = rest.find('|') {
                 let after = &rest[pipe + 1..];
-                if after.starts_with('|') {
-                    rest = &after[1..];
+                if let Some(next) = after.strip_prefix('|') {
+                    rest = next;
                     continue;
                 }
                 let mut target = after.trim_start();
