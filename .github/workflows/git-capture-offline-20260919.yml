@@ -66,11 +66,37 @@ jobs:
           rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
           git diff --check
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" expected="$3" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/offline-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/offline-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/offline-$name.log"
+            # bd-aav0v: these two assertions were BARE commands inside a function called bare
+            # five times -- ten runtime arms that aborted the step with no message at all.
+            #
+            # DO NOT convert to an accumulating flag: this step COMMITS AND PUSHES TO MAIN
+            # below, so aborting before the publish is the interlock. `return 1` from a bare
+            # call still trips errexit, so the abort is preserved; it only says why first.
+            #
+            # ALL FIVE COUNTS ARE LEFT EXACT, deliberately. This lane is the one that PASSED
+            # on 2026-09-19 with these values, so they are cargo measurements, not guesses --
+            # and a direct count agrees: repository 17, identity 7, security 11, policy 7.
+            # The stale pins were in git-capture-20260919, which pinned the same repository
+            # filter at 15; that lane was repaired at 883039d0b using THIS lane's pass as the
+            # measurement.
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/offline-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count). Publication is blocked here, by design."
+              return 1
+            fi
+            if test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing. Publication is blocked here, by design."
+              return 1
+            fi
+            if test "$ran" != "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $expected passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed. Publication is blocked here, by design."
+              return 1
+            fi
+            echo "ATTRIBUTION: arm '$name' ($filter) ok -- exactly $ran passed"
+            return 0
           }
           run_group repository core::memory::git_capture_repo::tests 17
           run_group identity core::memory::git_capture_identity_tests 7

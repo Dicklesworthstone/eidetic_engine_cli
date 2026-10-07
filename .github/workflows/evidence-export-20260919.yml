@@ -61,11 +61,36 @@ jobs:
           git diff --check
           run_exact_group() {
             local name="$1" filter="$2" count="$3"
-            local status=0
+            local status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/evidence-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/evidence-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/evidence-$name.log"
+            # bd-aav0v: two BARE assertions inside a function called bare twice -- four runtime
+            # arms that aborted with no message. This step COMMITS AND PUSHES TO MAIN below, so
+            # the abort is the interlock and `return 1` preserves it exactly; it only names the
+            # cause now.
+            #
+            # bd-lagsa note, recorded rather than acted on: `projection` pins
+            # `core::backup::evidence_export::tests` at 6 and a direct count says 7, so this
+            # pin looks stale. I am NOT changing it here. trust-recovery-20260919 pins the same
+            # filter and its own comment already records the same observation, and this lane
+            # has recent successes with 6 -- so either a test landed after the last pass or my
+            # count over-includes. The mismatch message below prints expected vs actual, so the
+            # next run of this lane settles it with cargo's own number instead of my resolver's.
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/evidence-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count). Publication is blocked here, by design."
+              return 1
+            fi
+            if test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing. Publication is blocked here, by design."
+              return 1
+            fi
+            if test "$ran" != "$count"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $count passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed. Publication is blocked here, by design."
+              return 1
+            fi
+            echo "ATTRIBUTION: arm '$name' ($filter) ok -- exactly $ran passed"
+            return 0
           }
           run_exact_group projection core::backup::evidence_export::tests 6
           run_exact_group recurrence context_history_survives_rebackup_without_regaining_evidence_authority 1

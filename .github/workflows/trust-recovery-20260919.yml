@@ -61,14 +61,38 @@ jobs:
           paths=(src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_trust_recovery.rs src/core/backup_trust_recovery_tests.rs src/core/backup_reference_recovery_tests.rs src/core/backup_signal_recovery.rs src/core/backup_signal_recovery_tests.rs src/core/backup_publication_recovery.rs src/core/backup_publication_recovery_tests.rs)
           rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
           git diff --check
+          # bd-aav0v: a two-iteration loop with two BARE assertions per pass -- four runtime
+          # arms that aborted the step with no message, and with no record of WHICH family
+          # failed. The loop made it worse than a shared flag: trust and signals are different
+          # recovery families with different counts, and a red named neither.
+          #
+          # DO NOT convert to an accumulating flag. This step COMMITS AND PUSHES TO MAIN below,
+          # so aborting before the publish is the interlock; `break 2`-style accumulation would
+          # let a failing family reach the push. Exiting nonzero from inside the loop under
+          # errexit is preserved exactly -- it only says why first now.
+          #
+          # The counts stay EXACT here. They are per-family leaf modules, and the other step in
+          # this file already carries the floors for the subtree filters, where the drift was.
           for family in trust signals; do
             status=0
             expected=8
             if test "$family" = trust; then expected=11; fi
             cargo test --locked --lib "core::backup::recovery::history::$family::tests" -- --test-threads=2 > "$RUNNER_TEMP/trust-$family.log" 2>&1 || status=$?
             tail -n 120 "$RUNNER_TEMP/trust-$family.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/trust-$family.log"
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/trust-$family.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: family '$family' FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count). Publication is blocked here, by design."
+              exit 1
+            fi
+            if test -z "$ran"; then
+              echo "ATTRIBUTION: family '$family' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing. Publication is blocked here, by design."
+              exit 1
+            fi
+            if test "$ran" != "$expected"; then
+              echo "ATTRIBUTION: family '$family' FAILED -- expected exactly $expected passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed. Publication is blocked here, by design."
+              exit 1
+            fi
+            echo "ATTRIBUTION: family '$family' ok -- exactly $ran passed (expected $expected)"
           done
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
