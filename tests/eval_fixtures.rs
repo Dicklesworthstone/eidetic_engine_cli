@@ -3149,3 +3149,96 @@ fn metamorphic_evaluation_json_fixture_maps_to_eval_domain_types() -> TestResult
         "success signal remains agent-facing",
     )
 }
+
+/// Validate EVERY discovered fixture, not the handful that happen to have an
+/// `include_str!` constant above (bd-e9zcn, the class fix for bd-mv2c4).
+///
+/// WHY A POPULATION CHECK AND NOT ANOTHER PER-FIXTURE GUARD. bd-mv2c4 found a
+/// fixture carrying values storage rejects, fixed that fixture, and added a
+/// guard -- inside a `structural_recall`-specific test. The guard's scope was
+/// never widened, so the identical defect in `metamorphic_evaluation` (four
+/// `verified`, one `untrusted`, one `observed`, none of them a stored
+/// `TrustClass`) survived both the fix and the guard. Three gaps had to line up
+/// for that: it was contract-checked for SHAPE, never checked for STORABILITY,
+/// and never executed, so nothing ever seeded it and tripped over the values.
+/// A guard scoped to one fixture cannot catch the next one by construction.
+///
+/// THE DIRECTORY IS READ AT RUN TIME ON PURPOSE. Every other fixture test here
+/// reaches its data through an `include_str!` constant, which only covers
+/// fixtures somebody remembered to register -- precisely the step that was
+/// missed. Discovering from disk means a fixture added tomorrow is validated
+/// without anyone editing this file.
+#[test]
+fn every_discovered_fixture_passes_cross_file_validation() -> TestResult {
+    let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
+        .map_err(|error| error.to_string())?;
+
+    // EMPTY-WORLD GUARD. This test reports a negative ("nothing is invalid"),
+    // and a discovery that returns nothing would report exactly that while
+    // checking nothing at all. A floor is the only thing standing between this
+    // check and a vacuous green. It is a FLOOR, not an exact count, so adding a
+    // fixture never reds the lane -- but losing the population does.
+    ensure(
+        fixtures.len() >= 10,
+        &format!(
+            "fixture discovery must find the reviewed population of 10 or more; found {}",
+            fixtures.len()
+        ),
+    )?;
+
+    // Collect every failure rather than returning the first. A second instance
+    // of a defect hiding behind the first is the exact history this test exists
+    // to end, so one run has to name them all.
+    let mut failures = Vec::new();
+    for fixture in &fixtures {
+        let label = fixture.fixture_id.as_str();
+        let scenario_text = match std::fs::read_to_string(&fixture.scenario_path) {
+            Ok(text) => text,
+            Err(error) => {
+                failures.push(format!(
+                    "{label}: read {}: {error}",
+                    fixture.scenario_path.display()
+                ));
+                continue;
+            }
+        };
+        let source_text = match std::fs::read_to_string(&fixture.source_memory_path) {
+            Ok(text) => text,
+            Err(error) => {
+                failures.push(format!(
+                    "{label}: read {}: {error}",
+                    fixture.source_memory_path.display()
+                ));
+                continue;
+            }
+        };
+        let scenario = match parse_scenario_model(&scenario_text, label) {
+            Ok(scenario) => scenario,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        let source = match parse_source_model(&source_text, label) {
+            Ok(source) => source,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        if let Err(error) = validate_fixture_scenario(&scenario, &source) {
+            failures.push(format!("{label}: {error}"));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {} discovered fixtures fail cross-file validation:\n  {}",
+            failures.len(),
+            fixtures.len(),
+            failures.join("\n  ")
+        ))
+    }
+}

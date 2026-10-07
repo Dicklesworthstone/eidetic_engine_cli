@@ -8,35 +8,35 @@
       "id": "mem_release_verification_rule",
       "level": "procedural",
       "kind": "rule",
-      "trust_class": "verified",
+      "trust_class": "agent_validated",
       "content": "Before release work, run cargo fmt --check, cargo clippy --all-targets -- -D warnings, and the relevant test subset through RCH."
     },
     {
       "id": "mem_release_feedback_success",
       "level": "feedback",
       "kind": "positive_outcome",
-      "trust_class": "verified",
+      "trust_class": "agent_validated",
       "content": "Following the release verification rule caught a formatting drift before the release workflow ran."
     },
     {
       "id": "mem_skip_verification_counterclaim",
       "level": "episodic",
       "kind": "claim",
-      "trust_class": "untrusted",
+      "trust_class": "legacy_import",
       "content": "If a change only edits documentation, skip cargo fmt and clippy before release."
     },
     {
       "id": "mem_release_procedure_old",
       "level": "procedural",
       "kind": "procedure",
-      "trust_class": "verified",
+      "trust_class": "agent_validated",
       "content": "Old release procedure: run cargo test before publishing."
     },
     {
       "id": "mem_release_procedure_latest",
       "level": "procedural",
       "kind": "procedure",
-      "trust_class": "verified",
+      "trust_class": "agent_validated",
       "supersedes": "mem_release_procedure_old",
       "content": "Current release procedure: run cargo fmt --check, cargo clippy --all-targets -- -D warnings, cargo test, and release asset verification before publishing."
     },
@@ -44,7 +44,7 @@
       "id": "mem_release_background_detail",
       "level": "episodic",
       "kind": "note",
-      "trust_class": "observed",
+      "trust_class": "agent_assertion",
       "content": "Background detail: release note drafting works best after collecting merged commit summaries."
     }
   ],
