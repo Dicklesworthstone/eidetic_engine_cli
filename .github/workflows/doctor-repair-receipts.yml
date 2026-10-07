@@ -88,20 +88,50 @@ jobs:
           # failure upstream of `tee` is still caught.
           set -uo pipefail
           failed=0
-          cargo test --locked --lib core::doctor_runtime::index_repair::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/index-repair.log" || failed=1
+          # bd-aav0v: THE ACCUMULATION ABOVE IS CORRECT AND STAYS. What was missing is
+          # ATTRIBUTION: eight arms all wrote a bare `failed=1`, so a red step said which
+          # suites ran but never which arm refused. Each arm now prints itself on BOTH
+          # paths, which also makes a SKIPPED arm visible -- its line is simply absent,
+          # where before an absent arm and a passing arm looked identical. That is the
+          # exact confusion the comment above describes from the 2026-09-26 incident.
+          #
+          # cargo's real exit comes from PIPESTATUS[0] rather than `|| failed=1` on the
+          # pipeline, so a tool failure is reported as a tool failure with its code,
+          # distinct from an assertion that did not match. `shell: bash` is declared on
+          # this step, so PIPESTATUS is available; it must be read on the line
+          # immediately after the pipeline.
+          #
+          # The floors are now numeric rather than regex alternations. The index-repair
+          # arm previously said `(9|[1-9][0-9]+)` to mean "at least 9", which is correct
+          # but obscure and silently wrong if anyone edits it; `-lt 9` says it plainly and
+          # prints the observed count.
+          run_suite() {
+            local name="$1" filter="$2" floor="$3"
+            local log="$RUNNER_TEMP/doctor-receipts/$name.log"
+            cargo test --locked --lib "$filter" -- --test-threads=1 2>&1 | tee "$log"
+            local cargo_exit=${PIPESTATUS[0]}
+            local ran
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$log" | head -1)
+            if test "$cargo_exit" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- cargo exit $cargo_exit (tool failure, not an assertion)"
+              failed=1
+            elif test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- passing-with-zero-failures count '${ran:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ok -- $ran tests ran, floor $floor"
+            fi
+          }
           # Monotone FLOOR, not an exact count. This pinned `7 passed` and
           # 1f7d8df78 (2026-09-26) took the suite to 9, so the step had failed
           # on every run for nine days -- because MORE tests passed. A floor
           # still catches the thing an exact count is for (silent deletion:
           # 8 or fewer is refused) without reddening when the suite grows.
           # Raise the floor when you add tests you want guaranteed present.
-          grep -Eq 'test result: ok\. (9|[1-9][0-9]+) passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/index-repair.log" || failed=1
-          cargo test --locked --lib core::doctor_fixers::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/dispatch.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/dispatch.log" || failed=1
-          cargo test --locked --lib core::doctor_runtime::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/runtime.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/runtime.log" || failed=1
-          cargo test --locked --lib cli::tests::doctor_fix_ -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/cli.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/cli.log" || failed=1
+          run_suite index-repair core::doctor_runtime::index_repair::tests:: 9
+          run_suite dispatch core::doctor_fixers::tests:: 1
+          run_suite runtime core::doctor_runtime::tests:: 1
+          run_suite cli cli::tests::doctor_fix_ 1
           exit "$failed"
       - name: Commit tested implementation directly to main
         shell: bash
