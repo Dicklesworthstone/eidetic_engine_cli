@@ -91,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
-      - name: Exercise requested index repair and backend identity serially
+      - name: Exercise repair identity, search freshness, and diagnostics serially
         if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
@@ -108,6 +108,10 @@ jobs:
           done <<'CASES'
           index-repair-serial core::index::tests::requested_index_repair_
           index-backend-identity core::index::remote_embedding_space_tests::
+          search-index-freshness core::search::tests::search_degradations_
+          search-snapshot-generation core::search::tests::snapshot_generation_context_search_uses_its_database_snapshot
+          search-generation-cache core::search::tests::search_generation_cache_follows_exchange_with_identical_metadata
+          search-diagnostic-retrieval core::search::tests::diag_search_report_exposes_prefusion_arms_and_fusion_contributions
           CASES
           exit "$failed"
       - name: Exercise producer integrity and standalone semantic scoring
