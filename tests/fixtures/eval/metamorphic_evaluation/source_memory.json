@@ -13,7 +13,7 @@
     },
     {
       "id": "mem_release_feedback_success",
-      "level": "feedback",
+      "level": "episodic",
       "kind": "positive_outcome",
       "trust_class": "agent_validated",
       "content": "Following the release verification rule caught a formatting drift before the release workflow ran."

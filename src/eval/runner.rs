@@ -1010,6 +1010,7 @@ pub fn validate_fixture_scenario(
 
     validate_structural_edges(source)?;
     validate_source_memory_trust_classes(source)?;
+    validate_source_memory_levels(source)?;
     validate_pack_quality_expectations(scenario, source)?;
     validate_ask_quality_expectations(scenario, source)?;
     validate_structural_recall_expectations(scenario, source)?;
@@ -1248,6 +1249,45 @@ fn validate_source_memory_trust_classes(source: &SourceMemoryFile) -> Result<(),
                 "source memory `{}` declares trust_class `{}`, which is not a stored \
                  TrustClass; supported trust classes are: {supported}",
                 memory.id, memory.trust_class
+            )));
+        }
+        Ok(())
+    };
+    for memory in &source.memories {
+        check(memory)?;
+    }
+    if let Some(seed_memory) = &source.seed_memory {
+        check(seed_memory)?;
+    }
+    Ok(())
+}
+
+/// Reject a declared `level` the memories table cannot store.
+///
+/// THE THIRD INSTANCE of the same defect class, found by the field census bd-e9zcn asked for
+/// rather than by tripping over it. `memories.level` carries
+/// `CHECK (level IN ('working', 'episodic', 'semantic', 'procedural'))`, and the seeder passes
+/// this string through verbatim (`src/cli/mod.rs` builds the row with `memory.level.clone()`),
+/// so an unlisted spelling aborts seeding exactly as `cites` and `agent_observed` did.
+/// metamorphic_evaluation declared `feedback`, which is not a `MemoryLevel`; it was corrected
+/// with this check.
+///
+/// UNLIKE `trust_class`, AN EMPTY VALUE IS NOT LEGAL HERE and must not be skipped. `level` has
+/// no `#[serde(default)]` on `SourceMemory`, and the column is `NOT NULL` under the CHECK, so
+/// there is no default for a seeder to supply. `MemoryLevel::from_str("")` already errors, so
+/// parsing without a short-circuit rejects it with the same message.
+fn validate_source_memory_levels(source: &SourceMemoryFile) -> Result<(), DomainError> {
+    let check = |memory: &SourceMemory| -> Result<(), DomainError> {
+        if memory.level.parse::<crate::models::MemoryLevel>().is_err() {
+            let supported = crate::models::MemoryLevel::all()
+                .iter()
+                .map(|level| level.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(fixture_validation_error(format!(
+                "source memory `{}` declares level `{}`, which is not a stored \
+                 MemoryLevel; supported levels are: {supported}",
+                memory.id, memory.level
             )));
         }
         Ok(())
@@ -3528,6 +3568,83 @@ mod tests {
                 return Err(format!(
                     "the rejection must enumerate the permitted relations so a fixture author \
                      can fix it without reading the schema; got {rendered}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `level` is the THIRD field in this class, after the structural-edge relation and
+    /// `trust_class` (bd-e9zcn). It was found by a census of the fixture's String fields
+    /// against the columns storage constrains, not by an abort -- `feedback` sat in
+    /// metamorphic_evaluation unnoticed because that family is never seeded.
+    ///
+    /// Both polarities, for the same reason as the relation test: a validator that rejects
+    /// everything would satisfy the negative arm by itself.
+    ///
+    /// NOTE THE DELIBERATE DIFFERENCE FROM THE trust_class TEST. There, `""` must VALIDATE,
+    /// because the field is `#[serde(default)]` and the seeder supplies a default. Here `""`
+    /// must be REJECTED: `level` has no serde default and the column is NOT NULL under a
+    /// CHECK, so an empty level has no legal meaning. The two tests disagree on the empty
+    /// string on purpose.
+    #[test]
+    fn source_memory_level_must_name_a_stored_memory_level() -> TestResult {
+        let fixture = |level: &str| {
+            format!(
+                r#"{{"schema":"ee.eval.source_memory.v1","fixture_id":"fx.level.probe",
+                    "memories":[
+                      {{"id":"mem_a","level":"{level}","kind":"fact","content":"a"}}]}}"#
+            )
+        };
+        let parse = |level: &str| -> Result<SourceMemoryFile, String> {
+            serde_json::from_str(&fixture(level))
+                .map_err(|error| format!("fixture `{level}` did not deserialize: {error}"))
+        };
+
+        // POSITIVE CONTROL. Every spelling storage stores must validate, or this check would
+        // red the fixtures it is meant to protect.
+        for level in crate::models::MemoryLevel::all() {
+            let source = parse(level.as_str())?;
+            validate_source_memory_levels(&source).map_err(|error| {
+                format!(
+                    "stored level `{}` must validate, got {error:?}",
+                    level.as_str()
+                )
+            })?;
+        }
+
+        // POSITIVE, AND DELIBERATELY NOT IN THE NEGATIVE ARM BELOW.
+        // `normalized_memory_level_token` is `trim().to_ascii_lowercase()`, so case and
+        // surrounding whitespace are accepted here. `MemoryLinkRelation::parse` is exact, which
+        // is why the relation test pins `SUPPORTS` and `supports ` as REJECTED and this one
+        // pins them as ACCEPTED. Asserting the wrong polarity on these two is the mistake this
+        // arm exists to prevent, so the difference is executable rather than a comment.
+        for normalized in ["EPISODIC", "episodic ", " Procedural", "SEMANTIC"] {
+            let source = parse(normalized)?;
+            validate_source_memory_levels(&source).map_err(|error| {
+                format!("level `{normalized}` normalizes to a stored level, got {error:?}")
+            })?;
+        }
+
+        // NEGATIVE. `feedback` is the exact spelling metamorphic_evaluation carried, so it is
+        // the witness this gap was found with. `working_set` is a near-miss on a real level, and
+        // the empty string is here because `level`, unlike `trust_class`, has no default to fall
+        // back on. None of these survives normalization.
+        for unsupported in ["feedback", "working_set", ""] {
+            let source = parse(unsupported)?;
+            let error = validate_source_memory_levels(&source)
+                .err()
+                .ok_or_else(|| format!("level `{unsupported}` must be rejected"))?;
+            let rendered = format!("{error:?}");
+            if !rendered.contains("not a stored") {
+                return Err(format!(
+                    "the rejection must say the level is not stored; got {rendered}"
+                ));
+            }
+            if !rendered.contains("procedural") {
+                return Err(format!(
+                    "the rejection must enumerate the permitted levels so a fixture author can \
+                     fix it without reading the schema; got {rendered}"
                 ));
             }
         }

@@ -34,6 +34,13 @@ roles into the same class, or inverting a pair, silently changes what the
 budget-trimming and contradiction families measure while every shape check
 still passes.
 
+`mem_release_feedback_success` was also moved from level `feedback` to
+`episodic` in the same pass. `feedback` is not a `MemoryLevel` -- the memories
+table allows only `working`, `episodic`, `semantic`, `procedural` -- so it would
+have been rejected on seeding for the same reason. The feedback semantics live in
+that memory's `kind` (`positive_outcome`), which storage does not constrain to a
+vocabulary, so nothing was lost.
+
 These replaced `verified`, `observed` and `untrusted` (bd-e9zcn, 2026-10-07).
 Those three spellings are not stored `TrustClass` values, so seeding this family
 would have aborted; nothing caught it because the fixture is contract-checked
