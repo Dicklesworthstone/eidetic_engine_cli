@@ -101,8 +101,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -125,8 +138,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -152,8 +178,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -175,14 +214,32 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          log="$RUNNER_TEMP/core-memory/remote-embed-unit.log"
-          timeout 12m cargo test --locked --lib core::remote_embed::tests:: -- --test-threads=2 > "$log" 2>&1 || failed=1
-          tail -n 100 "$log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
-          log="$RUNNER_TEMP/core-memory/remote-embed-http.log"
-          timeout 12m cargo test --locked --test integration_n_r remote_embedding_backend_e2e:: -- --test-threads=2 > "$log" 2>&1 || failed=1
-          tail -n 100 "$log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+          # bd-aav0v: four arms shared one `failed`, so a red step named no arm. The
+          # results.log line below recorded only the AGGREGATE, which cannot say which
+          # of the four refused. Each arm now prints itself on both paths, and a
+          # `timeout`-killed run is reported with its exit code (124) rather than
+          # collapsing into the same 1 as a count mismatch -- which matters here because
+          # both arms carry a 12-minute timeout and an HTTP boundary test is exactly the
+          # kind that hangs.
+          run_arm() {
+            local name="$1" log="$RUNNER_TEMP/core-memory/$2" cmd_exit=0
+            shift 2
+            "$@" > "$log" 2>&1 || cmd_exit=$?
+            tail -n 100 "$log"
+            if test "$cmd_exit" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- exit $cmd_exit (tool failure or timeout, not an assertion)"
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ok"
+            fi
+          }
+          run_arm remote-embed-unit remote-embed-unit.log \
+            timeout 12m cargo test --locked --lib core::remote_embed::tests:: -- --test-threads=2
+          run_arm remote-embed-http remote-embed-http.log \
+            timeout 12m cargo test --locked --test integration_n_r remote_embedding_backend_e2e:: -- --test-threads=2
           printf 'remote-embedding failed=%s\n' "$failed" >> "$RUNNER_TEMP/core-memory/results.log"
           exit "$failed"
       - name: Exercise import, revision, learning, and context regressions
@@ -195,8 +252,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -240,8 +310,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --features mcp --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -252,8 +335,16 @@ jobs:
           status=0
           timeout 12m cargo test --locked --features mcp --test mcp_parity ask -- --test-threads=1 > "$RUNNER_TEMP/core-memory/mcp-ask-parity.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/core-memory/mcp-ask-parity.log"
-          if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/core-memory/mcp-ask-parity.log"; then
+          # bd-aav0v, same split as the loop above. This one sits OUTSIDE the loop with a
+          # hardcoded log path, which is why a scan keyed on the loop body misses it.
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: case 'mcp-ask-parity' FAILED -- exit $status (tool failure or timeout, not an assertion)"
             failed=1
+          elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/core-memory/mcp-ask-parity.log"; then
+            echo "ATTRIBUTION: case 'mcp-ask-parity' FAILED -- no passing-with-zero-failures summary line"
+            failed=1
+          else
+            echo "ATTRIBUTION: case 'mcp-ask-parity' ok"
           fi
           printf 'mcp-ask-parity exit=%s\n' "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           exit "$failed"
@@ -267,8 +358,21 @@ jobs:
             status=0
             timeout 12m cargo test --locked --test "$target" "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
             tail -n 100 "$log"
-            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+            # bd-aav0v: the per-case exit was already recorded, which is more than most
+            # steps managed -- but it went to a FILE rather than the step output a human
+            # reads, and it collapsed two causes: `status -ne 0` (the tool failed, or the
+            # 12-minute timeout fired) and a missing summary line (the assertion failed)
+            # both set the same flag. Each case now names itself on stdout and the two
+            # causes are distinguished, which matters most for the timeout: exit 124 and a
+            # count mismatch are very different problems.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $status (tool failure or timeout, not an assertion)"
               failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
             fi
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
@@ -285,11 +389,37 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo clippy --locked --all-targets --features mcp -- -D warnings > "$RUNNER_TEMP/core-memory/clippy.log" 2>&1 || failed=1
-          cargo fmt --all --check > "$RUNNER_TEMP/core-memory/fmt.log" 2>&1 || failed=1
+          # bd-aav0v: three arms of DIFFERENT KINDS shared one flag -- a lint, a format
+          # check, and a working-tree cleanliness check. The third is the one worth naming:
+          # `git diff --exit-code` failing does not mean the code is wrong, it means
+          # something in the step MODIFIED tracked files, which is a completely different
+          # problem from a clippy warning and was previously indistinguishable from one.
+          clippy_exit=0
+          cargo clippy --locked --all-targets --features mcp -- -D warnings > "$RUNNER_TEMP/core-memory/clippy.log" 2>&1 || clippy_exit=$?
+          fmt_exit=0
+          cargo fmt --all --check > "$RUNNER_TEMP/core-memory/fmt.log" 2>&1 || fmt_exit=$?
           tail -n 100 "$RUNNER_TEMP/core-memory/clippy.log"
           tail -n 100 "$RUNNER_TEMP/core-memory/fmt.log"
-          git diff --exit-code || failed=1
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --all-targets --features mcp -D warnings' FAILED -- exit $clippy_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --all-targets --features mcp -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo fmt --all --check' FAILED -- exit $fmt_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo fmt --all --check' ok"
+          fi
+          diff_exit=0
+          git diff --exit-code || diff_exit=$?
+          if test "$diff_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'working tree unmodified' FAILED -- git diff exit $diff_exit; this step changed tracked files"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'working tree unmodified' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
