@@ -295,6 +295,30 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.reachability_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-production-reachability.py
 
+      # bd-pmgg0. src/graph/skyline.rs carried the README name "skyline" while
+      # computing a grid of cell means with hand-rolled decile bucketing and no
+      # dominance test, for months -- a README-advertised metric whose output did
+      # not mean what its name said. Repaired in 552f7ba4f. This gate catches the
+      # NEXT one: a src/graph/ file named for a README graph metric with zero fnx
+      # calls in CODE (comment mentions do not count -- anchor_projection.rs
+      # mentions fnx twice in doc comments and calls it zero times, and a
+      # raw-occurrence check reads that as routed).
+      #
+      # Self-test FIRST and the gate gated on it, same shape as the guard above,
+      # because the case that motivated this one can no longer validate it:
+      # skyline.rs routes through fnx now, so the gate is green on the very file
+      # it was written for. The planted arms are the only thing that has been seen
+      # to fail, including the comments-only arm and an empty-src/graph/ arm that
+      # stops a vacuous pass.
+      - name: Graph metric fnx routing guard --self-test
+        id: graph_fnx_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-graph-metric-fnx-routing.py --self-test
+
+      - name: Graph metric fnx routing guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.graph_fnx_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-graph-metric-fnx-routing.py
+
       # bd-479c6. ci.yml's `core::` shard was split six ways by submodule first
       # letter, because it carried 50% of the lib suite and measurably could not
       # finish inside its own 90m budget. A letter-keyed split has exactly one

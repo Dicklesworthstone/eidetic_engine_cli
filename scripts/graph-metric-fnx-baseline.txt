@@ -1,0 +1,21 @@
+# Reviewed exceptions for scripts/check-graph-metric-fnx-routing.py.
+#
+# One bare src/graph/ filename per line. A listed file is allowed to compute a
+# README-named graph metric without calling into the fnx-* crates.
+#
+# THIS LIST IS SHRINK-ONLY. The gate fails both ways:
+#   - a file flagged but not listed here        -> new hand-rolled metric, fix it
+#   - a file listed here but no longer flagged  -> stale entry, remove the line
+#
+# The second direction is the one that matters for an exception list. Without it
+# a stale entry keeps suppressing the same filename forever, so a later
+# regression in a file that was once legitimately excepted lands silently.
+#
+# IT IS EMPTY ON PURPOSE. At introduction (bd-pmgg0, 2026-10-07) all nine
+# metric-named files under src/graph/ route through fnx, so there is nothing to
+# except. The file exists so that a reviewed exception can be recorded without
+# anyone needing to disable the gate to land one.
+#
+# Adding a line is a decision, not a formality: AGENTS.md routes graph analytics
+# through franken_networkx. Record why in the commit message, because this file
+# has room for the name and not the reason.
