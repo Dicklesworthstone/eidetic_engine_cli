@@ -63,12 +63,33 @@ jobs:
           set -uo pipefail
           failed=0
           run_group() {
-            local filter=$1 count=$2 label=$3
+            local filter=$1 count=$2 label=$3 cargo_exit=0
             # `|| return 1` is required, not decorative: without `set -e` the
             # function's status is the grep's alone, so a cargo/timeout failure
             # would be swallowed whenever a stale log still matched.
-            timeout 20m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-$label.log" || return 1
-            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recovery-$label.log"
+            #
+            # bd-aav0v: that property is PRESERVED -- the early return below still
+            # fires on a tool failure -- but the function now says WHICH arm refused
+            # and WHY. Eight arms previously wrote a bare `failed=1`, so a red step
+            # listed the groups it ran and never named the one that said no.
+            #
+            # The two causes are now distinguished, which matters here because every
+            # group carries `timeout 20m`: exit 124 (the timeout fired) and a count
+            # mismatch are very different problems and were reported identically.
+            # `|| cargo_exit=$?` keeps the capture errexit-safe under pipefail; the
+            # pipeline's status is cargo's when cargo is what failed.
+            timeout 20m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-$label.log" || cargo_exit=$?
+            if test "$cargo_exit" -ne 0; then
+              echo "ATTRIBUTION: group '$label' FAILED -- exit $cargo_exit (tool failure or 20m timeout, not an assertion)"
+              return 1
+            fi
+            if ! grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recovery-$label.log"; then
+              local ran
+              ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' "$RUNNER_TEMP/recovery-$label.log" | head -1)
+              echo "ATTRIBUTION: group '$label' FAILED -- expected exactly $count passing, observed '${ran:-no summary line}'"
+              return 1
+            fi
+            echo "ATTRIBUTION: group '$label' ok -- $count passing, as pinned"
           }
           run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle || failed=1
           run_group core::backup::recovery::history::maintenance::tests 10 maintenance || failed=1
@@ -89,9 +110,31 @@ jobs:
           for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
             run_group "core::backup::tests::$filter" 1 "$filter" || failed=1
           done
-          timeout 15m cargo test --locked --lib core::jsonl_import::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-jsonl.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-jsonl.log" || failed=1
-          git diff --exit-code || failed=1
+          # bd-aav0v: the last three arms sit outside run_group and were the least
+          # attributed of all -- the jsonl pair shared one flag between a tool failure
+          # and an assertion, and `git diff` shared it with both.
+          jsonl_exit=0
+          timeout 15m cargo test --locked --lib core::jsonl_import::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-jsonl.log" || jsonl_exit=$?
+          if test "$jsonl_exit" -ne 0; then
+            echo "ATTRIBUTION: group 'jsonl' FAILED -- exit $jsonl_exit (tool failure or 15m timeout, not an assertion)"
+            failed=1
+          elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-jsonl.log"; then
+            echo "ATTRIBUTION: group 'jsonl' FAILED -- no passing-with-zero-failures summary line"
+            failed=1
+          else
+            echo "ATTRIBUTION: group 'jsonl' ok"
+          fi
+          # This arm is a different KIND of check from the seven above it: a failing
+          # `git diff` does not mean a test is wrong, it means SOMETHING IN THIS STEP
+          # MODIFIED TRACKED FILES. Sharing one flag made those indistinguishable.
+          diff_exit=0
+          git diff --exit-code || diff_exit=$?
+          if test "$diff_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'working tree unmodified' FAILED -- git diff exit $diff_exit; this step changed tracked files"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'working tree unmodified' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
