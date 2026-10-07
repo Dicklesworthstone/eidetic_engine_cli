@@ -96,10 +96,31 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           failed=0
-          cargo check --locked --all-targets > "$RUNNER_TEMP/evidence-check.log" 2>&1 || failed=1
+          # bd-aav0v: an all-targets compile and a production lint under one flag. They are
+          # not the same emergency -- the first says the tree does not build, the second
+          # says it builds and a lint objects -- and the step reported neither by name.
+          check_exit=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/evidence-check.log" 2>&1 || check_exit=$?
           tail -n 80 "$RUNNER_TEMP/evidence-check.log"
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/evidence-clippy.log" 2>&1 || failed=1
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/evidence-clippy.log" 2>&1 || clippy_exit=$?
           tail -n 80 "$RUNNER_TEMP/evidence-clippy.log"
+          if test "$check_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' FAILED -- exit $check_exit; the tree does not build, so the lint arm's verdict below is not meaningful"
+            grep -m1 -E '^error' "$RUNNER_TEMP/evidence-check.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/evidence-check.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' ok"
+          fi
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/evidence-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/evidence-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}

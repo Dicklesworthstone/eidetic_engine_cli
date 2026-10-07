@@ -131,8 +131,28 @@ jobs:
         run: |
           set -o pipefail
           failed=0
-          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/primer-clippy.log" || failed=1
-          rustfmt --edition 2024 --config skip_children=true --check src/core/primer.rs src/core/primer_seal_admission_tests.rs src/core/global_store.rs 2>&1 | tee "$RUNNER_TEMP/primer-fmt.log" || failed=1
+          # bd-aav0v: a production lint and a three-file format check under one flag. Keep
+          # the `|| var=...` on each pipeline: with errexit on (default `bash -e {0}`) and
+          # pipefail set here, a BARE pipeline would abort the step and no arm would report.
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/primer-clippy.log" || clippy_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --config skip_children=true --check src/core/primer.rs src/core/primer_seal_admission_tests.rs src/core/global_store.rs 2>&1 | tee "$RUNNER_TEMP/primer-fmt.log" || fmt_exit=$?
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/primer-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/primer-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on primer.rs, primer_seal_admission_tests.rs and global_store.rs' FAILED -- exit $fmt_exit; files named:"
+            grep -m5 -E '^Diff in ' "$RUNNER_TEMP/primer-fmt.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three primer sources' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

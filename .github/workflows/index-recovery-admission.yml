@@ -174,10 +174,33 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo test --locked --lib 'core::index::rollback_durability_tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rollback-tests.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-rollback-tests.log" || failed=1
-          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-reader-tests.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-reader-tests.log" || failed=1
+          # bd-aav0v: two suites, each with a tool-exit recorder AND a result-line
+          # recorder -- four runtime arms under one flag. The two kinds are genuinely
+          # different: a nonzero cargo exit is a failing assertion or a crashed harness,
+          # while a zero exit with no result line is a suite that never reported, which
+          # is what a filter matching zero tests looks like. This step accumulates on
+          # purpose (it is a reporting step under !cancelled(), it publishes nothing), so
+          # `report` records into the shared flag and always returns 0 -- returning
+          # nonzero from a BARE call would trip errexit and lose the remaining arms.
+          report() {
+            local label="$1" status="$2" log="$3"
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$label tests' FAILED -- exit $status (a failing assertion or a crashed harness, not a missing result)"
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$log"; then
+              echo "ATTRIBUTION: arm '$label result line' FAILED -- exit 0 but no 'ok. N passed; 0 failed' line; the suite reported nothing"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$label' ok -- $(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$log" | head -1) tests passed"
+            fi
+            return 0
+          }
+          rollback_exit=0
+          cargo test --locked --lib 'core::index::rollback_durability_tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rollback-tests.log" || rollback_exit=$?
+          report 'core::index::rollback_durability_tests' "$rollback_exit" "$RUNNER_TEMP/recovery-rollback-tests.log"
+          lease_exit=0
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-reader-tests.log" || lease_exit=$?
+          report 'core::index::read_lease' "$lease_exit" "$RUNNER_TEMP/recovery-reader-tests.log"
           exit "$failed"
       - name: Check production Clippy and new-source formatting
         if: ${{ !cancelled() }}

@@ -143,8 +143,31 @@ jobs:
         run: |
           set -o pipefail
           failed=0
-          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/diag-clippy.log" || failed=1
-          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_diagnostic_snapshot.rs tests/support/revision_search_cli.rs 2>&1 | tee "$RUNNER_TEMP/diag-fmt.log" || failed=1
+          # bd-aav0v: a production lint and a format check over three sources under one
+          # flag. The step is titled "Production Clippy and changed-source format", so it
+          # names both arms and reported neither -- and the format arm reaches into
+          # tests/support, which is not production source at all. Keep the `|| var=...` on
+          # each pipeline: with errexit on and pipefail set here, a BARE pipeline would
+          # abort the step and no arm would report.
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/diag-clippy.log" || clippy_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_diagnostic_snapshot.rs tests/support/revision_search_cli.rs 2>&1 | tee "$RUNNER_TEMP/diag-fmt.log" || fmt_exit=$?
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/diag-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/diag-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on search.rs, search_diagnostic_snapshot.rs and tests/support/revision_search_cli.rs' FAILED -- exit $fmt_exit; files named:"
+            grep -m5 -E '^Diff in ' "$RUNNER_TEMP/diag-fmt.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three changed sources' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

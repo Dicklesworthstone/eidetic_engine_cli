@@ -133,13 +133,46 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           failed=0
-          cargo test --locked --lib core::journal::tests:: -- --test-threads=2 > "$RUNNER_TEMP/journal-compatibility.log" 2>&1 || failed=1
+          # bd-aav0v: FOUR arms of three different kinds under one flag -- a test suite, a
+          # result-line check on that suite, an all-targets compile, and a production
+          # lint. The step title says "journal compatibility and production checks",
+          # which covers all four and distinguishes none. A broken build, a lint
+          # objection, a failing journal assertion and a suite that never reported are
+          # four different pieces of work.
+          journal_exit=0
+          cargo test --locked --lib core::journal::tests:: -- --test-threads=2 > "$RUNNER_TEMP/journal-compatibility.log" 2>&1 || journal_exit=$?
           tail -n 120 "$RUNNER_TEMP/journal-compatibility.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/journal-compatibility.log" || failed=1
-          cargo check --locked --all-targets > "$RUNNER_TEMP/journal-check.log" 2>&1 || failed=1
+          check_exit=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/journal-check.log" 2>&1 || check_exit=$?
           tail -n 80 "$RUNNER_TEMP/journal-check.log"
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/journal-clippy.log" 2>&1 || failed=1
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/journal-clippy.log" 2>&1 || clippy_exit=$?
           tail -n 80 "$RUNNER_TEMP/journal-clippy.log"
+          if test "$journal_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::journal::tests suite' FAILED -- exit $journal_exit (a failing assertion or a crashed harness)"
+            failed=1
+          elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/journal-compatibility.log"; then
+            echo "ATTRIBUTION: arm 'core::journal::tests result line' FAILED -- exit 0 but no 'ok. N passed; 0 failed' line; the suite reported nothing"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::journal::tests' ok -- $(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/journal-compatibility.log" | head -1) tests passed"
+          fi
+          if test "$check_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' FAILED -- exit $check_exit; the tree does not build, so the lint arm's verdict below is not meaningful"
+            grep -m1 -E '^error' "$RUNNER_TEMP/journal-check.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/journal-check.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' ok"
+          fi
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            grep -m1 -E '^error' "$RUNNER_TEMP/journal-clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/journal-clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}

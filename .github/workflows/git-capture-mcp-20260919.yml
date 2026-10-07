@@ -75,8 +75,37 @@ jobs:
               cargo test --locked --features mcp --test mcp_parity "$filter" -- --test-threads=1 > "$RUNNER_TEMP/mcp-$name.log" 2>&1 || status=$?
             fi
             tail -n 120 "$RUNNER_TEMP/mcp-$name.log"
-            test "$status" -eq 0
-            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/mcp-$name.log"
+            # bd-aav0v: these two assertions were BARE commands inside a function under
+            # `set -e`, and the function is called bare four times -- eight runtime arms
+            # whose failure aborted the step with no message whatsoever.
+            #
+            # DO NOT convert this to an accumulating flag. This step COMMITS AND PUSHES
+            # TO MAIN below, so aborting before the publish is the interlock, not a
+            # defect. `return 1` from a bare call still trips errexit, so the abort is
+            # preserved exactly -- the only change is that it now says why first.
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: group '$name' FAILED -- cargo exit $status (a failing assertion or a crashed harness). Publication is blocked here, by design."
+              return 1
+            fi
+            local actual
+            actual=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/mcp-$name.log" | head -1)
+            if ! grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/mcp-$name.log"; then
+              # Name the two causes apart. This is an EXACT count, so it also fails when
+              # MORE tests pass -- which is correct for the two single-test groups
+              # (inventory, manual) and a standing growth hazard for the two module
+              # filters (adapter, storage), exactly the defect that kept
+              # promotion-recovery.yml red for nine days while every test passed.
+              # Reporting actual-vs-expected does not change the threshold; it makes the
+              # difference between "a test regressed" and "the suite grew" readable.
+              if test -z "$actual"; then
+                echo "ATTRIBUTION: group '$name' FAILED -- cargo exited 0 but emitted NO 'test result: ok. N passed; 0 failed' line; the suite reported nothing (a filter matching zero tests looks like this). Publication is blocked here, by design."
+              else
+                echo "ATTRIBUTION: group '$name' FAILED -- exact count mismatch: expected $expected passed, log says $actual passed, 0 failed. If $actual is GREATER the suite grew and the pin is stale; if LOWER a test was removed or filtered out. Publication is blocked here, by design."
+              fi
+              return 1
+            fi
+            echo "ATTRIBUTION: group '$name' ok -- exactly $expected passed, 0 failed"
+            return 0
           }
           run_group adapter mcp::capture_git::tests 5 lib
           run_group storage capture_git:: 2 integration
