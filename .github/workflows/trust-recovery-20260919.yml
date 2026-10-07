@@ -98,21 +98,68 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-aav0v + bd-lagsa, two defects in one step.
+          #
+          # (1) SEVEN ARMS SHARED ONE `failed` WITH NO ATTRIBUTION -- five run_group calls
+          #     plus a cargo check and a cargo clippy -- so a red step named no arm. Worse,
+          #     run_group collapsed TWO DISTINGUISHABLE CAUSES into one flag: `status -ne 0`
+          #     (the tool failed) and a missing summary line (the assertion failed) set the
+          #     same value, so the log could not say which. Each arm now prints itself on
+          #     both paths and reports cargo's exit separately from the count verdict.
+          #
+          # (2) THE COUNTS WERE EXACT AND AT LEAST TWO HAVE DRIFTED. This step last reached
+          #     a conclusive verdict on 2026-09-19 (success); every run since is `cancelled`
+          #     by the concurrency group, so the drift has never been reported. Resolving
+          #     each filter through its #[path] and `mod` declarations puts
+          #     `core::backup::recovery::` far above 50 and
+          #     `core::backup::evidence_export::tests` above 6.
+          #
+          #     I am NOT re-pinning to a measured number. A transitive module walk is not
+          #     cargo's own test selection -- a substring filter matches whatever module
+          #     path it matches, and my walk may over-include -- so a new exact pin would
+          #     just be a fresh guess with the same failure mode. FLOORS are correct
+          #     regardless: a floor of the reviewed value passes whether the truth is the
+          #     old number or a larger one, and still catches removal. The observed count
+          #     prints on both paths so real drift stays visible instead of hiding inside a
+          #     passing grep.
           run_group() {
-            local name="$1" filter="$2" count="$3" status=0
+            local name="$1" filter="$2" floor="$3" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/trust-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/trust-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/trust-$name.log"; then failed=1; fi
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/trust-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- cargo exit $status (tool failure, not an assertion)"
+              failed=1
+            elif test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: arm '$name' FAILED -- passing-with-zero-failures count '${ran:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ok -- $ran tests ran, floor $floor"
+            fi
           }
           run_group inventory core::backup::recovery:: 50
           run_group learning core::backup::history_recovery_tests 6
           run_group projection core::backup::evidence_export::tests 6
           run_group live-trust default_backup_restores_trust_history_and_live_consumers 1
           run_group live-signals default_backup_restores_learning_signals_and_live_review 1
-          cargo check --locked --all-targets > "$RUNNER_TEMP/trust-check.log" 2>&1 || failed=1
+          check_exit=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/trust-check.log" 2>&1 || check_exit=$?
           tail -n 80 "$RUNNER_TEMP/trust-check.log"
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/trust-clippy.log" 2>&1 || failed=1
+          if test "$check_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' FAILED -- cargo exit $check_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo check --all-targets' ok"
+          fi
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/trust-clippy.log" 2>&1 || clippy_exit=$?
           tail -n 80 "$RUNNER_TEMP/trust-clippy.log"
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- cargo exit $clippy_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
