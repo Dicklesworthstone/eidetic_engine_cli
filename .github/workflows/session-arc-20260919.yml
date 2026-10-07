@@ -93,27 +93,76 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # FLOORS, NOT EXACT COUNTS (bd-n47uq: gate-maintenance drift, not product).
+          #
+          # Every count here was matched as an exact literal, so the lane failed the moment tests
+          # were ADDED. Measured at HEAD on 2026-10-06, two of them had drifted and BOTH drifted
+          # upward, with every test passing:
+          #
+          #   learning  expected 13, src/core/curate_session_arc_tests.rs holds 29 #[test] fns
+          #             (included into core::curate::tests::session_arc_tests via include!),
+          #             and the failing run logged exactly "29 passed; 0 failed"
+          #   arc-cli   expected exactly 2, tests/session_arc_learning_cli.rs holds 13
+          #
+          # So this lane has been red while the suite it exists to run was green, and it reds a
+          # delivery whose integrate step had already succeeded -- the publish step below never
+          # got the chance to run and retire the lane.
+          #
+          # `$count` was interpolated into a grep -E pattern, which is why `review` passed the
+          # regex '[1-9][0-9]*' instead of a number. Floors make that unnecessary: review's regex
+          # meant "at least one", which is a floor of 1. 0 failed stays inside the matched
+          # pattern so a run with failures cannot satisfy a floor, an absent result line is a
+          # failure rather than a zero, and the observed count is printed on both paths so growth
+          # is visible without reding the lane.
+          assert_floor() {
+            local label="$1" log="$2" floor="$3" actual=""
+            actual=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$log" | head -1)
+            if test -z "$actual" || test "$actual" -lt "$floor"; then
+              echo "ATTRIBUTION: $label FAILED -- passing-with-zero-failures count '${actual:-none}', required floor $floor"
+              return 1
+            fi
+            echo "ATTRIBUTION: $label ok -- $actual tests ran, floor $floor"
+          }
           run_group() {
-            local name="$1" filter="$2" count="$3"
-            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/arc-$name.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-$name.log"; return 1; }
+            local name="$1" filter="$2" floor="$3"
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/arc-$name.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-$name.log"; echo "ATTRIBUTION: group '$name' FAILED -- cargo exited nonzero"; return 1; }
             tail -n 100 "$RUNNER_TEMP/arc-$name.log"
-            grep -Eq "test result: ok\\. $count passed; 0 failed;" "$RUNNER_TEMP/arc-$name.log"
+            assert_floor "group '$name'" "$RUNNER_TEMP/arc-$name.log" "$floor"
           }
           run_group learning 'core::curate::tests::session_arc_tests' 13 || failed=1
-          run_group review 'core::curate::tests::review_session_' '[1-9][0-9]*' || failed=1
+          run_group review 'core::curate::tests::review_session_' 1 || failed=1
           run_group ownership 'core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict' 1 || failed=1
           run_group drift 'core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift' 1 || failed=1
           run_group specificity 'specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes' 1 || failed=1
           cargo test --locked --test session_arc_learning_cli -- --test-threads=2 > "$RUNNER_TEMP/arc-cli.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/arc-cli.log"; failed=1; }
           tail -n 100 "$RUNNER_TEMP/arc-cli.log"
-          grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/arc-cli.log" || failed=1
+          assert_floor 'arc-cli' "$RUNNER_TEMP/arc-cli.log" 2 || failed=1
           cargo test --locked --test integration_a_d docs_schemas_match_responses::curate_show_report_matches_schema -- --exact --test-threads=2 > "$RUNNER_TEMP/arc-schema.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-schema.log"; failed=1; }
           tail -n 80 "$RUNNER_TEMP/arc-schema.log"
-          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/arc-schema.log" || failed=1
+          assert_floor 'arc-schema' "$RUNNER_TEMP/arc-schema.log" 1 || failed=1
           exit "$failed"
       - name: Publish tested source directly to main
         run: |
           set -euo pipefail
+          # THE TWIN OF THE FLOORS IN THE TEST STEP ABOVE (bd-n47uq). Each `run:` block is its own
+          # shell, so the helper is defined again here rather than shared.
+          #
+          # The push-retry loop below re-verifies after merging concurrent main work, and it
+          # carried the SAME two stale exact counts the test step did (13 and 2, now 29 and 13).
+          # Fixing only the test step would have left this one armed: the step runs under
+          # `set -euo pipefail`, so a stale grep aborts the PUBLISH -- and only on the retry path,
+          # i.e. only when a push race forced a merge, which is precisely when concurrency is
+          # highest and the failure is hardest to attribute. A masked gate that fires only under
+          # contention is worse than one that fires every run.
+          assert_floor() {
+            local label="$1" log="$2" floor="$3" actual=""
+            actual=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$log" | head -1)
+            if test -z "$actual" || test "$actual" -lt "$floor"; then
+              echo "ATTRIBUTION: $label FAILED -- passing-with-zero-failures count '${actual:-none}', required floor $floor"
+              return 1
+            fi
+            echo "ATTRIBUTION: $label ok -- $actual tests ran, floor $floor"
+          }
           base=$(cat "$RUNNER_TEMP/arc-base.log")
           workflow=.github/workflows/session-arc-20260919.yml
           cat > "$workflow" <<'RECEIPT'
@@ -165,9 +214,9 @@ jobs:
               base=$(git rev-parse origin/main)
               cargo check --locked --all-targets > "$RUNNER_TEMP/arc-merge-check.log" 2>&1
               cargo test --locked --lib core::curate::tests::session_arc_tests -- --test-threads=2 > "$RUNNER_TEMP/arc-merge-tests.log" 2>&1
-              grep -Fq 'test result: ok. 13 passed; 0 failed;' "$RUNNER_TEMP/arc-merge-tests.log"
+              assert_floor 'arc-merge-tests' "$RUNNER_TEMP/arc-merge-tests.log" 13
               cargo test --locked --test session_arc_learning_cli -- --test-threads=2 > "$RUNNER_TEMP/arc-merge-cli.log" 2>&1
-              grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/arc-merge-cli.log"
+              assert_floor 'arc-merge-cli' "$RUNNER_TEMP/arc-merge-cli.log" 2
             done
           fi
           git rev-parse HEAD > "$RUNNER_TEMP/arc-integrated-sha.log"
