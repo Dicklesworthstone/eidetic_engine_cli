@@ -98,11 +98,35 @@ jobs:
             # re-pinned: on the not-yet-delivered path it is the "safe to patch this exact tree"
             # check and still does real work. Re-pinning to today's blob would only reset the
             # clock.
-            test "$(git hash-object src/cli/mod.rs)" = b24d3333595953388402bbba60997510b776c439
+            # bd-aav0v: these two were BARE `test` commands under `set -euo pipefail`, and this
+            # step is the one where this lane dies. Its log is COMPLETELY EMPTY -- run
+            # 37531124863 emits `##[group]Run set -euo pipefail`, the shell line, `##[endgroup]`,
+            # then `##[error]Process completed with exit code 1`, and nothing else. A reader
+            # gets a red lane and no cause at all.
+            #
+            # It is the blob pin that fails. Measured 2026-10-07:
+            #   pinned b24d3333595953388402bbba60997510b776c439
+            #   actual 7d9ab3e6215a8f76384f082283590d61406d258a
+            # The `else` branch below already announces the already-integrated case, so the
+            # outer guard works; what is unreported is the not-yet-delivered path refusing
+            # because src/cli/mod.rs moved for unrelated reasons.
+            #
+            # EXIT CODES AND CONDITIONS UNCHANGED -- still exit 1 on exactly the same tests.
+            # The pin is deliberately NOT re-pinned: the comment above explains that re-pinning
+            # to today's blob only resets the clock, and that reasoning still holds.
+            actual_cli_blob=$(git hash-object src/cli/mod.rs)
+            if test "$actual_cli_blob" != b24d3333595953388402bbba60997510b776c439; then
+              echo "ATTRIBUTION: guard 'src/cli/mod.rs blob pin' STOPPED this lane -- expected b24d3333595953388402bbba60997510b776c439, found $actual_cli_blob. The file has changed since this delivery was authored, so its patch is no longer known to apply to this exact tree. This is a refusal, not a regression: nothing was modified."
+              exit 1
+            fi
             git apply --check "$RUNNER_TEMP/resume-initializers.patch"
             git apply "$RUNNER_TEMP/resume-initializers.patch"
             git diff --check
-            test "$(git diff --numstat -- src/cli/mod.rs)" = $'3\t0\tsrc/cli/mod.rs'
+            applied_numstat=$(git diff --numstat -- src/cli/mod.rs)
+            if test "$applied_numstat" != $'3\t0\tsrc/cli/mod.rs'; then
+              echo "ATTRIBUTION: guard 'applied patch must add exactly 3 lines to src/cli/mod.rs' STOPPED this lane -- expected '3<TAB>0<TAB>src/cli/mod.rs', got '$applied_numstat'. The patch applied but changed a different amount than reviewed, so the delivery is not the one that was approved."
+              exit 1
+            fi
           else
             echo 'resume task-frame initializers already integrated; skipping delivery'
           fi
