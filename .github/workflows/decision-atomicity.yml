@@ -59,15 +59,27 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-aav0v: two targets x two causes = four arms under one flag. The `timeout
+          # 12m` on each makes the tool/assertion distinction load-bearing: exit 124 and
+          # a missing summary line are different problems and were reported identically.
           for target in unit cli; do
             log="$RUNNER_TEMP/decisions/$target.log"
+            cmd_exit=0
             if test "$target" = unit; then
-              timeout 12m cargo test --locked --lib core::decide:: -- --test-threads=2 > "$log" 2>&1 || failed=1
+              timeout 12m cargo test --locked --lib core::decide:: -- --test-threads=2 > "$log" 2>&1 || cmd_exit=$?
             else
-              timeout 12m cargo test --locked --test integration_a_d decide_workflow:: -- --test-threads=1 > "$log" 2>&1 || failed=1
+              timeout 12m cargo test --locked --test integration_a_d decide_workflow:: -- --test-threads=1 > "$log" 2>&1 || cmd_exit=$?
             fi
             tail -n 100 "$log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+            if test "$cmd_exit" -ne 0; then
+              echo "ATTRIBUTION: target '$target' FAILED -- exit $cmd_exit (tool failure or 12m timeout, not an assertion)"
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: target '$target' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: target '$target' ok"
+            fi
           done
           exit "$failed"
       - name: Check lint and formatting
@@ -76,10 +88,38 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/decisions/clippy.log" 2>&1 || failed=1
-          rustfmt --edition 2024 --check --config skip_children=true src/core/decide.rs src/core/decide_atomic.rs src/core/decide_atomic_tests.rs > "$RUNNER_TEMP/decisions/fmt.log" 2>&1 || failed=1
+          # bd-aav0v, and this step is the WORKED EXAMPLE for why it matters. Run
+          # 37563319770 failed here, and the step name -- "Check lint and formatting" --
+          # could not say which of the two. Diagnosing it meant pulling the run log and
+          # reading past the toolchain install to find
+          # `clippy::manual_strip` at src/policy/mod.rs:3964. That is minutes of work the
+          # step could have printed in one line.
+          #
+          # (For the record, that red is STALE: 439a47667 replaced
+          # `after.starts_with('|')` with `if let Some(next) = after.strip_prefix('|')`,
+          # so the lane clears on its next run. The attribution below is for the next
+          # time, not this one.)
+          clippy_exit=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/decisions/clippy.log" 2>&1 || clippy_exit=$?
+          fmt_exit=0
+          rustfmt --edition 2024 --check --config skip_children=true src/core/decide.rs src/core/decide_atomic.rs src/core/decide_atomic_tests.rs > "$RUNNER_TEMP/decisions/fmt.log" 2>&1 || fmt_exit=$?
           tail -n 100 "$RUNNER_TEMP/decisions/clippy.log"
           tail -n 100 "$RUNNER_TEMP/decisions/fmt.log"
+          if test "$clippy_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' FAILED -- exit $clippy_exit"
+            echo "ATTRIBUTION:   first clippy error line, for triage without opening the log:"
+            grep -m1 -E '^error' "$RUNNER_TEMP/decisions/clippy.log" || true
+            grep -m1 -E '^\s*-->' "$RUNNER_TEMP/decisions/clippy.log" || true
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'cargo clippy --lib -D warnings' ok"
+          fi
+          if test "$fmt_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three decide sources' FAILED -- exit $fmt_exit"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'rustfmt --check on the three decide sources' ok"
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
