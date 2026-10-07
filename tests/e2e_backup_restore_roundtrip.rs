@@ -663,8 +663,6 @@ fn collect_json_differences(
 }
 
 fn ensure_context_json_bytes_equal(
-    actual: &JsonValue,
-    expected: &JsonValue,
     actual_stdout: &[u8],
     expected_stdout: &[u8],
     ctx: &str,
@@ -672,10 +670,36 @@ fn ensure_context_json_bytes_equal(
     if actual_stdout == expected_stdout {
         return Ok(());
     }
+    // bd-bka39: DIFF WHAT WAS ACTUALLY COMPARED. The equality test above is on the
+    // CANONICALIZED bytes, from which canonical_context_stdout has already removed
+    // /data/degraded, /data/embed_backend, /data/pack/hash and /data/pack/text as
+    // legitimately store-local. Reporting `collect_json_differences(expected, actual)`
+    // on the RAW values therefore listed fields that were never part of the
+    // comparison -- and because those fields differ on essentially every side-path
+    // restore, they filled the "first JSON differences" list and hid the real cause.
+    //
+    // That misreport is why this failure was read for weeks as "an over-strict
+    // byte-for-byte comparison over hash-bearing degradations": every difference on
+    // display was under /data/degraded, which is not compared at all. Diffing the
+    // canonical forms names the field that actually differs.
+    let canonical_expected: JsonValue = serde_json::from_slice(expected_stdout)
+        .map_err(|error| format!("{ctx}: re-reading canonical expected JSON: {error}"))?;
+    let canonical_actual: JsonValue = serde_json::from_slice(actual_stdout)
+        .map_err(|error| format!("{ctx}: re-reading canonical actual JSON: {error}"))?;
     let mut diffs = Vec::new();
-    collect_json_differences(expected, actual, "", &mut diffs);
+    collect_json_differences(&canonical_expected, &canonical_actual, "", &mut diffs);
+    if diffs.is_empty() {
+        // Equal as values but not as bytes: key order or numeric formatting. Say so
+        // rather than printing an empty list, which reads like "no differences".
+        diffs.push(
+            "none at the value level -- the canonical forms differ only in serialization \
+             (key order or number formatting), not in content"
+                .to_owned(),
+        );
+    }
     Err(format!(
-        "{ctx}: expected {} bytes blake3:{}, got {} bytes blake3:{}; first JSON differences: {}",
+        "{ctx}: expected {} bytes blake3:{}, got {} bytes blake3:{}; first JSON differences \
+         (canonical forms, excluding store-local fields): {}",
         expected_stdout.len(),
         blake3::hash(expected_stdout).to_hex(),
         actual_stdout.len(),
@@ -2219,8 +2243,6 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     ])?;
     let restored_context_stdout = canonical_context_stdout(restored_context.clone())?;
     ensure_context_json_bytes_equal(
-        &restored_context,
-        &source_context,
         &restored_context_stdout,
         &source_context_stdout,
         "restored canonical context selection matches source context byte-for-byte",
