@@ -199,6 +199,304 @@ impl PendingFailure {
     }
 }
 
+/// An exec invocation survives empty-input polls, but its launch time and
+/// scope never become those of the polling request. Buffered output is bounded
+/// and only used for derivation; source rows and their hashes are unchanged.
+struct InFlightInvocation {
+    family: CommandFamily,
+    call_index: usize,
+    request_index: usize,
+    can_poll: bool,
+    process_id: Option<i32>,
+    output: ToolOutput,
+    failure_recorded: bool,
+}
+
+impl InFlightInvocation {
+    fn append(&mut self, chunk: ToolOutput) {
+        let overflow =
+            self.output.text.len().saturating_add(chunk.text.len()) > MAX_SCANNED_OUTPUT_BYTES;
+        let veto = self.output.failed() || chunk.failed() || overflow;
+        let mut end = chunk
+            .text
+            .len()
+            .min(MAX_SCANNED_OUTPUT_BYTES.saturating_sub(self.output.text.len()));
+        while !chunk.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Chunks are contiguous stdout/stderr, not separate messages. Inserting
+        // a newline could conceal a failure/instruction split across reads.
+        self.output.text.push_str(&chunk.text[..end]);
+        self.output.is_error = if veto {
+            Some(true)
+        } else {
+            chunk.is_error
+        };
+        self.output.exit_code = chunk.exit_code;
+    }
+}
+
+struct InvocationObservation {
+    family: CommandFamily,
+    call_index: usize,
+    output: ToolOutput,
+    new_failure: bool,
+    complete: bool,
+}
+
+#[derive(Default)]
+struct InvocationLedger {
+    calls: std::collections::HashMap<String, InFlightInvocation>,
+    running: std::collections::BTreeMap<i32, InFlightInvocation>,
+    seen_calls: BTreeSet<String>,
+    seen_processes: BTreeSet<i32>,
+    invalid_processes: BTreeSet<i32>,
+}
+
+impl InvocationLedger {
+    fn invalidate(&mut self, process_id: i32) {
+        self.invalid_processes.insert(process_id);
+        self.running.remove(&process_id);
+        self.calls
+            .retain(|_, call| call.process_id != Some(process_id));
+    }
+
+    fn observe(
+        &mut self,
+        event: ToolEvent,
+        index: usize,
+        readable: bool,
+    ) -> Option<InvocationObservation> {
+        match event {
+            ToolEvent::Call {
+                id,
+                command,
+                context,
+                can_poll,
+            } => {
+                if id.is_empty() || !self.seen_calls.insert(id.clone()) {
+                    if let Some(call) = self.calls.remove(&id)
+                        && let Some(process_id) = call.process_id
+                    {
+                        self.invalidate(process_id);
+                    }
+                    return None;
+                }
+                if readable
+                    && let Some(mut family) = command.as_deref().and_then(CommandFamily::parse)
+                {
+                    family.bind_context(context.as_deref());
+                    self.calls.insert(
+                        id,
+                        InFlightInvocation {
+                            family,
+                            call_index: index,
+                            request_index: index,
+                            can_poll,
+                            process_id: None,
+                            output: ToolOutput::default(),
+                            failure_recorded: false,
+                        },
+                    );
+                }
+                None
+            }
+            ToolEvent::Poll {
+                id,
+                process_id,
+                read_only,
+            } => {
+                if id.is_empty() || !self.seen_calls.insert(id.clone()) {
+                    if let Some(previous) = self.calls.remove(&id)
+                        && let Some(previous_id) = previous.process_id
+                    {
+                        self.invalidate(previous_id);
+                    }
+                    self.invalidate(process_id);
+                    return None;
+                }
+                if !readable || !read_only || self.invalid_processes.contains(&process_id) {
+                    self.invalidate(process_id);
+                    return None;
+                }
+                let Some(mut call) = self.running.remove(&process_id) else {
+                    // An overlapping poll cannot inherit another poll's output.
+                    // Also prevents a future exec from adopting an orphan id.
+                    self.invalidate(process_id);
+                    return None;
+                };
+                call.request_index = index;
+                self.calls.insert(id, call);
+                None
+            }
+            ToolEvent::Result { id, output } => {
+                let call = id.as_deref().and_then(|id| self.calls.remove(id))?;
+                if !readable || call.request_index >= index {
+                    if let Some(process_id) = call.process_id {
+                        self.invalidate(process_id);
+                    }
+                    return None;
+                }
+                self.finish(call, output)
+            }
+        }
+    }
+
+    fn finish(
+        &mut self,
+        mut call: InFlightInvocation,
+        output: ToolOutput,
+    ) -> Option<InvocationObservation> {
+        if call
+            .process_id
+            .is_some_and(|id| self.invalid_processes.contains(&id))
+        {
+            return None;
+        }
+        let (running, chunk) = if call.can_poll {
+            match execution_chunk(&output) {
+                Ok(Some(chunk)) => (chunk.process_id, chunk.output),
+                Ok(None) if call.process_id.is_none() => (None, output),
+                _ => {
+                    if let Some(process_id) = call.process_id {
+                        self.invalidate(process_id);
+                    }
+                    return None;
+                }
+            }
+        } else {
+            (None, output)
+        };
+        if let Some(process_id) = running {
+            if call
+                .process_id
+                .is_some_and(|previous| previous != process_id)
+                || self.invalid_processes.contains(&process_id)
+                || (call.process_id.is_none() && !self.seen_processes.insert(process_id))
+            {
+                if let Some(previous) = call.process_id {
+                    self.invalidate(previous);
+                }
+                self.invalidate(process_id);
+                return None;
+            }
+            call.process_id = Some(process_id);
+        }
+        call.append(chunk);
+        // Decoded chunks can assemble an instruction that no individual source
+        // row contained. Once detected, do not derive from this or later chunks.
+        if call.can_poll
+            && crate::policy::screen_external_text_for_ingestion(&call.output.text).instruction_like
+        {
+            if let Some(process_id) = call.process_id {
+                self.invalidate(process_id);
+            }
+            return None;
+        }
+        let observation = InvocationObservation {
+            family: call.family.clone(),
+            call_index: call.call_index,
+            output: call.output.clone(),
+            new_failure: !call.failure_recorded,
+            complete: running.is_none(),
+        };
+        call.failure_recorded |= !failure_diagnostics(&call.output).is_empty();
+        if let Some(process_id) = running {
+            // Count streams awaiting a poll result too: moving a stream from
+            // running to calls must not replenish its memory budget. At most
+            // 32 * 64 KiB is retained (plus this observation's transient copy).
+            let awaiting = self
+                .calls
+                .values()
+                .filter(|call| call.process_id.is_some())
+                .count();
+            if self.running.len().saturating_add(awaiting) < MAX_PENDING_FAILURES {
+                self.running.insert(process_id, call);
+            } else {
+                self.invalidate(process_id);
+            }
+        }
+        Some(observation)
+    }
+}
+
+struct ExecutionChunk {
+    process_id: Option<i32>,
+    output: ToolOutput,
+}
+
+/// Parse the actual unified-exec wrapper, not a status-looking line in stdout.
+/// The upstream header has optional Chunk ID, Wall time, exactly one process
+/// status, optional Original token count, then Output. A completed poll must
+/// carry its process exit; a malformed wrapper never degrades to plain stdout.
+fn execution_chunk(raw: &ToolOutput) -> std::result::Result<Option<ExecutionChunk>, ()> {
+    let text = raw.text.as_str();
+    if !text.starts_with("Chunk ID: ") && !text.starts_with("Wall time: ") {
+        return Ok(None);
+    }
+    let (header, body) = text
+        .split_once("\nOutput:")
+        .or_else(|| text.split_once("\nFinal output:"))
+        .ok_or(())?;
+    if header.len() > 1024 {
+        return Err(());
+    }
+    let body = if body.is_empty() {
+        body
+    } else {
+        body.strip_prefix('\n').ok_or(())?
+    };
+    let mut seen = BTreeSet::new();
+    let mut process_id = None;
+    let mut exit_code = None;
+    for line in header.lines() {
+        let field = if let Some(id) = line.strip_prefix("Chunk ID: ") {
+            if id.is_empty() {
+                return Err(());
+            }
+            "chunk"
+        } else if let Some(duration) = line.strip_prefix("Wall time: ") {
+            let duration = duration
+                .strip_suffix(" seconds")
+                .ok_or(())?
+                .parse::<f64>()
+                .map_err(|_| ())?;
+            if !duration.is_finite() || duration < 0.0 {
+                return Err(());
+            }
+            "time"
+        } else if let Some(id) = line.strip_prefix("Process running with session ID ") {
+            process_id = Some(id.parse::<i32>().map_err(|_| ())?);
+            "status"
+        } else if let Some(code) = line.strip_prefix("Process exited with code ") {
+            exit_code = Some(i64::from(code.parse::<i32>().map_err(|_| ())?));
+            "status"
+        } else if let Some(count) = line.strip_prefix("Original token count: ") {
+            count.parse::<u64>().map_err(|_| ())?;
+            "tokens"
+        } else {
+            return Err(());
+        };
+        if !seen.insert(field) {
+            return Err(());
+        }
+    }
+    if !seen.contains("time")
+        || !seen.contains("status")
+        || raw.exit_code.is_some_and(|code| Some(code) != exit_code)
+    {
+        return Err(());
+    }
+    Ok(Some(ExecutionChunk {
+        process_id,
+        output: ToolOutput {
+            text: body.to_owned(),
+            is_error: raw.is_error,
+            exit_code,
+        },
+    }))
+}
+
 /// Walk a session in transcript order and pair failures with the success that
 /// verified their fix. Pure over the given rows.
 pub(crate) fn session_failure_arcs(
@@ -206,10 +504,7 @@ pub(crate) fn session_failure_arcs(
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
 ) -> Vec<FailureArc> {
-    // Tool-call id -> (command family, index of the call span).
-    let mut calls: std::collections::HashMap<String, (CommandFamily, usize)> =
-        std::collections::HashMap::new();
-    let mut seen_calls = BTreeSet::new();
+    let mut ledger = InvocationLedger::default();
     let mut pending: Vec<PendingFailure> = Vec::new();
     let mut arcs = Vec::new();
 
@@ -222,71 +517,45 @@ pub(crate) fn session_failure_arcs(
             _ => Vec::new(),
         };
         for event in events {
-            match event {
-                ToolEvent::Call {
-                    id,
-                    command,
-                    context,
-                } => {
-                    // A reused id cannot replace a still-pending invocation or
-                    // reopen one whose result was already consumed. Refuse the
-                    // ambiguous association rather than choosing the last call.
-                    if id.is_empty() || !seen_calls.insert(id.clone()) {
-                        calls.remove(&id);
-                        continue;
-                    }
-                    if span.is_class_a_derivation_readable(workspace_id, session)
-                        && let Some(mut family) = command.as_deref().and_then(CommandFamily::parse)
-                    {
-                        family.bind_context(context.as_deref());
-                        calls.insert(id, (family, index));
-                    }
-                }
-                ToolEvent::Result { id, output } => {
-                    let Some((family, call_index)) = id.as_deref().and_then(|id| calls.remove(id))
-                    else {
-                        continue;
-                    };
-                    // Both halves feed the derivation: the command decides the
-                    // family, the output decides the outcome. Neither may be a
-                    // class-B (instruction-risk) record.
-                    if call_index >= index
-                        || !span.is_class_a_derivation_readable(workspace_id, session)
-                        || !spans[call_index].is_class_a_derivation_readable(workspace_id, session)
-                    {
-                        continue;
-                    }
-                    let diagnostics = failure_diagnostics(&output);
-                    if diagnostics.is_empty() {
-                        if !output.succeeded() {
-                            continue;
-                        }
-                        resolve_pending(
-                            &mut pending,
-                            &mut arcs,
-                            &family,
-                            call_index,
-                            index,
-                            span,
-                            spans,
-                            workspace_id,
-                            session,
-                        );
-                        continue;
-                    }
-                    if pending.len() == MAX_PENDING_FAILURES {
-                        arcs.push(pending.remove(0).into_arc(None));
-                    }
-                    pending.push(PendingFailure {
+            let Some(observed) = ledger.observe(
+                event,
+                index,
+                span.is_class_a_derivation_readable(workspace_id, session),
+            ) else {
+                continue;
+            };
+            let diagnostics = if observed.new_failure {
+                failure_diagnostics(&observed.output)
+            } else {
+                Vec::new()
+            };
+            if diagnostics.is_empty() {
+                if observed.complete && observed.output.succeeded() {
+                    resolve_pending(
+                        &mut pending,
+                        &mut arcs,
+                        &observed.family,
+                        observed.call_index,
                         index,
-                        failure_id: span.id.clone(),
-                        attempt_id: spans[call_index].id.clone(),
-                        symptom: symptom_line(&output),
-                        family,
-                        diagnostics,
-                    });
+                        span,
+                        spans,
+                        workspace_id,
+                        session,
+                    );
                 }
+                continue;
             }
+            if pending.len() == MAX_PENDING_FAILURES {
+                arcs.push(pending.remove(0).into_arc(None));
+            }
+            pending.push(PendingFailure {
+                index,
+                failure_id: span.id.clone(),
+                attempt_id: spans[observed.call_index].id.clone(),
+                symptom: symptom_line(&observed.output),
+                family: observed.family,
+                diagnostics,
+            });
         }
     }
     arcs.extend(pending.into_iter().map(|failure| failure.into_arc(None)));
@@ -537,6 +806,12 @@ enum ToolEvent {
         id: String,
         command: Option<String>,
         context: Option<String>,
+        can_poll: bool,
+    },
+    Poll {
+        id: String,
+        process_id: i32,
+        read_only: bool,
     },
     Result {
         id: Option<String>,
@@ -610,6 +885,7 @@ fn claude_block_event(block: &Value) -> Option<ToolEvent> {
                     input,
                 )
             }),
+            can_poll: false,
         }),
         "tool_result" => Some(ToolEvent::Result {
             id: block
@@ -637,6 +913,25 @@ fn codex_payload_event(payload: &Value) -> Option<ToolEvent> {
                 Some(arguments) => Some(arguments.clone()),
                 None => payload.get("action").cloned(),
             };
+            let tool_name = payload.get("name").and_then(Value::as_str);
+            if matches!(tool_name, Some("write_stdin" | "functions.write_stdin")) {
+                let arguments = arguments.as_ref()?;
+                let process_id = i32::try_from(arguments.get("session_id")?.as_i64()?).ok()?;
+                let read_only = arguments
+                    .get("chars")
+                    .is_none_or(|value| value.as_str() == Some(""))
+                    && arguments.as_object()?.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "session_id" | "chars" | "yield_time_ms" | "max_output_tokens"
+                        )
+                    });
+                return Some(ToolEvent::Poll {
+                    id: call_id?.to_owned(),
+                    process_id,
+                    read_only,
+                });
+            }
             let command = arguments.as_ref().and_then(command_argument);
             Some(ToolEvent::Call {
                 id: call_id?.to_owned(),
@@ -650,12 +945,21 @@ fn codex_payload_event(payload: &Value) -> Option<ToolEvent> {
                         arguments,
                     )
                 }),
+                can_poll: matches!(tool_name, Some("exec_command" | "functions.exec_command")),
             })
         }
         "function_call_output" | "local_shell_call_output" | "custom_tool_call_output" => {
             Some(ToolEvent::Result {
                 id: call_id.map(str::to_owned),
-                output: outcome::codex_output(payload.get("output")?)?,
+                // Consume a known call even when its result is malformed. A
+                // later duplicate must not replace that refusal with success.
+                output: payload
+                    .get("output")
+                    .and_then(outcome::codex_output)
+                    .unwrap_or_else(|| ToolOutput {
+                        is_error: Some(true),
+                        ..ToolOutput::default()
+                    }),
             })
         }
         _ => None,
