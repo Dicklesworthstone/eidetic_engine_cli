@@ -67,16 +67,35 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-aav0v: eight arms under one flag -- three filters in the loop, each with a
+          # tool outcome and an assertion, plus the public CLI pair below. A red step
+          # named none of them. Each arm now reports itself on both paths, and the two
+          # causes are separated because every arm carries `timeout 12m`: exit 124 and a
+          # missing summary line are different problems.
+          report_arm() {
+            local label="$1" cmd_exit="$2" log="$3"
+            if test "$cmd_exit" -ne 0; then
+              echo "ATTRIBUTION: arm '$label' FAILED -- exit $cmd_exit (tool failure or 12m timeout, not an assertion)"
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "ATTRIBUTION: arm '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$label' ok"
+            fi
+          }
           for filter in core::doctor_fixers::tests:: cli::tests::doctor_fix_ core::doctor_runtime::index_repair::tests::; do
             label=${filter//:/_}
             log="$RUNNER_TEMP/doctor-core/$label.log"
-            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || failed=1
+            cmd_exit=0
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || cmd_exit=$?
             tail -n 70 "$log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log" || failed=1
+            report_arm "$filter" "$cmd_exit" "$log"
           done
-          timeout 12m cargo test --locked --test integration_e_f e2e_doctor_concise_default:: -- --test-threads=1 > "$RUNNER_TEMP/doctor-core/public-cli.log" 2>&1 || failed=1
+          cli_exit=0
+          timeout 12m cargo test --locked --test integration_e_f e2e_doctor_concise_default:: -- --test-threads=1 > "$RUNNER_TEMP/doctor-core/public-cli.log" 2>&1 || cli_exit=$?
           tail -n 70 "$RUNNER_TEMP/doctor-core/public-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-core/public-cli.log" || failed=1
+          report_arm 'integration_e_f e2e_doctor_concise_default::' "$cli_exit" "$RUNNER_TEMP/doctor-core/public-cli.log"
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

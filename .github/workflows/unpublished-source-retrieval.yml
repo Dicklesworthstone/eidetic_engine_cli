@@ -126,12 +126,41 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log" || failed=1
-          grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/tests.log" || failed=1
+          # bd-aav0v: twelve arms under one flag -- the pinned suite and its assertion,
+          # then five loop cases each with a tool outcome and an assertion. A red step
+          # named none of them.
+          #
+          # bd-lagsa on the pin: `12 passed` was EXACT. Counted at HEAD, it is still
+          # accurate -- src/core/search_unpublished_tests.rs, reached from
+          # src/core/search.rs:11667 by `#[path]`, holds exactly 12 #[test]. So this one
+          # is NOT drifted; it is converted to a floor only so that ADDING a test here
+          # stops being a red, which is the tripwire bd-qz6dh retired. The observed count
+          # prints either way.
+          main_exit=0
+          cargo test --locked --lib core::search::unpublished_tests:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/unpublished/tests.log" || main_exit=$?
+          main_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/unpublished/tests.log" | head -1)
+          if test "$main_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::search::unpublished_tests::' FAILED -- exit $main_exit (tool failure, not an assertion)"
+            failed=1
+          elif test -z "$main_ran" || test "$main_ran" -lt 12; then
+            echo "ATTRIBUTION: arm 'core::search::unpublished_tests::' FAILED -- count '${main_ran:-none}', required floor 12"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::search::unpublished_tests::' ok -- $main_ran tests ran, floor 12"
+          fi
           while read -r label filter; do
-            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/unpublished/$label.log" 2>&1 || failed=1
+            case_exit=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/unpublished/$label.log" 2>&1 || case_exit=$?
             tail -n 80 "$RUNNER_TEMP/unpublished/$label.log"
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/$label.log" || failed=1
+            if test "$case_exit" -ne 0; then
+              echo "ATTRIBUTION: case '$label' FAILED -- exit $case_exit (tool failure, not an assertion)"
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/unpublished/$label.log"; then
+              echo "ATTRIBUTION: case '$label' FAILED -- no passing-with-zero-failures summary line"
+              failed=1
+            else
+              echo "ATTRIBUTION: case '$label' ok"
+            fi
           done <<'CASES'
           stale-source stale_read_only_search_retrieves_current_memory_and_rule_corpus_without_writes
           strict-source live_snapshot_fallback_preserves_strict_source_mode_and_cancellation
