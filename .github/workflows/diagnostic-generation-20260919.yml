@@ -58,7 +58,14 @@ jobs:
               git merge --no-edit origin/main
               base=$(git rev-parse origin/main)
             done
-            test "$pushed" -eq 1
+            # bd-aav0v: a BARE `test` under errexit. It means EVERY push attempt failed, which
+            # is a completely different situation from a failing test -- the verification above
+            # may have passed and only PUBLICATION failed. Silently the two are
+            # indistinguishable. Exit code and condition unchanged; still a hard stop.
+            if test "$pushed" -ne 1; then
+              echo "ATTRIBUTION: PUBLICATION FAILED, not verification -- all 3 'git push origin HEAD:main' attempts were rejected, each followed by a fetch/merge onto the new origin/main. The work above was prepared and its checks ran; nothing reached main. Re-running the lane is the remedy, not changing the source."
+              exit 1
+            fi
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify:
