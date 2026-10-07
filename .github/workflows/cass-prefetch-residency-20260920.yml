@@ -64,7 +64,22 @@ jobs:
           git diff --check
           cargo test --locked --lib core::cass_prefetch::residency_tests -- --test-threads=2 > "$RUNNER_TEMP/prefetch-residency.log" 2>&1
           tail -n 100 "$RUNNER_TEMP/prefetch-residency.log"
-          grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-residency.log"
+          # FLOOR, NOT AN EXACT COUNT, AND THIS ONE IS A KILL SWITCH (bd-lagsa).
+          #
+          # This pinned `8 passed` as a literal and sat FIRST in a step running three cargo
+          # invocations under `set -euo pipefail`. Add a ninth residency test -- a thing
+          # nobody would think to check a workflow for -- and this grep fails, the step dies
+          # here, and the two later suites (the whole coordinator sweep and the daemon
+          # envelope cases) never run at all. They would not appear as failures; their
+          # output would simply be absent, which is indistinguishable in the log from a
+          # suite that passed quietly. The lane would also never reach its commit and push.
+          #
+          # src/core/cass_prefetch_residency_tests.rs holds exactly 8 #[test] functions
+          # today, so the pin is not currently stale -- this is a landmine, not an outage,
+          # and 8 is kept as the floor rather than relaxed to 1 because 8 is the reviewed
+          # inventory this lane was built to guarantee. Silent deletion below 8 is still
+          # refused; growth above it no longer reds the lane.
+          grep -Eq 'test result: ok\. (8|9|[1-9][0-9]+) passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/prefetch-residency.log"
           cargo test --locked --lib core::cass_prefetch:: -- --test-threads=2 > "$RUNNER_TEMP/prefetch-all.log" 2>&1
           tail -n 100 "$RUNNER_TEMP/prefetch-all.log"
           # VACUITY FLOOR (bd-lagsa). This sweep of the whole coordinator was written to a
