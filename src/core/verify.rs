@@ -4558,6 +4558,29 @@ mod tests {
     ///                       new guard sees superseded_at None -> Verified
     /// A test that only passes after a fix cannot distinguish the fix from its
     /// absence. This one is red without it.
+    ///
+    /// ARM 3 ANSWERS bd-ht6om's THIRD QUESTION, which ARMS 1 and 2 left open:
+    /// should a TOMBSTONED referent be distinguishable from a superseded one?
+    ///
+    /// RULED: ONE STATUS IS ENOUGH, AND THE COLLAPSE IS INTENTIONAL. The ruling
+    /// is not "pin what the code does today" — that is the thing bd-ht6om warns
+    /// against. It rests on what this status is FOR. A
+    /// `VerifyProvenanceReferentStatus` exists to select a
+    /// `ProvenanceReverifyAction`, and `for_status` already maps `EvidenceDrift`
+    /// and `EvidenceMissing` — a STRONGER distinction than superseded-versus-
+    /// tombstoned, since one row is gone entirely — onto the same
+    /// `DemoteAndRevalidate`. Superseded and tombstoned warrant that same
+    /// action: ee never removes a memory, it demotes and raises a revalidation
+    /// candidate. So splitting them would add a wire variant that changes no
+    /// behaviour, while the cause already travels in the report's prose ("Review
+    /// the superseded or tombstoned memory"), which is where ADR 0088 puts
+    /// non-actionable detail.
+    ///
+    /// ARM 3 therefore asserts the collapse AND ITS PREMISE. Pinning only
+    /// `tombstoned -> EvidenceDrift` would be pinning behaviour; also pinning
+    /// that the two statuses select the same action records WHY one status
+    /// suffices. If someone later rules that the two must be distinguishable,
+    /// the action assertion is the thing that fires, and it points here.
     #[test]
     fn provenance_referent_liveness_keys_on_superseded_at_not_valid_to() -> TestResult {
         use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
@@ -4570,6 +4593,7 @@ mod tests {
         // ids in db::tests::future_valid_to_live_head_is_listed_and_superseded_revision_is_not.
         const SUPERSEDED: &str = "mem_01ktmv7000000000000000000a";
         const LIVE_FUTURE: &str = "mem_01ktmv7000000000000000000b";
+        const TOMBSTONED: &str = "mem_01ktmv7000000000000000000c";
         const FUTURE_VALID_TO: &str = "2099-01-01T00:00:00Z";
         const SUPERSEDED_AT: &str = "2026-05-01T00:00:00Z";
 
@@ -4611,11 +4635,20 @@ mod tests {
                 &memory_input("Live head with an author expiry.", Some(FUTURE_VALID_TO)),
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(TOMBSTONED, &memory_input("Tombstoned revision.", None))
+            .map_err(|error| error.to_string())?;
         ensure(
             connection
                 .mark_memory_superseded(SUPERSEDED, SUPERSEDED_AT)
                 .map_err(|error| error.to_string())?,
             "predecessor is marked superseded",
+        )?;
+        ensure(
+            connection
+                .tombstone_memory(TOMBSTONED)
+                .map_err(|error| error.to_string())?,
+            "third memory is tombstoned",
         )?;
 
         // PRECONDITIONS. Without these the arms below could pass for the wrong
@@ -4680,6 +4713,56 @@ mod tests {
             &live_report.status,
             &VerifyProvenanceReferentStatus::Verified,
             "a live memory with a future author valid_to must verify as present",
+        )?;
+
+        // ARM 3: a TOMBSTONED referent reports the same status as a superseded
+        // one. See the ruling in this test's doc comment.
+        //
+        // PRECONDITION. This row must be tombstoned and NOT superseded,
+        // otherwise ARM 3 would be re-testing ARM 1's condition and the two
+        // causes would not actually be separated.
+        let tombstoned_row = connection
+            .get_memory(TOMBSTONED)
+            .map_err(|error| error.to_string())?
+            .ok_or("tombstoned memory row exists")?;
+        ensure(
+            tombstoned_row.tombstoned_at.is_some(),
+            "ARM 3's row carries tombstoned_at",
+        )?;
+        ensure(
+            connection
+                .get_memory_superseded_at(TOMBSTONED)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "ARM 3's row is tombstoned ONLY -- not superseded, or it would duplicate ARM 1",
+        )?;
+
+        let tombstoned_uri = ProvenanceUri::EeMemory(
+            MemoryId::from_str(TOMBSTONED).map_err(|error| error.to_string())?,
+        );
+        let tombstoned_report =
+            verify_ee_memory_provenance_referent(&tombstoned_uri, Some(&connection), TOMBSTONED);
+        ensure_equal(
+            &tombstoned_report.status,
+            &VerifyProvenanceReferentStatus::EvidenceDrift,
+            "evidence pointing at a tombstoned memory must report drift, not Verified",
+        )?;
+
+        // THE PREMISE OF THE COLLAPSE, asserted rather than assumed. One status
+        // is sufficient only because both causes select the same maintenance
+        // action. If that stops being true, this is the assertion that fires.
+        ensure_equal(
+            &tombstoned_report.status.reverify_action(),
+            &superseded_report.status.reverify_action(),
+            "tombstoned and superseded referents must propose the SAME action; a single \
+             EvidenceDrift status is sufficient only while that holds",
+        )?;
+        ensure_equal(
+            &VerifyProvenanceReferentStatus::EvidenceMissing.reverify_action(),
+            &VerifyProvenanceReferentStatus::EvidenceDrift.reverify_action(),
+            "the enum already collapses a STRONGER distinction -- a missing row versus a \
+             drifted one -- onto one action, which is why collapsing superseded and \
+             tombstoned is consistent rather than lossy",
         )
     }
 }
