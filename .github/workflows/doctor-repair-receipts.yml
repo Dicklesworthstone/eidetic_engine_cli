@@ -117,8 +117,32 @@ jobs:
           paths=(src/cli/mod.rs src/core/doctor_fixers.rs src/core/doctor_runtime.rs src/core/index.rs src/core/doctor_index_repair.rs src/core/index_doctor_repair.rs)
           git diff --exit-code "$base" origin/main -- "${paths[@]}"
           git merge --ff-only origin/main
-          cargo test --locked --lib core::doctor_runtime::index_repair::tests:: -- --test-threads=1
-          cargo test --locked --lib cli::tests::doctor_fix_ -- --test-threads=1
+          # ASSERT THE COUNTS HERE TOO, NOT JUST IN THE TEST STEP ABOVE (bd-lagsa).
+          #
+          # These two re-verifications ran with their output uncaptured and nothing
+          # checking it. Under `set -euo pipefail` a FAILING test still aborts, so this
+          # was never a hole for failures -- the hole is VACUITY. A filter that matches
+          # nothing prints `running 0 tests`, summarises zero passed and zero failed,
+          # and exits 0 -- so a renamed or re-pathed module would let this step publish to
+          # main having verified NOTHING, silently. These filters are long module paths
+          # (`core::doctor_runtime::index_repair::tests::`, `cli::tests::doctor_fix_`),
+          # which is exactly the kind that gets renamed out from under a lane.
+          #
+          # Floors, matching the test step's values, so adding tests cannot red the
+          # publish: 9 for index-repair (1f7d8df78 took it from 7 to 9) and >=1 for the
+          # CLI arm. A floor of 1 is what actually kills the vacuous case; neither an
+          # exact pin nor an absent assertion does.
+          #
+          # Aborting is CORRECT in this step and must stay: the assertions gate this
+          # step's own `git push`, so converting them to accumulate would publish first
+          # and report failure afterwards. scripts/check-step-assertion-isolation.py
+          # classifies a step that both asserts and publishes as `publishGated` rather
+          # than at-risk for precisely this reason, so these two assertions do not make
+          # it a new at-risk step.
+          cargo test --locked --lib core::doctor_runtime::index_repair::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/publish-index-repair.log"
+          grep -Eq 'test result: ok\. (9|[1-9][0-9]+) passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/publish-index-repair.log"
+          cargo test --locked --lib cli::tests::doctor_fix_ -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-receipts/publish-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-receipts/publish-cli.log"
           git add -- "${paths[@]}"
           if ! git diff --cached --quiet; then
             git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(doctor): verify durable index repair publication and guarded undo' -m 'Format and verify the directly committed recovery implementation, including copy-capacity admission, persistence barriers, empty-source preservation, and refusal to undo a newer index. Focused index repair, doctor runtime and CLI regression suites passed before this normal main push.'
