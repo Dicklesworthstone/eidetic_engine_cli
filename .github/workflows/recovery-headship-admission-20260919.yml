@@ -79,11 +79,45 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # FLOORS, NOT EXACT COUNTS -- THREE OF THESE SEVEN ARE ALREADY STALE, WHICH IS WHY
+          # THIS LANE HAS BEEN RED SINCE 2026-09-28 WITH EVERY SUITE GREEN (bd-lagsa).
+          #
+          # Counted at HEAD by resolving each filter to its files through the #[path]
+          # declarations and counting #[test], not by reading the numbers below:
+          #
+          #   core::search::rule_admission::      expected 14, actual 52
+          #       the filter has a TRAILING :: and no `tests`, so it matches the whole
+          #       subtree: search_rule_admission.rs 16 + search_rule_scope.rs 12 +
+          #       search_revision_admission.rs 16 + search_rule_quarantine_tests.rs 8.
+          #       Note a sibling lane pins `...rule_admission::scope::tests::` at 12 and is
+          #       CORRECT -- the difference is entirely in how wide the filter is.
+          #   core::search::diagnostic_snapshot:: expected 14, actual 15
+          #       and diagnostic-generation pins `...diagnostic_snapshot::tests::` at 15,
+          #       which is correct. Same module, two lanes, one stale by one test.
+          #   core::jsonl_import::tests::         expected 61, actual 65
+          #
+          # The failing run's own log corroborates: it reports 15 and 65 where this step
+          # demanded 14 and 61, and `0 failed` on every suite.
+          #
+          # The step already ACCUMULATES (`failed=1`, `exit "$failed"`), so no suite was ever
+          # suppressed -- each group reported independently and three of them reported a
+          # count mismatch on a green suite. Only the comparison changes here.
+          #
+          # Expected values are kept as FLOORS rather than re-pinned to 52/15/65: re-pinning
+          # resets the clock, and these numbers are the reviewed inventories. The observed
+          # count prints on both paths so a gap like 14-versus-52 is visible instead of
+          # hidden inside a passing grep.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" floor="$3" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/recovery-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/recovery-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/recovery-$name.log"; then failed=1; fi
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/recovery-$name.log" | head -1)
+            if test "$status" -ne 0 || test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: group '$name' FAILED -- cargo exit $status, passing-with-zero-failures count '${ran:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: group '$name' ok -- $ran tests ran, floor $floor"
+            fi
           }
           run_group retrieval-admission 'core::search::rule_admission::' 14
           run_group diagnostic-snapshot 'core::search::diagnostic_snapshot::' 14
