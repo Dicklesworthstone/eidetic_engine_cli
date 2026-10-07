@@ -46626,7 +46626,24 @@ fn error_recall_query_seed(
             message: format!("Failed to build error recall report: {error}"),
             repair: Some("ee diagnose-error --help".to_owned()),
         })?;
-    Ok(Some(report.query_seed()))
+    // A prior fix recalled from an imported session joins the query as its own
+    // words, so retrieval can surface that turn in the pack
+    // (bd-reality-core-convergence-1azkt.60). Ids alone match nothing.
+    let mut seed = report.query_seed();
+    let recalled =
+        crate::core::error_diagnosis::recalled_repair_evidence(&connection, &workspace_id, &report)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to resolve recalled repair evidence: {error}"),
+                repair: Some("ee diagnose-error --help".to_owned()),
+            })?;
+    for text in recalled
+        .iter()
+        .filter_map(|evidence| evidence.text.as_deref())
+    {
+        seed.push_str("\nprior fix: ");
+        seed.push_str(text);
+    }
+    Ok(Some(seed))
 }
 
 /// Schema for pack replay response.
@@ -54396,6 +54413,24 @@ where
             );
         }
     };
+    let repair_evidence = match crate::core::error_diagnosis::recalled_repair_evidence(
+        &connection,
+        &workspace_id,
+        &report,
+    ) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to resolve recalled repair evidence: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
+                cli.renderer(),
+                stdout,
+                stderr,
+            );
+        }
+    };
     let matches = if report.exact {
         serde_json::json!([{
             "kind": "exact",
@@ -54419,6 +54454,7 @@ where
             "recordedLinkCount": recorded_link_count,
             "matches": matches,
             "report": report,
+            "repairEvidence": repair_evidence,
         },
         "degraded": [],
     });
@@ -54434,6 +54470,7 @@ fn error_repair_link_recording_from_args(
         proof_links: args.proof_links.clone(),
         stale_version_warnings: args.stale_version_warnings.clone(),
         created_by: Some("ee diagnose-error".to_string()),
+        evidence_ref: None,
     }
 }
 

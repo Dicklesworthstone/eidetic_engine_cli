@@ -78,6 +78,10 @@ pub mod audit_actions {
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     /// `ee index vacuum --apply` reclaimed retained derived index generations.
     pub const INDEX_VACUUM_APPLY: &str = "index.vacuum_apply";
+    /// `ee import cass` derived one session's failure->fix arcs into the
+    /// error-fingerprint store (bd-reality-core-convergence-1azkt.60). The row
+    /// doubles as the once-per-revision marker for that session.
+    pub const CASS_ERROR_RECALL_DERIVE: &str = "cass.error_recall_derive.v1";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
@@ -14426,6 +14430,40 @@ impl StoredEvidenceSpan {
         }
     }
 
+    /// Whether a live row may feed a derivation although it is not admitted
+    /// for retrieval. Tool and metadata records are quarantined from
+    /// retrieval for exposure, not secrecy (derivation policy class A, shared
+    /// by bd-reality-core-convergence-1azkt.45/.46/.59/.60): their text was
+    /// secret-screened at ingest. A record quarantined for instruction risk
+    /// (class B), a stale screening revision or a drifted hash never
+    /// qualifies, and neither does anything outside the live session join.
+    #[must_use]
+    pub fn is_class_a_derivation_readable(
+        &self,
+        expected_workspace_id: &str,
+        session: &StoredSession,
+    ) -> bool {
+        if !self.is_bound_to_session(expected_workspace_id, session)
+            || EvidenceProducerKind::parse(&self.producer_kind)
+                != Some(EvidenceProducerKind::CassImport)
+            || self.screening_version != EVIDENCE_SCREENING_VERSION
+            || self.security_policy_epoch != EVIDENCE_SECURITY_POLICY_EPOCH
+            || self.canonical_provenance_revision != EVIDENCE_CANONICAL_PROVENANCE_REVISION
+            || !matches!(self.secret_redaction_status.as_str(), "clean" | "redacted")
+            || !matches!(self.instruction_risk.as_str(), "none" | "low")
+        {
+            return false;
+        }
+        let canonical_hash = canonical_evidence_hash(&self.excerpt);
+        if self.content_hash != canonical_hash
+            || self.canonical_excerpt_hash.as_deref() != Some(canonical_hash.as_str())
+        {
+            return false;
+        }
+        let rescreen = crate::policy::screen_external_text_for_ingestion(&self.excerpt);
+        !rescreen.instruction_like && matches!(rescreen.instruction_risk, "none" | "low")
+    }
+
     /// [`Self::is_search_admitted_for_session`] with a recorded verdict; see
     /// [`Self::is_derivation_admitted_with_recorded_verdict`].
     #[must_use]
@@ -15142,6 +15180,37 @@ impl DbConnection {
         let session = self
             .get_session(&input.session_id)?
             .ok_or_else(|| malformed_evidence_input("evidence session does not exist"))?;
+        self.insert_prepared_evidence_span(id, input, prepared, &session)
+    }
+
+    /// [`Self::insert_evidence_span`] for a caller that already read the live
+    /// session row inside its own transaction, such as a bulk import writing
+    /// every span of one session. The same session and workspace checks run
+    /// against that row instead of re-reading it once per span
+    /// (bd-reality-core-convergence-1azkt.48); the schema trigger enforces
+    /// the same join again at insert.
+    pub fn insert_evidence_span_in_session(
+        &self,
+        id: &str,
+        input: &CreateEvidenceSpanInput,
+        session: &StoredSession,
+    ) -> Result<()> {
+        let prepared = prepare_evidence_security(input)?;
+        self.insert_prepared_evidence_span(id, input, prepared, session)
+    }
+
+    fn insert_prepared_evidence_span(
+        &self,
+        id: &str,
+        input: &CreateEvidenceSpanInput,
+        prepared: PreparedEvidenceSecurity,
+        session: &StoredSession,
+    ) -> Result<()> {
+        if session.id != input.session_id {
+            return Err(malformed_evidence_input(
+                "evidence session does not match the supplied session row",
+            ));
+        }
         if session.workspace_id != input.workspace_id {
             return Err(malformed_evidence_input(
                 "evidence session belongs to a different workspace",

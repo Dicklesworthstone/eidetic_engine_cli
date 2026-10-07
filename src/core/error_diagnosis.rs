@@ -51,6 +51,9 @@ pub struct ErrorRepairLinkRecording {
     pub proof_links: Vec<String>,
     pub stale_version_warnings: Vec<String>,
     pub created_by: Option<String>,
+    /// The observation these links were derived from (for example the
+    /// failing evidence span of an imported session), kept for provenance.
+    pub evidence_ref: Option<String>,
 }
 
 impl ErrorRepairLinkRecording {
@@ -85,6 +88,7 @@ pub fn record_error_repair_links(
             target_id,
             "helpful",
             None,
+            recording.evidence_ref.as_deref(),
             recording.created_by.as_deref(),
         );
     }
@@ -97,6 +101,7 @@ pub fn record_error_repair_links(
             target_id,
             "harmful",
             None,
+            recording.evidence_ref.as_deref(),
             recording.created_by.as_deref(),
         );
     }
@@ -109,6 +114,7 @@ pub fn record_error_repair_links(
             target_id,
             "unknown",
             None,
+            recording.evidence_ref.as_deref(),
             recording.created_by.as_deref(),
         );
     }
@@ -121,6 +127,7 @@ pub fn record_error_repair_links(
             warning,
             "unknown",
             Some(warning),
+            recording.evidence_ref.as_deref(),
             recording.created_by.as_deref(),
         );
     }
@@ -307,6 +314,74 @@ pub fn error_recall_report(
     ))
 }
 
+/// Imported transcript evidence behind a recall report
+/// (bd-reality-core-convergence-1azkt.60): the admitted turns that repaired
+/// this error class in earlier sessions, and the spans that verified them.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecalledRepairEvidence {
+    pub evidence_id: String,
+    /// `repair` for a fix turn, `proof` for the run that verified it.
+    pub role: &'static str,
+    pub provenance_uri: String,
+    /// Projected text of a retrieval-admitted repair turn. Proof spans are
+    /// tool output, quarantined from retrieval, so only their locator is
+    /// shown.
+    pub text: Option<String>,
+}
+
+/// Longest repair excerpt surfaced by recall, in characters.
+const RECALLED_REPAIR_TEXT_CHARS: usize = 400;
+
+/// Resolve the imported-evidence targets of a recall report against live
+/// storage. Targets that are not evidence ids (memories, proof run ids) are
+/// left to their own readers; evidence that no longer exists or is no longer
+/// admitted is silently dropped, exactly as retrieval would drop it.
+///
+/// # Errors
+///
+/// Propagates database errors from the evidence lookups.
+pub fn recalled_repair_evidence(
+    connection: &DbConnection,
+    workspace_id: &str,
+    report: &ErrorRecallReport,
+) -> Result<Vec<RecalledRepairEvidence>> {
+    let mut evidence = Vec::new();
+    for target in report
+        .helpful_repairs
+        .iter()
+        .filter(|id| id.starts_with("ev_"))
+    {
+        if let Some(span) = connection.get_search_admitted_evidence_span(target, workspace_id)? {
+            let text = span
+                .reader_text()
+                .chars()
+                .take(RECALLED_REPAIR_TEXT_CHARS)
+                .collect::<String>();
+            evidence.push(RecalledRepairEvidence {
+                evidence_id: span.id.clone(),
+                role: "repair",
+                provenance_uri: span.canonical_provenance_uri(),
+                text: Some(text),
+            });
+        }
+    }
+    for target in report.proof_links.iter().filter(|id| id.starts_with("ev_")) {
+        if let Some(span) = connection
+            .get_evidence_span(target)?
+            .filter(|span| span.workspace_id == workspace_id)
+        {
+            evidence.push(RecalledRepairEvidence {
+                evidence_id: span.id.clone(),
+                role: "proof",
+                provenance_uri: span.canonical_provenance_uri(),
+                text: None,
+            });
+        }
+    }
+    Ok(evidence)
+}
+
 fn stable_error_repair_link_id(
     workspace_id: &str,
     fingerprint_key: &str,
@@ -330,6 +405,7 @@ fn push_repair_link(
     target_id: &str,
     outcome: &str,
     stale_version_warning: Option<&str>,
+    evidence_ref: Option<&str>,
     created_by: Option<&str>,
 ) {
     let target_id = target_id.trim();
@@ -355,7 +431,10 @@ fn push_repair_link(
         link_kind: kind.as_str().to_string(),
         target_id: target_id.to_string(),
         outcome: outcome.to_string(),
-        evidence_ref: None,
+        evidence_ref: evidence_ref
+            .map(str::trim)
+            .filter(|evidence_ref| !evidence_ref.is_empty())
+            .map(str::to_string),
         stale_version_warning: stale_version_warning.map(str::to_string),
         created_by: created_by.map(str::to_string),
         created_at: String::new(),
@@ -475,6 +554,7 @@ mod tests {
                 proof_links: vec!["rch_pass_1".to_string()],
                 stale_version_warnings: vec!["rustc 1.95 repair may be stale".to_string()],
                 created_by: Some("test".to_string()),
+                evidence_ref: None,
             },
         )
         .expect("record links");

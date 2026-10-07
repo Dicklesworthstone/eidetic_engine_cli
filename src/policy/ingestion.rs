@@ -45,8 +45,11 @@ pub(super) fn screen_with_span_count(content: &str) -> (ExternalIngestionScreenR
 }
 
 /// Recently screened contents per thread, bounded so a long import cannot grow
-/// it without limit.
-const SCREEN_MEMO_CAPACITY: usize = 512;
+/// it without limit. Sized for one imported session: import screens each
+/// excerpt while parsing the CASS view, again at the storage boundary, and once
+/// more to record its admission verdict; a session longer than the memo pays
+/// all three.
+const SCREEN_MEMO_CAPACITY: usize = 4096;
 
 thread_local! {
     static SCREEN_MEMO: std::cell::RefCell<ScreenMemo> =

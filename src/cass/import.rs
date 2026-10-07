@@ -744,6 +744,7 @@ pub fn import_cass_sessions(
                     if index_job_id.is_some() {
                         index_jobs_queued = index_jobs_queued.saturating_add(1);
                     }
+                    derive_session_error_recall(&connection, &workspace_id, &session_id, changed);
                     if changed {
                         cursor.record_imported(&session.source_path);
                         imported = imported.saturating_add(1);
@@ -776,6 +777,7 @@ pub fn import_cass_sessions(
                     }
                     let session_spans = saturating_len(spans.len());
                     spans_imported = spans_imported.saturating_add(session_spans);
+                    derive_session_error_recall(&connection, &workspace_id, &session_id, true);
 
                     cursor.record_imported(&session.source_path);
                     imported = imported.saturating_add(1);
@@ -865,11 +867,18 @@ fn persist_session_import_if_absent(
         }
 
         connection.insert_session(&session_id, &session_input(workspace_id, session))?;
+        let stored_session = connection.get_session(&session_id)?.ok_or_else(|| {
+            DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "imported session row is missing inside its own transaction".to_owned(),
+            }
+        })?;
         for span in spans {
             let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
-            connection.insert_evidence_span(
+            connection.insert_evidence_span_in_session(
                 &evidence_id,
                 &evidence_input(workspace_id, &session_id, span),
+                &stored_session,
             )?;
             if span.redacted {
                 connection.insert_audit(
@@ -2435,6 +2444,71 @@ fn stable_session_id(workspace_id: &str, source_path: &str) -> String {
 
 fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
     EvidenceId::from_uuid(stable_uuid(&format!("evidence:{session_id}:{span_id}"))).to_string()
+}
+
+/// Record one session's failure->fix arcs in the error-fingerprint store
+/// (bd-reality-core-convergence-1azkt.60), once per derivation revision.
+///
+/// The marker is a deterministic audit row, so the first import after an
+/// upgrade derives sessions imported earlier and later imports skip them; a
+/// session whose transcript changed is derived again. The transcript is
+/// already durable here, so a failure is logged and never fails the import.
+fn derive_session_error_recall(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    transcript_changed: bool,
+) {
+    let marker_id = stable_cass_error_recall_audit_id(session_id);
+    let result = (|| -> Result<(), DbError> {
+        let marked = connection.get_audit(&marker_id)?.is_some();
+        if marked && !transcript_changed {
+            return Ok(());
+        }
+        let report = crate::core::cass_error_recall::record_session_error_recall(
+            connection,
+            workspace_id,
+            session_id,
+        )?;
+        if !marked {
+            connection.insert_audit(
+                &marker_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_owned()),
+                    actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                    action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                    target_type: Some("session".to_owned()),
+                    target_id: Some(session_id.to_owned()),
+                    details: Some(
+                        json!({
+                            "failuresSeen": report.failures_seen,
+                            "resolvedFailures": report.resolved_failures,
+                            "fingerprintsRecorded": report.fingerprints_recorded,
+                            "repairLinksRecorded": report.repair_links_recorded,
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(
+            target: "ee::cass::import",
+            session_id,
+            error = %error,
+            "deriving error recall from the imported session failed; the session itself is imported"
+        );
+    }
+}
+
+fn stable_cass_error_recall_audit_id(session_id: &str) -> String {
+    AuditId::from_uuid(stable_uuid(&format!(
+        "audit:{}:{session_id}",
+        crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE
+    )))
+    .to_string()
 }
 
 fn stable_cass_redaction_audit_id(evidence_id: &str) -> String {
