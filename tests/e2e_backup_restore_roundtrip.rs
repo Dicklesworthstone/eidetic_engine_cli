@@ -732,9 +732,24 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // values legitimately change the rendered text/hash and degradation prose;
     // the stable selection, provenance, explanations, and pack structure must
     // still match.
+    // bd-bka39: /data/pack/advisoryBanner is `degraded` IN SUMMARY FORM, so excluding the
+    // array while keeping the banner left the volatile channel leaking through a derived
+    // field. src/output/mod.rs:4250 writes the banner's `degradationCount` straight from
+    // `banner.degradation_count`, and its `summary` prose enumerates the same signals. A run
+    // with the corrected diff reporter (12e7ac527) showed exactly that:
+    //
+    //     /data/pack/advisoryBanner/degradationCount   expected 4, got 3
+    //     /data/pack/advisoryBanner/summary            prose enumerating those signals
+    //
+    // 4 vs 3 degradations is precisely the difference the list below exists to tolerate --
+    // the restored store has no published index (backup.rs:1963 marks it
+    // derived_rebuildable / rebuild_on_restore), so it retrieves differently and reports a
+    // different degradation set. Adding the banner finishes that decision rather than
+    // loosening it.
     for pointer in [
         "/data/degraded",
         "/degraded",
+        "/data/pack/advisoryBanner",
         "/data/embed_backend",
         "/data/pack/hash",
         "/data/pack/text",
