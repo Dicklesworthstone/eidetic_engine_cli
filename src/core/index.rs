@@ -2699,7 +2699,7 @@ where
             return Err(error);
         }
     };
-    let build_result = publish_full_index_generation_with_stack(
+    let build_result = publish_index_generation_preferring_delta(
         &_publish_lock,
         index_dir,
         stack,
@@ -2721,8 +2721,19 @@ where
     )
     .await;
 
+    let mut fallback_to_full = fallback_to_full;
     match build_result {
-        Ok(_) => {
+        Ok((_, kind)) => {
+            match kind {
+                PublishedGenerationKind::Delta => {
+                    processing_mode =
+                        processing_mode.replace("_staged_full_rebuild", "") + "_staged_delta";
+                    fallback_to_full = None;
+                }
+                PublishedGenerationKind::Full { delta_refused } => {
+                    fallback_to_full.get_or_insert(delta_refused);
+                }
+            }
             for job in &claimed {
                 reports.push(IndexProcessingJobReport {
                     job_id: job.id.clone(),
@@ -2934,9 +2945,9 @@ where
                 recover_interrupted_publish_for_snapshot(index_dir, published_generation)
             })
             .await?;
-        let fallback_to_full = None;
+        let mut fallback_to_full = None;
         let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
-        let build_result = publish_full_index_generation_with_stack(
+        let build_result = publish_index_generation_preferring_delta(
             &_publish_lock,
             index_dir,
             stack,
@@ -2948,7 +2959,18 @@ where
         .await;
 
         match build_result {
-            Ok(stats) => {
+            Ok((stats, kind)) => {
+                match kind {
+                    PublishedGenerationKind::Delta => {
+                        processing_mode = processing_mode
+                            .replace("_as_full_rebuild", "")
+                            .replace("_staged_full_rebuild", "")
+                            + "_staged_delta";
+                    }
+                    PublishedGenerationKind::Full { delta_refused } => {
+                        fallback_to_full = Some(delta_refused);
+                    }
+                }
                 let mut errors = stats
                     .errors
                     .iter()
@@ -3020,7 +3042,6 @@ enum IncrementalFallbackReason {
     TierUnavailable,
     #[cfg(test)]
     ForcedReindex,
-    #[cfg(test)]
     DeltaOverThreshold,
 }
 
@@ -3033,7 +3054,6 @@ impl IncrementalFallbackReason {
             Self::TierUnavailable => "tier_unavailable",
             #[cfg(test)]
             Self::ForcedReindex => "forced_reindex",
-            #[cfg(test)]
             Self::DeltaOverThreshold => "delta_over_threshold",
         }
     }
@@ -3120,25 +3140,58 @@ where
     index_checkpoint(cx)?;
     let staging_dir = create_publish_staging_dir(index_dir)?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
+    // Record what this generation indexes so the next write can publish only
+    // its delta (bd-reality-core-convergence-1azkt.57).
+    let digests = delta::DocDigests::new(&stack, &indexable_docs);
     let stats = build_index_generation(cx, &staging_dir, stack, indexable_docs).await?;
     let stats = validate_built_generation(&staging_dir, stats, document_counts)
         .map_err(IndexRebuildError::Index)?;
+    digests.write(&staging_dir)?;
     // Flush large payloads while cancellation is still available and before
     // taking the writer fence. Metadata is the recoverability marker; publish
     // it only after the final lease check below.
     sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+    publish_staged_generation(
+        publish_lock,
+        index_dir,
+        &staging_dir,
+        generation,
+        document_counts,
+        embedder_fingerprint.as_ref(),
+        commit_tail,
+    )
+    .await?;
+    Ok(stats)
+}
+
+/// The shared publication tail for a complete, flushed staged generation:
+/// stamp its metadata and exchange it in under the exclusive generation fence,
+/// then reclaim retained copies beyond the bound.
+async fn publish_staged_generation<F>(
+    publish_lock: &IndexPublishLockOwner<'_>,
+    index_dir: &Path,
+    staging_dir: &Path,
+    generation: u64,
+    document_counts: IndexDocumentCounts,
+    embedder_fingerprint: Option<&IndexEmbedderFingerprint>,
+    commit_tail: F,
+) -> Result<(), IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    let cx = publish_lock.cx;
     run_before_index_publish_hook(cx);
     index_checkpoint(cx)?;
     publish_lock
         .with_generation_fence(index_dir, || {
             cx.masked(|| {
                 write_index_metadata(
-                    &staging_dir,
+                    staging_dir,
                     generation,
                     document_counts,
-                    embedder_fingerprint.as_ref(),
+                    embedder_fingerprint,
                 )?;
-                publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)?;
+                publish_staged_index_with_commit(index_dir, staging_dir, commit_tail)?;
                 // Still inside the exclusive generation fence: no reader lease
                 // can be open, so displaced copies beyond the retention bound
                 // are reclaimed here instead of accumulating one full index
@@ -3151,7 +3204,166 @@ where
         })
         .await?;
     run_after_index_publish_hook(cx);
-    Ok(stats)
+    Ok(())
+}
+
+/// How a job-driven publication was built.
+enum PublishedGenerationKind {
+    /// Only the changed documents were applied to a copy of the live
+    /// generation.
+    Delta,
+    /// The whole corpus was rebuilt; the reason the delta path was refused.
+    Full { delta_refused: String },
+}
+
+/// Publish the snapshot as a delta over the live generation when the live
+/// generation's document digests prove which documents changed, and as a full
+/// rebuild otherwise (bd-reality-core-convergence-1azkt.57).
+///
+/// Both paths stage a complete private generation, validate its tier counts
+/// against the snapshot, flush it, and publish through the same fenced atomic
+/// exchange; cancellation before publication leaves the live generation
+/// untouched either way.
+async fn publish_index_generation_preferring_delta<F>(
+    publish_lock: &IndexPublishLockOwner<'_>,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    indexable_docs: Vec<crate::search::IndexableDocument>,
+    generation: u64,
+    document_counts: IndexDocumentCounts,
+    commit_tail: F,
+) -> Result<(BuildStats, PublishedGenerationKind), IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    let cx = publish_lock.cx;
+    index_checkpoint(cx)?;
+    match stage_delta_generation(
+        cx,
+        index_dir,
+        &stack,
+        &indexable_docs,
+        generation,
+        document_counts,
+    )
+    .await
+    {
+        Ok((staging_dir, applied)) => {
+            let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
+            let documents = indexable_docs.len();
+            publish_staged_generation(
+                publish_lock,
+                index_dir,
+                &staging_dir,
+                generation,
+                document_counts,
+                embedder_fingerprint.as_ref(),
+                commit_tail,
+            )
+            .await?;
+            tracing::info!(
+                target: "ee::index",
+                upserts = applied.upserts.len(),
+                removals = applied.removals.len(),
+                documents,
+                "published index generation as a staged delta"
+            );
+            Ok((
+                BuildStats {
+                    source_count: documents,
+                    doc_count: documents,
+                    error_count: 0,
+                    has_quality_index: stack.quality().is_some(),
+                    errors: Vec::new(),
+                },
+                PublishedGenerationKind::Delta,
+            ))
+        }
+        Err(DeltaStageError::Cancelled(error)) => Err(error),
+        Err(DeltaStageError::Refused(reason)) => {
+            tracing::debug!(
+                target: "ee::index",
+                reason = %reason,
+                "delta index intake refused; publishing a full rebuild"
+            );
+            let stats = publish_full_index_generation_with_stack(
+                publish_lock,
+                index_dir,
+                stack,
+                indexable_docs,
+                generation,
+                document_counts,
+                commit_tail,
+            )
+            .await?;
+            Ok((
+                stats,
+                PublishedGenerationKind::Full {
+                    delta_refused: reason,
+                },
+            ))
+        }
+    }
+}
+
+enum DeltaStageError {
+    Cancelled(IndexRebuildError),
+    Refused(String),
+}
+
+async fn stage_delta_generation(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: &EmbedderStack,
+    documents: &[crate::search::IndexableDocument],
+    generation: u64,
+    document_counts: IndexDocumentCounts,
+) -> Result<(PathBuf, delta::Delta), DeltaStageError> {
+    let refused = |fallback: IncrementalFallback| {
+        DeltaStageError::Refused(format!("{}: {}", fallback.reason.as_str(), fallback.detail))
+    };
+    // The live generation must be complete, compatible with this binary's
+    // corpus revision, and not ahead of the snapshot. Its lag is irrelevant:
+    // the digest diff, not the job list, decides what changed.
+    validate_incremental_index_metadata(index_dir, generation, u64::MAX).map_err(refused)?;
+    let applied = delta::plan(index_dir, stack, documents).map_err(refused)?;
+    let staging_dir = create_publish_staging_dir(index_dir)
+        .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
+    let staged = async {
+        delta::copy_generation(index_dir, &staging_dir)?;
+        index_checkpoint(cx)?;
+        delta::apply(cx, &staging_dir, stack, &applied)
+            .await
+            .map_err(|fallback| {
+                IndexRebuildError::Index(format!(
+                    "{}: {}",
+                    fallback.reason.as_str(),
+                    fallback.detail
+                ))
+            })?;
+        index_checkpoint(cx)?;
+        verify_published_tier_counts(
+            &staging_dir,
+            document_counts.total(),
+            stack.quality().is_some(),
+        )
+        .map_err(IndexRebuildError::Index)?;
+        delta::DocDigests::new(stack, documents).write(&staging_dir)?;
+        sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+        Ok::<(), IndexRebuildError>(())
+    }
+    .await;
+    match staged {
+        Ok(()) => Ok((staging_dir, applied)),
+        Err(error) => {
+            delta::discard_staging(&staging_dir);
+            if matches!(error, IndexRebuildError::Cancelled(_)) {
+                Err(DeltaStageError::Cancelled(error))
+            } else {
+                Err(DeltaStageError::Refused(error.to_string()))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3625,7 +3837,6 @@ async fn delete_incremental_document(
     Ok(())
 }
 
-#[cfg(test)]
 fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
     open_fast_vector_index_with(index_dir, VectorIndex::open)
 }
@@ -3665,7 +3876,6 @@ fn open_fast_vector_index_with(
     })
 }
 
-#[cfg(test)]
 fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, IncrementalFallback> {
     open_quality_vector_index_with(index_dir, VectorIndex::open)
 }
@@ -3704,7 +3914,6 @@ fn open_quality_vector_index_with(
     })
 }
 
-#[cfg(test)]
 fn compact_incremental_vector_index(
     index: &mut VectorIndex,
     tier: &str,
@@ -3730,7 +3939,6 @@ fn compact_incremental_vector_index(
     Ok(())
 }
 
-#[cfg(test)]
 fn vacuum_incremental_vector_index(
     index: &mut VectorIndex,
     tier: &str,
@@ -3753,7 +3961,7 @@ fn vacuum_incremental_vector_index(
     Ok(())
 }
 
-#[cfg(all(test, feature = "lexical-bm25"))]
+#[cfg(feature = "lexical-bm25")]
 fn open_lexical_index(index_dir: &Path) -> Result<TantivyIndex, IncrementalFallback> {
     let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
     if !path_exists_no_follow(&lexical_path) {
@@ -5430,6 +5638,9 @@ mod retention_names;
 
 #[path = "index_retention_gc.rs"]
 pub mod retention_gc;
+
+#[path = "index_delta.rs"]
+mod delta;
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
     retention_names::sequence(name, retained_prefix)
@@ -16904,25 +17115,42 @@ mod tests {
         let report = &reports[0];
         ensure(
             report.outcome == "completed",
-            format!("coalesced fallback rebuild should complete: {report:?}"),
+            format!("coalesced publication should complete: {report:?}"),
         )?;
+        // The job list says nothing about the unindexed retag; job-driven
+        // incremental intake therefore had to fall back on generation skew.
+        // Delta generations diff document digests instead, so either path is
+        // acceptable here, as long as the published generation indexes exactly
+        // the current corpus, retag included (bd-reality-core-convergence-1azkt.57).
         ensure(
-            report.fallback_to_full.as_deref()
-                == Some(IncrementalFallbackReason::GenerationSkew.as_str()),
-            format!("expected generation_skew fallback report, got {report:?}"),
-        )?;
-        ensure(
-            report.processing_mode.contains("fallback_to_full"),
-            format!(
-                "expected fallback processing mode marker, got {}",
-                report.processing_mode
-            ),
+            report.processing_mode.contains("staged_delta") || report.fallback_to_full.is_some(),
+            format!("publication must name its path: {report:?}"),
         )?;
         ensure(
             report.documents_indexed == 2,
             format!(
-                "fallback full rebuild should publish both documents, got {}",
+                "publication should index both documents, got {}",
                 report.documents_indexed
+            ),
+        )?;
+        let snapshot = collect_workspace_index_source_snapshot(&connection, workspace_id)
+            .map_err(|error| error.to_string())?;
+        let expected = delta::digest_map(&snapshot.documents);
+        let published: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(index_dir.join(delta::DOC_DIGESTS_FILE))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let published = published["documents"]
+            .as_object()
+            .ok_or("published digests have no documents map")?
+            .iter()
+            .map(|(id, digest)| (id.clone(), digest.as_str().unwrap_or_default().to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        ensure(
+            published == expected,
+            format!(
+                "the published generation must index exactly the current corpus, retag included: report={report:?} published={published:?} expected={expected:?}"
             ),
         )?;
 

@@ -213,3 +213,37 @@ validation/checkpoint/masked-tail protocol as a full rebuild.
   `tests/fixtures/golden/perf_artifact/incremental_index_intake.json`.
 - All Cargo verification for the schema and unit tests is RCH-only on this Mac
   lane.
+
+## Addendum 2026-10-06: staged delta generations (bd-reality-core-convergence-1azkt.57)
+
+Cancellation-safe staged publication (2026-08-06) made the in-place incremental
+apply paths test-only, so every write again rebuilt and re-embedded the whole
+corpus. Intake is restored without mutating the live generation:
+
+- **Delta source.** Every published generation records `doc_digests.json`: a
+  length-delimited blake3 digest of each indexed document (id, content, title,
+  sorted metadata) plus the identity of the embedders that produced its
+  vectors. The publisher diffs that map against the authoritative source
+  snapshot it already holds. A changed digest is an upsert, a missing id a
+  removal. The delta therefore does not depend on job bookkeeping: a change
+  made with no index job (for example a retag) is still applied.
+- **Staging.** The live generation's tier files are copied (not linked: tier
+  writers mutate in place and the FSVI reader refuses multiply-linked files)
+  into a private staging directory; admission state (`meta.json`, digests,
+  retired manifests) and writer locks are not copied. Removals, then upserts,
+  are applied to the copy with one compaction per vector tier and one lexical
+  commit.
+- **Validation and publication.** Tier counts must equal the snapshot's
+  document counts; then the staged generation is flushed, stamped and
+  exchanged through exactly the same masked, fenced, atomic path as a full
+  build. Cancellation before publication leaves the live generation untouched.
+- **Fallback.** No digests (pre-addendum stores), a different embedder, an
+  incompatible or newer live generation, more than 25% (max 256) of the corpus
+  changed, more than 32 lexical segments, or any staging failure publishes a
+  full rebuild instead, which is also the compaction step. `ee index rebuild`
+  is always a full rebuild.
+- **Equivalence.** Verified black-box: 30 delta-published writes answer the
+  same search ids in the same order, and the same pack hashes, as a full
+  rebuild of the same corpus. Raw BM25 can differ in the last float digit
+  because the lexical segment layout differs; full builds show the same
+  layout-dependent noise across documents with identical text.

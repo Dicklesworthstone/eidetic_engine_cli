@@ -211,3 +211,86 @@ fn vacuum_apply_reclaims_exactly_the_previewed_generations_once() -> TestResult 
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// bd-reality-core-convergence-1azkt.57: writes publish as staged deltas over
+/// the live generation. A delta-built index must answer exactly like a full
+/// rebuild of the same corpus: same hits in the same order, same pack.
+#[test]
+fn delta_published_index_answers_like_a_full_rebuild() -> TestResult {
+    let root = unique_root("delta-equivalence")?;
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    ok_json(&run(&root, &workspace, &["init"])?, "init")?;
+    let topics = ["release", "cargo", "sqlite", "replay", "clippy", "golden"];
+    for (index, topic) in topics.iter().cycle().take(12).enumerate() {
+        let content =
+            format!("Lesson {index} about {topic}: always verify the {topic} step before merging.");
+        ok_json(
+            &run(&root, &workspace, &["remember", &content, "--kind", "rule"])?,
+            "remember",
+        )?;
+    }
+    let observe = |root: &Path, workspace: &Path| -> Result<Vec<String>, String> {
+        let mut observed = Vec::new();
+        for query in ["verify release step", "cargo merging", "golden replay"] {
+            let search = ok_json(
+                &run(
+                    root,
+                    workspace,
+                    &[
+                        "search",
+                        query,
+                        "--limit",
+                        "10",
+                        "--source-mode",
+                        "lexical_only",
+                    ],
+                )?,
+                "search",
+            )?;
+            let ids = search["data"]["results"]
+                .as_array()
+                .ok_or("search has no results array")?
+                .iter()
+                .map(|hit| hit["docId"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>();
+            observed.push(format!("search {query}: {ids:?}"));
+            let pack = ok_json(
+                &run(
+                    root,
+                    workspace,
+                    &[
+                        "pack",
+                        query,
+                        "--read-only",
+                        "--max-tokens",
+                        "1500",
+                        "--source-mode",
+                        "lexical_only",
+                    ],
+                )?,
+                "pack",
+            )?;
+            observed.push(format!("pack {query}: {}", pack["data"]["pack"]["hash"]));
+        }
+        Ok(observed)
+    };
+    let delta_built = observe(&root, &workspace)?;
+    ok_json(
+        &run(&root, &workspace, &["index", "rebuild"])?,
+        "index rebuild",
+    )?;
+    let rebuilt = observe(&root, &workspace)?;
+    if delta_built != rebuilt {
+        return Err(format!(
+            "delta-built index diverges from a full rebuild:\ndelta={delta_built:#?}\nfull={rebuilt:#?}"
+        ));
+    }
+    if !delta_built.iter().any(|line| line.contains("mem_")) {
+        return Err(format!(
+            "the probe must observe real hits: {delta_built:#?}"
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}

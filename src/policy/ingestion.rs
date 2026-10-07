@@ -29,6 +29,54 @@ pub(super) fn screen(content: &str) -> ExternalIngestionScreenReport {
 /// replacement cannot split an encoded credential. Count the selected view,
 /// not both encodings of one secret. Clean records retain their original bytes.
 pub(super) fn screen_with_span_count(content: &str) -> (ExternalIngestionScreenReport, usize) {
+    // The screen is a pure function of its input, and CASS import screens each
+    // window twice (when the view is parsed, then again at the database insert
+    // boundary, which must not trust its caller). Remember recent results by
+    // content digest so an unchanged excerpt is scanned once per process
+    // (bd-reality-core-convergence-1azkt.48). The insert boundary still gets
+    // the screen of exactly the bytes it stores.
+    let key = *blake3::hash(content.as_bytes()).as_bytes();
+    if let Some(cached) = SCREEN_MEMO.with(|memo| memo.borrow().get(&key)) {
+        return cached;
+    }
+    let screened = screen_with_span_count_uncached(content);
+    SCREEN_MEMO.with(|memo| memo.borrow_mut().insert(key, screened.clone()));
+    screened
+}
+
+/// Recently screened contents per thread, bounded so a long import cannot grow
+/// it without limit.
+const SCREEN_MEMO_CAPACITY: usize = 512;
+
+thread_local! {
+    static SCREEN_MEMO: std::cell::RefCell<ScreenMemo> =
+        std::cell::RefCell::new(ScreenMemo::default());
+}
+
+#[derive(Default)]
+struct ScreenMemo {
+    order: std::collections::VecDeque<[u8; 32]>,
+    entries: std::collections::HashMap<[u8; 32], (ExternalIngestionScreenReport, usize)>,
+}
+
+impl ScreenMemo {
+    fn get(&self, key: &[u8; 32]) -> Option<(ExternalIngestionScreenReport, usize)> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: [u8; 32], value: (ExternalIngestionScreenReport, usize)) {
+        if self.entries.insert(key, value).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > SCREEN_MEMO_CAPACITY {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.entries.remove(&oldest);
+                }
+            }
+        }
+    }
+}
+
+fn screen_with_span_count_uncached(content: &str) -> (ExternalIngestionScreenReport, usize) {
     // Enforce the whole-input bound before allocating any decoded JSON tree.
     if content.len() <= MAX_SCAN_BYTES {
         match encoded_json::canonicalize(content) {
