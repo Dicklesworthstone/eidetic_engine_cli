@@ -168,10 +168,49 @@ jobs:
       - name: Exercise existing reader and rollback recovery behavior
         if: ${{ !cancelled() }}
         run: |
-          set -euo pipefail
-          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log"
-          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log"
-          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-recovery.log"
+          # ASSERT THAT SOMETHING RAN (bd-lagsa). These three suites had NO count
+          # assertion at all. Under the previous `set -euo pipefail` a FAILING test did
+          # abort, so this was never a hole for failures -- the hole is VACUITY. A filter
+          # that matches nothing reports zero passed and zero failed and exits 0, so the
+          # step passed while verifying nothing.
+          #
+          # The third filter is the fragile one: `recover_interrupted` is a bare
+          # SUBSTRING, not a module path, so any rename of those test functions silently
+          # empties it. Both module filters resolve today through index.rs:67 and :79 to
+          # index_rollback_manifest.rs and index_read_lease.rs.
+          #
+          # Observed counts at the time of writing, recorded as INFORMATION and
+          # deliberately NOT asserted: read_lease 7, rollback_manifest 9,
+          # recover_interrupted 10. The floors are 1, because a floor of 1 is exactly
+          # what kills the vacuous case and I have not reviewed these inventories --
+          # pinning 7/9/10 would invent a requirement nobody signed off and reintroduce
+          # the treadmill this bead is about. Raise a floor deliberately when you want a
+          # specific suite guaranteed present.
+          #
+          # Accumulating rather than aborting, which is also what makes this safe to add:
+          # three assertions in an ABORTING non-publishing step is the kill-switch shape
+          # scripts/check-step-assertion-isolation.py exists to refuse, and the first
+          # failure would hide the other two suites. This step performs no push, so
+          # accumulation is the correct form and every suite still runs and reports.
+          set -uo pipefail
+          failed=0
+          floor() {
+            local log="$1" floor="$2" label="$3" actual=""
+            actual=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$log" | head -1)
+            if test -z "$actual" || test "$actual" -lt "$floor"; then
+              echo "ATTRIBUTION: $label FAILED -- passing-with-zero-failures count '${actual:-none}', required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: $label ok -- $actual tests ran, floor $floor"
+            fi
+          }
+          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log" || failed=1
+          floor "$RUNNER_TEMP/generation-readers.log" 1 'read_lease'
+          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log" || failed=1
+          floor "$RUNNER_TEMP/generation-rollback.log" 1 'rollback_manifest'
+          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-recovery.log" || failed=1
+          floor "$RUNNER_TEMP/generation-recovery.log" 1 'recover_interrupted'
+          exit "$failed"
       - name: Production lint and module formatting
         if: ${{ !cancelled() }}
         run: |
