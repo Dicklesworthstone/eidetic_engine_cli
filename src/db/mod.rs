@@ -13702,6 +13702,65 @@ impl DbConnection {
         }
     }
 
+    /// Select a verified local embedder and retain inactive models for inspection.
+    ///
+    /// Fetch is an explicit workspace model choice. The selected row, retirement
+    /// of competing local embedding rows, and fetch audit must commit together
+    /// so a reader cannot observe either two selected models or no selected model.
+    pub fn select_model2vec_embedding(
+        &self,
+        insert_id: &str,
+        input: &CreateEmbeddingMetadataInput,
+        audit_id: &str,
+        audit_details: &str,
+    ) -> Result<StoredModelRegistryEntry> {
+        if input.provider != ModelProvider::Model2Vec
+            || input.status != ModelRegistryStatus::Available
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "model selection requires an available Model2Vec embedding".to_owned(),
+            });
+        }
+
+        self.with_transaction(|| {
+            self.upsert_embedding_metadata_record(insert_id, input)?;
+            let selected = self
+                .find_model_registry_entry(
+                    &input.workspace_id,
+                    ModelProvider::Model2Vec,
+                    &input.model_name,
+                    ModelPurpose::Embedding,
+                )?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "selected embedding model is missing after registry upsert".to_owned(),
+                })?;
+
+            self.execute_for(
+                DbOperation::Execute,
+                "UPDATE model_registry SET status = 'disabled', updated_at = ?1 WHERE workspace_id = ?2 AND provider = 'model2vec' AND purpose = 'embedding' AND id != ?3 AND status != 'disabled'",
+                &[
+                    Value::Text(Utc::now().to_rfc3339()),
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(selected.id.clone()),
+                ],
+            )?;
+            self.insert_audit(
+                audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: None,
+                    action: "model.fetched".to_owned(),
+                    target_type: Some("model_registry".to_owned()),
+                    target_id: Some(selected.id.clone()),
+                    details: Some(audit_details.to_owned()),
+                },
+            )?;
+            Ok(selected)
+        })
+    }
+
     /// Get a parsed embedding metadata record by registry ID.
     pub fn get_embedding_metadata_record(
         &self,
@@ -50481,6 +50540,296 @@ UPDATE memories
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    fn model2vec_selection_input(
+        model_name: &str,
+        dimension: u32,
+    ) -> super::CreateEmbeddingMetadataInput {
+        let mut input = embedding_metadata_input(ModelProvider::Model2Vec, model_name);
+        input.dimension = dimension;
+        input.metadata.dimension = dimension;
+        input
+    }
+
+    #[test]
+    fn select_model2vec_embedding_is_scoped_and_preserves_inactive_history() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_11234567890123456789012345', '/tmp/model-selection-other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        let default = model2vec_selection_input("potion-multilingual-128M", 256);
+        connection.insert_embedding_metadata_record("mdl_01234567890123456789012345", &default)?;
+        let old = connection
+            .get_model_registry_entry("mdl_01234567890123456789012345")?
+            .ok_or_else(|| TestFailure::new("default model missing"))?;
+        let mut other = default.clone();
+        other.workspace_id = "wsp_11234567890123456789012345".to_owned();
+        connection.insert_embedding_metadata_record("mdl_21234567890123456789012345", &other)?;
+        connection.insert_model_registry_entry(
+            "mdl_31234567890123456789012345",
+            &model_registry_input(ModelProvider::Model2Vec, "reranker", ModelPurpose::Reranker),
+        )?;
+        connection.insert_embedding_metadata_record(
+            "mdl_41234567890123456789012345",
+            &embedding_metadata_input(ModelProvider::External, "remote-api:test"),
+        )?;
+        let untouched_ids = [
+            "mdl_21234567890123456789012345",
+            "mdl_31234567890123456789012345",
+            "mdl_41234567890123456789012345",
+        ];
+        let untouched = untouched_ids
+            .iter()
+            .map(|id| connection.get_model_registry_entry(id))
+            .collect::<super::Result<Vec<_>>>()?;
+
+        let small = model2vec_selection_input("potion-base-8m", 256);
+        let details = r#"{"modelId":"potion-base-8m","downloaded":false}"#;
+        let audit_id = super::generate_audit_id();
+        let selected = connection.select_model2vec_embedding(
+            "mdl_11234567890123456789012345",
+            &small,
+            &audit_id,
+            details,
+        )?;
+        ensure_equal(
+            &selected.id.as_str(),
+            &"mdl_11234567890123456789012345",
+            "selected id",
+        )?;
+        ensure_equal(
+            &selected.status,
+            &ModelRegistryStatus::Available,
+            "selected status",
+        )?;
+        ensure_equal(&selected.dimension, &Some(256), "selected dimension")?;
+        ensure_equal(
+            &selected.content_hash,
+            &small.content_hash,
+            "selected fingerprint",
+        )?;
+        let stored = connection
+            .get_embedding_metadata_record(&selected.id)?
+            .ok_or_else(|| TestFailure::new("selected metadata missing"))?;
+        ensure_equal(&stored.metadata, &small.metadata, "selected metadata")?;
+
+        let inactive = connection
+            .get_model_registry_entry(&old.id)?
+            .ok_or_else(|| TestFailure::new("previous model history was lost"))?;
+        ensure_equal(
+            &inactive.status,
+            &ModelRegistryStatus::Disabled,
+            "old model inactive",
+        )?;
+        let mut expected_old = old;
+        expected_old.status = ModelRegistryStatus::Disabled;
+        expected_old.updated_at.clone_from(&inactive.updated_at);
+        ensure_equal(&inactive, &expected_old, "old model provenance preserved")?;
+        for (id, before) in untouched_ids.iter().zip(untouched) {
+            ensure_equal(
+                &connection.get_model_registry_entry(id)?,
+                &before,
+                "other scope untouched",
+            )?;
+        }
+        let audit = connection
+            .get_audit(&audit_id)?
+            .ok_or_else(|| TestFailure::new("selection audit missing"))?;
+        ensure_equal(&audit.action.as_str(), &"model.fetched", "fetch action")?;
+        ensure_equal(
+            &audit.workspace_id,
+            &Some(small.workspace_id),
+            "audit workspace",
+        )?;
+        ensure_equal(&audit.target_id, &Some(selected.id), "audit selected row")?;
+        ensure_equal(&audit.details.as_deref(), &Some(details), "audit details")?;
+        Ok(())
+    }
+
+    #[test]
+    fn select_model2vec_embedding_is_idempotent_and_can_switch_back() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let default = model2vec_selection_input("potion-multilingual-128M", 256);
+        let small = model2vec_selection_input("potion-base-32m", 512);
+        let original = connection.select_model2vec_embedding(
+            "mdl_01234567890123456789012345",
+            &default,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        let selected = connection.select_model2vec_embedding(
+            "mdl_11234567890123456789012345",
+            &small,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        let repeated = connection.select_model2vec_embedding(
+            "mdl_51234567890123456789012345",
+            &small,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        ensure_equal(
+            &repeated,
+            &selected,
+            "repeat fetch preserves selected row and timestamps",
+        )?;
+        ensure(
+            connection
+                .get_model_registry_entry("mdl_51234567890123456789012345")?
+                .is_none(),
+            "no duplicate row",
+        )?;
+        let restored = connection.select_model2vec_embedding(
+            "mdl_61234567890123456789012345",
+            &default,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        ensure_equal(
+            &restored.id,
+            &original.id,
+            "switch back preserves original identity",
+        )?;
+        ensure_equal(
+            &restored.created_at,
+            &original.created_at,
+            "switch back preserves history",
+        )?;
+        let rows = connection.list_model_registry_entries(&default.workspace_id)?;
+        ensure_equal(&rows.len(), &2, "only the two selected models are retained")?;
+        let active = rows
+            .iter()
+            .filter(|row| row.status == ModelRegistryStatus::Available)
+            .collect::<Vec<_>>();
+        ensure_equal(&active.len(), &1, "exactly one active model")?;
+        ensure_equal(&active[0].id, &original.id, "original model reactivated")?;
+        ensure_equal(
+            &connection
+                .list_audit_by_action("model.fetched", None)?
+                .len(),
+            &4,
+            "every successful fetch audited",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn select_model2vec_embedding_rolls_back_when_audit_fails() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let default = model2vec_selection_input("potion-multilingual-128M", 256);
+        let audit_id = super::generate_audit_id();
+        connection.select_model2vec_embedding(
+            "mdl_01234567890123456789012345",
+            &default,
+            &audit_id,
+            "{}",
+        )?;
+        let before = connection.list_model_registry_entries(&default.workspace_id)?;
+        let audit_before = connection.get_audit(&audit_id)?;
+        let small = model2vec_selection_input("potion-base-8m", 256);
+        ensure(
+            connection
+                .select_model2vec_embedding(
+                    "mdl_11234567890123456789012345",
+                    &small,
+                    &audit_id,
+                    "{}",
+                )
+                .is_err(),
+            "duplicate audit must reject selection",
+        )?;
+        ensure_equal(
+            &connection.list_model_registry_entries(&default.workspace_id)?,
+            &before,
+            "failed audit rolls back activation and deactivation",
+        )?;
+        ensure_equal(
+            &connection.get_audit(&audit_id)?,
+            &audit_before,
+            "prior audit unchanged",
+        )?;
+        ensure_equal(
+            &connection
+                .list_audit_by_action("model.fetched", None)?
+                .len(),
+            &1,
+            "failed fetch adds no audit",
+        )?;
+        let selected = connection.select_model2vec_embedding(
+            "mdl_21234567890123456789012345",
+            &small,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        ensure_equal(
+            &selected.model_name,
+            &small.model_name,
+            "transaction usable after rollback",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn select_model2vec_embedding_rejects_invalid_input_without_mutation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let input = model2vec_selection_input("potion-base-8m", 256);
+        connection.select_model2vec_embedding(
+            "mdl_01234567890123456789012345",
+            &input,
+            &super::generate_audit_id(),
+            "{}",
+        )?;
+        let before = connection.list_model_registry_entries(&input.workspace_id)?;
+        let mut invalid = Vec::new();
+        for status in [
+            ModelRegistryStatus::Unavailable,
+            ModelRegistryStatus::Disabled,
+        ] {
+            let mut value = input.clone();
+            value.status = status;
+            invalid.push(value);
+        }
+        let mut wrong_provider = input.clone();
+        wrong_provider.provider = ModelProvider::Hash;
+        invalid.push(wrong_provider);
+        let mut wrong_dimension = input.clone();
+        wrong_dimension.dimension += 1;
+        invalid.push(wrong_dimension);
+        let invalid_audit_id = super::generate_audit_id();
+        for value in invalid {
+            ensure(
+                connection
+                    .select_model2vec_embedding(
+                        "mdl_21234567890123456789012345",
+                        &value,
+                        &invalid_audit_id,
+                        "{}",
+                    )
+                    .is_err(),
+                "invalid selection is rejected",
+            )?;
+            ensure_equal(
+                &connection.list_model_registry_entries(&input.workspace_id)?,
+                &before,
+                "invalid selection preserves registry",
+            )?;
+            ensure(
+                connection.get_audit(&invalid_audit_id)?.is_none(),
+                "invalid selection has no audit",
+            )?;
+        }
         Ok(())
     }
 

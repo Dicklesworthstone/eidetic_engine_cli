@@ -16,6 +16,7 @@ on:
       - src/core/resume*.rs
       - src/core/recall*.rs
       - src/core/memory_lifecycle.rs
+      - src/core/model.rs
       - src/core/retrieval_affinity.rs
       - src/core/jsonl*.rs
       - src/core/context*.rs
@@ -39,6 +40,9 @@ on:
       - tests/session_arc_learning_cli.rs
       - tests/mcp_parity.rs
       - tests/mcp_parity/**
+      - tests/model_bundled_embedding_cli_e2e.rs
+      - tests/model_lifecycle_readiness_integration.rs
+      - tests/fixtures/failure_modes/semantic_dimension_exceeds_budget.json
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -108,6 +112,54 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets --features mcp 2>&1 | tee "$RUNNER_TEMP/core-memory/check.log"
+      - name: Exercise pinned model selection and storage compatibility
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          failed=0
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --lib "$filter" -- --test-threads=1 > "$log" 2>&1 || status=$?
+            tail -n 100 "$log"
+            if test "$status" -ne 0; then
+              echo "Case '$label' failed with exit $status."
+              failed=1
+            elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; [0-9]+ ignored;' "$log"; then
+              echo "Case '$label' did not execute a passing, nonempty test selection."
+              failed=1
+            fi
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+          done <<'CASES'
+          model-selection-atomic db::tests::select_model2vec_embedding_
+          model-storage-read-only db::tests::read_only_file_
+          model-registered-identity core::index::tests::registered_model2vec_
+          model-workspace-selection core::index::tests::workspace_registry_
+          model-read-preparation core::index::ask_model::tests::
+          model-fetch-lifecycle core::model::tests::
+          CASES
+          exit "$failed"
+      - name: Exercise real smaller-model fetch, switch, and daemon retrieval
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/core-memory/model-smaller-public.log"
+          status=0
+          # Explicit opt-in: this one test fetches pinned 8M and 32M assets.
+          # Its remaining children use EE_EMBED_DOWNLOAD=off and a network tripwire.
+          timeout 15m cargo test --locked --test model_bundled_embedding_cli_e2e \
+            smaller_model2vec_fetch_switch_reembed_and_daemon_retrieval \
+            -- --ignored --exact --test-threads=1 > "$log" 2>&1 || status=$?
+          tail -n 150 "$log"
+          printf 'model-smaller-public exit=%s\n' "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+          if test "$status" -ne 0; then
+            echo "Real smaller-model qualification failed with exit $status."
+            exit 1
+          fi
+          if ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+            echo "Real smaller-model qualification did not execute exactly one passing test."
+            exit 1
+          fi
       - name: Exercise configuration and isolated global hydration
         if: ${{ !cancelled() }}
         run: |
@@ -451,6 +503,7 @@ jobs:
           backup-contract contracts backup_import_roundtrip::
           core-cli e2e_core_workflow core_workflow_init_remember_search_context_why
           learning-cli session_arc_learning_cli public_cli_
+          model-lifecycle integration_g_m model_lifecycle_readiness_integration::
           cass-context integration_n_r no_mocks_e2e::no_mocks_import_cass_fixture_sessions_stores_spans_and_searches
           readonly-context integration_n_r retrieval_index_regression_oracle::sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace
           CASES

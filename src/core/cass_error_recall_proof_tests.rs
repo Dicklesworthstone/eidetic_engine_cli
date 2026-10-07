@@ -499,7 +499,8 @@ fn matching_labels_do_not_hide_different_packages_targets_features_or_filters() 
 
 #[test]
 fn invocation_context_keeps_directory_environment_tool_and_argv_boundaries() {
-    let arguments = json!({"cmd":"cargo check", "workdir":"/repo/a", "env":{"RUSTFLAGS":"-Dwarnings"}});
+    let arguments =
+        json!({"cmd":"cargo check", "workdir":"/repo/a", "env":{"RUSTFLAGS":"-Dwarnings"}});
     let failed = invocation("exec_command", &arguments);
     for other in [
         json!({"cmd":"cargo check", "workdir":"/repo/b", "env":{"RUSTFLAGS":"-Dwarnings"}}),
@@ -513,9 +514,7 @@ fn invocation_context_keeps_directory_environment_tool_and_argv_boundaries() {
     let one = json!({"command":["cargo", "test", "first second"]});
     let two = json!({"command":["cargo", "test", "first", "second"]});
     assert_eq!(command_argument(&one), command_argument(&two));
-    assert!(
-        !invocation("exec_command", &one).verifies(&invocation("exec_command", &two))
-    );
+    assert!(!invocation("exec_command", &one).verifies(&invocation("exec_command", &two)));
     let debug = format!("{failed:?}");
     assert!(!debug.contains("/repo/a"));
     assert!(!debug.contains("RUSTFLAGS"));
@@ -528,9 +527,7 @@ fn observational_controls_do_not_change_a_valid_retry_scope() {
         "workdir":"/repo", "cmd":"cargo check", "description":"Verify the repair",
         "yield_time_ms":1000, "max_output_tokens":4000, "timeout_ms":60000
     });
-    assert!(
-        invocation("exec_command", &later).verifies(&invocation("exec_command", &first))
-    );
+    assert!(invocation("exec_command", &later).verifies(&invocation("exec_command", &first)));
     let with_cd = invocation("Bash", &json!({"command":"cd /repo && cargo check"}));
     assert_eq!(with_cd.to_string(), "cargo check");
     assert!(with_cd.verifies(&with_cd));
@@ -678,7 +675,10 @@ fn exec_output(status: &str, body: &str) -> Value {
 }
 
 fn running_output(process_id: i32, body: &str) -> Value {
-    exec_output(&format!("Process running with session ID {process_id}"), body)
+    exec_output(
+        &format!("Process running with session ID {process_id}"),
+        body,
+    )
 }
 
 fn completed_output(code: i32, body: &str) -> Value {
@@ -930,11 +930,7 @@ fn final_zero_cannot_erase_a_failure_observed_in_an_earlier_chunk() {
 
 #[test]
 fn interactive_unreadable_and_overlapping_polls_invalidate_only_their_stream() {
-    for (chars, readable, overlap) in [
-        ("y\n", true, false),
-        ("", false, false),
-        ("", true, true),
-    ] {
+    for (chars, readable, overlap) in [("y\n", true, false), ("", false, false), ("", true, true)] {
         let mut ledger = InvocationLedger::default();
         assert!(ledger.observe(exec_event("a"), 0, true).is_none());
         let running = ledger
@@ -1002,7 +998,11 @@ fn running_stream_budget_counts_pending_polls_and_releases_completed_slots() {
     assert!(ledger.observe(exec_event("excess"), 200, true).is_none());
     assert!(
         ledger
-            .observe(output_event("excess", running_output(999, "body")), 201, true)
+            .observe(
+                output_event("excess", running_output(999, "body")),
+                201,
+                true
+            )
             .is_some()
     );
     assert!(ledger.invalid_processes.contains(&999));
@@ -1036,7 +1036,11 @@ fn chunk_limits_and_decoded_instruction_splits_fail_closed() {
             )
             .is_some()
     );
-    assert!(ledger.observe(poll_event("tail", 42, ""), 2, true).is_none());
+    assert!(
+        ledger
+            .observe(poll_event("tail", 42, ""), 2, true)
+            .is_none()
+    );
     let complete = ledger
         .observe(output_event("tail", completed_output(0, "é")), 3, true)
         .expect("oversized diagnostic observation");
@@ -1083,7 +1087,11 @@ fn malformed_polled_results_and_reused_process_ids_cannot_be_replayed() {
             .is_some()
     );
     assert!(ledger.observe(poll_event("p", 42, ""), 2, true).is_none());
-    assert!(ledger.observe(output_event("p", json!({})), 3, true).is_none());
+    assert!(
+        ledger
+            .observe(output_event("p", json!({})), 3, true)
+            .is_none()
+    );
     assert!(
         ledger
             .observe(output_event("p", completed_output(0, "")), 4, true)

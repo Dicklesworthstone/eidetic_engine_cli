@@ -12102,7 +12102,7 @@ pub struct ModelListArgs {
 /// Arguments for `ee model fetch`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ModelFetchArgs {
-    /// Model alias or manifest model ID. Use `rerank-default` for the bundled reranker.
+    /// Model to fetch: embedding-default, potion-base-8M, potion-base-32M, or rerank-default.
     #[arg(value_name = "MODEL")]
     pub model: String,
 

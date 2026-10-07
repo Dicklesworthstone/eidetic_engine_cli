@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::core::index::{INDEX_METADATA_SCHEMA_V2, expected_index_corpus_revision};
-use ee::core::model::build_model_lifecycle_report_for_workspace;
+use ee::core::model::{
+    build_model_lifecycle_report_for_workspace, ensure_bundled_embedding_model_registered,
+};
 use ee::core::recall::{RecallQuery, run_recall};
 use ee::db::{
     CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection,
@@ -18,14 +20,10 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-const OFFLINE_READY_GOLDEN_REL: &str =
-    "tests/fixtures/golden/model_lifecycle/offline_local_readiness.json.golden";
 const OFFLINE_MODEL_ID: &str = "mdl_01HQ3K5Z000000000000000060";
 const OFFLINE_MODEL_REVISION: &str = "hash-fixture-v1";
 const OFFLINE_MODEL_SOURCE_URI: &str = "models/hash-embedder-fixture.json";
 const OFFLINE_MODEL_CHECKED_AT: &str = "2026-06-15T00:00:00Z";
-const CANONICAL_GENERATED_AT: &str = "2026-06-15T00:00:01Z";
-const CANONICAL_WORKSPACE_FINGERPRINT: &str = "0123456789ab";
 
 struct WorkspaceFixture {
     _temp: tempfile::TempDir,
@@ -91,6 +89,8 @@ fn fresh_workspace() -> Result<WorkspaceFixture, String> {
             },
         )
         .map_err(|error| format!("insert workspace: {error}"))?;
+    ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+        .map_err(|error| format!("declare bundled model: {error}"))?;
 
     Ok(WorkspaceFixture {
         _temp: temp,
@@ -276,33 +276,11 @@ fn write_ready_semantic_index(fixture: &WorkspaceFixture, model_hash: &str) -> T
     )
 }
 
-fn canonicalize_model_lifecycle_json(mut value: Value) -> Value {
-    value["generatedAt"] = serde_json::json!(CANONICAL_GENERATED_AT);
-    value["workspaceFingerprint"] = serde_json::json!(CANONICAL_WORKSPACE_FINGERPRINT);
-    value
-}
-
 fn pretty_json(value: &Value) -> Result<String, String> {
     let mut text =
         serde_json::to_string_pretty(value).map_err(|error| format!("pretty json: {error}"))?;
     text.push('\n');
     Ok(text)
-}
-
-fn assert_json_golden(relative_path: &str, actual: &Value) -> TestResult {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    let expected = fs::read_to_string(&path)
-        .map_err(|error| format!("read golden {}: {error}", path.display()))?;
-    let actual = pretty_json(actual)?;
-    if actual == expected {
-        return Ok(());
-    }
-    Err(format!(
-        "golden mismatch for {}\nexpected:\n{}\nactual:\n{}",
-        path.display(),
-        expected,
-        actual
-    ))
 }
 
 fn assert_no_workspace_path_leak(value: &Value, workspace_path: &Path) -> TestResult {
@@ -315,10 +293,16 @@ fn assert_no_workspace_path_leak(value: &Value, workspace_path: &Path) -> TestRe
 }
 
 #[test]
-fn search_surface_reports_dimension_incompatible_readiness() -> TestResult {
+fn search_surface_does_not_select_unmatched_registry_dimensions() -> TestResult {
     let fixture = fresh_workspace()?;
     insert_embedding_model(&fixture.connection, &fixture.workspace_id, 384)?;
     write_index_metadata(&fixture.workspace_path, 128)?;
+    let entries_before = fixture
+        .connection
+        .list_model_registry_entries(&fixture.workspace_id)
+        .map_err(|error| error.to_string())?;
+    let index_path = fixture.workspace_path.join(".ee/index/meta.json");
+    let index_before = fs::read(&index_path).map_err(|error| error.to_string())?;
 
     let report = build_model_lifecycle_report_for_workspace(
         &fixture.workspace_path,
@@ -326,19 +310,41 @@ fn search_surface_reports_dimension_incompatible_readiness() -> TestResult {
         Some(&fixture.connection),
     )
     .map_err(|error| format!("lifecycle report: {error:?}"))?;
-    let degradation = report
-        .semantic_surface_degradation("search")
-        .ok_or("missing search lifecycle degradation")?;
-
-    ensure_equal(
-        degradation.code,
-        "embed_model_unavailable",
-        "dimension mismatch reuses semantic-unavailable code",
-    )?;
-    ensure_equal(degradation.severity, "high", "dimension mismatch severity")?;
+    // The selected-fixture mismatch and its established surface code remain
+    // covered by model.rs's explicit selection seam. This public API must not
+    // treat an arbitrary available registry row as the runtime descriptor.
+    let model_id = format!("mdl_{:026}", 42);
+    let unselected = report
+        .models
+        .iter()
+        .find(|model| model.model_id == model_id)
+        .ok_or("unselected registry inventory missing")?;
     ensure(
-        degradation.message.contains("dimension-incompatible"),
-        "search message names dimension-incompatible readiness",
+        report.semantic_readiness.selected_model_id.as_deref() != Some(model_id.as_str()),
+        "unmatched dimensions must not select a registry model",
+    )?;
+    ensure_equal(
+        &unselected.dimension_compatibility.compatible,
+        &None,
+        "unselected inventory has no runtime compatibility verdict",
+    )?;
+    ensure_equal(
+        &report.indexes[0].stored_dimension,
+        &Some(128),
+        "stored index evidence remains visible",
+    )?;
+    ensure_equal(
+        &fixture
+            .connection
+            .list_model_registry_entries(&fixture.workspace_id)
+            .map_err(|error| error.to_string())?,
+        &entries_before,
+        "lifecycle observation preserves registry entries",
+    )?;
+    ensure_equal(
+        &fs::read(&index_path).map_err(|error| error.to_string())?,
+        &index_before,
+        "lifecycle observation preserves index evidence",
     )
 }
 
@@ -383,10 +389,18 @@ fn recall_surface_reports_lexical_only_readiness() -> TestResult {
 }
 
 #[test]
-fn offline_local_model_lifecycle_matches_redacted_golden() -> TestResult {
+fn offline_asset_provenance_does_not_attest_a_runtime_embedding_identity() -> TestResult {
     let fixture = fresh_workspace()?;
     let model_hash = insert_offline_local_model(&fixture)?;
     write_ready_semantic_index(&fixture, &model_hash)?;
+    let entries_before = fixture
+        .connection
+        .list_model_registry_entries(&fixture.workspace_id)
+        .map_err(|error| error.to_string())?;
+    let asset_path = fixture.workspace_path.join(OFFLINE_MODEL_SOURCE_URI);
+    let asset_before = fs::read(&asset_path).map_err(|error| error.to_string())?;
+    let index_path = fixture.workspace_path.join(".ee/index/meta.json");
+    let index_before = fs::read(&index_path).map_err(|error| error.to_string())?;
 
     let report = build_model_lifecycle_report_for_workspace(
         &fixture.workspace_path,
@@ -394,22 +408,57 @@ fn offline_local_model_lifecycle_matches_redacted_golden() -> TestResult {
         Some(&fixture.connection),
     )
     .map_err(|error| format!("lifecycle report: {error:?}"))?;
-    ensure_equal(
-        report.semantic_readiness.state,
-        "available",
-        "offline local model/index fixture should be semantically ready",
-    )?;
-    ensure_equal(
-        &report
-            .degraded
-            .iter()
-            .map(|degradation| degradation.code)
-            .collect::<Vec<_>>(),
-        &Vec::new(),
-        "semantically ready fixture should not emit lifecycle degradations",
+    ensure(
+        report.semantic_readiness.selected_model_id.as_deref() != Some(OFFLINE_MODEL_ID),
+        "matching synthetic asset bytes cannot attest the process runtime descriptor",
     )?;
 
-    let actual = canonicalize_model_lifecycle_json(report.data_json());
+    // Exact selected-fixture rendering remains pinned by the unchanged golden
+    // in model.rs, with an explicit identity and no ambient model dependency.
+    let actual = report.data_json();
     assert_no_workspace_path_leak(&actual, &fixture.workspace_path)?;
-    assert_json_golden(OFFLINE_READY_GOLDEN_REL, &actual)
+    let inventory = actual["models"]
+        .as_array()
+        .ok_or("model inventory missing")?
+        .iter()
+        .find(|model| model["modelId"] == OFFLINE_MODEL_ID)
+        .ok_or("offline model inventory missing")?;
+    ensure_equal(
+        &inventory["state"],
+        &serde_json::json!("available"),
+        "verified asset remains available inventory",
+    )?;
+    ensure_equal(
+        &inventory["assetProvenance"]["contentHash"],
+        &serde_json::json!(model_hash),
+        "registry fingerprint remains visible",
+    )?;
+    ensure_equal(
+        &inventory["assetProvenance"]["assetHash"],
+        &serde_json::json!(model_hash),
+        "asset digest remains verified",
+    )?;
+    ensure_equal(
+        &inventory["dimensionCompatibility"]["compatible"],
+        &Value::Null,
+        "unselected model has no runtime compatibility verdict",
+    )?;
+    ensure_equal(
+        &fixture
+            .connection
+            .list_model_registry_entries(&fixture.workspace_id)
+            .map_err(|error| error.to_string())?,
+        &entries_before,
+        "lifecycle observation preserves registry history",
+    )?;
+    ensure_equal(
+        &fs::read(&asset_path).map_err(|error| error.to_string())?,
+        &asset_before,
+        "lifecycle observation preserves model bytes",
+    )?;
+    ensure_equal(
+        &fs::read(&index_path).map_err(|error| error.to_string())?,
+        &index_before,
+        "lifecycle observation preserves index bytes",
+    )
 }

@@ -4,14 +4,14 @@
 # packages selected by Cargo.lock; sibling checkouts are not required. The
 # 0.17.0 publication candidate uses the
 # published Asupersync 0.5.0 source and coordinated downstream minor versions:
-# FrankenSQLite 0.4.6 (whole family; 0.4.7 regresses strict read-only opens),
-# Frankensearch 0.6.1, franken-agent-detection 0.3.3, FrankenNetworkX 0.3.0
+# FrankenSQLite 0.4.10 (whole family; repairs strict read-only opens and bd-obwsy),
+# Frankensearch 0.7.1, franken-agent-detection 0.3.3, FrankenNetworkX 0.3.0
 # and SQLModel 0.5.0. This records source provenance while their registry packages
 # are qualified; publication status is tracked in UPGRADE_LOG.md.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	f3c00b742756692567539037c48745dfc3e87f5a
 franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
-frankensearch	7cc86150c08c22e5e1d4560a8e27a38b6733efae
-frankensqlite	7a28b76dd9c9c747a2b2524db527da9a3e3b583d
+frankensearch	d1cb86e1848309fe39fb7c8c4c4d7356ebd878aa
+frankensqlite	92aeb2b9762f2f38154fde74c4055959c6ebe294
 sqlmodel_rust	12d490b22ce3a82533591b5b39d2318b21da1f0f
 toon_rust	d356b8d344a7d709417c2e381f8b595d237683b9

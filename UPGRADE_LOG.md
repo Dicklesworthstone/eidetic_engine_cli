@@ -1,5 +1,33 @@
 # Dependency Upgrade Log
 
+## 2026-10-07 — verified smaller Model2Vec selections (#51)
+
+- **Frankensearch 0.6.1 -> 0.7.1.** Published source
+  `d1cb86e1848309fe39fb7c8c4c4d7356ebd878aa` supplies the per-model
+  `RegisteredModel2Vec` loader, pinned 8M/32M manifests, and exact execution
+  certificates. The core/embed/index/fusion/lexical/storage family resolves
+  to 0.4.0; rerank resolves to 0.5.0. The default model's artifact pins and
+  EE descriptor fingerprint are preserved, while the upstream native producer
+  revision changes. Existing semantic indexes therefore require reembedding;
+  producer mismatch rejection is retained.
+- **FrankenSQLite 0.4.6 -> 0.4.10, all 17 resolved family crates.**
+  Frankensearch storage 0.4.0 requires at least 0.4.7. The prior blocker was
+  the 0.4.7 strict read-only open regression. The published 0.4.10 source
+  `92aeb2b9762f2f38154fde74c4055959c6ebe294` contains the read-only repair
+  `48c6cf6b2dbfce8b51b70f3c295c0b454b8f1d8a` and the bd-obwsy table-corruption
+  repairs; the release advisory also reproduces that corruption on 0.4.6.
+  Archive SHA-256 and `.cargo_vcs_info.json` were checked against the registry
+  and release sources. EE's serialized writer and strict read-only contracts
+  remain unchanged.
+- Exactly 25 resolved packages change: the eight Frankensearch packages and
+  the 17 FrankenSQLite packages. Asupersync, SQLModel, NetworkX, and the
+  forbidden-dependency feature restrictions retain their previous selections.
+- Qualification includes per-model fetch/registry/descriptor tests, atomic
+  selection rollback, strict read-only storage tests, and the opt-in public
+  smaller-model retrieval gate. Local compilation is constrained by
+  `asupersync` being killed under the execution environment's memory limit;
+  runtime results must come from the exact-commit hosted qualification.
+
 ## 2026-10-01 — 0.17.0 candidate (release wave)
 
 - **FrankenSQLite 0.4.1 -> 0.4.6, whole family.** Carries 0.4.4's durable

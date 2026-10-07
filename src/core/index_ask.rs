@@ -21,15 +21,30 @@ pub(crate) struct CachedLocalEmbedderAttestation {
 
 impl CachedLocalEmbedderAttestation {
     pub(crate) fn matches_client_configuration(&self) -> bool {
+        self.matches_client_settings(
+            &default_embedder_settings(),
+            configured_embed_backend() == EmbedBackendSelection::Remote,
+        )
+    }
+
+    fn matches_client_settings(
+        &self,
+        settings: &EeEmbedderSettings,
+        remote_selected: bool,
+    ) -> bool {
         self.is_valid()
-            && cached_daemon_model_allowed(
-                &default_embedder_settings(),
-                configured_embed_backend() == EmbedBackendSelection::Remote,
-            )
+            && cached_daemon_model_allowed(settings, remote_selected)
+            // A configured directory is the explicit multilingual default.
+            // Its valid assets cannot authorize a peer's different model.
+            && (settings.local_source != EmbedModelSource::Configured
+                || self.model_id == POTION_MODEL_NAME)
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        let descriptor = EmbedderDescriptor::potion();
+        let Some(Ok(model)) = RegisteredModel2Vec::builtin(&self.model_id) else {
+            return false;
+        };
+        let descriptor = EmbedderDescriptor::model2vec(&model);
         self.backend == EmbedBackend::NeuralLocal
             && self.model_id == descriptor.id
             && Some(self.dimension) == u32::try_from(descriptor.dimension).ok()
@@ -37,11 +52,11 @@ impl CachedLocalEmbedderAttestation {
                 == descriptor_content_hash(
                     &descriptor,
                     ModelProvider::Model2Vec,
-                    Some(&ModelManifest::potion_128m()),
+                    Some(model.download_manifest()),
                 )
     }
 
-    fn for_loaded(embedder: &dyn crate::search::Embedder) -> Option<Self> {
+    pub(super) fn for_loaded(embedder: &dyn crate::search::Embedder) -> Option<Self> {
         if !embedder.is_ready()
             || !embedder.is_semantic()
             || embedder.category() != ModelCategory::StaticEmbedder
@@ -391,6 +406,7 @@ mod tests {
     fn already_loaded_registered_probe_is_exact_nonblocking_and_noninitializing() {
         let registered = OnceLock::new();
         let identity = RegisteredModel2VecIdentity {
+            model_name: POTION_MODEL_NAME.to_owned(),
             canonical_source: PathBuf::from("/verified/model"),
             content_hash: "blake3:cache-identity".to_owned(),
             dimension: 256,
@@ -414,6 +430,9 @@ mod tests {
         let mut changed_dimension = identity.clone();
         changed_dimension.dimension = 128;
         assert!(already_loaded_registered(&registered, &changed_dimension).is_none());
+        let mut changed_model = identity.clone();
+        changed_model.model_name = "potion-base-8m".to_owned();
+        assert!(already_loaded_registered(&registered, &changed_model).is_none());
         let _loading = cache.current.lock().unwrap();
         assert!(already_loaded_registered(&registered, &identity).is_none());
     }
@@ -543,6 +562,7 @@ mod tests {
         let registered = OnceLock::new();
         let cache = registered.get_or_init(RegisteredModel2VecCache::default);
         let identity = RegisteredModel2VecIdentity {
+            model_name: POTION_MODEL_NAME.to_owned(),
             canonical_source: PathBuf::from("/verified/model"),
             content_hash: "blake3:cache-identity".to_owned(),
             dimension: 256,
@@ -565,32 +585,58 @@ mod tests {
 
     #[test]
     fn cached_local_attestation_rejects_model_identity_drift() {
-        let descriptor = EmbedderDescriptor::potion();
-        let value = serde_json::json!({
-            "backend": "neural_local",
-            "modelId": descriptor.id,
-            "modelHash": descriptor_content_hash(
-                &descriptor, ModelProvider::Model2Vec, Some(&ModelManifest::potion_128m()),
-            ),
-            "dimension": descriptor.dimension,
-        });
-        let attestation: CachedLocalEmbedderAttestation =
-            serde_json::from_value(value.clone()).unwrap();
-        assert!(attestation.is_valid());
-        for (key, wrong) in [
-            ("backend", serde_json::json!("hash_fallback")),
-            ("modelId", serde_json::json!("other-model")),
-            ("modelHash", serde_json::json!("blake3:wrong")),
-            ("dimension", serde_json::json!(0)),
+        let root = tempfile::tempdir().unwrap();
+        let settings = EeEmbedderSettings {
+            model_root: root.path().join("absent"),
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
+        };
+        for model in [
+            RegisteredModel2Vec::potion_128m().unwrap(),
+            RegisteredModel2Vec::potion_base_8m().unwrap(),
+            RegisteredModel2Vec::potion_base_32m().unwrap(),
         ] {
-            let mut changed = value.clone();
-            changed[key] = wrong;
-            let changed: CachedLocalEmbedderAttestation = serde_json::from_value(changed).unwrap();
-            assert!(!changed.is_valid(), "accepted changed {key}");
+            let descriptor = EmbedderDescriptor::model2vec(&model);
+            let value = serde_json::json!({
+                "backend": "neural_local",
+                "modelId": descriptor.id,
+                "modelHash": descriptor_content_hash(
+                    &descriptor, ModelProvider::Model2Vec, Some(model.download_manifest()),
+                ),
+                "dimension": descriptor.dimension,
+            });
+            let attestation: CachedLocalEmbedderAttestation =
+                serde_json::from_value(value.clone()).unwrap();
+            assert!(attestation.is_valid());
+            assert!(attestation.matches_client_settings(&settings, false));
+            assert!(!attestation.matches_client_settings(&settings, true));
+            let other_model = if model2vec_model_name(&model) == POTION_MODEL_NAME {
+                "potion-base-8m"
+            } else {
+                POTION_MODEL_NAME
+            };
+            for (key, wrong) in [
+                ("backend", serde_json::json!("hash_fallback")),
+                ("modelId", serde_json::json!("other-model")),
+                ("modelId", serde_json::json!(other_model)),
+                ("modelHash", serde_json::json!("blake3:wrong")),
+                ("dimension", serde_json::json!(0)),
+            ] {
+                let mut changed = value.clone();
+                changed[key] = wrong;
+                let changed: CachedLocalEmbedderAttestation =
+                    serde_json::from_value(changed).unwrap();
+                assert!(
+                    !changed.is_valid(),
+                    "accepted changed {key} for {}",
+                    model.id()
+                );
+            }
+            let mut extra = value;
+            extra["untrustedClaim"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<CachedLocalEmbedderAttestation>(extra).is_err());
         }
-        let mut extra = value;
-        extra["untrustedClaim"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<CachedLocalEmbedderAttestation>(extra).is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -625,6 +671,25 @@ mod tests {
                 .expect("warm local model");
         assert!(Arc::ptr_eq(&expected, &admitted.embedder));
         assert!(admitted.attestation.is_valid());
+        assert!(
+            admitted
+                .attestation
+                .matches_client_settings(&settings, false)
+        );
+        let alternative = RegisteredModel2Vec::potion_base_8m().unwrap();
+        let alternative_descriptor = EmbedderDescriptor::model2vec(&alternative);
+        let alternative_attestation = CachedLocalEmbedderAttestation {
+            backend: EmbedBackend::NeuralLocal,
+            model_id: alternative_descriptor.id.clone(),
+            model_hash: descriptor_content_hash(
+                &alternative_descriptor,
+                ModelProvider::Model2Vec,
+                Some(alternative.download_manifest()),
+            ),
+            dimension: alternative.dimension(),
+        };
+        assert!(alternative_attestation.is_valid());
+        assert!(!alternative_attestation.matches_client_settings(&settings, false));
         assert!(registered.get().is_none());
         let cx = asupersync::Cx::for_testing();
         let (direct, delegated) = crate::core::run_cli_future(async {

@@ -2927,11 +2927,65 @@ You can also keep running lexical fallback; `ee status` and `ee doctor --full`
 show the degraded capability. `EE_EMBED_MODEL_PATH` is a diagnostics/fault
 injection knob, not the model loader.
 
+### Choosing a local embedding model
+
+`ee model fetch` supports three pinned Frankensearch Model2Vec models:
+
+| Fetch name | Dimensions | Download size | Language coverage |
+| --- | ---: | ---: | --- |
+| `embedding-default` / `potion-multilingual-128M` | 256 | about 531 MB | Multilingual default |
+| `potion-base-8M` | 256 | about 31 MB | English |
+| `potion-base-32M` | 512 | about 131 MB | English |
+
+The `minishlab/`-prefixed names are also accepted, case-insensitively. The
+smaller models reduce the model assets that must be loaded; EE-specific
+latency, resident memory, and retrieval-quality comparisons are not yet
+qualified. Frankensearch supplies each model's pinned revision, file hashes,
+preprocessing contract, and execution certificate.
+
+For an initialized workspace, fetching a model also selects it atomically in
+that workspace's registry. Previously selected local embedding rows remain
+available for inspection with `disabled` status. Their artifacts and existing
+indexes are retained. Model selection and its audit commit together; a failed
+fetch or registration leaves the previous selection in place.
+
+```bash
+ee model fetch potion-base-8M --workspace . --json
+ee index reembed --workspace . --json
+EE_EMBED_DOWNLOAD=off ee search "release verification" --workspace . --json
+```
+
+Switching models requires `ee index reembed` (or a complete `ee index rebuild`)
+before semantic retrieval can use the old corpus. The 8M and default models
+both have 256 dimensions but different embedding spaces, so their vectors
+remain incompatible. The Frankensearch 0.7.1 upgrade also changes the native
+producer revision; rebuild pre-upgrade semantic indexes even when retaining
+the default model. Artifact and producer checks remain enforced.
+
+Explicit process configuration still takes precedence over registry selection.
+`EE_EMBED_MODEL_DIR` selects the default multilingual model at that location;
+clear it for commands that should use a registered smaller model. An explicit
+remote backend also remains authoritative. For example, to store the chosen
+model in a shared cache and then use it locally:
+
+```bash
+EE_EMBED_MODEL_DIR=/shared/models EE_EMBED_BACKEND=local \
+  ee model fetch potion-base-8M --workspace . --json
+EE_EMBED_MODEL_DIR= EE_EMBED_BACKEND=local EE_EMBED_DOWNLOAD=off \
+  ee index reembed --workspace . --json
+EE_EMBED_MODEL_DIR= EE_EMBED_BACKEND=local EE_EMBED_DOWNLOAD=off \
+  ee search "release verification" --workspace . --json
+```
+
+Restart a resident daemon with the same cleared override after switching models
+so it can release the previously loaded model and warm the selected one.
+
 ### Sharing the embedding model with other tools
 
-`ee` pins exactly one local embedder: `minishlab/potion-multilingual-128M`
-(Model2Vec static embeddings, 256-d, revision `a28f4eeb…`, ~531 MB). What is
-on disk, how it is verified, and what can and cannot be shared:
+The default local embedder remains `minishlab/potion-multilingual-128M`
+(Model2Vec static embeddings, 256-d, revision `a28f4eeb…`, about 531 MB).
+Each smaller model uses the same verified two-file layout under its own model
+directory; the default layout is shown below.
 
 **Registry layout.** `ee model fetch embedding-default` downloads into
 `<root>/potion-multilingual-128M/` and writes exactly three entries:
@@ -2953,7 +3007,7 @@ above is *read* (and preferred when it already verifies) but never written by
 without an initialized workspace. It verifies or installs the machine cache and
 refreshes a stale verification receipt without creating an `.ee` directory or a
 database. When the addressed workspace already has a store, the command also
-updates its model registry and records the fetch audit. An explicit `--database`
+selects the fetched model in its registry and records the fetch audit. An explicit `--database`
 still requires that database to exist; unreadable or corrupt stores are errors.
 `EE_EMBED_DOWNLOAD=off` prohibits network access for explicit fetches as well as
 automatic loading. It permits verification of an existing local model and

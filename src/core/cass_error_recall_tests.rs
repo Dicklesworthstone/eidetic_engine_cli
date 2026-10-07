@@ -363,13 +363,7 @@ fn unresolved_failures_record_only_their_fingerprint_and_class_b_records_nothing
 fn a_resolved_arc_becomes_one_bounded_admitted_incident_card() {
     let connection = store();
     let session_id = session(&connection, 0x59_0001);
-    bash_call(
-        &connection,
-        &session_id,
-        1,
-        "toolu_1",
-        "cargo test --lib",
-    );
+    bash_call(&connection, &session_id, 1, "toolu_1", "cargo test --lib");
     let failure = bash_result(
         &connection,
         &session_id,

@@ -1,10 +1,10 @@
 //! `ee model status` / `ee model list` reporting (EE-294).
 //!
 //! Surfaces the state of the workspace's local embedding/model registry in a
-//! stable, machine-readable shape. `ee` does not pick embedding models —
-//! Frankensearch owns that decision. These commands expose what the registry
-//! knows so agents can introspect availability and degraded-mode posture
-//! without scraping `ee index status`.
+//! stable, machine-readable shape. Frankensearch owns model manifests and
+//! loading; an explicit fetch selects a registered local model for the workspace.
+//! Status and list expose availability and degraded-mode posture without
+//! requiring agents to scrape `ee index status`.
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -18,13 +18,15 @@ use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, EMBEDDING_DOWNLOAD_TIMEOUT, EmbeddingPosture, IndexHealth,
-    IndexStatusOptions, POTION_MODEL_NAME, current_embedding_posture, default_embedder_model_root,
-    ensure_loaded_embedding_registry_record, get_index_status_in_current_snapshot,
-    get_index_status_with_connection, potion_model_destination_dir,
+    IndexStatusOptions, active_embedding_registry_input_with_source, current_embedding_posture,
+    default_embedder_model_root, get_index_status_in_current_snapshot,
+    get_index_status_with_connection, load_model2vec_model, model2vec_model_destination_dir,
+    model2vec_model_dir_verification, model2vec_model_name, selected_embedding_registry_model_id,
+    verified_default_local_model_available_for_workspace,
 };
 // Test-only: constructed by the inline `#[cfg(test)]` suites below.
 #[cfg(test)]
-use crate::core::index::IndexStatusReport;
+use crate::core::index::{IndexStatusReport, POTION_MODEL_NAME, potion_model_destination_dir};
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
     ModelRegistryUpsertOutcome, StoredModelRegistryEntry,
@@ -33,12 +35,12 @@ use crate::models::DomainError;
 use crate::models::EMBEDDING_POSTURE_MODE_NEURAL_REMOTE;
 use crate::models::model_registry::{
     EmbedBackend, EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider,
-    ModelPurpose, ModelRegistryStatus,
+    ModelPurpose, ModelRegistryStatus, SemanticModelAdmissibilityBudget,
 };
 use frankensearch::Model2VecEmbedder;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, ModelDownloader, ModelLifecycle, ModelManifest,
-    is_verification_cached, verify_dir_and_record,
+    RegisteredModel2Vec, is_verification_cached, verify_dir_and_record,
 };
 
 /// Convert a DbError to DomainError, preserving MigrationDrift as a distinct error code.
@@ -429,12 +431,10 @@ const DEG_RERANK_MODEL_CORRUPT: ModelDegradation = ModelDegradation {
     resolution: Some(AUTOMATIC_REPAIR_UNAVAILABLE),
 };
 
-const SEMANTIC_DIMENSION_BUDGET: u32 = 384;
-
 const DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET: ModelDegradation = ModelDegradation {
     code: "semantic_dimension_exceeds_budget",
     severity: "medium",
-    message: "Available embedding model dimension exceeds the configured budget; semantic search is degraded.",
+    message: "Available embedding model dimension exceeds the supported local budget; semantic search is degraded.",
     repair: Some("select a smaller local embedding model or run `ee index reembed --workspace .`"),
     resolution: None,
 };
@@ -1048,9 +1048,8 @@ fn build_model_lifecycle_report(
     caller_holds_snapshot: bool,
     entries: &[StoredModelRegistryEntry],
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+    cached_default_model_available: bool,
 ) -> ModelLifecycleReport {
-    let generated_at = Utc::now().to_rfc3339();
-    let fingerprint = workspace_fingerprint(workspace_path);
     let status_options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(database_path.to_path_buf()),
@@ -1061,6 +1060,29 @@ fn build_model_lifecycle_report(
     } else {
         get_index_status_with_connection(&status_options, Some(connection))
     };
+    build_model_lifecycle_report_with_index_status(
+        workspace_path,
+        database_path,
+        entries,
+        selected_embedding_entry,
+        cached_default_model_available,
+        index_status,
+    )
+}
+
+fn build_model_lifecycle_report_with_index_status(
+    workspace_path: &Path,
+    database_path: &Path,
+    entries: &[StoredModelRegistryEntry],
+    selected_embedding_entry: Option<&StoredModelRegistryEntry>,
+    cached_default_model_available: bool,
+    index_status: Result<
+        crate::core::index::IndexStatusReport,
+        crate::core::index::IndexStatusError,
+    >,
+) -> ModelLifecycleReport {
+    let generated_at = Utc::now().to_rfc3339();
+    let fingerprint = workspace_fingerprint(workspace_path);
     // A failed probe yields no index evidence at all. Carry the real cause
     // forward so compatibility is reported as "not probed" rather than as
     // metadata that lacks a dimension (GH#32).
@@ -1134,11 +1156,6 @@ fn build_model_lifecycle_report(
         selected_embedding_entry,
         index_degraded,
     );
-    // Resolved here, not inside the readiness function, so the readiness logic
-    // stays a pure function of its inputs and can be unit-tested for both states
-    // without a real model cache on the host (bd-xivcz).
-    let cached_default_model_available =
-        crate::core::index::verified_default_local_model_available();
     let semantic_readiness = semantic_readiness_from_lifecycle(
         selected_embedding_entry,
         &models,
@@ -1410,7 +1427,7 @@ fn inspect_model_lifecycle_asset(
     };
 
     // Model2Vec's canonical local asset is a verified *directory* of pinned
-    // artifacts — the same directory `fetch_bundled_embedding_model` writes
+    // artifacts — the same directory `fetch_registered_embedding_model` writes
     // and the runtime loads — not one regular file. Judge it by the pinned
     // frankensearch manifest verification the runtime itself applies, so the
     // lifecycle observer can never call a model `model_asset_corrupt` while
@@ -1501,7 +1518,7 @@ fn is_model2vec_embedding_entry(entry: &StoredModelRegistryEntry) -> bool {
 
 /// Inspect a Model2Vec model directory with the same pinned-manifest check the
 /// runtime uses before it will load the directory (`verify_dir_cached` against
-/// the potion manifest). Frankensearch owns the artifact set and per-file
+/// the selected registration). Frankensearch owns the artifact set and per-file
 /// digests; the lifecycle observer only reports whether that verification
 /// passes, and does not invent a directory hash of its own (GH#30).
 fn inspect_model2vec_lifecycle_dir(
@@ -1511,16 +1528,25 @@ fn inspect_model2vec_lifecycle_dir(
     mut degraded: Vec<ModelLifecycleDegradation>,
 ) -> ModelLifecycleAssetInspection {
     let model_dir = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
-    if !crate::core::index::verified_potion_model_dir(&model_dir) {
-        degraded.push(ModelLifecycleDegradation::new(
-            "model_asset_corrupt",
-            "high",
-            format!(
+    let model = RegisteredModel2Vec::builtin(&entry.model_name).and_then(Result::ok);
+    if !model
+        .as_ref()
+        .is_some_and(|model| model2vec_model_dir_verification(model, &model_dir).is_ok())
+    {
+        degraded.push(ModelLifecycleDegradation {
+            code: "model_asset_corrupt",
+            severity: "high",
+            message: format!(
                 "Model2Vec model directory for registry row {} failed pinned manifest verification.",
                 entry.id
             ),
-            Some("ee model fetch embedding-default --workspace ."),
-        ));
+            repair: model.as_ref().map(|model| {
+                format!(
+                    "ee model fetch {} --workspace .",
+                    embedding_model_fetch_name(model2vec_model_name(model))
+                )
+            }),
+        });
         return ModelLifecycleAssetInspection {
             state: "corrupt",
             content_hash,
@@ -2549,6 +2575,28 @@ pub fn build_model_lifecycle_report_for_workspace(
     database_path: Option<&Path>,
     connection: Option<&DbConnection>,
 ) -> Result<ModelLifecycleReport, DomainError> {
+    build_model_lifecycle_report_for_workspace_with_selection(
+        workspace_path,
+        database_path,
+        connection,
+        |connection, workspace_id| {
+            Ok((
+                selected_embedding_registry_model_id(connection, workspace_id)?,
+                verified_default_local_model_available_for_workspace(connection, workspace_id)?,
+            ))
+        },
+    )
+}
+
+/// Keep selection explicit through inspection and compatibility. Production
+/// resolves it from the workspace; fixtures supply their own identity without
+/// changing the process embedder or depending on a machine model cache.
+fn build_model_lifecycle_report_for_workspace_with_selection(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+    resolve_selection: impl FnOnce(&DbConnection, &str) -> Result<(Option<String>, bool), DbError>,
+) -> Result<ModelLifecycleReport, DomainError> {
     let workspace_path = resolve_workspace_path(workspace_path)?;
     let database_path = if connection.is_some() {
         let path = database_path
@@ -2586,9 +2634,17 @@ pub fn build_model_lifecycle_report_for_workspace(
                 Some("ee doctor".to_string()),
             )
         })?;
-    let selected_embedding_entry = entries
-        .iter()
-        .find(|entry| entry_is_available_embedding(entry));
+    let (selected_id, cached_default_model_available) =
+        resolve_selection(connection, &workspace_id).map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to resolve the selected embedding model",
+                Some("ee model status --workspace . --json".to_string()),
+            )
+        })?;
+    let selected_embedding_entry = selected_id
+        .as_deref()
+        .and_then(|selected_id| entries.iter().find(|entry| entry.id == selected_id));
 
     // A caller-supplied connection owns its transaction state; the probe must
     // never open a nested read snapshot on it (GH#32).
@@ -2599,12 +2655,29 @@ pub fn build_model_lifecycle_report_for_workspace(
         caller_holds_snapshot,
         &entries,
         selected_embedding_entry,
+        cached_default_model_available,
     ))
 }
 
 /// Build a `ee model status` report.
 pub fn build_model_status_report(
     options: &ModelStatusOptions<'_>,
+) -> Result<ModelStatusReport, DomainError> {
+    build_model_status_report_with_posture(options, |connection, workspace_id, index_dir| {
+        Ok((
+            current_embedding_posture(connection, workspace_id, index_dir)?,
+            verified_default_local_model_available_for_workspace(connection, workspace_id)?,
+        ))
+    })
+}
+
+fn build_model_status_report_with_posture(
+    options: &ModelStatusOptions<'_>,
+    observe_posture: impl FnOnce(
+        &DbConnection,
+        &str,
+        &Path,
+    ) -> Result<(EmbeddingPosture, bool), DbError>,
 ) -> Result<ModelStatusReport, DomainError> {
     let manifest = bundled_rerank_model_manifest()?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
@@ -2635,11 +2708,6 @@ pub fn build_model_status_report(
         .filter(|entry| entry.status.as_str() == "available")
         .count();
 
-    let selected_embedding_entry = entries
-        .iter()
-        .find(|entry| entry_is_available_embedding(entry))
-        .cloned();
-
     let reranker_registered_count = entries
         .iter()
         .filter(|entry| entry_is_reranker(entry))
@@ -2663,7 +2731,7 @@ pub fn build_model_status_report(
         fetch_command: format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}"),
     };
 
-    let embedding_posture = current_embedding_posture(
+    let (embedding_posture, cached_default_model_available) = observe_posture(
         &connection,
         &workspace_id,
         &workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
@@ -2675,15 +2743,18 @@ pub fn build_model_status_report(
             Some("ee index reembed --workspace .".to_string()),
         )
     })?;
-    let selected_registry_entry = embedding_posture
-        .selected_registry_model
-        .as_ref()
-        .and_then(|selected| {
-            entries
-                .iter()
-                .find(|entry| entry.id == selected.id)
-                .cloned()
-        })
+    let selected_embedding_entry =
+        embedding_posture
+            .selected_registry_model
+            .as_ref()
+            .and_then(|selected| {
+                entries
+                    .iter()
+                    .find(|entry| entry.id == selected.id)
+                    .cloned()
+            });
+    let selected_registry_entry = selected_embedding_entry
+        .clone()
         .map(ModelRegistryEntryView::from_stored);
     let active =
         ModelStatusActive::from_embedding_posture(embedding_posture, selected_registry_entry);
@@ -2710,6 +2781,7 @@ pub fn build_model_status_report(
         false,
         &entries,
         selected_embedding_entry.as_ref(),
+        cached_default_model_available,
     );
 
     Ok(ModelStatusReport {
@@ -2727,9 +2799,9 @@ pub fn build_model_status_report(
 
 fn entry_exceeds_semantic_dimension_budget(entry: &StoredModelRegistryEntry) -> bool {
     entry_is_available_embedding(entry)
-        && entry
-            .dimension
-            .is_some_and(|dimension| dimension > SEMANTIC_DIMENSION_BUDGET)
+        && entry.dimension.is_some_and(|dimension| {
+            dimension > SemanticModelAdmissibilityBudget::local_default().max_dimension
+        })
 }
 
 fn entry_is_available_embedding(entry: &StoredModelRegistryEntry) -> bool {
@@ -2823,30 +2895,92 @@ pub fn bundled_rerank_model_manifest() -> Result<RerankModelManifest, DomainErro
     Ok(manifest)
 }
 
-/// Fetch and register the default rerank model.
+/// Fetch a pinned model and select it for the requested workspace when present.
 pub fn fetch_model(options: &ModelFetchOptions<'_>) -> Result<ModelFetchReport, DomainError> {
-    if is_default_embedding_model_request(options.model_id) {
-        return fetch_bundled_embedding_model(options);
+    if let Some(model) = resolve_embedding_model_request(options.model_id)? {
+        return fetch_registered_embedding_model(options, &model);
     }
     fetch_rerank_model(options)
 }
 
-fn is_default_embedding_model_request(model_id: &str) -> bool {
+fn resolve_embedding_model_request(
+    model_id: &str,
+) -> Result<Option<RegisteredModel2Vec>, DomainError> {
     let model_id = model_id.trim();
-    model_id.eq_ignore_ascii_case(DEFAULT_EMBEDDING_MODEL_ALIAS)
-        || model_id.eq_ignore_ascii_case(BUNDLED_EMBEDDING_MODEL_ID)
-        || model_id.eq_ignore_ascii_case(POTION_MODEL_NAME)
+    let name = if model_id.eq_ignore_ascii_case(DEFAULT_EMBEDDING_MODEL_ALIAS) {
+        BUNDLED_EMBEDDING_MODEL_ID
+    } else if let Some((owner, name)) = model_id.split_once('/')
+        && owner.eq_ignore_ascii_case("minishlab")
+    {
+        name
+    } else {
+        model_id
+    };
+    RegisteredModel2Vec::builtin(name)
+        .transpose()
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Pinned embedding model registration is invalid: {error}"),
+            repair: None,
+        })
 }
 
-fn fetch_bundled_embedding_model(
+fn embedding_model_fetch_name(model_id: &str) -> &str {
+    if model_id.eq_ignore_ascii_case(BUNDLED_EMBEDDING_MODEL_ID) {
+        DEFAULT_EMBEDDING_MODEL_ALIAS
+    } else {
+        model_id
+    }
+}
+
+fn embedding_model_fetch_destination(
+    model_root: &Path,
+    model: &RegisteredModel2Vec,
+) -> Result<PathBuf, DomainError> {
+    let destination = model2vec_model_destination_dir(model_root, model);
+    if destination == model_root {
+        return Ok(destination);
+    }
+    // An operator-chosen basename can still name this model directly. Keep
+    // using that verified directory instead of placing a second copy inside it.
+    if model2vec_model_dir_verification(model, model_root).is_ok() {
+        return Ok(model_root.to_path_buf());
+    }
+    // A direct model-directory override is not a model-store root. Nesting a
+    // sibling there invalidates the existing model's strict artifact manifest.
+    // Even incomplete model artifacts must not be silently treated as a store.
+    if model
+        .download_manifest()
+        .files
+        .iter()
+        .any(|file| fs::symlink_metadata(model_root.join(&file.name)).is_ok())
+    {
+        let fetch_name = embedding_model_fetch_name(model2vec_model_name(model));
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Model root {} contains direct model artifacts that do not verify for {}. Select a parent model-store directory or clear EE_EMBED_MODEL_DIR before fetching this model.",
+                model_root.display(),
+                model2vec_model_name(model),
+            ),
+            repair: Some(format!(
+                "EE_EMBED_MODEL_DIR= ee model fetch {fetch_name} --workspace ."
+            )),
+        });
+    }
+    Ok(destination)
+}
+
+fn fetch_registered_embedding_model(
     options: &ModelFetchOptions<'_>,
+    model: &RegisteredModel2Vec,
 ) -> Result<ModelFetchReport, DomainError> {
+    let model_name = model2vec_model_name(model);
+    let fetch_name = embedding_model_fetch_name(model_name);
     if options.from_file.is_some() {
         return Err(DomainError::Usage {
             message: format!(
-                "{DEFAULT_EMBEDDING_MODEL_ALIAS} is fetched from the pinned frankensearch manifest; --from-file is only supported for rerank artifacts"
+                "{fetch_name} is fetched from the pinned frankensearch manifest; --from-file is only supported for rerank artifacts"
             ),
-            repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+            repair: Some(format!("ee model fetch {fetch_name}")),
         });
     }
 
@@ -2871,19 +3005,8 @@ fn fetch_bundled_embedding_model(
         .model_store_root
         .map(Path::to_path_buf)
         .unwrap_or_else(default_embedder_model_root);
-    let destination = potion_model_destination_dir(&model_root);
-    // Match local search discovery when EE_EMBED_MODEL_DIR names a verified
-    // model directory with an operator-chosen basename. Do not download into
-    // a new child instead of repairing the model already in use.
-    let stored_path = if destination != model_root
-        && !destination.is_dir()
-        && crate::core::index::verified_potion_model_dir(&model_root)
-    {
-        model_root
-    } else {
-        destination
-    };
-    let manifest = ModelManifest::potion_128m();
+    let stored_path = embedding_model_fetch_destination(&model_root, model)?;
+    let manifest = model.download_manifest();
     let content_length_bytes = manifest.total_size_bytes();
     let source_path = PathBuf::from(format!(
         "https://huggingface.co/{}/tree/{}",
@@ -2897,11 +3020,11 @@ fn fetch_bundled_embedding_model(
     // refreshes the receipt here through Frankensearch's own minting API: one
     // full SHA-256 pass, refused if the files change meanwhile. A failure
     // (corrupt bytes, a read-only directory) leaves fetch on its usual path.
-    if stored_path.is_dir() && !is_verification_cached(&manifest, &stored_path) {
-        if let Err(error) = verify_dir_and_record(&manifest, &stored_path) {
+    if stored_path.is_dir() && !is_verification_cached(manifest, &stored_path) {
+        if let Err(error) = verify_dir_and_record(manifest, &stored_path) {
             tracing::warn!(
                 target: "ee::model",
-                model = POTION_MODEL_NAME,
+                model = model_name,
                 path = %stored_path.display(),
                 %error,
                 "could not refresh the model verification receipt"
@@ -2910,26 +3033,24 @@ fn fetch_bundled_embedding_model(
     }
     // Keep the successful load: a cached fetch must not parse the large
     // tokenizer and allocate the embedding matrix twice.
-    let cached = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).ok();
+    let cached = load_model2vec_model(&stored_path, model).ok();
     let was_cached = cached.is_some();
     let loaded = if let Some(loaded) = cached {
         loaded
     } else {
-        download_embedding_manifest(&manifest, &stored_path)?;
-        Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).map_err(|error| {
-            DomainError::Configuration {
-                message: format!(
-                    "Bundled embedding model downloaded to {} but failed to load: {error}",
-                    stored_path.display()
-                ),
-                repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
-            }
+        download_embedding_manifest(manifest, &stored_path)?;
+        load_model2vec_model(&stored_path, model).map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Pinned embedding model {model_name} downloaded to {} but failed to load: {error}",
+                stored_path.display()
+            ),
+            repair: Some(format!("ee model fetch {fetch_name}")),
         })?
     };
     let hash_blake3 = crate::core::index::embedding_model_content_hash(&loaded)
         .trim_start_matches("blake3:")
         .to_string();
-    let hash_sha256 = model_manifest_sha256_fingerprint(&manifest);
+    let hash_sha256 = model_manifest_sha256_fingerprint(manifest);
     let registry_entry = registration
         .as_ref()
         .map(|(connection, workspace_id)| {
@@ -2948,7 +3069,7 @@ fn fetch_bundled_embedding_model(
         schema: MODEL_FETCH_SCHEMA_V2,
         workspace_path,
         database_path,
-        model_id: POTION_MODEL_NAME.to_string(),
+        model_id: model_name.to_string(),
         model_purpose: "embedding",
         source_path,
         stored_path,
@@ -2968,57 +3089,42 @@ fn register_fetched_embedding_model(
     was_cached: bool,
     content_length_bytes: u64,
 ) -> Result<ModelRegistryEntryView, DomainError> {
-    ensure_loaded_embedding_registry_record(connection, workspace_id, loaded, Some(stored_path))
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to register downloaded bundled embedding model: {error}"),
-            repair: Some("ee model status --workspace . --json".to_string()),
-        })?;
-
-    let registry_entry = connection
-        .find_model_registry_entry(
-            workspace_id,
-            ModelProvider::Model2Vec,
-            POTION_MODEL_NAME,
-            ModelPurpose::Embedding,
-        )
-        .map_err(|error| {
-            db_error_to_domain(
-                error,
-                "Failed to reload bundled embedding model registry entry",
-                Some("ee model status --workspace . --json".to_string()),
-            )
-        })?
-        .ok_or_else(|| DomainError::Storage {
-            message: "Downloaded bundled embedding model was not registered".to_string(),
-            repair: Some("ee model status --workspace . --json".to_string()),
-        })?;
-    connection
-        .insert_audit(
-            &crate::db::generate_audit_id(),
-            &crate::db::CreateAuditInput {
-                workspace_id: Some(workspace_id.to_string()),
-                actor: None,
-                action: "model.fetched".to_string(),
-                target_type: Some("model_registry".to_string()),
-                target_id: Some(registry_entry.id.clone()),
-                details: Some(
-                    serde_json::json!({
-                        "schema": MODEL_FETCH_SCHEMA_V2,
-                        "modelId": POTION_MODEL_NAME,
-                        "modelPurpose": "embedding",
-                        "storedPath": stored_path.to_string_lossy(),
-                        "downloaded": !was_cached,
-                        "downloadSizeBytes": content_length_bytes,
-                    })
-                    .to_string(),
+    let input =
+        active_embedding_registry_input_with_source(workspace_id, loaded, Some(stored_path))
+            .map_err(|error| DomainError::Configuration {
+                message: format!(
+                    "Failed to admit downloaded embedding model for registration: {error}"
                 ),
-            },
+                repair: Some("ee model status --workspace . --json".to_string()),
+            })?
+            .ok_or_else(|| DomainError::Configuration {
+                message: "Downloaded embedding model is not ready for registration".to_string(),
+                repair: Some("ee model status --workspace . --json".to_string()),
+            })?;
+    let audit_details = serde_json::json!({
+        "schema": MODEL_FETCH_SCHEMA_V2,
+        "modelId": input.model_name,
+        "modelPurpose": "embedding",
+        "storedPath": stored_path.to_string_lossy(),
+        "downloaded": !was_cached,
+        "downloadSizeBytes": content_length_bytes,
+    })
+    .to_string();
+    // Selection, deactivation of other local embedding models, and the audit
+    // are one durable transition. A failed fetch leaves the previous workspace
+    // selection intact; a successful switch requires rebuilding its index.
+    let registry_entry = connection
+        .select_model2vec_embedding(
+            &generate_model_registry_id(),
+            &input,
+            &crate::db::generate_audit_id(),
+            &audit_details,
         )
         .map_err(|error| {
             db_error_to_domain(
                 error,
-                "Failed to audit embedding model fetch",
-                Some("ee audit verify --workspace . --json".to_string()),
+                "Failed to select downloaded embedding model",
+                Some("ee model status --workspace . --json".to_string()),
             )
         })?;
 
@@ -3029,17 +3135,22 @@ fn download_embedding_manifest(
     manifest: &ModelManifest,
     destination: &Path,
 ) -> Result<(), DomainError> {
+    let fetch_name = embedding_model_fetch_name(&manifest.id);
+    let fetch_command = format!("ee model fetch {fetch_name}");
     if !crate::core::index::embedding_download_allowed() {
         return Err(DomainError::Configuration {
-            message: "Bundled embedding model is unavailable locally and network downloads are disabled by EE_EMBED_DOWNLOAD=off.".to_string(),
-            repair: Some(
-                "Populate the model cache from a verified offline copy, or explicitly set EE_EMBED_DOWNLOAD=auto and rerun ee model fetch embedding-default."
-                    .to_string(),
+            message: format!(
+                "Pinned embedding model {} is unavailable locally and network downloads are disabled by EE_EMBED_DOWNLOAD=off.",
+                manifest.id
             ),
+            repair: Some(format!(
+                "Populate the model cache from a verified offline copy, or explicitly set EE_EMBED_DOWNLOAD=auto and rerun {fetch_command}."
+            )),
         });
     }
     let manifest = manifest.clone();
     let destination = destination.to_path_buf();
+    let runtime_repair = fetch_command.clone();
     crate::core::run_cli_future(async move {
         // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
         #[allow(clippy::expect_used)]
@@ -3062,7 +3173,7 @@ fn download_embedding_manifest(
             .await
         {
             Ok(result) => result.map_err(|error| DomainError::Configuration {
-                message: format!("Failed to download bundled embedding model: {error}"),
+                message: format!("Failed to download pinned embedding model {}: {error}", manifest.id),
                 repair: Some(
                     "Check network access, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists."
                         .to_string(),
@@ -3070,18 +3181,19 @@ fn download_embedding_manifest(
             }),
             Err(_elapsed) => Err(DomainError::Configuration {
                 message: format!(
-                    "Bundled embedding model download exceeded its {}s time limit and was aborted (the connection most likely stalled)",
+                    "Pinned embedding model {} download exceeded its {}s time limit and was aborted (the connection most likely stalled)",
+                    manifest.id,
                     EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
                 ),
                 repair: Some(format!(
-                    "Retry `ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}`, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists."
+                    "Retry `{fetch_command}`, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists."
                 )),
             }),
         }
     })
     .map_err(|error| DomainError::Configuration {
         message: format!("Failed to start embedding model download runtime: {error}"),
-        repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+        repair: Some(runtime_repair),
     })?
 }
 
@@ -3168,8 +3280,8 @@ fn unpack_rerank_model_artifact(archive_path: &Path, stored_dir: &Path) -> Resul
 pub fn fetch_rerank_model(
     options: &ModelFetchOptions<'_>,
 ) -> Result<ModelFetchReport, DomainError> {
-    if is_default_embedding_model_request(options.model_id) {
-        return fetch_bundled_embedding_model(options);
+    if let Some(model) = resolve_embedding_model_request(options.model_id)? {
+        return fetch_registered_embedding_model(options, &model);
     }
 
     let manifest = resolve_rerank_model_manifest(options.model_id)?;
@@ -3586,7 +3698,8 @@ fn resolve_rerank_model_manifest(model_id: &str) -> Result<RerankModelManifest, 
     } else {
         Err(DomainError::Usage {
             message: format!(
-                "unknown model `{model_id}`; expected `{DEFAULT_RERANK_MODEL_ALIAS}` or `{}`",
+                "unknown model `{model_id}`; expected `{DEFAULT_EMBEDDING_MODEL_ALIAS}`, `{}`, `{DEFAULT_RERANK_MODEL_ALIAS}`, or `{}`",
+                RegisteredModel2Vec::BUILTIN_IDS.join("`, `"),
                 manifest.model_id
             ),
             repair: Some(format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}")),
@@ -4609,6 +4722,7 @@ mod tests {
     fn write_index_metadata(workspace_path: &Path, source_generation: u64) -> TestResult {
         let index_dir = workspace_path.join(".ee").join("index");
         fs::create_dir_all(&index_dir).map_err(|error| format!("create index dir: {error}"))?;
+        write_empty_lifecycle_index_tiers(&index_dir, "hash-128", 128)?;
         fs::write(
             index_dir.join("meta.json"),
             serde_json::json!({
@@ -4637,6 +4751,115 @@ mod tests {
             .to_string(),
         )
         .map_err(|error| format!("write index metadata: {error}"))
+    }
+
+    fn write_empty_lifecycle_index_tiers(
+        index_dir: &Path,
+        model_id: &str,
+        dimension: usize,
+    ) -> TestResult {
+        frankensearch::VectorIndex::create(&index_dir.join("vector.fast.idx"), model_id, dimension)
+            .and_then(|writer| writer.finish())
+            .map_err(|error| format!("write empty fast fixture tier: {error}"))?;
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let lexical_path = index_dir.join("lexical");
+            crate::core::run_cli_future(async move {
+                use crate::search::LexicalWrite;
+                let cx = asupersync::Cx::current()
+                    .ok_or_else(|| "fixture runtime context missing".to_owned())?;
+                let lexical = crate::search::TantivyIndex::create(&lexical_path)
+                    .map_err(|error| format!("create empty lexical fixture tier: {error}"))?;
+                lexical
+                    .commit(&cx)
+                    .await
+                    .map_err(|error| format!("commit empty lexical fixture tier: {error}"))
+            })
+            .map_err(|error| format!("fixture runtime: {error}"))??;
+        }
+        Ok(())
+    }
+
+    fn lifecycle_report_with_fixture_selection(
+        workspace_path: &Path,
+        database_path: &Path,
+        connection: Option<&DbConnection>,
+        model_id: &str,
+    ) -> Result<ModelLifecycleReport, DomainError> {
+        build_model_lifecycle_report_for_workspace_with_selection(
+            workspace_path,
+            Some(database_path),
+            connection,
+            |_, _| Ok((Some(model_id.to_owned()), false)),
+        )
+    }
+
+    /// Observation-only fixture: the same identity reaches the index status
+    /// compatibility check and lifecycle rendering; no process state changes.
+    struct LifecycleFixtureEmbedder(&'static str);
+
+    impl crate::search::Embedder for LifecycleFixtureEmbedder {
+        fn embed<'a>(
+            &'a self,
+            _cx: &'a asupersync::Cx,
+            text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            Box::pin(async move { Ok(crate::search::HashEmbedder::default_384().embed_sync(text)) })
+        }
+
+        fn dimension(&self) -> usize {
+            384
+        }
+
+        fn id(&self) -> &str {
+            self.0
+        }
+
+        fn model_name(&self) -> &str {
+            self.0
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+
+        fn category(&self) -> frankensearch::ModelCategory {
+            frankensearch::ModelCategory::HashEmbedder
+        }
+    }
+
+    fn status_report_with_fixture_selection(
+        workspace_path: &Path,
+        model_id: &str,
+    ) -> Result<ModelStatusReport, DomainError> {
+        build_model_status_report_with_posture(
+            &ModelStatusOptions {
+                workspace_path,
+                database_path: None,
+            },
+            |connection, _, _| {
+                let selected = connection
+                    .get_model_registry_entry(model_id)?
+                    .expect("fixture selection must name its persisted registry row");
+                let dimension = selected.dimension.expect("fixture embedding dimension");
+                let mut posture = fixture_embedding_posture(
+                    selected.provider != ModelProvider::Hash,
+                    "registry_observed",
+                    &selected.model_name,
+                    dimension as usize,
+                );
+                posture.selected_registry_model =
+                    Some(crate::core::index::EmbeddingPostureRegistryModel {
+                        id: selected.id,
+                        provider: selected.provider.as_str().to_owned(),
+                        model_name: selected.model_name,
+                        status: selected.status.as_str().to_owned(),
+                        dimension,
+                        deterministic: true,
+                    });
+                Ok((posture, false))
+            },
+        )
     }
 
     fn empty_reranker_status() -> ModelStatusReranker {
@@ -5042,9 +5265,13 @@ mod tests {
         )?;
         write_index_metadata(&workspace_path, 0)?;
 
-        let report =
-            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
-                .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let report = lifecycle_report_with_fixture_selection(
+            &workspace_path,
+            &database_path,
+            None,
+            "mdl_01HQ3K5Z000000000000000099",
+        )
+        .map_err(|error| format!("lifecycle report: {error:?}"))?;
         let degradation = report
             .semantic_surface_degradation("search")
             .ok_or("missing search lifecycle degradation")?;
@@ -5087,19 +5314,24 @@ mod tests {
         )?;
         write_index_metadata(&workspace_path, 0)?;
 
-        let standalone =
-            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
-                .map_err(|error| format!("standalone lifecycle report: {error:?}"))?;
+        let standalone = lifecycle_report_with_fixture_selection(
+            &workspace_path,
+            &database_path,
+            None,
+            "mdl_01HQ3K5Z000000000000000032",
+        )
+        .map_err(|error| format!("standalone lifecycle report: {error:?}"))?;
 
         let connection = DbConnection::open_file(&database_path)
             .map_err(|error| format!("open snapshot connection: {error}"))?;
         connection
             .begin_read_snapshot()
             .map_err(|error| format!("begin read snapshot: {error}"))?;
-        let in_snapshot = build_model_lifecycle_report_for_workspace(
+        let in_snapshot = lifecycle_report_with_fixture_selection(
             &workspace_path,
-            Some(&database_path),
+            &database_path,
             Some(&connection),
+            "mdl_01HQ3K5Z000000000000000032",
         )
         .map_err(|error| format!("in-snapshot lifecycle report: {error:?}"))?;
         connection
@@ -5180,9 +5412,13 @@ mod tests {
         fs::write(workspace_path.join(".ee").join("index"), b"not a directory")
             .map_err(|error| format!("write index placeholder: {error}"))?;
 
-        let report =
-            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
-                .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let report = lifecycle_report_with_fixture_selection(
+            &workspace_path,
+            &database_path,
+            None,
+            "mdl_01HQ3K5Z000000000000000033",
+        )
+        .map_err(|error| format!("lifecycle report: {error:?}"))?;
 
         ensure(
             report.semantic_readiness.state == "unknown",
@@ -5245,8 +5481,153 @@ mod tests {
         )
     }
 
+    /// Synthetic assets exercise lifecycle inspection and rendering through an
+    /// explicit selection. They cannot attest a production runtime identity.
     #[test]
-    fn status_picks_first_available_registry_entry() -> TestResult {
+    fn offline_fixture_lifecycle_matches_redacted_golden_without_mutating_evidence() -> TestResult {
+        const MODEL_ID: &str = "mdl_01HQ3K5Z000000000000000060";
+        const REVISION: &str = "hash-fixture-v1";
+        const SOURCE_URI: &str = "models/hash-embedder-fixture.json";
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let asset_bytes = br#"{"schema":"ee.test_model_asset.v1","provider":"hash","dimension":384,"purpose":"model-lifecycle-readiness"}"#;
+        let asset_path = workspace_path.join(SOURCE_URI);
+        fs::create_dir_all(asset_path.parent().ok_or("model parent missing")?)
+            .map_err(|error| error.to_string())?;
+        fs::write(&asset_path, asset_bytes).map_err(|error| error.to_string())?;
+        let content_hash = format!("blake3:{}", blake3::hash(asset_bytes).to_hex());
+        let mut metadata = EmbeddingMetadataRecord::new(384, ModelDistanceMetric::Cosine);
+        metadata.deterministic = true;
+        metadata.model_revision = Some(REVISION.to_owned());
+        connection
+            .insert_model_registry_entry(
+                MODEL_ID,
+                &CreateModelRegistryInput {
+                    workspace_id: workspace_id.clone(),
+                    provider: ModelProvider::Hash,
+                    model_name: "fnv1a-384-local".to_owned(),
+                    purpose: ModelPurpose::Embedding,
+                    dimension: Some(384),
+                    distance_metric: Some(ModelDistanceMetric::Cosine),
+                    status: ModelRegistryStatus::Available,
+                    version: Some(REVISION.to_owned()),
+                    source_uri: Some(SOURCE_URI.to_owned()),
+                    content_hash: Some(content_hash.clone()),
+                    metadata_json: Some(
+                        metadata
+                            .to_canonical_json()
+                            .map_err(|error| error.to_string())?,
+                    ),
+                    last_checked_at: Some("2026-06-15T00:00:00Z".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let source_generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("workspace generation missing")?;
+        let index_dir = workspace_path.join(".ee").join("index");
+        fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let index_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": crate::core::index::INDEX_METADATA_SCHEMA_V2,
+            "sourceGeneration": source_generation,
+            "corpusRevision": crate::core::index::expected_index_corpus_revision().as_str(),
+            "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+            "documentCount": 0,
+            "documentCounts": {"memories": 0, "sessions": 0, "artifacts": 0, "rules": 0, "evidence": 0},
+            "tierDocumentCounts": {"fast": 0, "quality": null, "lexical": cfg!(feature = "lexical-bm25").then_some(0)},
+            "lastRebuildAt": "2026-06-15T00:00:01Z",
+            "storedModelId": MODEL_ID,
+            "storedModelRevision": REVISION,
+            "storedModelHash": content_hash,
+            "storedDimension": 384,
+            "storedDistanceMetric": "cosine",
+            "storedVectorDtype": "float32",
+            "derivedFrom": [".ee/ee.db", SOURCE_URI],
+        })).map_err(|error| error.to_string())?;
+        fs::write(index_dir.join("meta.json"), &index_bytes).map_err(|error| error.to_string())?;
+        write_empty_lifecycle_index_tiers(&index_dir, MODEL_ID, 384)?;
+        let entries = connection
+            .list_model_registry_entries(&workspace_id)
+            .map_err(|error| error.to_string())?;
+        let selected = entries
+            .iter()
+            .find(|entry| entry.id == MODEL_ID)
+            .ok_or("fixture selection missing")?;
+
+        let index_options = IndexStatusOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        let index_status = crate::core::index::get_index_status_with_embedder(
+            &index_options,
+            Some(&connection),
+            false,
+            &LifecycleFixtureEmbedder(MODEL_ID),
+        );
+        let report = build_model_lifecycle_report_with_index_status(
+            &workspace_path,
+            &database_path,
+            &entries,
+            Some(selected),
+            false,
+            index_status,
+        );
+        assert_eq!(report.semantic_readiness.state, "available");
+        assert!(
+            report.degraded.is_empty(),
+            "ready fixture degradations: {:?}",
+            report.degraded
+        );
+        let mut actual = report.data_json();
+        actual["generatedAt"] = serde_json::json!("2026-06-15T00:00:01Z");
+        actual["workspaceFingerprint"] = serde_json::json!("0123456789ab");
+        let mut actual =
+            serde_json::to_string_pretty(&actual).map_err(|error| error.to_string())?;
+        actual.push('\n');
+        assert!(
+            !actual.contains(workspace_path.to_string_lossy().as_ref()),
+            "absolute workspace path leaked"
+        );
+        let expected = include_str!(
+            "../../tests/fixtures/golden/model_lifecycle/offline_local_readiness.json.golden"
+        );
+        assert_eq!(actual, expected, "offline lifecycle rendering golden");
+        let mismatched_status = crate::core::index::get_index_status_with_embedder(
+            &index_options,
+            Some(&connection),
+            false,
+            &LifecycleFixtureEmbedder("different-lifecycle-fixture"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_ne!(mismatched_status.health, IndexHealth::Ready);
+        assert!(
+            mismatched_status.last_check_error.as_deref().is_some_and(|error| error.contains("different embedding backends cannot be mixed")),
+            "the same-dimension negative must exercise the production compatibility check: {:?}",
+            mismatched_status.last_check_error,
+        );
+        assert_eq!(
+            connection
+                .list_model_registry_entries(&workspace_id)
+                .map_err(|error| error.to_string())?,
+            entries
+        );
+        assert_eq!(
+            fs::read(&asset_path).map_err(|error| error.to_string())?,
+            asset_bytes
+        );
+        assert_eq!(
+            fs::read(index_dir.join("meta.json")).map_err(|error| error.to_string())?,
+            index_bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn status_uses_the_observed_registry_selection() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
         insert_embedding_metadata_entry(
@@ -5266,11 +5647,9 @@ mod tests {
             ModelRegistryStatus::Disabled,
         )?;
 
-        let report = build_model_status_report(&ModelStatusOptions {
-            workspace_path: &workspace_path,
-            database_path: None,
-        })
-        .map_err(|error| format!("status: {error:?}"))?;
+        let report =
+            status_report_with_fixture_selection(&workspace_path, "mdl_01HQ3K5Z000000000000000001")
+                .map_err(|error| format!("status: {error:?}"))?;
 
         ensure(report.registered_count == 3, "registered_count")?;
         ensure(report.available_count == 1, "available_count")?;
@@ -5281,6 +5660,82 @@ mod tests {
             .as_ref()
             .ok_or("missing selected entry")?;
         ensure(selected.status == "available", "selected available")
+    }
+
+    #[test]
+    fn status_and_lifecycle_share_selected_sibling_despite_available_external_model() -> TestResult
+    {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_embedding_metadata_entry(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000014",
+            ModelProvider::External,
+            "remote-api:previous-model",
+            ModelRegistryStatus::Available,
+        )?;
+        let selected_id = "mdl_01HQ3K5Z000000000000000015";
+        let model = RegisteredModel2Vec::potion_base_8m().map_err(|error| error.to_string())?;
+        insert_embedding_metadata_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            selected_id,
+            ModelProvider::Model2Vec,
+            model2vec_model_name(&model),
+            ModelRegistryStatus::Available,
+            model.dimension(),
+        )?;
+        write_index_metadata(&workspace_path, 0)?;
+
+        // The artifact-admission tests establish runtime selection. This
+        // explicit observation tests that both report surfaces carry the same
+        // selected identity even when unrelated inventory sorts before it.
+        let report = status_report_with_fixture_selection(&workspace_path, selected_id)
+            .map_err(|error| format!("status: {error:?}"))?;
+        assert_eq!(report.registered_count, 3);
+        assert_eq!(report.available_count, 2);
+        assert_eq!(
+            report
+                .active
+                .selected_registry_entry
+                .as_ref()
+                .map(|entry| entry.id.as_str()),
+            Some(selected_id),
+        );
+        assert_eq!(
+            report
+                .model_lifecycle
+                .semantic_readiness
+                .selected_model_id
+                .as_deref(),
+            Some(selected_id),
+        );
+        assert_eq!(
+            report.model_lifecycle.indexes[0]
+                .dimension_compatibility
+                .expected_dimension,
+            Some(model.dimension()),
+        );
+        assert_eq!(
+            report.model_lifecycle.indexes[0]
+                .dimension_compatibility
+                .compatible,
+            Some(false),
+            "the stored 128d index must be compared with selected 256d 8M, not external inventory",
+        );
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("reopen db: {error}"))?;
+        assert_eq!(
+            connection
+                .get_model_registry_entry("mdl_01HQ3K5Z000000000000000014")
+                .map_err(|error| error.to_string())?
+                .ok_or("external history missing")?
+                .status,
+            ModelRegistryStatus::Available,
+            "reporting must preserve unrelated external availability",
+        );
+        Ok(())
     }
 
     #[test]
@@ -5345,9 +5800,9 @@ mod tests {
             &workspace_id,
             "mdl_01HQ3K5Z000000000000000006",
             ModelProvider::Hash,
-            "oversized-4096",
+            "oversized-4097",
             ModelRegistryStatus::Available,
-            SEMANTIC_DIMENSION_BUDGET + 1,
+            SemanticModelAdmissibilityBudget::local_default().max_dimension + 1,
         )?;
 
         let report = build_model_status_report(&ModelStatusOptions {
@@ -5365,6 +5820,41 @@ mod tests {
                 .any(|degradation| degradation.code == "semantic_dimension_exceeds_budget"),
             "semantic dimension degradation",
         )
+    }
+
+    #[test]
+    fn status_does_not_reject_supported_512_dimension_model() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        let model = RegisteredModel2Vec::potion_base_32m().map_err(|error| error.to_string())?;
+        assert_eq!(model.dimension(), 512);
+        // This fixture tests the dimension budget only. Its synthetic source
+        // does not claim that the real model artifacts have been admitted.
+        insert_embedding_metadata_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000007",
+            ModelProvider::Model2Vec,
+            model2vec_model_name(&model),
+            ModelRegistryStatus::Available,
+            model.dimension(),
+        )?;
+
+        let report = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .map_err(|error| format!("status: {error:?}"))?;
+        assert_eq!(report.registered_count, 2);
+        assert_eq!(report.available_count, 1);
+        assert!(
+            !report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "semantic_dimension_exceeds_budget"),
+            "the supported 32M model must fit the shared local dimension budget"
+        );
+        Ok(())
     }
 
     #[test]
@@ -5498,6 +5988,191 @@ mod tests {
             error.message().contains(AUTOMATIC_REPAIR_UNAVAILABLE),
             "reranker fetch error must expose automatic_repair_unavailable",
         )
+    }
+
+    #[test]
+    fn embedding_fetch_requests_resolve_exact_pinned_models_and_aliases() -> TestResult {
+        for (request, expected_name, expected_dimension, expected_revision) in [
+            (
+                "embedding-default",
+                BUNDLED_EMBEDDING_MODEL_ID,
+                256,
+                BUNDLED_EMBEDDING_MODEL_REVISION,
+            ),
+            (
+                " POTION-MULTILINGUAL-128m ",
+                BUNDLED_EMBEDDING_MODEL_ID,
+                256,
+                BUNDLED_EMBEDDING_MODEL_REVISION,
+            ),
+            (
+                "minishlab/potion-multilingual-128M",
+                BUNDLED_EMBEDDING_MODEL_ID,
+                256,
+                BUNDLED_EMBEDDING_MODEL_REVISION,
+            ),
+            (
+                "potion-base-8M",
+                "potion-base-8m",
+                256,
+                "bf8b056651a2c21b8d2565580b8569da283cab23",
+            ),
+            (
+                "MINISHLAB/POTION-BASE-8m",
+                "potion-base-8m",
+                256,
+                "bf8b056651a2c21b8d2565580b8569da283cab23",
+            ),
+            (
+                "potion-base-32M",
+                "potion-base-32m",
+                512,
+                "1e5a03f8eeb2c98b928fbbd846f22f816360919f",
+            ),
+            (
+                " minishlab/potion-base-32M ",
+                "potion-base-32m",
+                512,
+                "1e5a03f8eeb2c98b928fbbd846f22f816360919f",
+            ),
+        ] {
+            let model = resolve_embedding_model_request(request)
+                .map_err(|error| error.message().to_owned())?
+                .ok_or_else(|| format!("built-in request {request:?} was not resolved"))?;
+            assert_eq!(model2vec_model_name(&model), expected_name, "{request}");
+            assert_eq!(model.dimension(), expected_dimension, "{request}");
+            assert_eq!(
+                model.download_manifest().revision,
+                expected_revision,
+                "{request}"
+            );
+            assert_eq!(
+                model.download_manifest().dimension,
+                Some(expected_dimension),
+                "{request}"
+            );
+        }
+
+        let default = resolve_embedding_model_request(DEFAULT_EMBEDDING_MODEL_ALIAS)
+            .map_err(|error| error.message().to_owned())?
+            .ok_or_else(|| "default registration missing".to_owned())?;
+        let smaller = resolve_embedding_model_request("potion-base-8M")
+            .map_err(|error| error.message().to_owned())?
+            .ok_or_else(|| "8M registration missing".to_owned())?;
+        assert_eq!(default.download_manifest(), &ModelManifest::potion_128m());
+        assert_eq!(default.dimension(), smaller.dimension());
+        assert_ne!(
+            model_manifest_sha256_fingerprint(default.download_manifest()),
+            model_manifest_sha256_fingerprint(smaller.download_manifest()),
+            "equal dimensions must not collapse different pinned models"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_fetch_requests_do_not_alias_unknown_repositories_or_models() -> TestResult {
+        for request in [
+            "",
+            "potion",
+            "potion-base-2M",
+            "potion-base-8M-extra",
+            "other/potion-base-8M",
+            "minishlab/other/potion-base-8M",
+            "minishlab/potion-base-8M@main",
+            "https://huggingface.co/minishlab/potion-base-8M",
+            "rerank-default",
+        ] {
+            assert!(
+                resolve_embedding_model_request(request)
+                    .map_err(|error| error.message().to_owned())?
+                    .is_none(),
+                "{request:?} must not select a default or differently sourced model"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_fetch_routes_all_registered_models_before_any_storage_write() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source = temp.path().join("unverified-model.bin");
+        let model_store = temp.path().join("models");
+        for (request, expected_fetch_name) in [
+            ("embedding-default", "embedding-default"),
+            ("potion-multilingual-128M", "embedding-default"),
+            ("potion-base-8M", "potion-base-8m"),
+            ("minishlab/potion-base-8M", "potion-base-8m"),
+            ("potion-base-32M", "potion-base-32m"),
+            ("minishlab/potion-base-32M", "potion-base-32m"),
+        ] {
+            let options = ModelFetchOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                model_id: request,
+                from_file: Some(&source),
+                model_store_root: Some(&model_store),
+            };
+            for result in [fetch_model(&options), fetch_rerank_model(&options)] {
+                let error = result.expect_err("embedding models require their pinned manifest");
+                assert!(matches!(error, DomainError::Usage { .. }));
+                assert!(error.message().contains("pinned frankensearch manifest"));
+                assert!(error.message().contains("--from-file"));
+                assert!(!error.message().contains("unknown model"));
+                let expected_repair = format!("ee model fetch {expected_fetch_name}");
+                assert_eq!(
+                    error.repair(),
+                    Some(expected_repair.as_str()),
+                    "repair must retain the selected model: {request}"
+                );
+            }
+        }
+        assert!(!temp.path().join(".ee").exists());
+        assert!(!model_store.exists());
+        assert!(!source.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_fetch_never_nests_a_sibling_inside_direct_model_artifacts() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let direct_model = temp.path().join(POTION_MODEL_NAME);
+        fs::create_dir(&direct_model).map_err(|error| error.to_string())?;
+        let artifact = direct_model.join("model.safetensors");
+        let original_bytes = b"existing model artifacts, including incomplete offline copies";
+        fs::write(&artifact, original_bytes).map_err(|error| error.to_string())?;
+
+        for name in ["potion-base-8m", "potion-base-32m"] {
+            let model = RegisteredModel2Vec::builtin(name)
+                .ok_or("missing built-in registration")?
+                .map_err(|error| error.to_string())?;
+            let error = embedding_model_fetch_destination(&direct_model, &model)
+                .expect_err("a direct model directory cannot contain a sibling download");
+            assert!(error.message().contains("parent model-store directory"));
+            assert!(error.message().contains(name));
+            assert_eq!(
+                error.repair(),
+                Some(format!("EE_EMBED_MODEL_DIR= ee model fetch {name} --workspace .").as_str()),
+            );
+            assert!(!direct_model.join(name).exists());
+            assert_eq!(
+                fs::read(&artifact).map_err(|error| error.to_string())?,
+                original_bytes
+            );
+            assert_eq!(
+                embedding_model_fetch_destination(temp.path(), &model)
+                    .map_err(|error| error.message().to_owned())?,
+                temp.path().join(name),
+                "a parent model store remains a valid sibling destination",
+            );
+        }
+        let default = RegisteredModel2Vec::potion_128m().map_err(|error| error.to_string())?;
+        assert_eq!(
+            embedding_model_fetch_destination(&direct_model, &default)
+                .map_err(|error| error.message().to_owned())?,
+            direct_model,
+            "the matching canonical directory remains repairable",
+        );
+        Ok(())
     }
 
     #[test]
@@ -5886,6 +6561,43 @@ mod tests {
             }),
             "repair must point at re-fetching the bundled model",
         )
+    }
+
+    #[test]
+    fn model2vec_lifecycle_repairs_keep_the_selected_model_identity() -> TestResult {
+        let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let model_dir = tmp.path().join("selected-model");
+        fs::create_dir_all(&model_dir).map_err(|error| error.to_string())?;
+        for (model_name, expected_repair) in [
+            (
+                "potion-base-8m",
+                Some("ee model fetch potion-base-8m --workspace ."),
+            ),
+            (
+                "potion-base-32m",
+                Some("ee model fetch potion-base-32m --workspace ."),
+            ),
+            ("unregistered-model", None),
+        ] {
+            let mut entry = lifecycle_entry(
+                ModelProvider::Model2Vec,
+                ModelPurpose::Embedding,
+                &model_dir,
+            );
+            entry.model_name = model_name.to_owned();
+            let inspection = inspect_model_lifecycle_asset(&entry, tmp.path());
+            assert_eq!(inspection.state, "corrupt", "{model_name}");
+            assert!(!inspection.provenance_complete, "{model_name}");
+            assert!(inspection.asset_hash.is_none(), "{model_name}");
+            let failure = inspection
+                .degraded
+                .iter()
+                .find(|entry| entry.message.contains("pinned manifest verification"))
+                .ok_or_else(|| format!("missing manifest rejection for {model_name}"))?;
+            assert_eq!(failure.code, "model_asset_corrupt");
+            assert_eq!(failure.repair.as_deref(), expected_repair, "{model_name}");
+        }
+        Ok(())
     }
 
     #[test]

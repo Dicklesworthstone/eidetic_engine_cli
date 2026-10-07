@@ -227,11 +227,7 @@ impl InFlightInvocation {
         // Chunks are contiguous stdout/stderr, not separate messages. Inserting
         // a newline could conceal a failure/instruction split across reads.
         self.output.text.push_str(&chunk.text[..end]);
-        self.output.is_error = if veto {
-            Some(true)
-        } else {
-            chunk.is_error
-        };
+        self.output.is_error = if veto { Some(true) } else { chunk.is_error };
         self.output.exit_code = chunk.exit_code;
     }
 }
@@ -697,17 +693,19 @@ impl CommandFamily {
     }
 
     fn bind_context(&mut self, context: Option<&str>) {
-        self.verification_scope = self.verification_scope.as_deref().zip(context).map(
-            |(command, context)| {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"ee.cass.repair_invocation.v1\0");
-                for field in [command, context] {
-                    hasher.update(&(field.len() as u64).to_le_bytes());
-                    hasher.update(field.as_bytes());
-                }
-                hasher.finalize().to_hex().to_string()
-            },
-        );
+        self.verification_scope =
+            self.verification_scope
+                .as_deref()
+                .zip(context)
+                .map(|(command, context)| {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"ee.cass.repair_invocation.v1\0");
+                    for field in [command, context] {
+                        hasher.update(&(field.len() as u64).to_le_bytes());
+                        hasher.update(field.as_bytes());
+                    }
+                    hasher.finalize().to_hex().to_string()
+                });
     }
 
     /// Require an exact invocation and context. Even a rustc error may be in
@@ -881,7 +879,10 @@ fn claude_block_event(block: &Value) -> Option<ToolEvent> {
                 .and_then(command_text),
             context: block.get("input").and_then(|input| {
                 call_context(
-                    block.get("name").and_then(Value::as_str).unwrap_or("tool_use"),
+                    block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool_use"),
                     input,
                 )
             }),

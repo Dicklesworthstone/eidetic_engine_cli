@@ -1,4 +1,4 @@
-//! Real-binary e2e pin for bundled embedding model registration.
+//! Real-binary e2e pins for verified local embedding model registration.
 
 #[path = "support/isolated_ee.rs"]
 mod isolated_ee;
@@ -974,6 +974,367 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
             "logPath": path_string(&workspace.log_path),
         }),
     )
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "downloads the pinned 8M and 32M models; run the explicit smaller-model qualification"]
+fn smaller_model2vec_fetch_switch_reembed_and_daemon_retrieval() -> TestResult {
+    let workspace = E2eWorkspace::create("smaller-model2vec-switch")?;
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut offline_env = network_tripwire.proxy_env();
+    offline_env.extend([
+        ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
+        ("EE_EMBED_BACKEND".to_string(), "local".to_string()),
+        (
+            "XDG_CONFIG_HOME".to_string(),
+            path_string(&workspace.path.join("xdg-config")),
+        ),
+        (
+            "XDG_CACHE_HOME".to_string(),
+            path_string(&workspace.path.join("xdg-cache")),
+        ),
+        (
+            "XDG_STATE_HOME".to_string(),
+            path_string(&workspace.path.join("xdg-state")),
+        ),
+    ]);
+    // Only the two explicit fetch children receive network consent. Every
+    // subsequent read, rebuild and real daemon uses the isolated offline cache.
+    let download_env = offline_env
+        .iter()
+        .filter(|(name, _)| name.starts_with("XDG_") || name == "EE_EMBED_BACKEND")
+        .cloned()
+        .chain([("EE_EMBED_DOWNLOAD".to_string(), "auto".to_string())])
+        .collect::<Vec<_>>();
+    let workspace_arg = workspace.workspace_arg()?;
+    let init = run_ee_with_env(
+        &workspace,
+        "smaller_init",
+        &["init", "--workspace", workspace_arg, "--json"],
+        &offline_env,
+    )?;
+    ensure_success(&init, "smaller-model init")?;
+
+    let content = "Release qualification must retrieve persisted memories using the selected local embedding model.";
+    let query = "release qualification selected local embedding model";
+    let remember = run_ee_with_env(
+        &workspace,
+        "smaller_remember",
+        &[
+            "remember",
+            content,
+            "--workspace",
+            workspace_arg,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&remember, "smaller-model remember")?;
+    let remembered = stdout_json(&remember, "smaller-model remember")?;
+    let remembered = response_data(&remembered, "smaller-model remember")?;
+    let memory_id = remembered
+        .get("memoryId")
+        .or_else(|| remembered.get("memory_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "smaller-model remember response missing memory ID".to_string())?;
+    let metadata_path = workspace.path.join(".ee/index/meta.json");
+    let mut previous_metadata = None;
+
+    for (requested, model_id, dimension) in [
+        ("minishlab/potion-base-8M", "potion-base-8m", 256),
+        ("potion-base-32M", "potion-base-32m", 512),
+    ] {
+        let fetch_args = [
+            "model",
+            "fetch",
+            requested,
+            "--workspace",
+            workspace_arg,
+            "--json",
+        ];
+        let fetched = run_ee_with_env(
+            &workspace,
+            &format!("{model_id}_fetch"),
+            &fetch_args,
+            &download_env,
+        )?;
+        ensure_success(&fetched, "smaller-model fetch")?;
+        let fetched_json = stdout_json(&fetched, "smaller-model fetch")?;
+        let fetched_data = response_data(&fetched_json, "smaller-model fetch")?;
+        ensure_eq_str(
+            string_member(fetched_data, "modelId")?,
+            model_id,
+            "fetched model identity",
+        )?;
+        let entry = fetched_data
+            .get("registryEntry")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "smaller-model fetch missing registry entry".to_string())?;
+        ensure_eq_str(
+            string_member(entry, "modelName")?,
+            model_id,
+            "registered model identity",
+        )?;
+        ensure_eq_str(
+            string_member(entry, "status")?,
+            "available",
+            "registered model status",
+        )?;
+        ensure_eq_u64(
+            u64_member(entry, "dimension")?,
+            dimension,
+            "registered model dimension",
+        )?;
+        let registry_id = string_member(entry, "id")?;
+
+        let cached = run_ee_with_env(
+            &workspace,
+            &format!("{model_id}_cached_fetch"),
+            &fetch_args,
+            &offline_env,
+        )?;
+        ensure_success(&cached, "smaller-model cached fetch")?;
+        let cached_json = stdout_json(&cached, "smaller-model cached fetch")?;
+        ensure_eq_str(
+            cached_json
+                .pointer("/data/registryEntry/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "cached fetch missing registry entry ID".to_string())?,
+            registry_id,
+            "cached fetch keeps the registry identity",
+        )?;
+        if cached_json.pointer("/data/copied").and_then(Value::as_bool) != Some(false) {
+            return Err(format!(
+                "cached {model_id} fetch did not reuse its verified installation"
+            ));
+        }
+
+        if let Some(previous) = &previous_metadata {
+            let status = run_ee_with_env(
+                &workspace,
+                &format!("{model_id}_incompatible_status"),
+                &["index", "status", "--workspace", workspace_arg, "--json"],
+                &offline_env,
+            )?;
+            let status_json = stdout_json(&status, "status after model switch")?;
+            let status_data = response_data(&status_json, "status after model switch")?;
+            if string_member(status_data, "health")? == "ready"
+                || !string_member(status_data, "lastCheckError")?.contains("cannot be mixed")
+            {
+                return Err(format!(
+                    "model switch accepted the old index: {status_json}"
+                ));
+            }
+            let current = fs::read(&metadata_path)
+                .map_err(|error| format!("read index after model switch: {error}"))?;
+            if &current != previous {
+                return Err(
+                    "fetch/status rewrote the previous model's index metadata before reembed"
+                        .to_string(),
+                );
+            }
+        }
+
+        let reembed = run_ee_with_env(
+            &workspace,
+            &format!("{model_id}_reembed"),
+            &["index", "reembed", "--workspace", workspace_arg, "--json"],
+            &offline_env,
+        )?;
+        ensure_success(&reembed, "smaller-model reembed")?;
+        let reembed_json = stdout_json(&reembed, "smaller-model reembed")?;
+        let reembed_data = response_data(&reembed_json, "smaller-model reembed")?;
+        ensure_eq_str(
+            string_member(reembed_data, "status")?,
+            "success",
+            "reembed status",
+        )?;
+        ensure_eq_str(
+            string_member(reembed_data, "job_status")?,
+            "completed",
+            "reembed job status",
+        )?;
+        ensure_u64_at_least(
+            u64_member(reembed_data, "documents_embedded")?,
+            1,
+            "reembedded documents",
+        )?;
+        let embedding = reembed_data
+            .get("embedding")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "smaller-model reembed missing embedding posture".to_string())?;
+        ensure_eq_str(
+            string_member(embedding, "fast_model_id")?,
+            model_id,
+            "reembed identity",
+        )?;
+        ensure_eq_str(
+            string_member(embedding, "source")?,
+            "registry_observed",
+            "reembed source",
+        )?;
+        ensure_eq_u64(
+            u64_member(embedding, "fast_dimension")?,
+            dimension,
+            "reembed dimension",
+        )?;
+        if embedding.get("semantic").and_then(Value::as_bool) != Some(true) {
+            return Err(format!("{model_id} reembed used a nonsemantic backend"));
+        }
+
+        let status = run_ee_with_env(
+            &workspace,
+            &format!("{model_id}_ready_status"),
+            &["index", "status", "--workspace", workspace_arg, "--json"],
+            &offline_env,
+        )?;
+        ensure_success(&status, "smaller-model ready status")?;
+        let status_json = stdout_json(&status, "smaller-model ready status")?;
+        let status_data = response_data(&status_json, "smaller-model ready status")?;
+        ensure_eq_str(
+            string_member(status_data, "health")?,
+            "ready",
+            "rebuilt index health",
+        )?;
+        ensure_eq_u64(
+            u64_member(status_data, "indexGeneration")?,
+            u64_member(status_data, "dbGeneration")?,
+            "rebuilt index generation",
+        )?;
+
+        let search_args = [
+            "search",
+            query,
+            "--workspace",
+            workspace_arg,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
+            "--relevance-floor",
+            "0",
+            "--json",
+        ];
+        let search = run_ee_with_env(
+            &workspace,
+            &format!("{model_id}_search"),
+            &search_args,
+            &offline_env,
+        )?;
+        ensure_smaller_model_semantic_hit(&search, "smaller-model CLI search", memory_id, content)?;
+        {
+            let daemon = RunningE2eDaemon::start(&workspace, &offline_env)?;
+            daemon.prewarm_search(&workspace, query)?;
+            let socket_arg = daemon.socket_arg();
+            let mut daemon_args = search_args.to_vec();
+            daemon_args.extend(["--use-daemon", "--daemon-socket", socket_arg.as_str()]);
+            let daemon_search = run_ee_with_env(
+                &workspace,
+                &format!("{model_id}_daemon_search"),
+                &daemon_args,
+                &offline_env,
+            )?;
+            ensure_smaller_model_semantic_hit(
+                &daemon_search,
+                "smaller-model daemon search",
+                memory_id,
+                content,
+            )?;
+            ensure_degraded_code_count(
+                &daemon_search,
+                "smaller-model daemon search",
+                "daemon_search_fallback",
+                0,
+            )?;
+        }
+        let metadata = fs::read(&metadata_path)
+            .map_err(|error| format!("read rebuilt index metadata: {error}"))?;
+        let metadata_json: Value = serde_json::from_slice(&metadata)
+            .map_err(|error| format!("parse rebuilt index metadata: {error}"))?;
+        ensure_eq_str(
+            metadata_json
+                .get("storedModelId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "rebuilt index missing storedModelId".to_string())?,
+            model_id,
+            "published index model identity",
+        )?;
+        previous_metadata = Some(metadata);
+        network_tripwire.assert_unused()?;
+    }
+    workspace.log(
+        "complete",
+        json!({"event": "smaller_model2vec_qualification_passed"}),
+    )
+}
+
+#[cfg(unix)]
+fn ensure_smaller_model_semantic_hit(
+    output: &Output,
+    context: &str,
+    memory_id: &str,
+    content: &str,
+) -> TestResult {
+    ensure_success(output, context)?;
+    ensure_response_embed_backend(output, context, "neural_local")?;
+    ensure_degraded_code_count(output, context, "embed_model_unavailable", 0)?;
+    let payload = stdout_json(output, context)?;
+    ensure_eq_str(
+        payload
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{context}: missing sourceModeApplied"))?,
+        "semantic_only",
+        context,
+    )?;
+    let hit = payload
+        .pointer("/data/results")
+        .and_then(Value::as_array)
+        .and_then(|results| {
+            results.iter().find(|result| {
+                result
+                    .get("memoryId")
+                    .or_else(|| result.get("memory_id"))
+                    .and_then(Value::as_str)
+                    == Some(memory_id)
+            })
+        })
+        .ok_or_else(|| format!("{context}: omitted persisted memory {memory_id}"))?;
+    ensure_eq_str(
+        hit.get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{context}: missing persisted content"))?,
+        content,
+        context,
+    )?;
+    if !hit
+        .get("fastScore")
+        .and_then(Value::as_f64)
+        .is_some_and(f64::is_finite)
+    {
+        return Err(format!("{context}: missing finite semantic score"));
+    }
+    if !hit
+        .get("provenance")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("kind").and_then(Value::as_str) == Some("search_document")
+                    && entry.get("docId").and_then(Value::as_str) == Some(memory_id)
+            })
+        })
+    {
+        return Err(format!(
+            "{context}: provenance did not bind the persisted memory"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

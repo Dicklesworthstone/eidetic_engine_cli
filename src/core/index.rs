@@ -49,7 +49,7 @@ use crate::search::{LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelArtifactManifestV1, ModelDownloader,
-    ModelLifecycle, ModelManifest, is_verification_cached,
+    ModelLifecycle, ModelManifest, RegisteredModel2Vec, is_verification_cached,
 };
 use frankensearch::{
     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
@@ -6607,6 +6607,7 @@ static REGISTERED_MODEL2VEC_CACHE: OnceLock<RegisteredModel2VecCache> = OnceLock
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RegisteredModel2VecIdentity {
+    model_name: String,
     canonical_source: PathBuf,
     content_hash: String,
     dimension: u32,
@@ -7035,6 +7036,38 @@ pub(crate) fn verified_default_local_model_available() -> bool {
         && verified_default_model_dir(&default_embedder_settings()).is_some()
 }
 
+/// A verified machine default is usable only when workspace selection permits
+/// it. Rejected explicit registrations must not be resurrected as a different
+/// local model by an inspection-only fallback.
+pub(crate) fn verified_default_local_model_available_for_workspace(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<bool, DbError> {
+    if configured_embed_backend() == EmbedBackendSelection::Remote
+        || DEFAULT_SEARCH_EMBEDDER
+            .get()
+            .is_some_and(DefaultSearchEmbedder::local_model_load_failed)
+    {
+        return Ok(false);
+    }
+    if configured_embedder_model_root().is_some() {
+        return Ok(verified_default_local_model_available());
+    }
+    Ok(workspace_allows_default_local_model(db, workspace_id)?
+        && verified_default_local_model_available())
+}
+
+fn workspace_allows_default_local_model(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<bool, DbError> {
+    Ok(matches!(
+        resolve_registered_model2vec(db, workspace_id, |_| Ok(()))?,
+        RegisteredModel2VecResolution::NotRegistered
+            | RegisteredModel2VecResolution::BundledDefaultDeclared
+    ))
+}
+
 /// Test-only since 5434b5b4e (bd-kvltg). Production now resolves through
 /// `default_search_embedder_stack_with_provenance`, which carries the origin
 /// fact the posture needs; this bare wrapper survives only because the
@@ -7269,6 +7302,16 @@ fn resolve_registered_model2vec<T>(
             entry.provider == ModelProvider::Model2Vec && entry.purpose == ModelPurpose::Embedding
         })
         .collect::<Vec<_>>();
+    // Fetching an explicit model disables its former alternatives. Those
+    // retained rows and the initial bundled declaration are historical
+    // inventory, not competing selections. Multiple active models remain
+    // ambiguous; an invalid active row must never fall through to a default.
+    if entries
+        .iter()
+        .any(|entry| entry.status == ModelRegistryStatus::Available)
+    {
+        entries.retain(|entry| entry.status == ModelRegistryStatus::Available);
+    }
     entries.sort_by(|left, right| left.id.cmp(&right.id));
     let Some(entry) = entries.first() else {
         return Ok(RegisteredModel2VecResolution::NotRegistered);
@@ -7279,12 +7322,21 @@ fn resolve_registered_model2vec<T>(
             EmbedRegistryRejectionReason::AmbiguousEntries,
         ));
     }
-    if entry.model_name != POTION_MODEL_NAME {
-        return Ok(rejected_registered_model2vec(
-            entry,
-            EmbedRegistryRejectionReason::ModelNameMismatch,
-        ));
-    }
+    let model = match RegisteredModel2Vec::builtin(&entry.model_name) {
+        Some(Ok(model)) if entry.model_name == model2vec_model_name(&model) => model,
+        Some(Err(_)) => {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                EmbedRegistryRejectionReason::ManifestVerificationFailed,
+            ));
+        }
+        _ => {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                EmbedRegistryRejectionReason::ModelNameMismatch,
+            ));
+        }
+    };
     if crate::core::model::is_bundled_embedding_declaration(entry) {
         tracing::debug!(
             target: "ee::index::embedder",
@@ -7333,7 +7385,7 @@ fn resolve_registered_model2vec<T>(
             ));
         }
     };
-    let manifest = ModelManifest::potion_128m();
+    let manifest = model.download_manifest();
     for file in &manifest.files {
         let file_path = canonical_source.join(&file.name);
         let file_metadata = match std::fs::symlink_metadata(&file_path) {
@@ -7358,7 +7410,7 @@ fn resolve_registered_model2vec<T>(
             ));
         }
     }
-    if potion_model_dir_verification(&canonical_source).is_err() {
+    if model2vec_model_dir_verification(&model, &canonical_source).is_err() {
         return Ok(rejected_registered_model2vec(
             entry,
             EmbedRegistryRejectionReason::ManifestVerificationFailed,
@@ -7421,9 +7473,9 @@ fn resolve_registered_model2vec<T>(
             EmbedRegistryRejectionReason::MetadataMismatch,
         ));
     }
-    let descriptor = EmbedderDescriptor::potion();
+    let descriptor = EmbedderDescriptor::model2vec(&model);
     let expected_hash =
-        descriptor_content_hash(&descriptor, ModelProvider::Model2Vec, Some(&manifest));
+        descriptor_content_hash(&descriptor, ModelProvider::Model2Vec, Some(manifest));
     if !content_hash.eq_ignore_ascii_case(&expected_hash) {
         return Ok(rejected_registered_model2vec(
             entry,
@@ -7437,6 +7489,7 @@ fn resolve_registered_model2vec<T>(
         ));
     }
     let identity = RegisteredModel2VecIdentity {
+        model_name: model2vec_model_name(&model).to_owned(),
         canonical_source,
         content_hash,
         dimension,
@@ -7451,6 +7504,9 @@ fn resolve_registered_model2vec<T>(
 fn load_registered_model2vec(
     identity: RegisteredModel2VecIdentity,
 ) -> Result<EmbedderStack, EmbedRegistryRejectionReason> {
+    let model = RegisteredModel2Vec::builtin(&identity.model_name)
+        .ok_or(EmbedRegistryRejectionReason::ModelNameMismatch)?
+        .map_err(|_| EmbedRegistryRejectionReason::ManifestVerificationFailed)?;
     let canonical_source = identity.canonical_source.clone();
     let content_hash = identity.content_hash.clone();
     let dimension = identity.dimension;
@@ -7458,9 +7514,7 @@ fn load_registered_model2vec(
     let fast = REGISTERED_MODEL2VEC_CACHE
         .get_or_init(RegisteredModel2VecCache::default)
         .get_or_try_insert_with(identity, || {
-            let Ok(embedder) =
-                Model2VecEmbedder::load_shared_with_name(&canonical_source, POTION_MODEL_NAME)
-            else {
+            let Ok(embedder) = load_shared_model2vec_model(&canonical_source, &model) else {
                 return None;
             };
             let fingerprint =
@@ -7547,14 +7601,70 @@ pub(crate) fn verified_potion_model_dir(model_dir: &Path) -> bool {
 /// `ee model status` report a directory as usable that the runtime then
 /// refused, silently falling through to the download or hash-fallback path.
 pub(crate) fn potion_model_dir_verification(model_dir: &Path) -> Result<(), SearchError> {
+    model2vec_model_dir_verification(&RegisteredModel2Vec::potion_128m()?, model_dir)
+}
+
+/// The selected model supplies both artifact and execution pins. Reuse the
+/// same strict directory gate for fetch, inspection, and runtime admission.
+pub(crate) fn model2vec_model_dir_verification(
+    model: &RegisteredModel2Vec,
+    model_dir: &Path,
+) -> Result<(), SearchError> {
     static VERIFIED_MODELS: OnceLock<ModelDirectoryVerificationCache> = OnceLock::new();
     VERIFIED_MODELS
         .get_or_init(ModelDirectoryVerificationCache::default)
         .verify(
-            &ModelArtifactManifestV1::potion_128m_native()?,
-            &ModelManifest::potion_128m(),
+            model.artifact_manifest(),
+            model.download_manifest(),
             model_dir,
         )
+}
+
+/// Preserve the established multilingual model's registry and index identity.
+/// The explicit siblings use their upstream registered operational ids.
+pub(crate) fn model2vec_model_name(model: &RegisteredModel2Vec) -> &str {
+    if model.id().eq_ignore_ascii_case(POTION_MODEL_NAME) {
+        POTION_MODEL_NAME
+    } else {
+        model.id()
+    }
+}
+
+pub(crate) fn model2vec_model_destination_dir(
+    model_root: &Path,
+    model: &RegisteredModel2Vec,
+) -> PathBuf {
+    let name = model2vec_model_name(model);
+    if model_root.ends_with(name) {
+        model_root.to_path_buf()
+    } else {
+        model_root.join(name)
+    }
+}
+
+/// Default registration retains its historical display name and fingerprint.
+/// Siblings require the registered loader, which attests their exact producer
+/// certificate; a display-name substitution would still load the default.
+pub(crate) fn load_model2vec_model(
+    model_dir: &Path,
+    model: &RegisteredModel2Vec,
+) -> Result<Model2VecEmbedder, SearchError> {
+    if model2vec_model_name(model) == POTION_MODEL_NAME {
+        Model2VecEmbedder::load_with_name(model_dir, POTION_MODEL_NAME)
+    } else {
+        Model2VecEmbedder::load_registered(model_dir, model)
+    }
+}
+
+fn load_shared_model2vec_model(
+    model_dir: &Path,
+    model: &RegisteredModel2Vec,
+) -> Result<Arc<Model2VecEmbedder>, SearchError> {
+    if model2vec_model_name(model) == POTION_MODEL_NAME {
+        Model2VecEmbedder::load_shared_with_name(model_dir, POTION_MODEL_NAME)
+    } else {
+        Model2VecEmbedder::load_shared_registered(model_dir, model)
+    }
 }
 
 /// Process-local proof of a successful Frankensearch verification. A missing
@@ -8355,15 +8465,18 @@ fn active_embedding_model_source_dir(
     workspace_id: &str,
     fast_embedder: &dyn crate::search::Embedder,
 ) -> Result<Option<PathBuf>, DbError> {
-    if provider_for_embedder(fast_embedder) != ModelProvider::Model2Vec
-        || fast_embedder.id() != POTION_MODEL_NAME
-    {
+    if provider_for_embedder(fast_embedder) != ModelProvider::Model2Vec {
         return Ok(None);
     }
+    let Some(Ok(model)) = RegisteredModel2Vec::builtin(fast_embedder.id()) else {
+        return Ok(None);
+    };
 
     if let Some(model_root) = configured_embedder_model_root()
-        && let Some(canonical) =
-            canonical_verified_potion_model_dir(&potion_model_destination_dir(&model_root))
+        && let Some(canonical) = canonical_verified_model2vec_model_dir(
+            &model2vec_model_destination_dir(&model_root, &model),
+            &model,
+        )
     {
         return Ok(Some(canonical));
     }
@@ -8371,22 +8484,28 @@ fn active_embedding_model_source_dir(
     if let Some(existing) = db.find_model_registry_entry(
         workspace_id,
         ModelProvider::Model2Vec,
-        POTION_MODEL_NAME,
+        model2vec_model_name(&model),
         ModelPurpose::Embedding,
     )? && let Ok(existing_path) = registered_model2vec_source_path(db, &existing)
-        && let Some(canonical) = canonical_verified_potion_model_dir(&existing_path)
+        && let Some(canonical) = canonical_verified_model2vec_model_dir(&existing_path, &model)
     {
         return Ok(Some(canonical));
     }
 
-    Ok(canonical_verified_potion_model_dir(
-        &potion_model_destination_dir(&default_embedder_model_root()),
+    Ok(canonical_verified_model2vec_model_dir(
+        &model2vec_model_destination_dir(&default_embedder_model_root(), &model),
+        &model,
     ))
 }
 
-fn canonical_verified_potion_model_dir(model_dir: &Path) -> Option<PathBuf> {
+fn canonical_verified_model2vec_model_dir(
+    model_dir: &Path,
+    model: &RegisteredModel2Vec,
+) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(model_dir).ok()?;
-    verified_potion_model_dir(&canonical).then_some(canonical)
+    model2vec_model_dir_verification(model, &canonical)
+        .is_ok()
+        .then_some(canonical)
 }
 
 #[cfg(test)]
@@ -8397,7 +8516,7 @@ fn active_embedding_registry_input(
     active_embedding_registry_input_with_source(workspace_id, fast_embedder, None)
 }
 
-fn active_embedding_registry_input_with_source(
+pub(crate) fn active_embedding_registry_input_with_source(
     workspace_id: &str,
     fast_embedder: &dyn crate::search::Embedder,
     source_dir: Option<&Path>,
@@ -8420,16 +8539,19 @@ fn active_embedding_registry_input_with_source(
     metadata.model_revision = Some(fingerprint.revision.clone());
     metadata.deterministic = true;
     let source_uri = if provider == ModelProvider::Model2Vec
-        && fast_embedder.id() == POTION_MODEL_NAME
+        && let Some(model) = RegisteredModel2Vec::builtin(fast_embedder.id())
         && let Some(source_dir) = source_dir
     {
+        let model = model.map_err(|error| {
+            IndexRebuildError::Index(format!("invalid registered Model2Vec identity: {error}"))
+        })?;
         let canonical = std::fs::canonicalize(source_dir).map_err(|error| {
             IndexRebuildError::Index(format!(
                 "failed to canonicalize loaded Model2Vec directory {}: {error}",
                 source_dir.display()
             ))
         })?;
-        if !verified_potion_model_dir(&canonical) {
+        if model2vec_model_dir_verification(&model, &canonical).is_err() {
             return Err(IndexRebuildError::Index(format!(
                 "loaded Model2Vec directory {} failed pinned manifest verification",
                 canonical.display()
@@ -8522,6 +8644,15 @@ impl EmbedderDescriptor {
         }
     }
 
+    fn model2vec(model: &RegisteredModel2Vec) -> Self {
+        Self {
+            id: model2vec_model_name(model).to_owned(),
+            model_name: model2vec_model_name(model).to_owned(),
+            dimension: model.dimension() as usize,
+            ..Self::potion()
+        }
+    }
+
     fn remote(settings: &RemoteEmbedSettings, dimension: usize) -> Self {
         Self {
             id: settings.embedder_id(),
@@ -8582,8 +8713,12 @@ fn workspace_local_embedder_descriptors(
     configured_settings: Option<&EeEmbedderSettings>,
 ) -> Result<(EmbedderDescriptor, Option<EmbedderDescriptor>), DbError> {
     if configured_settings.is_none() {
-        match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
-        {
+        match resolve_registered_model2vec(db, workspace_id, |identity| {
+            let model = RegisteredModel2Vec::builtin(&identity.model_name)
+                .ok_or(EmbedRegistryRejectionReason::ModelNameMismatch)?
+                .map_err(|_| EmbedRegistryRejectionReason::ManifestVerificationFailed)?;
+            Ok(EmbedderDescriptor::model2vec(&model))
+        })? {
             RegisteredModel2VecResolution::Ready(descriptor) => return Ok((descriptor, None)),
             RegisteredModel2VecResolution::Rejected(_) => {
                 return Ok(stack_descriptors(&hash_fallback_embedder_stack()));
@@ -8722,14 +8857,26 @@ fn manifest_for_embedder(
     embedder: &dyn crate::search::Embedder,
     provider: ModelProvider,
 ) -> Option<frankensearch::embed::ModelManifest> {
+    manifest_for_embedder_identity(embedder.id(), embedder.dimension(), provider)
+}
+
+fn manifest_for_embedder_identity(
+    model_id: &str,
+    dimension: usize,
+    provider: ModelProvider,
+) -> Option<frankensearch::embed::ModelManifest> {
     match provider {
-        ModelProvider::Model2Vec | ModelProvider::FastEmbed => {
-            let normalized_id = normalized_embedder_manifest_key(embedder.id());
+        ModelProvider::Model2Vec => RegisteredModel2Vec::builtin(model_id)
+            .and_then(Result::ok)
+            .filter(|model| Some(model.dimension()) == u32::try_from(dimension).ok())
+            .map(|model| model.download_manifest().clone()),
+        ModelProvider::FastEmbed => {
+            let normalized_id = normalized_embedder_manifest_key(model_id);
             frankensearch::embed::ModelManifest::builtin_catalog()
                 .models
                 .into_iter()
                 .find(|manifest| {
-                    manifest.dimension == u32::try_from(embedder.dimension()).ok()
+                    manifest.dimension == u32::try_from(dimension).ok()
                         && (normalized_embedder_manifest_key(&manifest.id) == normalized_id
                             || normalized_embedder_manifest_key(&manifest.repo)
                                 .contains(&normalized_id)
@@ -8755,7 +8902,11 @@ fn normalized_embedder_manifest_key(input: &str) -> String {
 }
 
 fn provider_for_embedder(embedder: &dyn crate::search::Embedder) -> ModelProvider {
-    match embedder.category() {
+    provider_for_embedder_category(embedder.category())
+}
+
+fn provider_for_embedder_category(category: ModelCategory) -> ModelProvider {
+    match category {
         ModelCategory::HashEmbedder => ModelProvider::Hash,
         ModelCategory::StaticEmbedder => ModelProvider::Model2Vec,
         ModelCategory::TransformerEmbedder => ModelProvider::FastEmbed,
@@ -8788,6 +8939,20 @@ pub(crate) fn current_embedding_posture(
 ) -> Result<EmbeddingPosture, DbError> {
     let documents_total = current_indexable_document_count(db, workspace_id)?;
     embedding_posture_for_document_count(db, workspace_id, index_dir, documents_total)
+}
+
+/// Resolve the selected registry identity without counting the corpus or
+/// loading weights. Lifecycle inspection shares posture's matching rule.
+pub(crate) fn selected_embedding_registry_model_id(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<Option<String>, DbError> {
+    let (fast, _) = workspace_embedder_descriptors(db, workspace_id)?;
+    let records = db.list_embedding_metadata_records(workspace_id)?;
+    Ok(
+        matching_embedding_registry_record(&fast, &records)
+            .map(|record| record.registry.id.clone()),
+    )
 }
 
 /// Resolve any workspace-specific embedding backend before a status caller
@@ -8855,16 +9020,16 @@ fn embedding_posture_from_records(
     records: &[crate::db::StoredEmbeddingMetadataRecord],
     vector_coverage: EmbeddingVectorCoverage,
 ) -> EmbeddingPosture {
-    let selected_registry_model = records
-        .iter()
-        .find(|record| record.registry.status.as_str() == "available")
-        .map(|record| EmbeddingPostureRegistryModel {
-            id: record.registry.id.clone(),
-            provider: record.registry.provider.as_str().to_owned(),
-            model_name: record.registry.model_name.clone(),
-            status: record.registry.status.as_str().to_owned(),
-            dimension: record.metadata.dimension,
-            deterministic: record.metadata.deterministic,
+    let selected_registry_model =
+        matching_embedding_registry_record(fast_embedder, records).map(|record| {
+            EmbeddingPostureRegistryModel {
+                id: record.registry.id.clone(),
+                provider: record.registry.provider.as_str().to_owned(),
+                model_name: record.registry.model_name.clone(),
+                status: record.registry.status.as_str().to_owned(),
+                dimension: record.metadata.dimension,
+                deterministic: record.metadata.deterministic,
+            }
         });
     let available_model_count = records
         .iter()
@@ -8928,6 +9093,31 @@ fn embedding_posture_from_records(
         selected_registry_model,
         vector_coverage,
     }
+}
+
+fn matching_embedding_registry_record<'a>(
+    embedder: &EmbedderDescriptor,
+    records: &'a [crate::db::StoredEmbeddingMetadataRecord],
+) -> Option<&'a crate::db::StoredEmbeddingMetadataRecord> {
+    let provider = provider_for_embedder_category(embedder.category);
+    let manifest = manifest_for_embedder_identity(&embedder.id, embedder.dimension, provider);
+    let content_hash = descriptor_content_hash(embedder, provider, manifest.as_ref());
+    let dimension = u32::try_from(embedder.dimension).ok()?;
+    records.iter().find(|record| {
+        record.registry.status == ModelRegistryStatus::Available
+            && record.registry.purpose == ModelPurpose::Embedding
+            && record.registry.provider == provider
+            // Registry publication uses the operational embedder id, which
+            // includes the remote-api prefix for an external backend.
+            && record.registry.model_name == embedder.id
+            && record.registry.dimension == Some(dimension)
+            && record.metadata.dimension == dimension
+            && record
+                .registry
+                .content_hash
+                .as_deref()
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&content_hash))
+    })
 }
 
 fn embedding_vector_coverage(
@@ -9936,7 +10126,8 @@ fn get_index_status_with_connection_mode(
     let evidence_totals = EvidenceAdmissionTotals::from_report(&evidence_admission);
 
     // Read index metadata if available.
-    let metadata_status = read_index_metadata_with_embedder(&index_dir, fast_embedder);
+    let metadata_status =
+        read_index_metadata_for_selection(&index_dir, fast_embedder, embedding.as_ref());
     let last_check_error = metadata_status
         .corruption_error
         .clone()
@@ -10400,21 +10591,59 @@ fn read_index_metadata_with_embedder(
     index_dir: &Path,
     fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> IndexMetadataStatus {
+    if let Some(embedder) = fast_embedder {
+        return read_index_metadata_with_identity(
+            index_dir,
+            u32::try_from(embedder.dimension())
+                .map(|dimension| Some((embedder.id(), dimension)))
+                .map_err(|error| error.to_string()),
+        );
+    }
+    let active_identity = active_semantic_identity();
+    read_index_metadata_with_identity(
+        index_dir,
+        Ok(active_identity
+            .as_ref()
+            .map(|(id, dimension)| (id.as_str(), *dimension))),
+    )
+}
+
+fn read_index_metadata_for_selection(
+    index_dir: &Path,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
+    embedding: Option<&EmbeddingPosture>,
+) -> IndexMetadataStatus {
+    if let Some(embedder) = fast_embedder {
+        return read_index_metadata_with_embedder(index_dir, Some(embedder));
+    }
+    // Passive status has already resolved the workspace's selected model.
+    // A separately warmed process default cannot describe that workspace
+    // after an explicit model switch, nor should a cold cache skip the check.
+    let identity = embedding
+        .filter(|posture| posture.semantic)
+        .map(|posture| {
+            u32::try_from(posture.fast_dimension)
+                .map(|dimension| (posture.fast_model_id.as_str(), dimension))
+                .map_err(|error| error.to_string())
+        })
+        .transpose();
+    read_index_metadata_with_identity(index_dir, identity)
+}
+
+fn read_index_metadata_with_identity(
+    index_dir: &Path,
+    active_identity: Result<Option<(&str, u32)>, String>,
+) -> IndexMetadataStatus {
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
     match parse_index_metadata(index_dir) {
         Ok(Some(metadata)) => {
-            let compatibility_error = match fast_embedder {
-                Some(embedder) => u32::try_from(embedder.dimension()).map_or_else(
-                    |error| Some(error.to_string()),
-                    |dimension| {
-                        index_metadata_compatibility_error_with_identity(
-                            &meta_path,
-                            &metadata,
-                            Some((embedder.id(), dimension)),
-                        )
-                    },
+            let compatibility_error = match active_identity {
+                Ok(identity) => index_metadata_compatibility_error_with_identity(
+                    &meta_path,
+                    &metadata,
+                    identity,
                 ),
-                None => index_metadata_compatibility_error(&meta_path, &metadata),
+                Err(error) => Some(error),
             }
             .or_else(|| {
                     let document_count = metadata.document_count?;
@@ -11935,6 +12164,7 @@ mod tests {
 
     fn registered_model2vec_test_identity(content_hash: &str) -> RegisteredModel2VecIdentity {
         RegisteredModel2VecIdentity {
+            model_name: POTION_MODEL_NAME.to_owned(),
             canonical_source: PathBuf::from("/verified/models/potion-multilingual-128M"),
             content_hash: content_hash.to_owned(),
             dimension: BUNDLED_EMBEDDING_DIMENSION,
@@ -11947,6 +12177,67 @@ mod tests {
             name,
             usize::try_from(BUNDLED_EMBEDDING_DIMENSION).expect("bundled dimension fits usize"),
         ))
+    }
+
+    #[test]
+    fn registered_model2vec_descriptors_preserve_default_and_distinguish_siblings() -> TestResult {
+        let legacy_hash = descriptor_content_hash(
+            &EmbedderDescriptor::potion(),
+            ModelProvider::Model2Vec,
+            Some(&ModelManifest::potion_128m()),
+        );
+        let mut fingerprints = BTreeSet::new();
+        for (name, dimension) in [
+            (POTION_MODEL_NAME, 256),
+            ("potion-base-8m", 256),
+            ("potion-base-32m", 512),
+        ] {
+            let model = RegisteredModel2Vec::builtin(name)
+                .ok_or_else(|| format!("missing built-in registration {name}"))?
+                .map_err(|error| error.to_string())?;
+            let descriptor = EmbedderDescriptor::model2vec(&model);
+            ensure(
+                descriptor.id == name
+                    && descriptor.model_name == name
+                    && descriptor.dimension == dimension,
+                format!("descriptor must retain the selected {name} identity and width"),
+            )?;
+            let fingerprint = descriptor_content_hash(
+                &descriptor,
+                ModelProvider::Model2Vec,
+                Some(model.download_manifest()),
+            );
+            let identity_fixture = TestSemanticEmbedder::new(name, dimension);
+            ensure(
+                active_embedder_fingerprint(&identity_fixture, ModelProvider::Model2Vec)
+                    .content_hash
+                    == fingerprint,
+                "runtime and passive descriptor identity must use the same registered manifest",
+            )?;
+            if name == POTION_MODEL_NAME {
+                ensure(
+                    fingerprint == legacy_hash,
+                    "default 128M registry fingerprint and uppercase spelling must stay compatible",
+                )?;
+            }
+            fingerprints.insert(fingerprint);
+            let root = Path::new("/verified/models");
+            let destination = model2vec_model_destination_dir(root, &model);
+            ensure(
+                destination == root.join(name)
+                    && model2vec_model_destination_dir(&destination, &model) == destination,
+                "each built-in must use its own canonical directory, including direct paths",
+            )?;
+        }
+        ensure(
+            fingerprints.len() == 3,
+            "all built-in spaces must remain distinct, including the two 256d models",
+        )?;
+        let misleading = TestSemanticEmbedder::new("unregistered-potion-base-8m", 256);
+        ensure(
+            manifest_for_embedder(&misleading, ModelProvider::Model2Vec).is_none(),
+            "an unregistered name must never inherit a built-in model's pins",
+        )
     }
 
     #[test]
@@ -11986,6 +12277,8 @@ mod tests {
     fn registered_model2vec_cache_keys_every_immutable_identity_field() -> TestResult {
         let cache = RegisteredModel2VecCache::default();
         let base = registered_model2vec_test_identity("blake3:identity-a");
+        let mut changed_model = base.clone();
+        changed_model.model_name = "potion-base-8m".to_owned();
         let mut changed_source = base.clone();
         changed_source.canonical_source = PathBuf::from("/verified/models/alternate-potion");
         let mut changed_hash = base.clone();
@@ -11998,6 +12291,7 @@ mod tests {
         let mut selected = Vec::new();
         for identity in [
             base,
+            changed_model,
             changed_source,
             changed_hash,
             changed_dimension,
@@ -12017,8 +12311,8 @@ mod tests {
             selected.push(embedder);
         }
         ensure(
-            loads.get() == 5,
-            "source, hash, dimension, and metric changes must each select a new embedder",
+            loads.get() == 6,
+            "model, source, hash, dimension, and metric changes must each select a new embedder",
         )?;
         for (left_index, left) in selected.iter().enumerate() {
             for right in &selected[(left_index + 1)..] {
@@ -13990,6 +14284,7 @@ mod tests {
         let expected = loaded as Arc<dyn crate::search::Embedder>;
         let default = search_embedder_stack_for_settings(&settings).fast_arc();
         let registered = load_registered_model2vec(RegisteredModel2VecIdentity {
+            model_name: POTION_MODEL_NAME.to_owned(),
             canonical_source: directory,
             content_hash: descriptor_content_hash(
                 &descriptor,
@@ -14009,6 +14304,91 @@ mod tests {
             Arc::ptr_eq(&expected, &registered),
             "registry route must reuse the same tokenizer and matrix allocation",
         )
+    }
+
+    #[test]
+    #[ignore = "requires real potion-base-8m and potion-base-32m directories under EE_EMBED_MODEL_FIXTURE_DIR"]
+    fn verified_registered_model2vec_siblings_match_loaded_identity() -> TestResult {
+        let root = crate::config::env_registry::read_os(
+            crate::config::env_registry::EnvVar::EmbedModelFixtureDir,
+        )
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "EE_EMBED_MODEL_FIXTURE_DIR must contain both registered siblings".to_owned()
+        })?;
+        let mut native_identities = Vec::new();
+        for model in [
+            RegisteredModel2Vec::potion_base_8m().map_err(|error| error.to_string())?,
+            RegisteredModel2Vec::potion_base_32m().map_err(|error| error.to_string())?,
+        ] {
+            let directory = model2vec_model_destination_dir(&root, &model)
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            model2vec_model_dir_verification(&model, &directory)
+                .map_err(|error| error.to_string())?;
+            let loaded = load_shared_model2vec_model(&directory, &model)
+                .map_err(|error| error.to_string())?;
+            let descriptor = EmbedderDescriptor::model2vec(&model);
+            let content_hash = descriptor_content_hash(
+                &descriptor,
+                ModelProvider::Model2Vec,
+                Some(model.download_manifest()),
+            );
+            ensure(
+                loaded.id() == descriptor.id
+                    && loaded.model_name() == descriptor.model_name
+                    && loaded.dimension() == descriptor.dimension
+                    && active_embedder_fingerprint(loaded.as_ref(), ModelProvider::Model2Vec)
+                        .content_hash
+                        == content_hash,
+                "real inference must retain the selected registered descriptor and fingerprint",
+            )?;
+            let native = loaded
+                .identity()
+                .map_err(|error| error.to_string())?
+                .clone();
+            ensure(
+                !native_identities.contains(&native),
+                "different registered models must carry distinct full native producer identities",
+            )?;
+            native_identities.push(native);
+            let registered = load_registered_model2vec(RegisteredModel2VecIdentity {
+                model_name: model2vec_model_name(&model).to_owned(),
+                canonical_source: directory.clone(),
+                content_hash,
+                dimension: model.dimension(),
+                distance_metric: "cosine",
+            })
+            .map_err(|error| format!("real registered model load failed: {error:?}"))?;
+            let expected = loaded.clone() as Arc<dyn crate::search::Embedder>;
+            ensure(
+                Arc::ptr_eq(&expected, &registered.fast_arc()),
+                "registered and direct shared loaders must reuse the same verified allocation",
+            )?;
+            ensure(
+                ask_model::CachedLocalEmbedderAttestation::for_loaded(registered.fast())
+                    .is_some_and(|attestation| attestation.is_valid()),
+                "the loaded sibling must be admissible for cached-only daemon retrieval",
+            )?;
+            let cx = asupersync::Cx::for_testing();
+            let vector = crate::core::run_cli_future(async {
+                loaded.embed(&cx, "durable memory retrieval").await
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            ensure(
+                vector.len() == model.dimension() as usize
+                    && vector.iter().all(|value| value.is_finite())
+                    && vector.iter().any(|value| *value != 0.0),
+                "the selected real model must execute nonzero finite vectors at its pinned width",
+            )?;
+            let default = RegisteredModel2Vec::potion_128m().map_err(|error| error.to_string())?;
+            ensure(
+                model2vec_model_dir_verification(&default, &directory).is_err(),
+                "sibling artifacts must never pass the default multilingual registration",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -14099,6 +14479,300 @@ mod tests {
             "the machine-default resolver's selected stack must remain intact",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    fn model2vec_registry_selection_fixture(
+        rows: &[(&str, ModelRegistryStatus)],
+        declare_default: bool,
+    ) -> Result<(DbConnection, String), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::testing::wsp("modelselection");
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: unique_test_dir("model-selection")
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("model selection".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        if declare_default {
+            ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+                .map_err(|error| error.to_string())?;
+        }
+        for (ordinal, (name, status)) in rows.iter().enumerate() {
+            let dimension = RegisteredModel2Vec::builtin(name)
+                .and_then(Result::ok)
+                .map_or(256, |model| model.dimension() as usize);
+            let embedder = TestSemanticEmbedder::new(name, dimension);
+            let mut input = active_embedding_registry_input(&workspace_id, &embedder)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "semantic model must supply registry metadata".to_owned())?;
+            input.status = *status;
+            // Selection is tested independently of the artifact admission
+            // gate: a chosen active row must reach this exact rejection.
+            input.source_uri = None;
+            connection
+                .insert_embedding_metadata_record(
+                    &crate::testing::mdl(&format!("modelselection{ordinal}")),
+                    &input,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok((connection, workspace_id))
+    }
+
+    #[test]
+    fn registered_model2vec_selection_uses_active_rows_and_fails_closed() -> TestResult {
+        use ModelRegistryStatus::{Available, Disabled, Unavailable};
+        let cases = [
+            (
+                true,
+                vec![("potion-base-8m", Available), ("potion-base-32m", Disabled)],
+                EmbedRegistryRejectionReason::SourceMissing,
+            ),
+            (
+                true,
+                vec![("potion-base-32m", Available), ("potion-base-8m", Disabled)],
+                EmbedRegistryRejectionReason::SourceMissing,
+            ),
+            (
+                true,
+                vec![
+                    ("potion-base-8m", Available),
+                    ("potion-base-32m", Available),
+                ],
+                EmbedRegistryRejectionReason::AmbiguousEntries,
+            ),
+            (
+                true,
+                vec![("unregistered-model", Available)],
+                EmbedRegistryRejectionReason::ModelNameMismatch,
+            ),
+            (
+                false,
+                vec![("potion-base-8m", Disabled)],
+                EmbedRegistryRejectionReason::StatusNotAvailable,
+            ),
+            (
+                false,
+                vec![("potion-base-32m", Unavailable)],
+                EmbedRegistryRejectionReason::StatusNotAvailable,
+            ),
+            (
+                false,
+                vec![
+                    ("potion-base-8m", Disabled),
+                    ("potion-base-32m", Unavailable),
+                ],
+                EmbedRegistryRejectionReason::AmbiguousEntries,
+            ),
+        ];
+        for (declare_default, rows, expected_reason) in cases {
+            let (connection, workspace_id) =
+                model2vec_registry_selection_fixture(&rows, declare_default)?;
+            let loaded = std::cell::Cell::new(false);
+            let resolution = resolve_registered_model2vec(&connection, &workspace_id, |_| {
+                loaded.set(true);
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+            let RegisteredModel2VecResolution::Rejected(resolution) = resolution else {
+                return Err(format!("fixture {rows:?} must reject before loading"));
+            };
+            let rejection = resolution
+                .registry_rejection
+                .ok_or_else(|| "rejected selection must identify its registry row".to_owned())?;
+            ensure(
+                rejection.reason == expected_reason && !loaded.get(),
+                format!("{rows:?} must reach {expected_reason}, got {rejection:?}"),
+            )?;
+            if expected_reason == EmbedRegistryRejectionReason::SourceMissing {
+                ensure(
+                    rejection.registry_id == crate::testing::mdl("modelselection0"),
+                    "the active sibling must outrank the declaration and disabled alternatives",
+                )?;
+            }
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registered_model2vec_rejection_cannot_resurrect_a_verified_machine_default() -> TestResult {
+        for declared in [false, true] {
+            let (connection, workspace_id) = model2vec_registry_selection_fixture(&[], declared)?;
+            ensure(
+                workspace_allows_default_local_model(&connection, &workspace_id)
+                    .map_err(|error| error.to_string())?,
+                "an empty registry or exact initial declaration must permit verified machine cache",
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        for status in [
+            ModelRegistryStatus::Available,
+            ModelRegistryStatus::Disabled,
+            ModelRegistryStatus::Unavailable,
+        ] {
+            let (connection, workspace_id) =
+                model2vec_registry_selection_fixture(&[("potion-base-8m", status)], false)?;
+            ensure(
+                !workspace_allows_default_local_model(&connection, &workspace_id)
+                    .map_err(|error| error.to_string())?,
+                "missing, disabled, or unavailable selected assets must not admit a different cache",
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registered_model2vec_posture_matches_execution_instead_of_first_available_row() -> TestResult
+    {
+        let (connection, workspace_id) = model2vec_registry_selection_fixture(
+            &[("potion-base-8m", ModelRegistryStatus::Available)],
+            true,
+        )?;
+        let records = connection
+            .list_embedding_metadata_records(&workspace_id)
+            .map_err(|error| error.to_string())?;
+        let selected = records
+            .iter()
+            .find(|record| record.registry.model_name == "potion-base-8m")
+            .ok_or_else(|| "selected model fixture must be present".to_owned())?;
+        let mut external = selected.clone();
+        external.registry.id = crate::testing::mdl("externalfirst");
+        external.registry.provider = ModelProvider::External;
+        external.registry.model_name = "remote-api:prior-model".to_owned();
+        let mut other = selected.clone();
+        other.registry.id = crate::testing::mdl("otherlocal");
+        other.registry.model_name = POTION_MODEL_NAME.to_owned();
+        let records = [external, other, selected.clone()];
+        let model = RegisteredModel2Vec::potion_base_8m().map_err(|error| error.to_string())?;
+        let descriptor = EmbedderDescriptor::model2vec(&model);
+        let posture = embedding_posture_from_records(
+            &descriptor,
+            None,
+            &records,
+            EmbeddingVectorCoverage::new(2, 2),
+        );
+        ensure(
+            posture
+                .selected_registry_model
+                .as_ref()
+                .is_some_and(|record| record.id == selected.registry.id)
+                && posture.available_model_count == 3
+                && posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+            "posture must name the actual 8M identity while retaining inventory counts",
+        )?;
+        let mut wrong_hash = selected.clone();
+        wrong_hash.registry.content_hash = Some("blake3:wrong-model".to_owned());
+        let mut wrong_dimension = selected.clone();
+        wrong_dimension.registry.dimension = Some(512);
+        let mut wrong_metadata = selected.clone();
+        wrong_metadata.metadata.dimension = 512;
+        let mut unavailable = selected.clone();
+        unavailable.registry.status = ModelRegistryStatus::Disabled;
+        for rejected in [wrong_hash, wrong_dimension, wrong_metadata, unavailable] {
+            ensure(
+                matching_embedding_registry_record(&descriptor, &[rejected]).is_none(),
+                "a mismatched fingerprint, width, or status cannot confirm execution",
+            )?;
+        }
+        let fallback = embedding_posture_from_records(
+            &EmbedderDescriptor::from_embedder(&HashEmbedder::default_256()),
+            None,
+            &records,
+            EmbeddingVectorCoverage::new(2, 2),
+        );
+        ensure(
+            fallback.selected_registry_model.is_none(),
+            "a rejected registration must not remain reported as the selected hash fallback",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn registered_model2vec_passive_status_uses_workspace_identity_and_explicit_overrides()
+    -> TestResult {
+        let models = [
+            RegisteredModel2Vec::potion_128m().map_err(|error| error.to_string())?,
+            RegisteredModel2Vec::potion_base_8m().map_err(|error| error.to_string())?,
+            RegisteredModel2Vec::potion_base_32m().map_err(|error| error.to_string())?,
+        ];
+        for stored in &models {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let index_dir = root.path().join("index");
+            let stored_embedder = Arc::new(TestSemanticEmbedder::new(
+                model2vec_model_name(stored),
+                stored.dimension() as usize,
+            ));
+            let stack = EmbedderStack::from_parts(stored_embedder.clone(), None);
+            let fingerprint = embedder_fingerprint_for_index_metadata(&stack)
+                .ok_or_else(|| "selected semantic model must yield index identity".to_owned())?;
+            let counts = IndexDocumentCounts::memory_only(1);
+            let stats = build_index_generation_sync(
+                &index_dir,
+                stack,
+                vec![test_indexable_doc(
+                    "model-selection",
+                    "durable agent memory",
+                )],
+            )?;
+            validate_built_generation(&index_dir, stats, counts)?;
+            write_index_metadata(&index_dir, 7, counts, Some(&fingerprint))
+                .map_err(|error| error.to_string())?;
+            for selected in &models {
+                let posture = embedding_posture_from_records(
+                    &EmbedderDescriptor::model2vec(selected),
+                    None,
+                    &[],
+                    EmbeddingVectorCoverage::new(1, 1),
+                );
+                let passive = read_index_metadata_for_selection(&index_dir, None, Some(&posture));
+                ensure(
+                    passive.present
+                        && passive.generation == Some(7)
+                        && passive.corruption_error.is_none(),
+                    "passive identity validation must retain readable generation metadata",
+                )?;
+                if stored.id() == selected.id() {
+                    ensure(
+                        passive.compatibility_error.is_none(),
+                        format!("matching workspace model must remain compatible: {passive:?}"),
+                    )?;
+                } else {
+                    let error = passive.compatibility_error.ok_or_else(|| {
+                        "switching the selected model must require an index rebuild".to_owned()
+                    })?;
+                    ensure(
+                        error.contains("rebuild")
+                            && error.contains(model2vec_model_name(stored))
+                            && error.contains(model2vec_model_name(selected)),
+                        format!("mismatch must name both selected embedding spaces: {error}"),
+                    )?;
+                    if stored.dimension() == selected.dimension() {
+                        ensure(
+                            error.contains("different embedding backends"),
+                            "128M and 8M must reject one another even at the same 256d width",
+                        )?;
+                    }
+                }
+                let explicit = read_index_metadata_for_selection(
+                    &index_dir,
+                    Some(stored_embedder.as_ref()),
+                    Some(&posture),
+                );
+                ensure(
+                    explicit.compatibility_error.is_none(),
+                    "an explicit fixture or execution embedder must outrank passive selection",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
