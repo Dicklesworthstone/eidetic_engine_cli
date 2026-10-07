@@ -85,6 +85,18 @@ jobs:
           status=0
           cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/evidence-engine.log" 2>&1 || status=$?
           tail -n 210 "$RUNNER_TEMP/evidence-engine.log"
+          # VACUITY FLOOR (bd-lagsa). `status` already carries cargo's exit, so a FAILING
+          # test was always caught. What was not caught is a run that executed nothing:
+          # re-path `core::ask::` and the filter matches zero tests, libtest reports zero
+          # passed and zero failed, cargo exits 0, and this sweep of the whole ask engine
+          # passes having run none of it. Floor of 1, since the module is expected to grow.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/evidence-engine.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::ask:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            status=1
+          else
+            echo "ATTRIBUTION: core::ask:: ran $ran tests"
+          fi
           exit "$status"
       - name: Preserve exact source and verification logs
         if: ${{ !cancelled() }}

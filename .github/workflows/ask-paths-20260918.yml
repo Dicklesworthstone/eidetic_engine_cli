@@ -130,6 +130,20 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --lib core::ask:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-paths-engine.log"
+          # VACUITY FLOOR (bd-lagsa). `pipefail` already means a FAILING test fails this
+          # step, so this is not about failures. It is about a run that executed nothing:
+          # re-path `core::ask::` and the filter matches zero tests, libtest reports zero
+          # passed and zero failed, cargo exits 0, and this step -- the lane's only sweep
+          # of the whole ask engine -- passes having run none of it.
+          #
+          # Floor of 1, not a count. This module is the broadest filter in the lane and is
+          # expected to grow, so an exact pin would red on progress.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/ask-paths-engine.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::ask:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: core::ask:: ran $ran tests"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:

@@ -95,6 +95,17 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --lib core::ask:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-semantic-engine-tests.log"
+          # VACUITY FLOOR (bd-lagsa) -- same reasoning as the sibling ask lanes. `pipefail`
+          # catches a failing test; what it cannot catch is a filter that matches nothing,
+          # which reports zero passed and zero failed and exits 0. Floor of 1, because this
+          # is the lane's only sweep of the whole ask engine and the module is expected to
+          # grow.
+          ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/ask-semantic-engine-tests.log" | head -1)
+          if test -z "$ran" || test "$ran" -lt 1; then
+            echo "ATTRIBUTION: core::ask:: produced no passing-with-zero-failures line (count '${ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: core::ask:: ran $ran tests"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
